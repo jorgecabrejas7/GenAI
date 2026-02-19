@@ -1,0 +1,7 @@
+## En la terminal de atreus
+
+ssh -N -L puerto:127.0.0.1:puerto nodo
+
+## En la terminal de tu ordenador
+
+ssh -N -L puerto:127.0.0.1:puerto alberto.vicente@atreus

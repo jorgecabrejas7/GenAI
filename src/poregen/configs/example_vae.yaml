@@ -1,0 +1,30 @@
+# PoreGen VAE — default configuration
+# Load in notebooks: yaml.safe_load(open("src/poregen/configs/example_vae.yaml"))
+
+model:
+  name: conv              # "conv" or "unet"
+  z_channels: 8
+  base_channels: 32
+  n_blocks: 2
+  patch_size: 64
+
+loss:
+  xct_loss_type: l1       # l1 | mse | charbonnier
+  xct_weight: 1.0
+  mask_bce_weight: 1.0
+  mask_dice_weight: 1.0
+  use_tversky: false
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  kl_free_bits: 0.25
+  kl_warmup_steps: 5000
+  kl_max_beta: 1.0
+
+training:
+  seed: 42
+  batch_size: 4
+  lr: 1.0e-4
+  total_steps: 10000
+  eval_every: 200
+  save_every: 1000
+  num_workers: 4

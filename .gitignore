@@ -1,0 +1,6 @@
+/data/
+/raw_data/
+/runs/
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
