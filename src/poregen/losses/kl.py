@@ -9,7 +9,7 @@ def kl_divergence(
     mu: torch.Tensor,
     logvar: torch.Tensor,
     free_bits: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute KL(q(z|x) || N(0,I)) with optional free-bits.
 
     Parameters
@@ -23,9 +23,12 @@ def kl_divergence(
     Returns
     -------
     kl : scalar tensor
-        Mean KL across the batch.
+        Sum KL across channels (after free-bits clamping).
     freebits_used : scalar tensor
         Fraction of channels that were clamped by free-bits.
+    kl_per_channel : (C,) tensor
+        Raw (pre-clamp) per-channel KL for monitoring and ablation
+        decisions (e.g. z_channels active-units criterion).
     """
     # Per-element KL: 0.5 * (mu^2 + exp(logvar) - logvar - 1)
     kl_elem = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1.0)
@@ -42,7 +45,7 @@ def kl_divergence(
         kl = kl_per_channel.sum()
         n_clamped = torch.tensor(0.0, device=mu.device)
 
-    return kl, n_clamped
+    return kl, n_clamped, kl_per_channel
 
 
 def beta_schedule(

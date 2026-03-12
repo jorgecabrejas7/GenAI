@@ -12,26 +12,11 @@ from poregen.losses.kl import kl_divergence, beta_schedule
 from poregen.models.vae.base import VAEOutput
 
 
-# Default config values — override in your notebook / YAML.
-_DEFAULTS: dict[str, Any] = {
-    "xct_loss_type": "l1",
-    "xct_weight": 1.0,
-    "mask_bce_weight": 1.0,
-    "mask_dice_weight": 1.0,
-    "use_tversky": False,
-    "tversky_alpha": 0.3,
-    "tversky_beta": 0.7,
-    "kl_free_bits": 0.25,
-    "kl_warmup_steps": 5000,
-    "kl_max_beta": 1.0,
-}
-
-
 def compute_total_loss(
     output: VAEOutput,
     batch: dict[str, torch.Tensor],
     step: int,
-    cfg: dict[str, Any] | None = None,
+    cfg: dict[str, Any],
 ) -> dict[str, torch.Tensor | float]:
     """Compute combined VAE loss.
 
@@ -42,22 +27,32 @@ def compute_total_loss(
         Must contain ``"xct"`` and ``"mask"`` tensors.
     step : int
         Current global training step (for β scheduling).
-    cfg : dict, optional
-        Override any key from ``_DEFAULTS``.
+    cfg : dict
+        Config dict as returned by ``load_config()``.  Must contain
+        ``loss`` and optionally ``training`` sections.  No internal
+        defaults — all values must be present in *cfg*.
 
     Returns
     -------
     dict with keys:
         total, xct_loss, mask_bce, mask_dice (or mask_tversky),
-        kl, beta, freebits_used
+        kl, beta, freebits_used, kl_per_channel
     """
-    c = {**_DEFAULTS, **(cfg or {})}
+    c = cfg["loss"]
 
     # ── XCT reconstruction ─────────────────────────────────────────
     recon_fn = get_recon_loss(c["xct_loss_type"])
     xct_loss = recon_fn(output.xct_logits, batch["xct"])
 
-    # ── Mask ───────────────────────────────────────────────────────
+    # ── Mask — class-balanced BCE + Dice/Tversky ───────────────────
+    # pos_weight = (1 - phi) / phi corrects for pore class imbalance.
+    # Computed per batch so it adapts to variable porosity patches.
+    phi = batch["mask"].mean().clamp(min=1e-6, max=1.0 - 1e-6)
+    pos_weight = torch.tensor(
+        (1.0 - phi.item()) / phi.item(),
+        dtype=output.mask_logits.dtype,
+        device=output.mask_logits.device,
+    )
     mask_dict = combined_mask_loss(
         output.mask_logits,
         batch["mask"],
@@ -66,10 +61,11 @@ def compute_total_loss(
         use_tversky=c["use_tversky"],
         tversky_alpha=c.get("tversky_alpha", 0.3),
         tversky_beta=c.get("tversky_beta", 0.7),
+        pos_weight=pos_weight,
     )
 
     # ── KL ─────────────────────────────────────────────────────────
-    kl, freebits_used = kl_divergence(
+    kl, freebits_used, kl_per_channel = kl_divergence(
         output.mu, output.logvar, free_bits=c["kl_free_bits"],
     )
     beta = beta_schedule(step, c["kl_warmup_steps"], c["kl_max_beta"])
@@ -81,13 +77,14 @@ def compute_total_loss(
         + beta * kl
     )
 
-    result = {
+    result: dict[str, Any] = {
         "total": total,
         "xct_loss": xct_loss,
         "mask_bce": mask_dict["mask_bce"],
         "kl": kl,
         "beta": beta,
         "freebits_used": freebits_used,
+        "kl_per_channel": kl_per_channel,  # (C,) — for monitoring and ablation
     }
     # Add the region loss under its actual key (mask_dice or mask_tversky)
     for k, v in mask_dict.items():

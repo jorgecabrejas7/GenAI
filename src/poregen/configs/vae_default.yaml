@@ -1,0 +1,50 @@
+# PoreGen VAE — default configuration (single source of truth)
+#
+# Load in notebooks:
+#   from poregen.configs.config import load_config
+#   cfg = load_config("src/poregen/configs/vae_default.yaml")
+#
+# Per-run overrides (machine-specific paths, step counts, etc.) should be
+# applied in the notebook after loading:
+#   cfg["training"]["total_steps"] = 50000
+#
+# Paths (data_root, run_dir) are intentionally absent — pass them as
+# environment variables or notebook-level variables so this file stays
+# machine-agnostic and version-control friendly.
+
+model:
+  name: conv              # "conv" (no skip connections) | "unet" (ablation only)
+  z_channels: 8           # latent channels — ablate {4, 8, 16} if <5/8 active after training
+  base_channels: 32
+  n_blocks: 2             # downsample factor = 2^n_blocks = 4 → 64³ → 16³ latent
+  patch_size: 64
+
+loss:
+  xct_loss_type: l1       # l1 | mse | charbonnier
+  xct_weight: 1.0
+  mask_bce_weight: 1.0
+  mask_dice_weight: 1.0
+  use_tversky: false      # switch to true empirically if false-negative pores dominate
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  kl_free_bits: 0.25      # minimum KL per channel; prevents posterior collapse
+  kl_warmup_steps: 5000   # β ramps linearly 0 → kl_max_beta over this many steps
+  kl_max_beta: 0.05       # decided 2026-03-12; see PoreGen Decisions Log
+
+training:
+  seed: 42
+  lr: 1.0e-4
+  total_steps: 100000
+  max_grad_norm: 1.0      # gradient clipping norm
+  log_every: 10           # steps between TensorBoard scalar writes
+  eval_every: 500         # steps between validation runs
+  val_batches: 20         # number of val batches to aggregate per eval
+  test_every: 5000        # steps between test-set evaluations
+  test_batches: 20        # number of test batches to aggregate per test eval
+  save_every: 2000        # steps between checkpoint saves
+  image_log_every: 500    # steps between reconstruction image logs to TensorBoard
+
+data:
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
