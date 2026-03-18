@@ -34,6 +34,7 @@ loss:
 training:
   seed: 42
   lr: 1.0e-4
+  weight_decay: 0.01      # AdamW weight decay (D10 — 2026-03-18)
   total_steps: 100000
   max_grad_norm: 1.0      # gradient clipping norm
   log_every: 10           # steps between TensorBoard scalar writes
