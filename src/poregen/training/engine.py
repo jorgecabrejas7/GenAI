@@ -226,6 +226,8 @@ def train_loop(
     test_batches: int = 20,
     save_every: int = 100,
     image_log_every: int = 500,
+    sample_every: int = 0,
+    n_patch_samples: int = 8,
     run_dir: str | Path = "runs/vae/default",
     device: torch.device = torch.device("cpu"),
     autocast_dtype: torch.dtype = torch.float16,
@@ -253,6 +255,12 @@ def train_loop(
         Number of test batches per test evaluation.
     image_log_every : int
         Steps between reconstruction image logs to TensorBoard.
+    sample_every : int
+        Steps between full 3-D patch sample saves to disk (0 = disabled).
+        Saves ``n_patch_samples`` patches per split to
+        ``run_dir/samples/step_XXXXXXXX/{train,val,test}.npz``.
+    n_patch_samples : int
+        Number of patches to save per split at each sample checkpoint.
     tb_writer : SummaryWriter, optional
         TensorBoard writer. All monitoring is skipped if None.
 
@@ -375,6 +383,18 @@ def train_loop(
                 scheduler=scheduler,
             )
 
+        # ── 3-D patch samples ─────────────────────────────────────────
+        if sample_every > 0 and (step + 1) % sample_every == 0:
+            _save_patch_samples(
+                model,
+                {"train": train_iter, "val": val_iter, "test": test_iter},
+                n_patch_samples,
+                step + 1,
+                run_dir,
+                device,
+                autocast_dtype,
+            )
+
     # Final checkpoint
     save_checkpoint(
         run_dir / "last.ckpt",
@@ -386,6 +406,81 @@ def train_loop(
     log_file.close()
     metrics_file.close()
     return history
+
+
+# ── patch sample saving ──────────────────────────────────────────────────
+
+@torch.no_grad()
+def _save_patch_samples(
+    model: nn.Module,
+    iters: dict[str, Iterator | None],
+    n_samples: int,
+    step: int,
+    run_dir: Path,
+    device: torch.device,
+    autocast_dtype: torch.dtype,
+) -> None:
+    """Save full 3-D patch reconstructions to disk for later visualisation.
+
+    Writes ``run_dir/samples/step_XXXXXXXX/{split}.npz`` and a companion
+    ``{split}_meta.json`` for each split.  Arrays inside the npz:
+
+    - ``xct_gt``    (N, 1, 64, 64, 64) float32  — normalised input
+    - ``mask_gt``   (N, 1, 64, 64, 64) float32  — ground-truth mask
+    - ``xct_recon`` (N, 1, 64, 64, 64) float32  — sigmoid(xct_logits)
+    - ``mask_recon``(N, 1, 64, 64, 64) float32  — sigmoid(mask_logits)
+    """
+    import numpy as np
+
+    samples_dir = run_dir / "samples" / f"step_{step:08d}"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+
+    for split, data_iter in iters.items():
+        if data_iter is None:
+            continue
+
+        xct_gts, mask_gts, xct_recons, mask_recons, metas = [], [], [], [], []
+        collected = 0
+
+        while collected < n_samples:
+            batch = next(data_iter)
+            n_take = min(n_samples - collected, batch["xct"].shape[0])
+
+            xct  = batch["xct"] [:n_take].to(device)
+            mask = batch["mask"][:n_take].to(device)
+
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                output = model(xct, mask)
+
+            xct_gts.append(xct.cpu().float().numpy())
+            mask_gts.append(mask.cpu().float().numpy())
+            xct_recons.append(torch.sigmoid(output.xct_logits) .cpu().float().numpy()[:n_take])
+            mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
+
+            for i in range(n_take):
+                coords = batch["coords"]
+                metas.append({
+                    "volume_id":   batch["volume_id"][i],
+                    "z0": int(coords[0][i]), "y0": int(coords[1][i]), "x0": int(coords[2][i]),
+                    "porosity":    float(batch["porosity"][i]),
+                    "source_group": batch["source_group"][i],
+                })
+
+            collected += n_take
+
+        np.savez_compressed(
+            samples_dir / f"{split}.npz",
+            xct_gt    = np.concatenate(xct_gts),
+            mask_gt   = np.concatenate(mask_gts),
+            xct_recon = np.concatenate(xct_recons),
+            mask_recon= np.concatenate(mask_recons),
+        )
+        with open(samples_dir / f"{split}_meta.json", "w") as f:
+            json.dump(metas, f, indent=2)
+
+    model.train()
 
 
 # ── image logging helper ──────────────────────────────────────────────────

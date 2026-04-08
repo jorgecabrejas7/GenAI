@@ -47,6 +47,8 @@ training:
   test_batches: 20        # number of test batches to aggregate per test eval
   save_every: 20000       # steps between checkpoint saves
   image_log_every: 500    # steps between reconstruction image logs to TensorBoard
+  sample_every: 100000   # steps between 3-D patch sample saves (≈ every quarter epoch)
+  n_patch_samples: 8     # patches per split (train/val/test) per save
 
 data:
   batch_size: 8
