@@ -1,0 +1,34 @@
+# Create environment and install with:
+#   mamba create -n poregen python=3.11
+#   mamba activate poregen
+#   mamba install pytorch torchvision pytorch-cuda=13.0 -c pytorch -c nvidia
+#   pip install -r requirements.txt
+
+# Core data / I/O
+numpy>=1.24
+zarr>=2.16
+numcodecs>=0.12
+tifffile>=2023.7
+pyarrow>=14.0
+pandas>=2.0
+
+# Scientific
+scipy>=1.11
+scikit-image>=0.21
+
+# Utilities
+tqdm>=4.65
+psutil>=5.9
+fill-voids>=2.0
+joblib>=1.3
+pyyaml>=6.0
+
+# Dev
+pytest>=7.0
+
+# Notebook / monitoring
+jupyterlab>=4.0
+ipykernel>=6.0
+matplotlib>=3.7
+ipywidgets>=8.0
+tensorboard>=2.14
