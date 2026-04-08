@@ -28,21 +28,24 @@ loss:
   tversky_alpha: 0.3
   tversky_beta: 0.7
   kl_free_bits: 0.25      # minimum KL per channel; prevents posterior collapse
-  kl_warmup_steps: 5000   # β ramps linearly 0 → kl_max_beta over this many steps
+  kl_warmup_steps: 379945 # β ramps linearly 0 → kl_max_beta over this many steps (1 epoch @ bs=8)
   kl_max_beta: 0.05       # decided 2026-03-12; see PoreGen Decisions Log
 
 training:
   seed: 42
   lr: 1.0e-4
   weight_decay: 0.01      # AdamW weight decay (D10 — 2026-03-18)
-  total_steps: 100000
+  total_steps: 1519780    # 4 epochs @ bs=8 (3039566 train patches / 8 * 4)
   max_grad_norm: 1.0      # gradient clipping norm
+  scheduler: cosine       # cosine | none
+  lr_min: 1.0e-5          # final lr for cosine decay (1/10 of lr)
+  warmup_steps: 2000      # linear warmup before cosine decay begins
   log_every: 10           # steps between TensorBoard scalar writes
   eval_every: 500         # steps between validation runs
   val_batches: 20         # number of val batches to aggregate per eval
   test_every: 5000        # steps between test-set evaluations
   test_batches: 20        # number of test batches to aggregate per test eval
-  save_every: 2000        # steps between checkpoint saves
+  save_every: 20000       # steps between checkpoint saves
   image_log_every: 500    # steps between reconstruction image logs to TensorBoard
 
 data:

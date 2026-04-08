@@ -84,3 +84,32 @@ def segmentation_metrics(
             results[f"f1_{suffix}"] = f1
 
     return results
+
+
+@torch.no_grad()
+def porosity_error(
+    mask_logits: torch.Tensor,
+    target: torch.Tensor,
+) -> dict[str, float]:
+    """Mean absolute error between predicted and ground-truth porosity per patch.
+
+    Porosity is the mean voxel activation over the patch volume.  Reporting
+    per-batch mean ± std lets you track whether the VAE learns pore fraction
+    globally, independently of local texture accuracy.
+
+    Parameters
+    ----------
+    mask_logits : (B, 1, D, H, W)  — raw logits
+    target      : (B, 1, D, H, W)  — binary ground-truth mask {0, 1}
+
+    Returns
+    -------
+    dict with ``porosity_error`` (mean |pred − gt|) and ``porosity_error_std``.
+    """
+    pred_por = torch.sigmoid(mask_logits).mean(dim=(1, 2, 3, 4))  # (B,)
+    gt_por   = target.mean(dim=(1, 2, 3, 4))                       # (B,)
+    err = (pred_por - gt_por).abs()
+    return {
+        "porosity_error":     err.mean().item(),
+        "porosity_error_std": err.std().item() if err.numel() > 1 else 0.0,
+    }

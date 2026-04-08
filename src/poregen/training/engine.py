@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from poregen.models.vae.base import VAEOutput
-from poregen.metrics.seg import segmentation_metrics
+from poregen.metrics.seg import segmentation_metrics, porosity_error
 from poregen.metrics.recon import mae, psnr
 from poregen.metrics.latent import active_units
 from poregen.training.checkpoint import save_checkpoint
@@ -158,6 +158,7 @@ def _run_eval(
     seg_acc: dict[str, Any] = {}
     recon_acc: dict[str, Any] = {}
     latent_acc: dict[str, Any] = {}
+    por_acc: dict[str, Any] = {}
     last_output: VAEOutput | None = None
     last_batch: dict | None = None
 
@@ -168,10 +169,15 @@ def _run_eval(
         )
         _accumulate(loss_acc, losses)
 
-        # Segmentation metrics
         mask_dev = batch["mask"].to(device, non_blocking=True)
+
+        # Segmentation metrics
         seg = segmentation_metrics(output.mask_logits, mask_dev)
         _accumulate(seg_acc, seg)
+
+        # Porosity preservation error
+        por = porosity_error(output.mask_logits, mask_dev)
+        _accumulate(por_acc, por)
 
         # Reconstruction metrics
         xct_dev = batch["xct"].to(device, non_blocking=True)
@@ -191,6 +197,7 @@ def _run_eval(
     agg = {
         **_mean_acc(loss_acc, n_batches),
         **_mean_acc(seg_acc, n_batches),
+        **_mean_acc(por_acc, n_batches),
         **_mean_acc(recon_acc, n_batches),
         **_mean_acc(latent_acc, n_batches),
     }
