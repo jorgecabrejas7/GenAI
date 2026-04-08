@@ -14,8 +14,8 @@ from tqdm.auto import tqdm
 
 from poregen.models.vae.base import VAEOutput
 from poregen.metrics.seg import segmentation_metrics, porosity_error
-from poregen.metrics.recon import mae, psnr
-from poregen.metrics.latent import active_units
+from poregen.metrics.recon import mae, psnr, sharpness_proxy
+from poregen.metrics.latent import active_units, latent_stats
 from poregen.training.checkpoint import save_checkpoint
 
 
@@ -181,14 +181,17 @@ def _run_eval(
 
         # Reconstruction metrics
         xct_dev = batch["xct"].to(device, non_blocking=True)
+        xct_recon = torch.sigmoid(output.xct_logits)
         recon = {
-            "mae": mae(output.xct_logits, xct_dev).item(),
-            "psnr": psnr(output.xct_logits, xct_dev).item(),
+            "mae":             mae(output.xct_logits, xct_dev).item(),
+            "psnr":            psnr(output.xct_logits, xct_dev).item(),
+            "sharpness_recon": sharpness_proxy(xct_recon).item(),
+            "sharpness_gt":    sharpness_proxy(xct_dev).item(),
         }
         _accumulate(recon_acc, recon)
 
         # Latent metrics
-        lat = active_units(output.mu)
+        lat = {**active_units(output.mu), **latent_stats(output.mu, output.logvar)}
         _accumulate(latent_acc, lat)
 
         last_output = output
