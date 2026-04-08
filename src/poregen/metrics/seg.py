@@ -87,15 +87,13 @@ def segmentation_metrics(
 
 
 @torch.no_grad()
-def porosity_error(
+def porosity_metrics(
     mask_logits: torch.Tensor,
     target: torch.Tensor,
 ) -> dict[str, float]:
-    """Mean absolute error between predicted and ground-truth porosity per patch.
+    """Porosity MAE, bias, and collapse-detection stats per batch.
 
-    Porosity is the mean voxel activation over the patch volume.  Reporting
-    per-batch mean ± std lets you track whether the VAE learns pore fraction
-    globally, independently of local texture accuracy.
+    Primary success metric per EDA: porosity_mae < 0.005 (quarter of phi_mean).
 
     Parameters
     ----------
@@ -104,12 +102,17 @@ def porosity_error(
 
     Returns
     -------
-    dict with ``porosity_error`` (mean |pred − gt|) and ``porosity_error_std``.
+    dict with:
+      porosity_mae      — mean |pred − gt| porosity (primary metric)
+      porosity_bias     — mean (pred − gt), detects systematic over/under-prediction
+      mask_pred_mean    — mean of sigmoid(mask_logits) over batch (collapse: → 0 or 1)
     """
-    pred_por = torch.sigmoid(mask_logits).mean(dim=(1, 2, 3, 4))  # (B,)
-    gt_por   = target.mean(dim=(1, 2, 3, 4))                       # (B,)
-    err = (pred_por - gt_por).abs()
+    pred_sigmoid = torch.sigmoid(mask_logits)
+    pred_por = pred_sigmoid.mean(dim=(1, 2, 3, 4))  # (B,)
+    gt_por   = target.mean(dim=(1, 2, 3, 4))         # (B,)
+    signed   = pred_por - gt_por
     return {
-        "porosity_error":     err.mean().item(),
-        "porosity_error_std": err.std().item() if err.numel() > 1 else 0.0,
+        "porosity_mae":    signed.abs().mean().item(),
+        "porosity_bias":   signed.mean().item(),
+        "mask_pred_mean":  pred_sigmoid.mean().item(),
     }

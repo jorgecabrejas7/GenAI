@@ -45,11 +45,11 @@ def compute_total_loss(
     xct_loss = recon_fn(output.xct_logits, batch["xct"])
 
     # ── Mask — class-balanced BCE + Dice/Tversky ───────────────────
-    # pos_weight = (1 - phi) / phi corrects for pore class imbalance.
-    # Computed per batch so it adapts to variable porosity patches.
-    phi = batch["mask"].mean().clamp(min=1e-6, max=1.0 - 1e-6)
+    # pos_weight from config (EDA: phi_mean=0.019 → correct value ≈ 51).
+    # Using a fixed value avoids instability from per-batch estimates on
+    # very sparse or near-zero porosity patches.
     pos_weight = torch.tensor(
-        (1.0 - phi.item()) / phi.item(),
+        float(c["mask_bce_pos_weight"]),
         dtype=output.mask_logits.dtype,
         device=output.mask_logits.device,
     )

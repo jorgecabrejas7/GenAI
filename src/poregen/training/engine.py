@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from poregen.models.vae.base import VAEOutput
-from poregen.metrics.seg import segmentation_metrics, porosity_error
+from poregen.metrics.seg import segmentation_metrics, porosity_metrics
 from poregen.metrics.recon import mae, psnr, sharpness_proxy
 from poregen.metrics.latent import active_units, latent_stats
 from poregen.training.checkpoint import save_checkpoint
@@ -154,13 +154,15 @@ def _run_eval(
     """Run eval over *n_batches* batches; return aggregated metrics and the
     last VAEOutput (for image logging).
     """
-    loss_acc: dict[str, Any] = {}
-    seg_acc: dict[str, Any] = {}
-    recon_acc: dict[str, Any] = {}
+    loss_acc:   dict[str, Any] = {}
+    seg_acc:    dict[str, Any] = {}
+    recon_acc:  dict[str, Any] = {}
     latent_acc: dict[str, Any] = {}
-    por_acc: dict[str, Any] = {}
+    por_acc:    dict[str, Any] = {}
+    # per-volume porosity tracking for histogram logging
+    vol_por_errors: dict[str, list[float]] = {}
     last_output: VAEOutput | None = None
-    last_batch: dict | None = None
+    last_batch:  dict | None = None
 
     for _ in range(n_batches):
         batch = next(data_iter)
@@ -170,23 +172,33 @@ def _run_eval(
         _accumulate(loss_acc, losses)
 
         mask_dev = batch["mask"].to(device, non_blocking=True)
+        xct_dev  = batch["xct"].to(device,  non_blocking=True)
 
         # Segmentation metrics
         seg = segmentation_metrics(output.mask_logits, mask_dev)
         _accumulate(seg_acc, seg)
 
-        # Porosity preservation error
-        por = porosity_error(output.mask_logits, mask_dev)
+        # Porosity metrics (primary success metric + collapse detection)
+        por = porosity_metrics(output.mask_logits, mask_dev)
         _accumulate(por_acc, por)
 
+        # Per-volume porosity tracking
+        pred_por_v = torch.sigmoid(output.mask_logits).mean(dim=(1, 2, 3, 4))
+        gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))
+        for i, vid in enumerate(batch["volume_id"]):
+            vol_por_errors.setdefault(vid, []).append(
+                (pred_por_v[i] - gt_por_v[i]).abs().item()
+            )
+
         # Reconstruction metrics
-        xct_dev = batch["xct"].to(device, non_blocking=True)
         xct_recon = torch.sigmoid(output.xct_logits)
         recon = {
             "mae":             mae(output.xct_logits, xct_dev).item(),
             "psnr":            psnr(output.xct_logits, xct_dev).item(),
             "sharpness_recon": sharpness_proxy(xct_recon).item(),
             "sharpness_gt":    sharpness_proxy(xct_dev).item(),
+            "recon_xct_mean":  xct_recon.mean().item(),
+            "recon_xct_std":   xct_recon.std().item(),
         }
         _accumulate(recon_acc, recon)
 
@@ -195,7 +207,7 @@ def _run_eval(
         _accumulate(latent_acc, lat)
 
         last_output = output
-        last_batch = batch
+        last_batch  = batch
 
     agg = {
         **_mean_acc(loss_acc, n_batches),
@@ -204,7 +216,11 @@ def _run_eval(
         **_mean_acc(recon_acc, n_batches),
         **_mean_acc(latent_acc, n_batches),
     }
-    return agg, last_output, last_batch  # type: ignore[return-value]
+    # kl_total: sum of raw per-channel KL (collapse → 0)
+    if "kl_per_channel" in agg and isinstance(agg["kl_per_channel"], list):
+        agg["kl_total"] = sum(agg["kl_per_channel"])
+
+    return agg, last_output, last_batch, vol_por_errors  # type: ignore[return-value]
 
 
 # ── training loop ─────────────────────────────────────────────────────────
@@ -311,18 +327,22 @@ def train_loop(
         if tb_writer is not None and (step + 1) % log_every == 0:
             for k, v in losses.items():
                 if isinstance(v, list):
-                    # kl_per_channel — log each channel individually
                     for i, ch_val in enumerate(v):
-                        tb_writer.add_scalar(f"train/kl_ch{i}", ch_val, step)
+                        tb_writer.add_scalar(f"train/kl_ch{i:02d}", ch_val, step)
                 else:
                     tb_writer.add_scalar(f"train/{k}", v, step)
             tb_writer.add_scalar("train/grad_norm", grad_norm, step)
             if scheduler is not None:
                 tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
+            # active_channels: channels with raw KL > free_bits (collapse detector)
+            kl_chs = losses.get("kl_per_channel", [])
+            if kl_chs and "freebits_used" in losses:
+                n_dead   = round(losses["freebits_used"] * len(kl_chs))
+                tb_writer.add_scalar("train/active_channels", len(kl_chs) - n_dead, step)
 
         # ── validation ────────────────────────────────────────────────
         if val_iter is not None and (step + 1) % eval_every == 0:
-            agg, last_output, last_batch = _run_eval(
+            agg, last_output, last_batch, _vol_por = _run_eval(
                 model, val_iter, loss_fn, val_batches, step, device, autocast_dtype
             )
             val_record = {"step": step, "split": "val", "elapsed": time.time() - t0, **{
@@ -338,10 +358,10 @@ def train_loop(
                 for k, v in agg.items():
                     if isinstance(v, list):
                         for i, ch_val in enumerate(v):
-                            tb_writer.add_scalar(f"val/kl_ch{i}", ch_val, step)
+                            tb_writer.add_scalar(f"val/kl_ch{i:02d}", ch_val, step)
                     else:
                         tb_writer.add_scalar(f"val/{k}", v, step)
-                # per-channel KL histogram
+                # per-channel KL histogram + kl_total (collapse detector)
                 if "kl_per_channel" in agg and isinstance(agg["kl_per_channel"], list):
                     kl_tensor = torch.tensor(agg["kl_per_channel"])
                     tb_writer.add_histogram("val/kl_per_channel", kl_tensor, step)
@@ -356,7 +376,7 @@ def train_loop(
 
         # ── test evaluation ───────────────────────────────────────────
         if test_iter is not None and (step + 1) % test_every == 0:
-            test_agg, test_output, test_batch = _run_eval(
+            test_agg, test_output, test_batch, test_vol_por = _run_eval(
                 model, test_iter, loss_fn, test_batches, step, device, autocast_dtype
             )
             test_record = {"step": step, "split": "test", "elapsed": time.time() - t0, **{
@@ -369,10 +389,16 @@ def train_loop(
                 for k, v in test_agg.items():
                     if isinstance(v, list):
                         for i, ch_val in enumerate(v):
-                            tb_writer.add_scalar(f"test/kl_ch{i}", ch_val, step)
+                            tb_writer.add_scalar(f"test/kl_ch{i:02d}", ch_val, step)
                     else:
                         tb_writer.add_scalar(f"test/{k}", v, step)
                 _log_recon_images(tb_writer, test_output, test_batch, step, "test", device)
+                # Per-volume porosity MAE histogram (50× spread across volumes)
+                if test_vol_por:
+                    per_vol_maes = torch.tensor(
+                        [float(sum(errs) / len(errs)) for errs in test_vol_por.values()]
+                    )
+                    tb_writer.add_histogram("test/porosity_mae_per_volume", per_vol_maes, step)
 
         # ── checkpoint ───────────────────────────────────────────────
         if (step + 1) % save_every == 0:

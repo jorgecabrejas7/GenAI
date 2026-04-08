@@ -30,6 +30,7 @@ def _default_cfg(use_tversky=False):
             "xct_loss_type": "l1",
             "xct_weight": 1.0,
             "mask_bce_weight": 1.0,
+            "mask_bce_pos_weight": 51.0,
             "mask_dice_weight": 1.0,
             "use_tversky": use_tversky,
             "tversky_alpha": 0.3,
