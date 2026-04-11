@@ -1,0 +1,122 @@
+RECONSTRUCTION DIAGNOSTIC REPORT
+Data root: data/processed
+Output dir: debug_reconstruction_report
+
+
+======================================================================
+  H1: Patch Check — raw zarr patches as seen during training
+======================================================================
+  Patch index: 2,298,383 patches total
+
+  train: 1,835,343 patches — sampling 5
+    patch shape=(64, 64, 64)  min=  0  max=255  mean=168.1  normalized=[0.000, 1.000]  porosity=0.006
+    patch shape=(64, 64, 64)  min=  0  max=255  mean=188.4  normalized=[0.000, 1.000]  porosity=0.029
+    patch shape=(64, 64, 64)  min= 67  max=253  mean=200.9  normalized=[0.263, 0.992]  porosity=0.104
+    patch shape=(64, 64, 64)  min=129  max=255  mean=211.1  normalized=[0.506, 1.000]  porosity=0.010
+    patch shape=(64, 64, 64)  min=167  max=255  mean=211.7  normalized=[0.655, 1.000]  porosity=0.004
+    Saved: debug_reconstruction_report/h1_patches_train.png
+
+  val: 230,819 patches — sampling 5
+    patch shape=(64, 64, 64)  min=141  max=255  mean=214.6  normalized=[0.553, 1.000]  porosity=0.008
+    patch shape=(64, 64, 64)  min=122  max=255  mean=213.0  normalized=[0.478, 1.000]  porosity=0.015
+    patch shape=(64, 64, 64)  min=163  max=255  mean=211.0  normalized=[0.639, 1.000]  porosity=0.016
+    patch shape=(64, 64, 64)  min= 21  max=253  mean=190.9  normalized=[0.082, 0.992]  porosity=0.004
+    patch shape=(64, 64, 64)  min=166  max=248  mean=209.8  normalized=[0.651, 0.973]  porosity=0.003
+    Saved: debug_reconstruction_report/h1_patches_val.png
+
+  test: 232,221 patches — sampling 5
+    patch shape=(64, 64, 64)  min=170  max=244  mean=206.1  normalized=[0.667, 0.957]  porosity=0.001
+    patch shape=(64, 64, 64)  min=171  max=255  mean=213.9  normalized=[0.671, 1.000]  porosity=0.004
+    patch shape=(64, 64, 64)  min= 32  max=255  mean=201.0  normalized=[0.125, 1.000]  porosity=0.132
+    patch shape=(64, 64, 64)  min=105  max=255  mean=214.1  normalized=[0.412, 1.000]  porosity=0.007
+    patch shape=(64, 64, 64)  min= 53  max=247  mean=205.4  normalized=[0.208, 0.969]  porosity=0.001
+    Saved: debug_reconstruction_report/h1_patches_test.png
+
+  ACTION: Open h1_patches_*.png. For each patch, check which
+  column (D/H/W) shows the most meaningful pore cross-section.
+
+======================================================================
+  H4: Volume Stats Coverage
+======================================================================
+  Stats file: data/processed/volume_stats.json
+  Number of entries: 81
+
+  Summary:
+             mean        std
+count   81.000000  81.000000
+mean   207.808148  12.640029
+std      2.230621   2.360351
+min    200.139869  10.288261
+25%    207.193717  11.193902
+50%    208.165882  11.918009
+75%    208.910391  12.741971
+max    212.063771  20.128920
+
+  OK: No fallback stats detected
+  OK: All std values >= 1.0
+
+  OK: All 81 patch-index volumes have stats entries
+
+======================================================================
+  DataLoader Output Range
+======================================================================
+  Dataset size (val split): 230819 patches
+  Sampling 20 patches (expect xct in [0, 1]):
+
+  [00] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.485
+  [01] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.639
+  [02] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.012  max=+0.996  mean=+0.641
+  [03] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.016  max=+1.000  mean=+0.640
+  [04] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.020  max=+1.000  mean=+0.639
+  [05] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.016  max=+1.000  mean=+0.638
+  [06] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.012  max=+1.000  mean=+0.638
+  [07] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.008  max=+0.996  mean=+0.636
+  [08] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.634
+  [09] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.633
+  [10] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.632
+  [11] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.633
+  [12] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.012  max=+1.000  mean=+0.634
+  [13] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.016  max=+1.000  mean=+0.633
+  [14] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.020  max=+1.000  mean=+0.633
+  [15] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.016  max=+1.000  mean=+0.634
+  [16] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.012  max=+1.000  mean=+0.636
+  [17] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.008  max=+1.000  mean=+0.634
+  [18] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.628
+  [19] MedidasDB__Airbus_Panel_Pegaso_prob  min=+0.004  max=+1.000  mean=+0.627
+
+  Aggregate over 20 patches:
+    min(min)=+0.004  max(max)=+1.000  mean(mean)=+0.627
+  STATUS: OK — /255 normalisation confirmed, all values in [0, 1]
+
+======================================================================
+  H2: Model Logit Range vs GT Range
+======================================================================
+  Device: cuda
+  Model: randomly initialised (no checkpoint provided)
+  Batch 0: GT=[+0.004, +1.000] mean=+0.601 | Logit=[-1.808, +3.270] mean=+0.099
+  Batch 1: GT=[+0.008, +1.000] mean=+0.638 | Logit=[-2.163, +2.884] mean=+0.099
+  Batch 2: GT=[+0.004, +1.000] mean=+0.633 | Logit=[-2.038, +3.526] mean=+0.099
+  Batch 3: GT=[+0.012, +1.000] mean=+0.633 | Logit=[-2.104, +3.094] mean=+0.099
+  Batch 4: GT=[+0.004, +1.000] mean=+0.631 | Logit=[-1.973, +3.666] mean=+0.099
+
+  GT    aggregate: min=+0.004  max=+1.000  mean=+0.627
+  Recon aggregate: min=-2.163  max=+3.666  mean=+0.099
+  NOTE: random init — logits reflect untrained decoder weights. Expected roughly N(0, σ) depending on initialisation. This confirms the forward pass works and input shapes are correct.
+  Saved: debug_reconstruction_report/h2_random_init_patch0_MedidasDB__Airbus_Panel_Pegaso_probetas_.png
+  Saved: debug_reconstruction_report/h2_random_init_patch1_MedidasDB__Airbus_Panel_Pegaso_probetas_.png
+
+======================================================================
+  Bug A: Metric Sanity Check (sigmoid in z-score space)
+======================================================================
+  Simulated z-scored GT (std=1.5) + good reconstruction (noise std=0.2):
+    Correct MAE (pred vs gt in z-score space): 0.1537  ← meaningful
+    Buggy   MAE (sigmoid(pred) vs gt):          1.0655  ← always ≈3-4, garbage
+  CONFIRMED BUG: sigmoid-in-z-score-space inflates MAE by 6.9×, masking reconstruction quality
+
+======================================================================
+  SUMMARY
+======================================================================
+  Check H1 PNGs: h1_patches_*.png — do patches look correct in each axis?
+  Check DataLoader range above: xct should be in [0, 1]
+  Check H2 (if checkpoint provided): h2_gt_vs_recon_*.png
+  Bug A is confirmed by the metric sanity section above.

@@ -53,15 +53,17 @@ PATCH_SIZE = 64
 def reconstruct_volume(
     model: torch.nn.Module,
     zarr_root: zarr.Group,
-    vol_stats: dict,
     volume_id: str,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Reconstruct a full volume from non-overlapping 64³ patches.
 
+    XCT is normalised as uint8 / 255 → [0, 1] consistently for both GT and
+    reconstruction.  No per-volume z-score statistics are required.
+
     Returns
     -------
-    xct_gt, mask_gt, xct_recon, mask_recon : uint8 arrays, shape (D, H, W)
+    xct_gt, mask_gt, xct_recon, mask_recon : float32 arrays in [0, 1], shape (D, H, W)
     """
     grp   = zarr_root[volume_id]
     xct_z = grp["xct"]
@@ -71,9 +73,6 @@ def reconstruct_volume(
     xct_recon  = np.zeros((D, H, W), dtype=np.float32)
     mask_recon = np.zeros((D, H, W), dtype=np.float32)
 
-    mean, std = (vol_stats.get(volume_id, {}).get("mean", 128.0),
-                 vol_stats.get(volume_id, {}).get("std",  50.0))
-
     model.eval()
     with torch.no_grad():
         for z0 in range(0, D - PATCH_SIZE + 1, PATCH_SIZE):
@@ -82,7 +81,7 @@ def reconstruct_volume(
                     xct_p  = xct_z [z0:z0+PATCH_SIZE, y0:y0+PATCH_SIZE, x0:x0+PATCH_SIZE]
                     mask_p = msk_z[z0:z0+PATCH_SIZE, y0:y0+PATCH_SIZE, x0:x0+PATCH_SIZE]
 
-                    xct_f  = (xct_p.astype(np.float32) - mean) / max(std, 1e-6)
+                    xct_f  = xct_p.astype(np.float32) / 255.0
                     mask_f = mask_p.astype(np.float32)
 
                     xct_t  = torch.from_numpy(xct_f) .unsqueeze(0).unsqueeze(0).to(device)
@@ -91,7 +90,7 @@ def reconstruct_volume(
                     out = model(xct_t, mask_t)
 
                     xct_recon [z0:z0+PATCH_SIZE, y0:y0+PATCH_SIZE, x0:x0+PATCH_SIZE] = (
-                        torch.sigmoid(out.xct_logits).squeeze().cpu().numpy()
+                        out.xct_logits.clamp(0.0, 1.0).squeeze().cpu().numpy()
                     )
                     mask_recon[z0:z0+PATCH_SIZE, y0:y0+PATCH_SIZE, x0:x0+PATCH_SIZE] = (
                         torch.sigmoid(out.mask_logits).squeeze().cpu().numpy()
@@ -268,7 +267,6 @@ def eval_volume(
     volume_id: str,
     model: torch.nn.Module,
     zarr_root: zarr.Group,
-    vol_stats: dict,
     device: torch.device,
     r_max: int = 50,
 ) -> dict:
@@ -277,7 +275,7 @@ def eval_volume(
     t0 = time.perf_counter()
 
     xct_gt, mask_gt, xct_recon, mask_recon = reconstruct_volume(
-        model, zarr_root, vol_stats, volume_id, device
+        model, zarr_root, volume_id, device
     )
 
     bin_gt   = (mask_gt   >= 0.5).astype(bool)
@@ -374,11 +372,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── Data ─────────────────────────────────────────────────────────────────
     index_path = data_root / "patch_index.parquet"
-    stats_path = data_root / "volume_stats.json"
     zarr_path  = data_root / "volumes.zarr"
-
-    with open(stats_path) as f:
-        vol_stats = json.load(f)
 
     zarr_root = zarr.open_group(str(zarr_path), mode="r")
 
@@ -391,7 +385,7 @@ def main(argv: list[str] | None = None) -> None:
     for vol_id in test_vol_ids:
         try:
             res = eval_volume(
-                vol_id, model, zarr_root, vol_stats, device, r_max=args.r_max
+                vol_id, model, zarr_root, device, r_max=args.r_max
             )
             volume_results.append(res)
         except Exception as exc:
@@ -408,8 +402,8 @@ def main(argv: list[str] | None = None) -> None:
     # ── Memorization score ────────────────────────────────────────────────────
     logger.info("Computing memorization score …")
     try:
-        train_ds = PatchDataset(index_path, data_root, split="train", stats_path=stats_path)
-        test_ds  = PatchDataset(index_path, data_root, split="test",  stats_path=stats_path)
+        train_ds = PatchDataset(index_path, data_root, split="train")
+        test_ds  = PatchDataset(index_path, data_root, split="test")
         mem = memorization_score(
             model, test_ds, train_ds, device,
             n_test=args.n_test_sample,

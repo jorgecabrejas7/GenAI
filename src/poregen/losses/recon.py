@@ -1,4 +1,9 @@
-"""XCT reconstruction losses — operate on logits, apply sigmoid internally."""
+"""XCT reconstruction losses — operate directly in z-score space.
+
+The decoder outputs raw (unbounded) values predicting the z-scored XCT target.
+No activation is applied before the loss; sigmoid/tanh would constrain the
+output to [0,1]/[-1,1] and fight the z-scored targets (range ≈ [-4, 4]).
+"""
 
 from __future__ import annotations
 
@@ -7,13 +12,13 @@ import torch.nn.functional as F
 
 
 def l1_loss(pred_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """L1 loss between sigmoid(pred_logits) and target in [0, 1]."""
-    return F.l1_loss(torch.sigmoid(pred_logits), target)
+    """L1 loss in z-score space."""
+    return F.l1_loss(pred_logits, target)
 
 
 def mse_loss(pred_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """MSE loss between sigmoid(pred_logits) and target in [0, 1]."""
-    return F.mse_loss(torch.sigmoid(pred_logits), target)
+    """MSE loss in z-score space."""
+    return F.mse_loss(pred_logits, target)
 
 
 def charbonnier_loss(
@@ -26,8 +31,7 @@ def charbonnier_loss(
     Less sensitive to outliers than MSE while being differentiable at 0
     (unlike plain L1).
     """
-    pred = torch.sigmoid(pred_logits)
-    diff = pred - target
+    diff = pred_logits - target
     return torch.mean(torch.sqrt(diff * diff + eps * eps))
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -26,11 +25,12 @@ class PatchDataset(Dataset):
         Directory containing ``volumes.zarr/``.
     split : str
         One of ``"train"``, ``"val"``, ``"test"``.
-    stats_path : str | Path | None
-        Path to ``volume_stats.json``.  When provided, XCT patches are
-        normalised per-volume as ``(xct - mean) / std`` (z-score, float32).
-        When ``None`` (default), the legacy ``xct / 255.0`` global scaling
-        is used instead and a warning is emitted.
+
+    Notes
+    -----
+    XCT patches are normalised as ``xct / 255.0`` → float32 in ``[0, 1]``.
+    Raw volumes are stored as uint8, so this is a global min-max scale with
+    no per-volume statistics required.
     """
 
     def __init__(
@@ -38,7 +38,6 @@ class PatchDataset(Dataset):
         index_path: str | Path,
         volumes_root: str | Path,
         split: str = "train",
-        stats_path: str | Path | None = None,
     ) -> None:
         df = pd.read_parquet(str(index_path))
         self.df = df[df["split"] == split].reset_index(drop=True)
@@ -58,30 +57,6 @@ class PatchDataset(Dataset):
         self.volumes_root = Path(volumes_root)
         self._zarr_cache: dict[str, zarr.Group] = {}
 
-        # Per-volume normalisation stats
-        if stats_path is not None:
-            with open(stats_path) as f:
-                raw = json.load(f)
-            # Keep only mean + std; cast to float32 scalars
-            self._vol_stats: dict[str, tuple[float, float]] = {
-                vid: (float(s["mean"]), float(s["std"]))
-                for vid, s in raw.items()
-            }
-            missing = set(self.df["volume_id"].unique()) - self._vol_stats.keys()
-            if missing:
-                logger.warning(
-                    "PatchDataset: %d volume(s) have no entry in stats_path "
-                    "and will fall back to /255 normalisation: %s",
-                    len(missing),
-                    missing,
-                )
-        else:
-            logger.warning(
-                "PatchDataset: stats_path not provided — using global /255 "
-                "normalisation. Per-volume z-score is strongly recommended."
-            )
-            self._vol_stats = {}
-
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -93,18 +68,8 @@ class PatchDataset(Dataset):
             self._zarr_cache[volume_id] = root[volume_id]
         return self._zarr_cache[volume_id]
 
-    def _normalise_xct(self, xct: np.ndarray, volume_id: str) -> torch.Tensor:
-        xct_f = xct.astype(np.float32)
-        if volume_id in self._vol_stats:
-            mean, std = self._vol_stats[volume_id]
-            xct_f = (xct_f - mean) / max(std, 1e-6)
-            # Clip at ±4σ — EDA: pore component sits at −2.96σ so ±3σ clips pore
-            # signal. For uint8 with mean≈192/std≈52 this is a no-op (range≈[-3.7,1.2])
-            # but protects against outlier volumes with different intensity distributions.
-            xct_f = np.clip(xct_f, -4.0, 4.0)
-        else:
-            xct_f = xct_f / 255.0
-        return torch.from_numpy(xct_f).unsqueeze(0)
+    def _normalise_xct(self, xct: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy(xct.astype(np.float32) / 255.0).unsqueeze(0)
 
     # ------------------------------------------------------------------
     # Dataset interface
@@ -124,12 +89,12 @@ class PatchDataset(Dataset):
         xct  = grp["xct"] [z0 : z0 + ps, y0 : y0 + ps, x0 : x0 + ps]
         mask = grp["mask"][z0 : z0 + ps, y0 : y0 + ps, x0 : x0 + ps]
 
-        xct_t  = self._normalise_xct(xct, vid)
+        xct_t  = self._normalise_xct(xct)
         mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0)
 
         return {
-            "xct": xct_t,                       # (1, ps, ps, ps) float32, z-scored per volume
-            "mask": mask_t,                      # (1, ps, ps, ps) float32 {0, 1}
+            "xct": xct_t,            # (1, ps, ps, ps) float32 in [0, 1]
+            "mask": mask_t,          # (1, ps, ps, ps) float32 {0, 1}
             "volume_id": vid,
             "coords": (z0, y0, x0),
             "porosity": float(row["porosity"]),

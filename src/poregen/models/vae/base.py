@@ -51,8 +51,8 @@ class VAEOutput:
 
     All spatial tensors keep the same batch dimension as the input.
 
-    - **xct_logits**: raw decoder output for XCT; apply ``sigmoid`` before
-      comparing to ground-truth in [0, 1].
+    - **xct_logits**: raw decoder output for XCT in z-score space (unbounded).
+      The decoder predicts z-scored values directly — no activation needed.
     - **mask_logits**: raw decoder output for the pore mask; use with
       ``BCEWithLogitsLoss``.
     - **mu**, **logvar**: posterior parameters.

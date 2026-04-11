@@ -1,4 +1,9 @@
-"""Reconstruction quality metrics (XCT channel)."""
+"""Reconstruction quality metrics (XCT channel).
+
+All metrics operate directly on model logits and ground-truth targets.
+Both are in [0, 1] (uint8 / 255) — no sigmoid or other activation is applied
+before comparison.
+"""
 
 from __future__ import annotations
 
@@ -8,21 +13,22 @@ import torch.nn.functional as F
 
 @torch.no_grad()
 def mse(pred_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Mean squared error between sigmoid(pred_logits) and target."""
-    return F.mse_loss(torch.sigmoid(pred_logits), target)
+    """Mean squared error between pred_logits and target (both in [0, 1])."""
+    return F.mse_loss(pred_logits, target)
 
 
 @torch.no_grad()
 def mae(pred_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Mean absolute error between sigmoid(pred_logits) and target."""
-    return F.l1_loss(torch.sigmoid(pred_logits), target)
+    """Mean absolute error between pred_logits and target (both in [0, 1])."""
+    return F.l1_loss(pred_logits, target)
 
 
 @torch.no_grad()
 def psnr(pred_logits: torch.Tensor, target: torch.Tensor, max_val: float = 1.0) -> torch.Tensor:
     """Peak signal-to-noise ratio (dB).
 
-    Uses MSE between sigmoid(pred_logits) and target as the error.
+    Uses MSE between pred_logits and target as the error.  ``max_val`` is 1.0
+    since both tensors are in [0, 1].
     """
     mse_val = mse(pred_logits, target)
     if mse_val == 0:
@@ -37,7 +43,7 @@ def sharpness_proxy(x: torch.Tensor) -> torch.Tensor:
     Parameters
     ----------
     x : (B, 1, D, H, W)
-        Reconstruction (after sigmoid) or ground-truth volume.
+        Reconstruction or ground-truth volume in [0, 1].
 
     Returns
     -------

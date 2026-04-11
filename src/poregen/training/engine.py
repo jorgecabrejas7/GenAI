@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterator
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from poregen.models.vae.base import VAEOutput
 from poregen.metrics.seg import segmentation_metrics, porosity_metrics
@@ -33,10 +33,19 @@ def _infinite(loader: DataLoader) -> Iterator:
         yield from loader
 
 
-def _central_slice(vol: torch.Tensor) -> torch.Tensor:
-    """Extract the central axial (D-axis) slice → (B, 1, H, W)."""
-    d = vol.shape[2]
-    return vol[:, :, d // 2, :, :]
+def _central_slice_d(vol: torch.Tensor) -> torch.Tensor:
+    """Extract the central D-axis slice → (B, 1, H, W)."""
+    return vol[:, :, vol.shape[2] // 2, :, :]
+
+
+def _central_slice_h(vol: torch.Tensor) -> torch.Tensor:
+    """Extract the central H-axis slice → (B, 1, D, W)."""
+    return vol[:, :, :, vol.shape[3] // 2, :]
+
+
+def _central_slice_w(vol: torch.Tensor) -> torch.Tensor:
+    """Extract the central W-axis slice → (B, 1, D, H)."""
+    return vol[:, :, :, :, vol.shape[4] // 2]
 
 
 def _accumulate(acc: dict, new: dict) -> None:
@@ -160,6 +169,8 @@ def _run_eval(
     latent_acc: dict[str, Any] = {}
     por_acc:    dict[str, Any] = {}
     # per-volume porosity tracking for histogram logging
+    # Stores signed errors (pred - gt) per patch per volume.
+    # Histogram uses |mean(signed)| = volume-level porosity MAE estimate.
     vol_por_errors: dict[str, list[float]] = {}
     last_output: VAEOutput | None = None
     last_batch:  dict | None = None
@@ -187,18 +198,17 @@ def _run_eval(
         gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))
         for i, vid in enumerate(batch["volume_id"]):
             vol_por_errors.setdefault(vid, []).append(
-                (pred_por_v[i] - gt_por_v[i]).abs().item()
+                (pred_por_v[i] - gt_por_v[i]).item()  # signed; histogram uses |mean|
             )
 
-        # Reconstruction metrics
-        xct_recon = torch.sigmoid(output.xct_logits)
+        # Reconstruction metrics — logits and GT are both in [0, 1] (uint8/255)
         recon = {
             "mae":             mae(output.xct_logits, xct_dev).item(),
             "psnr":            psnr(output.xct_logits, xct_dev).item(),
-            "sharpness_recon": sharpness_proxy(xct_recon).item(),
+            "sharpness_recon": sharpness_proxy(output.xct_logits).item(),
             "sharpness_gt":    sharpness_proxy(xct_dev).item(),
-            "recon_xct_mean":  xct_recon.mean().item(),
-            "recon_xct_std":   xct_recon.std().item(),
+            "recon_xct_mean":  output.xct_logits.mean().item(),
+            "recon_xct_std":   output.xct_logits.std().item(),
         }
         _accumulate(recon_acc, recon)
 
@@ -336,9 +346,11 @@ def train_loop(
                 tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
             # active_channels: channels with raw KL > free_bits (collapse detector)
             kl_chs = losses.get("kl_per_channel", [])
-            if kl_chs and "freebits_used" in losses:
-                n_dead   = round(losses["freebits_used"] * len(kl_chs))
-                tb_writer.add_scalar("train/active_channels", len(kl_chs) - n_dead, step)
+            if kl_chs:
+                tb_writer.add_histogram("train/kl_per_channel", torch.tensor(kl_chs), step)
+                if "freebits_used" in losses:
+                    n_dead = round(losses["freebits_used"] * len(kl_chs))
+                    tb_writer.add_scalar("train/active_channels", len(kl_chs) - n_dead, step)
 
         # ── validation ────────────────────────────────────────────────
         if val_iter is not None and (step + 1) % eval_every == 0:
@@ -366,13 +378,17 @@ def train_loop(
                     kl_tensor = torch.tensor(agg["kl_per_channel"])
                     tb_writer.add_histogram("val/kl_per_channel", kl_tensor, step)
 
-        # ── TensorBoard: reconstruction images ───────────────────────
+        # ── TensorBoard: reconstruction images + MC uncertainty ──────
         if (
             tb_writer is not None
             and val_iter is not None
             and (step + 1) % image_log_every == 0
         ):
             _log_recon_images(tb_writer, last_output, last_batch, step, "val", device)
+            run_montecarlo_eval(
+                model, last_batch, step, device, tb_writer,
+                autocast_dtype=autocast_dtype,
+            )
 
         # ── test evaluation ───────────────────────────────────────────
         if test_iter is not None and (step + 1) % test_every == 0:
@@ -393,17 +409,19 @@ def train_loop(
                     else:
                         tb_writer.add_scalar(f"test/{k}", v, step)
                 _log_recon_images(tb_writer, test_output, test_batch, step, "test", device)
-                # Per-volume porosity MAE histogram (50× spread across volumes)
+                # Per-volume porosity MAE histogram.
+                # |mean(signed_errors)| = |mean_pred_por - mean_gt_por| per volume.
                 if test_vol_por:
                     per_vol_maes = torch.tensor(
-                        [float(sum(errs) / len(errs)) for errs in test_vol_por.values()]
+                        [abs(sum(errs) / len(errs)) for errs in test_vol_por.values()]
                     )
                     tb_writer.add_histogram("test/porosity_mae_per_volume", per_vol_maes, step)
 
         # ── checkpoint ───────────────────────────────────────────────
         if (step + 1) % save_every == 0:
+            ckpt_name = f"{run_dir.name}_step{step + 1:08d}.ckpt"
             save_checkpoint(
-                run_dir / "last.ckpt",
+                run_dir / ckpt_name,
                 model, optimizer, scaler, step=step + 1,
                 metadata={"total_steps": total_steps},
                 scheduler=scheduler,
@@ -422,9 +440,11 @@ def train_loop(
             )
 
     # Final checkpoint
+    final_step = start_step + total_steps
+    ckpt_name = f"{run_dir.name}_step{final_step:08d}.ckpt"
     save_checkpoint(
-        run_dir / "last.ckpt",
-        model, optimizer, scaler, step=start_step + total_steps,
+        run_dir / ckpt_name,
+        model, optimizer, scaler, step=final_step,
         metadata={"total_steps": total_steps},
         scheduler=scheduler,
     )
@@ -519,20 +539,153 @@ def _log_recon_images(
     prefix: str,
     device: torch.device,
 ) -> None:
-    """Log central axial slice reconstructions to TensorBoard."""
+    """Log central slices along all 3 axes to TensorBoard.
+
+    XCT logits and GT are both in [0, 1] (uint8/255 normalisation).
+    We clamp the logits to [0, 1] for display — no further normalisation needed.
+    Mask reconstruction is passed through sigmoid → [0, 1].
+    """
     with torch.no_grad():
-        xct_recon = torch.sigmoid(output.xct_logits)   # (B,1,D,H,W) in [0,1]
-        mask_recon = torch.sigmoid(output.mask_logits) # (B,1,D,H,W) in [0,1]
-        xct_gt = batch["xct"].to(device, non_blocking=True)
+        xct_recon  = output.xct_logits.clamp(0.0, 1.0)
+        mask_recon = torch.sigmoid(output.mask_logits)
+        xct_gt  = batch["xct"].to(device, non_blocking=True)
         mask_gt = batch["mask"].to(device, non_blocking=True)
 
-        # Central axial slice → (B, 1, H, W) for make_grid
-        xct_recon_sl = _central_slice(xct_recon)
-        mask_recon_sl = _central_slice(mask_recon)
-        xct_gt_sl = _central_slice(xct_gt)
-        mask_gt_sl = _central_slice(mask_gt)
+        for tag, gt_vol, recon_vol in [
+            ("xct",  xct_gt,  xct_recon),
+            ("mask", mask_gt, mask_recon),
+        ]:
+            for axis, slicer in [
+                ("d", _central_slice_d),
+                ("h", _central_slice_h),
+                ("w", _central_slice_w),
+            ]:
+                tb_writer.add_images(f"{prefix}/{tag}_gt_{axis}",    slicer(gt_vol),    step)
+                tb_writer.add_images(f"{prefix}/{tag}_recon_{axis}", slicer(recon_vol), step)
 
-    tb_writer.add_images(f"{prefix}/xct_recon", xct_recon_sl, step)
-    tb_writer.add_images(f"{prefix}/xct_gt", xct_gt_sl, step)
-    tb_writer.add_images(f"{prefix}/mask_recon", mask_recon_sl, step)
-    tb_writer.add_images(f"{prefix}/mask_gt", mask_gt_sl, step)
+
+# ── Monte Carlo uncertainty estimation ───────────────────────────────────
+
+def run_montecarlo_eval(
+    model: nn.Module,
+    batch: dict,
+    step: int,
+    device: torch.device,
+    writer: Any,
+    n_samples: int = 30,
+    autocast_dtype: torch.dtype = torch.float16,
+    cmap_name: str = "plasma",
+) -> None:
+    """Run N stochastic forward passes and log mean/uncertainty to TensorBoard.
+
+    The model is set to eval() mode so BatchNorm/Dropout behave deterministically,
+    but the VAE reparameterization samples a different z each pass (the randomness
+    comes from ``torch.randn_like`` inside ``_reparameterize``, which is unaffected
+    by eval() or no_grad()).
+
+    Logs per axis (d=axial, h=coronal, w=sagittal):
+      montecarlo/xct_mean_{axis}   — mean reconstruction (grayscale)
+      montecarlo/xct_std_{axis}    — voxel-wise std       (colormap)
+      montecarlo/mask_mean_{axis}  — mean mask sigmoid    (grayscale)
+      montecarlo/mask_std_{axis}   — voxel-wise std       (colormap)
+
+    Parameters
+    ----------
+    model : nn.Module
+        VAE model (will be temporarily set to eval()).
+    batch : dict
+        A single batch dict with ``"xct"`` and ``"mask"`` keys.
+    step : int
+        Global training step (TensorBoard x-axis).
+    device : torch.device
+    writer : SummaryWriter
+        TensorBoard writer.
+    n_samples : int
+        Number of stochastic forward passes.
+    autocast_dtype : torch.dtype
+        Dtype for AMP autocast (match the training loop).
+    cmap_name : str
+        Matplotlib colormap for std maps (e.g. 'plasma', 'inferno', 'hot').
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    model.eval()
+    xct  = batch["xct"].to(device, non_blocking=True)
+    mask = batch["mask"].to(device, non_blocking=True)
+
+    xct_samples  = []
+    mask_samples = []
+
+    with torch.no_grad():
+        for _ in range(n_samples):
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                output = model(xct, mask)
+            xct_samples.append(output.xct_logits.clamp(0.0, 1.0).float())
+            mask_samples.append(torch.sigmoid(output.mask_logits).float())
+
+    # Stack → (N, B, 1, D, H, W)
+    xct_stack  = torch.stack(xct_samples,  dim=0)
+    mask_stack = torch.stack(mask_samples, dim=0)
+
+    xct_mean = xct_stack.mean(dim=0)   # (B, 1, D, H, W)
+    xct_std  = xct_stack.std(dim=0)
+    mask_mean = mask_stack.mean(dim=0)
+    mask_std  = mask_stack.std(dim=0)
+
+    # ── Diversity check: warn if predictions are not distinct ─────────────
+    _DIVERSITY_EPS = 1e-5
+    xct_div  = xct_std.mean().item()
+    mask_div = mask_std.mean().item()
+    if xct_div < _DIVERSITY_EPS or mask_div < _DIVERSITY_EPS:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "run_montecarlo_eval step=%d: predictions are nearly identical "
+            "(xct_div=%.2e  mask_div=%.2e). "
+            "Check reparameterization / posterior collapse.",
+            step, xct_div, mask_div,
+        )
+    writer.add_scalar("montecarlo/xct_diversity",  xct_div,  step)
+    writer.add_scalar("montecarlo/mask_diversity", mask_div, step)
+
+    cmap = plt.get_cmap(cmap_name)
+
+    def _std_to_rgb(std_slice: torch.Tensor) -> torch.Tensor:
+        """Convert a (B, 1, H, W) std map to (B, 3, H, W) RGB via colormap."""
+        arr = std_slice.squeeze(1).cpu().numpy()          # (B, H, W)
+        vmax = arr.max() if arr.max() > 0 else 1.0
+        arr_norm = arr / vmax                             # normalise to [0, 1]
+        # apply colormap: returns (B, H, W, 4) RGBA float
+        rgba = np.stack([cmap(arr_norm[b]) for b in range(arr_norm.shape[0])])
+        rgb  = rgba[..., :3]                              # drop alpha → (B, H, W, 3)
+        # TensorBoard wants (B, 3, H, W)
+        return torch.from_numpy(rgb.transpose(0, 3, 1, 2).astype(np.float32))
+
+    for axis, slicer in [
+        ("d", _central_slice_d),
+        ("h", _central_slice_h),
+        ("w", _central_slice_w),
+    ]:
+        writer.add_images(f"montecarlo/xct_mean_{axis}",  slicer(xct_mean),  step)
+        writer.add_images(f"montecarlo/mask_mean_{axis}", slicer(mask_mean), step)
+        writer.add_images(f"montecarlo/xct_std_{axis}",   _std_to_rgb(slicer(xct_std)),  step)
+        writer.add_images(f"montecarlo/mask_std_{axis}",  _std_to_rgb(slicer(mask_std)), step)
+
+    # ── Single normal prediction + GT ─────────────────────────────────────
+    # Use the first MC sample as the "normal" reconstruction (already computed).
+    xct_recon_single  = xct_samples[0]                          # (B, 1, D, H, W)
+    mask_recon_single = mask_samples[0]
+    xct_gt  = xct.clamp(0.0, 1.0)
+    mask_gt = mask.clamp(0.0, 1.0)
+
+    for axis, slicer in [
+        ("d", _central_slice_d),
+        ("h", _central_slice_h),
+        ("w", _central_slice_w),
+    ]:
+        writer.add_images(f"montecarlo/xct_recon_{axis}",  slicer(xct_recon_single),  step)
+        writer.add_images(f"montecarlo/xct_gt_{axis}",     slicer(xct_gt),            step)
+        writer.add_images(f"montecarlo/mask_recon_{axis}", slicer(mask_recon_single), step)
+        writer.add_images(f"montecarlo/mask_gt_{axis}",    slicer(mask_gt),           step)

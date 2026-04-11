@@ -88,3 +88,19 @@ def save_splits(
     out_path.write_text(json.dumps(payload, indent=2))
     logger.info("Wrote splits to %s", out_path)
     return out_path
+
+
+def load_splits(path: str | Path) -> dict[str, str]:
+    """Load a splits JSON written by :func:`save_splits`.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping of ``volume_id -> split_name`` (same format as
+        :func:`assign_volume_splits`).
+    """
+    path = Path(path)
+    payload = json.loads(path.read_text())
+    splits: dict[str, str] = payload["volumes"]
+    logger.info("Loaded splits from %s (%s)", path, payload.get("counts", {}))
+    return splits

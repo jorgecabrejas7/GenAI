@@ -1,8 +1,9 @@
 # Create environment and install with:
 #   mamba create -n poregen python=3.11
 #   mamba activate poregen
-#   mamba install pytorch torchvision pytorch-cuda=13.0 -c pytorch -c nvidia
+#   mamba install pytorch torchvision  
 #   pip install -r requirements.txt
+#   pip install -e ".[dev]"
 
 # Core data / I/O
 numpy>=1.24
