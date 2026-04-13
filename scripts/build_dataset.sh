@@ -5,7 +5,7 @@ set -euo pipefail
 
 build_dataset \
     --raw_root ./raw_data \
-    --out_root ./data/processed \
+    --out_root ./data/split_v1 \
     --patch_size 64 \
     --stride 32 \
     --chunk_size "32,32,32" \

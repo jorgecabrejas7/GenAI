@@ -28,3 +28,9 @@ training:
   eval_every: 200
   save_every: 1000
   num_workers: 4
+
+data:
+  dataset_root: split_v1
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true

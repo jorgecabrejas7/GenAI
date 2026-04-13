@@ -18,7 +18,7 @@ pip install -e ".[notebook]"
 # 3.  Build dataset (adjust counts to your volume inventory)
 build_dataset \
     --raw_root ./raw_data \
-    --out_root ./data/processed \
+    --out_root ./data/split_v1 \
     --patch_size 64 --stride 32 \
     --n_train 40 --n_val 5 --n_test 5 \
     --seed 123
@@ -97,7 +97,7 @@ GenAI/
 ### Output Structure
 
 ```
-data/processed/
+data/split_v1/
 ├── volumes.zarr/
 │   ├── <volume_id>/
 │   │   ├── xct   (uint8, chunked)
@@ -116,7 +116,7 @@ build_dataset --help
 | Flag | Default | Description |
 |---|---|---|
 | `--raw_root` | `./raw_data` | Root of raw TIFF volumes |
-| `--out_root` | `./data/processed` | Output directory |
+| `--out_root` | `./data/split_v1` | Output directory |
 | `--patch_size` | `64` | Cubic patch side length |
 | `--stride` | `32` | Stride between patches |
 | `--chunk_size` | `32,32,32` | Zarr chunk size |

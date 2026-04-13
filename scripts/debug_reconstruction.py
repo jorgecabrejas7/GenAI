@@ -37,7 +37,7 @@ import zarr
 # Allow running from repo root without installing the package
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-DATA_ROOT = Path("data/processed")
+DATA_ROOT = Path("data/split_v1")
 OUT_DIR   = Path("debug_reconstruction_report")
 
 
@@ -451,7 +451,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Debug reconstruction visualization issues")
     parser.add_argument("--checkpoint", default=None, help="Path to .ckpt file (enables H2 check)")
     parser.add_argument("--config",     default=None, help="Path to YAML config (needed with --checkpoint)")
-    parser.add_argument("--data_root",  default="data/processed", help="Path to processed data root")
+    parser.add_argument("--data_root",  default="data/split_v1", help="Path to dataset root")
     args = parser.parse_args()
 
     global DATA_ROOT

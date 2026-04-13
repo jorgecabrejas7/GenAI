@@ -8,6 +8,44 @@ from typing import Any
 import yaml
 
 
+def _normalise_data_config(cfg: dict[str, Any]) -> None:
+    """Keep ``split_version`` and ``dataset_root`` consistent for old/new callers."""
+    data = cfg.get("data")
+    if not isinstance(data, dict):
+        return
+
+    split_version = data.get("split_version")
+    dataset_root = data.get("dataset_root")
+
+    inferred_version: str | None = None
+    if isinstance(dataset_root, str):
+        root = dataset_root.strip().lower()
+        if root in {"split_v1", "split_v2"}:
+            inferred_version = root.removeprefix("split_")
+
+    if split_version is None:
+        if inferred_version is not None:
+            data["split_version"] = inferred_version
+        return
+
+    version = str(split_version).strip().lower()
+    if version not in {"v1", "v2"}:
+        raise ValueError(
+            f"Unsupported data.split_version '{split_version}'. Expected 'v1' or 'v2'."
+        )
+
+    expected_root = f"split_{version}"
+    if dataset_root is not None and dataset_root != expected_root:
+        raise ValueError(
+            "Config mismatch: data.split_version="
+            f"{version!r} expects data.dataset_root={expected_root!r}, "
+            f"found {dataset_root!r}."
+        )
+
+    data["split_version"] = version
+    data.setdefault("dataset_root", expected_root)
+
+
 def load_config(path: str | Path, **overrides: Any) -> dict[str, Any]:
     """Load a YAML config file and apply optional dot-notation overrides.
 
@@ -59,4 +97,5 @@ def load_config(path: str | Path, **overrides: Any) -> dict[str, Any]:
             )
         cfg[section][field] = value
 
+    _normalise_data_config(cfg)
     return cfg

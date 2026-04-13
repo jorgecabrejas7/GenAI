@@ -4,11 +4,11 @@ Usage
 -----
 ::
 
-    build_dataset --raw_root ./raw_data --out_root ./data/processed \
+    build_dataset --raw_root ./raw_data --out_root ./data/split_v1 \
         --n_train 40 --n_val 5 --n_test 5 --seed 123
 
     # Only compute per-volume intensity stats from existing zarr data:
-    build_dataset --out_root ./data/processed --stats_only
+    build_dataset --out_root ./data/split_v1 --stats_only
 
 Or via ``python -m poregen.dataset.build_dataset``.
 """
@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--raw_root", type=str, default="./raw_data")
-    p.add_argument("--out_root", type=str, default="./data/processed")
+    p.add_argument("--out_root", type=str, default="./data/split_v1")
     p.add_argument("--patch_size", type=int, default=64)
     p.add_argument("--stride", type=int, default=32)
     p.add_argument(

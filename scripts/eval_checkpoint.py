@@ -13,7 +13,7 @@ Usage
 
     python scripts/eval_checkpoint.py \\
         --checkpoint runs/vae/conv_baseline/last.ckpt \\
-        --data_root  data/processed \\
+        --data_root  data/split_v1 \\
         --config     src/poregen/configs/vae_default.yaml \\
         --out_dir    runs/vae/conv_baseline/eval
 
@@ -332,7 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--checkpoint", required=True, help="Path to .ckpt file")
-    p.add_argument("--data_root",  required=True, help="data/processed directory")
+    p.add_argument(
+        "--data_root",
+        default=None,
+        help="Optional dataset root (defaults to data/<cfg.data.dataset_root>)",
+    )
     p.add_argument("--config",     required=True, help="vae_default.yaml path")
     p.add_argument("--out_dir",    required=True, help="Directory to write eval results")
     p.add_argument("--gpu",        type=int, default=0)
@@ -351,13 +355,15 @@ def main(argv: list[str] | None = None) -> None:
     t_global = time.perf_counter()
 
     out_dir   = Path(args.out_dir)
-    data_root = Path(args.data_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Setup ────────────────────────────────────────────────────────────────
     cfg    = load_config(args.config)
+    dataset_root = cfg.get("data", {}).get("dataset_root", "split_v1")
+    data_root = Path(args.data_root) if args.data_root else Path("data") / dataset_root
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s", device)
+    logger.info("Data root: %s", data_root)
 
     model = build_vae(
         cfg["model"]["name"],
