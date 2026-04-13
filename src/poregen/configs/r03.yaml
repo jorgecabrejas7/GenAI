@@ -43,6 +43,8 @@ training:
   final_full_eval: true
   sample_every: 12500
   n_patch_samples: 8
+  compile: true           # torch.compile(mode="reduce-overhead") — ~25-30% throughput; set false to debug
+  deterministic: false
 
 data:
   split_version: v2

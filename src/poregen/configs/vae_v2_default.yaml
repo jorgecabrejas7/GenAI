@@ -58,7 +58,7 @@ training:
   final_full_eval: true
   sample_every: 12500
   n_patch_samples: 8
-  compile: false            # set true to enable torch.compile (requires PyTorch >= 2.0)
+  compile: true             # torch.compile(mode="reduce-overhead") — ~25-30% throughput; set false to debug
   deterministic: false      # set true for bit-exact reproducibility (disables cuDNN autotuning)
 
 data:

@@ -594,8 +594,8 @@ def train_loop(
                 log_file.write(json.dumps(fv_record) + "\n")
                 metrics_file.write(json.dumps(fv_record) + "\n")
                 if tb_writer is not None:
-                    _log_scalars_to_tb(tb_writer, fv_agg, "val", final_step)
-                    _log_recon_images(tb_writer, fv_out, fv_batch, final_step, "val", device)
+                    _log_scalars_to_tb(tb_writer, fv_agg, "val_full", final_step)
+                    _log_recon_images(tb_writer, fv_out, fv_batch, final_step, "val_full", device)
 
             if test_loader is not None:
                 ft_agg, ft_out, ft_batch, ft_vol_por = _run_eval(
@@ -609,8 +609,8 @@ def train_loop(
                 }
                 metrics_file.write(json.dumps(ft_record) + "\n")
                 if tb_writer is not None:
-                    _log_scalars_to_tb(tb_writer, ft_agg, "test", final_step)
-                    _log_recon_images(tb_writer, ft_out, ft_batch, final_step, "test", device)
+                    _log_scalars_to_tb(tb_writer, ft_agg, "test_full", final_step)
+                    _log_recon_images(tb_writer, ft_out, ft_batch, final_step, "test_full", device)
                     if ft_vol_por:
                         per_vol_maes = torch.tensor(
                             [abs(sum(errs) / len(errs)) for errs in ft_vol_por.values()]
