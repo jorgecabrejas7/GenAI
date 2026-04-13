@@ -120,8 +120,8 @@ def train_step(
         Per-component loss values. Scalars are Python floats; ``kl_per_channel``
         is a list of length C.
     grad_norm : float
-        Global gradient norm (after unscaling, before clipping). 0.0 if
-        max_grad_norm is None.
+        Global gradient norm (after unscaling, before clipping). Always
+        computed; clipping only applied when max_grad_norm is not None.
     latent_moments : dict
         Channel-wise aggregated moments for ``output.mu``. Used to compute
         train-time ``n_active`` over a rolling window without storing all
@@ -142,15 +142,12 @@ def train_step(
     scaler.scale(losses["total"]).backward()
 
     grad_norm = 0.0
-    if max_grad_norm is not None:
-        # Only unscale when the scaler is actually active (float16 path).
-        # On bfloat16 / CPU the scaler is disabled and unscale_() is a no-op
-        # that still iterates all gradient buffers — skip it.
-        if scaler.is_enabled():
-            scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), max_grad_norm
-        ).item()
+    if scaler.is_enabled():
+        scaler.unscale_(optimizer)
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        model.parameters(),
+        max_grad_norm if max_grad_norm is not None else float("inf"),
+    ).item()
 
     scaler.step(optimizer)
     scaler.update()
