@@ -8,9 +8,9 @@
 # applied in the notebook after loading:
 #   cfg["training"]["total_steps"] = 50000
 #
-# Paths (data_root, run_dir) are intentionally absent — pass them as
-# environment variables or notebook-level variables so this file stays
-# machine-agnostic and version-control friendly.
+# Dataset selection now lives in ``data.dataset_root`` as the folder name
+# under the repo-level ``data/`` directory. ``run_dir`` stays notebook/script
+# specific so experiment outputs remain machine-local when needed.
 #
 # Batch-size scaling rules (applied every time bs changes):
 #   - total_steps      = ceil(n_train / bs) * n_epochs
@@ -57,10 +57,14 @@ training:
   test_batches: 20        # batches per test eval
   save_every: 1000        # steps between checkpoint saves            (÷8 from bs=8 baseline)
   image_log_every: 62     # steps between reconstruction image logs   (÷8 from bs=8 baseline)
+  montecarlo_every: 100   # fixed cadence for MC uncertainty logging
+  montecarlo_batch_size: 8  # fixed showcase patches used by MC logging
+  final_full_eval: true   # run full validation and test passes at the end
   sample_every: 12500     # steps between 3-D patch sample saves      (÷8 from bs=8 baseline)
   n_patch_samples: 8      # patches per split (train/val/test) per save
 
 data:
+  dataset_root: split_v1  # folder under repo data/: split_v1 | split_v2
   batch_size: 128
   num_workers: 4
   pin_memory: true

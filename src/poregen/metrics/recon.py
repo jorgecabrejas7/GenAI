@@ -1,8 +1,9 @@
 """Reconstruction quality metrics (XCT channel).
 
-All metrics operate directly on model logits and ground-truth targets.
-Both are in [0, 1] (uint8 / 255) — no sigmoid or other activation is applied
-before comparison.
+These helpers expect prediction/target tensors that are already in the
+comparison space used by the caller. In particular, ``sharpness_proxy``
+assumes an intensity volume in ``[0, 1]`` and does not apply activations
+internally.
 """
 
 from __future__ import annotations

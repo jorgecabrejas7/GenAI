@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -15,8 +16,14 @@ from tqdm import tqdm
 from poregen.models.vae.base import VAEOutput
 from poregen.metrics.seg import segmentation_metrics, porosity_metrics
 from poregen.metrics.recon import mae, psnr, sharpness_proxy
-from poregen.metrics.latent import active_units, latent_stats
+from poregen.metrics.latent import (
+    active_units_from_moments,
+    latent_channel_moments,
+    latent_stats,
+    merge_latent_channel_moments,
+)
 from poregen.training.checkpoint import save_checkpoint
+from poregen.training.sample_export import export_patch_sample_split
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -83,7 +90,7 @@ def train_step(
     autocast_dtype: torch.dtype = torch.float16,
     max_grad_norm: float | None = None,
     scheduler: Any | None = None,
-) -> tuple[dict[str, Any], float]:
+) -> tuple[dict[str, Any], float, dict[str, Any]]:
     """Single training step with AMP, optional gradient clipping, and scheduler.
 
     Returns
@@ -94,6 +101,10 @@ def train_step(
     grad_norm : float
         Global gradient norm (after unscaling, before clipping). 0.0 if
         max_grad_norm is None.
+    latent_moments : dict
+        Channel-wise aggregated moments for ``output.mu``. Used to compute
+        train-time ``n_active`` over a rolling window without storing all
+        latent tensors.
     """
     model.train()
     xct = batch["xct"].to(device, non_blocking=True)
@@ -105,6 +116,7 @@ def train_step(
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
         output: VAEOutput = model(xct, mask)
         losses = loss_fn(output, batch_dev, step)
+    latent_moments = latent_channel_moments(output.mu)
 
     scaler.scale(losses["total"]).backward()
 
@@ -121,7 +133,7 @@ def train_step(
     if scheduler is not None:
         scheduler.step()
 
-    return {k: _to_scalar(v) for k, v in losses.items()}, grad_norm
+    return {k: _to_scalar(v) for k, v in losses.items()}, grad_norm, latent_moments
 
 
 @torch.no_grad()
@@ -168,6 +180,7 @@ def _run_eval(
     recon_acc:  dict[str, Any] = {}
     latent_acc: dict[str, Any] = {}
     por_acc:    dict[str, Any] = {}
+    latent_moment_summaries: list[dict[str, Any]] = []
     # per-volume porosity tracking for histogram logging
     # Stores signed errors (pred - gt) per patch per volume.
     # Histogram uses |mean(signed)| = volume-level porosity MAE estimate.
@@ -201,20 +214,29 @@ def _run_eval(
                 (pred_por_v[i] - gt_por_v[i]).item()  # signed; histogram uses |mean|
             )
 
-        # Reconstruction metrics — logits and GT are both in [0, 1] (uint8/255)
+        # Reconstruction metrics.
+        # Sharpness is computed on the post-sigmoid XCT prediction so the
+        # values stay in the same [0, 1] space as the ground truth.
+        xct_pred = torch.sigmoid(output.xct_logits)
+        sharpness_recon = sharpness_proxy(xct_pred).item()
+        sharpness_gt = sharpness_proxy(xct_dev).item()
         recon = {
             "mae":             mae(output.xct_logits, xct_dev).item(),
             "psnr":            psnr(output.xct_logits, xct_dev).item(),
-            "sharpness_recon": sharpness_proxy(output.xct_logits).item(),
-            "sharpness_gt":    sharpness_proxy(xct_dev).item(),
+            "sharpness_recon": sharpness_recon,
+            "sharpness_gt":    sharpness_gt,
+            "sharpness_recon_over_gt": (
+                sharpness_recon / sharpness_gt if sharpness_gt > 0.0 else float("nan")
+            ),
             "recon_xct_mean":  output.xct_logits.mean().item(),
             "recon_xct_std":   output.xct_logits.std().item(),
         }
         _accumulate(recon_acc, recon)
 
         # Latent metrics
-        lat = {**active_units(output.mu), **latent_stats(output.mu, output.logvar)}
+        lat = latent_stats(output.mu, output.logvar)
         _accumulate(latent_acc, lat)
+        latent_moment_summaries.append(latent_channel_moments(output.mu))
 
         last_output = output
         last_batch  = batch
@@ -230,7 +252,26 @@ def _run_eval(
     if "kl_per_channel" in agg and isinstance(agg["kl_per_channel"], list):
         agg["kl_total"] = sum(agg["kl_per_channel"])
 
+    if latent_moment_summaries:
+        merged = merge_latent_channel_moments(latent_moment_summaries)
+        agg.update(active_units_from_moments(
+            merged["count"],
+            merged["sum"],
+            merged["sum_sq"],
+        ))
+    else:
+        agg.update({"active_fraction": 0.0, "n_active": 0, "n_total": 0})
+
     return agg, last_output, last_batch, vol_por_errors  # type: ignore[return-value]
+
+
+def _snapshot_logging_batch(batch: dict[str, Any], n_examples: int) -> dict[str, torch.Tensor]:
+    """Keep a small, fixed batch on CPU for lightweight reconstruction logging."""
+    n_take = min(max(1, n_examples), batch["xct"].shape[0])
+    return {
+        "xct": batch["xct"][:n_take].detach().cpu().clone(),
+        "mask": batch["mask"][:n_take].detach().cpu().clone(),
+    }
 
 
 # ── training loop ─────────────────────────────────────────────────────────
@@ -252,6 +293,8 @@ def train_loop(
     test_batches: int = 20,
     save_every: int = 100,
     image_log_every: int = 500,
+    montecarlo_every: int | None = None,
+    montecarlo_batch_size: int = 8,
     sample_every: int = 0,
     n_patch_samples: int = 8,
     run_dir: str | Path = "runs/vae/default",
@@ -261,6 +304,8 @@ def train_loop(
     max_grad_norm: float | None = None,
     scheduler: Any | None = None,
     tb_writer: Any | None = None,
+    train_active_window_batches: int = 50,
+    final_full_eval: bool = False,
 ) -> list[dict[str, Any]]:
     """Training loop with full real-time TensorBoard monitoring.
 
@@ -281,14 +326,25 @@ def train_loop(
         Number of test batches per test evaluation.
     image_log_every : int
         Steps between reconstruction image logs to TensorBoard.
+    montecarlo_every : int, optional
+        Steps between Monte Carlo uncertainty logs. If None, reuse
+        ``image_log_every`` for backward-compatible behavior.
+    montecarlo_batch_size : int
+        Number of patches kept in the fixed showcase batch for Monte Carlo
+        logging. Smaller values keep the logging step lightweight.
     sample_every : int
         Steps between full 3-D patch sample saves to disk (0 = disabled).
-        Saves ``n_patch_samples`` patches per split to
-        ``run_dir/samples/step_XXXXXXXX/{train,val,test}.npz``.
+        Saves ``n_patch_samples`` patches per split as ImageJ-readable TIFF
+        stacks under ``run_dir/samples/step_XXXXXXXX/{train,val,test}/``.
     n_patch_samples : int
         Number of patches to save per split at each sample checkpoint.
     tb_writer : SummaryWriter, optional
         TensorBoard writer. All monitoring is skipped if None.
+    train_active_window_batches : int
+        Number of recent train batches used for rolling ``train/n_active``.
+    final_full_eval : bool
+        If True, run one full pass over validation and test loaders after the
+        final training step and log the aggregated metrics.
 
     Returns
     -------
@@ -301,6 +357,7 @@ def train_loop(
 
     log_file = open(log_path, "a")
     metrics_file = open(metrics_path, "a")
+    montecarlo_every = image_log_every if montecarlo_every is None else montecarlo_every
 
     train_iter = _infinite(train_loader)
     val_iter = _infinite(val_loader) if val_loader is not None else None
@@ -308,21 +365,36 @@ def train_loop(
 
     history: list[dict[str, Any]] = []
     t0 = time.time()
+    train_active_window: deque[dict[str, Any]] = deque(
+        maxlen=max(1, train_active_window_batches)
+    )
+    last_output: VAEOutput | None = None
+    last_batch: dict[str, Any] | None = None
+    montecarlo_batch: dict[str, torch.Tensor] | None = None
 
     pbar = tqdm(range(start_step, start_step + total_steps), desc="Training")
 
     for step in pbar:
         # ── train step ────────────────────────────────────────────────
         batch = next(train_iter)
-        losses, grad_norm = train_step(
+        losses, grad_norm, latent_moments = train_step(
             model, batch, optimizer, scaler, loss_fn,
             step=step, device=device, autocast_dtype=autocast_dtype,
             max_grad_norm=max_grad_norm, scheduler=scheduler,
         )
+        if montecarlo_batch is None and montecarlo_batch_size > 0:
+            montecarlo_batch = _snapshot_logging_batch(batch, montecarlo_batch_size)
+        train_active_window.append(latent_moments)
+        train_active_moments = merge_latent_channel_moments(train_active_window)
+        train_active = active_units_from_moments(
+            train_active_moments["count"],
+            train_active_moments["sum"],
+            train_active_moments["sum_sq"],
+        )
 
         record = {"step": step, "split": "train", "elapsed": time.time() - t0, **{
             k: v for k, v in losses.items() if not isinstance(v, list)
-        }}
+        }, **train_active}
         history.append(record)
         log_file.write(json.dumps(record) + "\n")
         log_file.flush()
@@ -341,10 +413,15 @@ def train_loop(
                         tb_writer.add_scalar(f"train/kl_ch{i:02d}", ch_val, step)
                 else:
                     tb_writer.add_scalar(f"train/{k}", v, step)
+            for k, v in train_active.items():
+                tb_writer.add_scalar(f"train/{k}", v, step)
             tb_writer.add_scalar("train/grad_norm", grad_norm, step)
             if scheduler is not None:
                 tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
-            # active_channels: channels with raw KL > free_bits (collapse detector)
+            # active_channels approximates "channels above free-bits", not
+            # variance-based activity. When free_bits == 0, freebits_used is
+            # always 0 and this heuristic incorrectly reports every channel as
+            # active even if some have collapsed. Prefer train/n_active.
             kl_chs = losses.get("kl_per_channel", [])
             if kl_chs:
                 tb_writer.add_histogram("train/kl_per_channel", torch.tensor(kl_chs), step)
@@ -382,11 +459,22 @@ def train_loop(
         if (
             tb_writer is not None
             and val_iter is not None
+            and last_output is not None
+            and last_batch is not None
+            and image_log_every > 0
             and (step + 1) % image_log_every == 0
         ):
             _log_recon_images(tb_writer, last_output, last_batch, step, "val", device)
+
+        # ── TensorBoard: fixed showcase Monte Carlo ───────────────────
+        if (
+            tb_writer is not None
+            and montecarlo_batch is not None
+            and montecarlo_every > 0
+            and (step + 1) % montecarlo_every == 0
+        ):
             run_montecarlo_eval(
-                model, last_batch, step, device, tb_writer,
+                model, montecarlo_batch, step, device, tb_writer,
                 autocast_dtype=autocast_dtype,
             )
 
@@ -449,6 +537,77 @@ def train_loop(
         scheduler=scheduler,
     )
 
+    if final_full_eval:
+        if val_loader is not None:
+            final_val_agg, final_val_output, final_val_batch, _ = _run_eval(
+                model,
+                iter(val_loader),
+                loss_fn,
+                len(val_loader),
+                final_step,
+                device,
+                autocast_dtype,
+            )
+            final_val_record = {
+                "step": final_step,
+                "split": "val",
+                "elapsed": time.time() - t0,
+                "full_eval": True,
+                "n_batches": len(val_loader),
+                **{k: v for k, v in final_val_agg.items() if not isinstance(v, list)},
+            }
+            log_file.write(json.dumps(final_val_record) + "\n")
+            log_file.flush()
+            metrics_file.write(json.dumps(final_val_record) + "\n")
+            metrics_file.flush()
+
+            if tb_writer is not None:
+                for k, v in final_val_agg.items():
+                    if isinstance(v, list):
+                        for i, ch_val in enumerate(v):
+                            tb_writer.add_scalar(f"val/kl_ch{i:02d}", ch_val, final_step)
+                    else:
+                        tb_writer.add_scalar(f"val/{k}", v, final_step)
+                if "kl_per_channel" in final_val_agg and isinstance(final_val_agg["kl_per_channel"], list):
+                    kl_tensor = torch.tensor(final_val_agg["kl_per_channel"])
+                    tb_writer.add_histogram("val/kl_per_channel", kl_tensor, final_step)
+                _log_recon_images(tb_writer, final_val_output, final_val_batch, final_step, "val", device)
+
+        if test_loader is not None:
+            final_test_agg, final_test_output, final_test_batch, final_test_vol_por = _run_eval(
+                model,
+                iter(test_loader),
+                loss_fn,
+                len(test_loader),
+                final_step,
+                device,
+                autocast_dtype,
+            )
+            final_test_record = {
+                "step": final_step,
+                "split": "test",
+                "elapsed": time.time() - t0,
+                "full_eval": True,
+                "n_batches": len(test_loader),
+                **{k: v for k, v in final_test_agg.items() if not isinstance(v, list)},
+            }
+            metrics_file.write(json.dumps(final_test_record) + "\n")
+            metrics_file.flush()
+
+            if tb_writer is not None:
+                for k, v in final_test_agg.items():
+                    if isinstance(v, list):
+                        for i, ch_val in enumerate(v):
+                            tb_writer.add_scalar(f"test/kl_ch{i:02d}", ch_val, final_step)
+                    else:
+                        tb_writer.add_scalar(f"test/{k}", v, final_step)
+                _log_recon_images(tb_writer, final_test_output, final_test_batch, final_step, "test", device)
+                if final_test_vol_por:
+                    per_vol_maes = torch.tensor(
+                        [abs(sum(errs) / len(errs)) for errs in final_test_vol_por.values()]
+                    )
+                    tb_writer.add_histogram("test/porosity_mae_per_volume", per_vol_maes, final_step)
+
     log_file.close()
     metrics_file.close()
     return history
@@ -466,16 +625,7 @@ def _save_patch_samples(
     device: torch.device,
     autocast_dtype: torch.dtype,
 ) -> None:
-    """Save full 3-D patch reconstructions to disk for later visualisation.
-
-    Writes ``run_dir/samples/step_XXXXXXXX/{split}.npz`` and a companion
-    ``{split}_meta.json`` for each split.  Arrays inside the npz:
-
-    - ``xct_gt``    (N, 1, 64, 64, 64) float32  — normalised input
-    - ``mask_gt``   (N, 1, 64, 64, 64) float32  — ground-truth mask
-    - ``xct_recon`` (N, 1, 64, 64, 64) float32  — sigmoid(xct_logits)
-    - ``mask_recon``(N, 1, 64, 64, 64) float32  — sigmoid(mask_logits)
-    """
+    """Save full 3-D patch reconstructions as per-patch TIFF stacks."""
     import numpy as np
 
     samples_dir = run_dir / "samples" / f"step_{step:08d}"
@@ -502,7 +652,9 @@ def _save_patch_samples(
 
             xct_gts.append(xct.cpu().float().numpy())
             mask_gts.append(mask.cpu().float().numpy())
-            xct_recons.append(torch.sigmoid(output.xct_logits) .cpu().float().numpy()[:n_take])
+            # XCT reconstruction is trained directly in [0, 1] logit space.
+            # Clamp for export instead of applying an extra sigmoid.
+            xct_recons.append(output.xct_logits.clamp(0.0, 1.0).cpu().float().numpy()[:n_take])
             mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
 
             for i in range(n_take):
@@ -516,15 +668,16 @@ def _save_patch_samples(
 
             collected += n_take
 
-        np.savez_compressed(
-            samples_dir / f"{split}.npz",
-            xct_gt    = np.concatenate(xct_gts),
-            mask_gt   = np.concatenate(mask_gts),
-            xct_recon = np.concatenate(xct_recons),
-            mask_recon= np.concatenate(mask_recons),
+        export_patch_sample_split(
+            samples_dir / split,
+            {
+                "xct_gt": np.concatenate(xct_gts),
+                "mask_gt": np.concatenate(mask_gts),
+                "xct_recon": np.concatenate(xct_recons),
+                "mask_recon": np.concatenate(mask_recons),
+            },
+            metas,
         )
-        with open(samples_dir / f"{split}_meta.json", "w") as f:
-            json.dump(metas, f, indent=2)
 
     model.train()
 

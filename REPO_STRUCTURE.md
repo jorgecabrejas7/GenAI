@@ -19,8 +19,7 @@ GenAI/
 │   ├── configs/                # Default YAML configuration
 │   └── vae/                    # Backward-compat re-export shim
 ├── notebooks/                  # Training & eval notebooks (the primary interface)
-│   ├── train_vae.ipynb         # Main training notebook
-│   ├── 10_train_vae.ipynb      # Training skeleton
+│   ├── 10_train_vae.ipynb      # Main training notebook
 │   └── 11_eval_vae.ipynb       # Evaluation skeleton
 ├── scripts/                    # Shell helpers (dataset build, etc.)
 ├── tests/                      # Unit tests
@@ -274,7 +273,7 @@ model.train() → move batch to device → autocast forward → loss_fn(output, 
 
 ## 8. How It All Connects in the Notebook
 
-This is the sequence of operations in `train_vae.ipynb`:
+This is the sequence of operations in `10_train_vae.ipynb`:
 
 ```mermaid
 flowchart TD

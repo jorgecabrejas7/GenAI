@@ -16,6 +16,8 @@ pandas>=2.0
 # Scientific
 scipy>=1.11
 scikit-image>=0.21
+scikit-learn>=1.4
+umap-learn>=0.5
 
 # Utilities
 tqdm>=4.65
