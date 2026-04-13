@@ -17,6 +17,9 @@ def compute_total_loss(
     batch: dict[str, torch.Tensor],
     step: int,
     cfg: dict[str, Any],
+    *,
+    pos_weight: torch.Tensor | None = None,
+    mask_sigmoid: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor | float]:
     """Compute combined VAE loss.
 
@@ -29,8 +32,17 @@ def compute_total_loss(
         Current global training step (for β scheduling).
     cfg : dict
         Config dict as returned by ``load_config()``.  Must contain
-        ``loss`` and optionally ``training`` sections.  No internal
-        defaults — all values must be present in *cfg*.
+        ``loss`` and optionally ``training`` sections.
+    pos_weight : torch.Tensor, optional
+        Pre-allocated scalar tensor for the BCE positive-class weight.
+        **Callers should create this once at training start** and pass it
+        here every step to avoid a device allocation on every call.
+        If ``None``, the tensor is created from ``cfg["loss"]["mask_bce_pos_weight"]``
+        (original behaviour — safe but slightly slower).
+    mask_sigmoid : torch.Tensor, optional
+        Pre-computed ``torch.sigmoid(output.mask_logits)``.  When the eval
+        loop already has the sigmoid (e.g. for metrics), pass it here to
+        avoid computing it twice inside the loss.
 
     Returns
     -------
@@ -40,19 +52,20 @@ def compute_total_loss(
     """
     c = cfg["loss"]
 
-    # ── XCT reconstruction ─────────────────────────────────────────
+    # ── XCT reconstruction ────────────────────────────────────────────
     recon_fn = get_recon_loss(c["xct_loss_type"])
     xct_loss = recon_fn(output.xct_logits, batch["xct"])
 
-    # ── Mask — class-balanced BCE + Dice/Tversky ───────────────────
-    # pos_weight from config (EDA: phi_mean=0.019 → correct value ≈ 51).
-    # Using a fixed value avoids instability from per-batch estimates on
-    # very sparse or near-zero porosity patches.
-    pos_weight = torch.tensor(
-        float(c["mask_bce_pos_weight"]),
-        dtype=output.mask_logits.dtype,
-        device=output.mask_logits.device,
-    )
+    # ── Mask — class-balanced BCE + Dice/Tversky ──────────────────────
+    # pos_weight should ideally be pre-allocated once per training run.
+    # Falling back to on-the-fly allocation keeps the API backward-compat.
+    if pos_weight is None:
+        pos_weight = torch.tensor(
+            float(c["mask_bce_pos_weight"]),
+            dtype=output.mask_logits.dtype,
+            device=output.mask_logits.device,
+        )
+
     mask_dict = combined_mask_loss(
         output.mask_logits,
         batch["mask"],
@@ -62,15 +75,16 @@ def compute_total_loss(
         tversky_alpha=c.get("tversky_alpha", 0.3),
         tversky_beta=c.get("tversky_beta", 0.7),
         pos_weight=pos_weight,
+        sigmoid=mask_sigmoid,
     )
 
-    # ── KL ─────────────────────────────────────────────────────────
+    # ── KL ────────────────────────────────────────────────────────────
     kl, freebits_used, kl_per_channel = kl_divergence(
         output.mu, output.logvar, free_bits=c["kl_free_bits"],
     )
     beta = beta_schedule(step, c["kl_warmup_steps"], c["kl_max_beta"])
 
-    # ── Total ──────────────────────────────────────────────────────
+    # ── Total ─────────────────────────────────────────────────────────
     total = (
         c["xct_weight"] * xct_loss
         + mask_dict["mask_total"]
@@ -78,13 +92,13 @@ def compute_total_loss(
     )
 
     result: dict[str, Any] = {
-        "total": total,
-        "xct_loss": xct_loss,
-        "mask_bce": mask_dict["mask_bce"],
-        "kl": kl,
-        "beta": beta,
-        "freebits_used": freebits_used,
-        "kl_per_channel": kl_per_channel,  # (C,) — for monitoring and ablation
+        "total":          total,
+        "xct_loss":       xct_loss,
+        "mask_bce":       mask_dict["mask_bce"],
+        "kl":             kl,
+        "beta":           beta,
+        "freebits_used":  freebits_used,
+        "kl_per_channel": kl_per_channel,   # (C,) — for monitoring and ablation
     }
     # Add the region loss under its actual key (mask_dice or mask_tversky)
     for k, v in mask_dict.items():

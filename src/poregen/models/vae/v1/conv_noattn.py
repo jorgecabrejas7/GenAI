@@ -1,46 +1,25 @@
-"""ConvVAE3D_NoAttn — purely convolutional 3-D VAE (no skip connections, no attention)."""
+"""ConvVAE3DNoAttn — purely convolutional 3-D VAE (no skip connections, no attention).
+
+First-generation architecture.  Checkpoint-compatible with all runs trained
+before the v2 refactor — parameter names are unchanged.
+
+Use this to ablate the contribution of bottleneck attention relative to
+:class:`poregen.models.vae.v1.conv.ConvVAE3D`.
+"""
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
+from poregen.models.nn.blocks import down_block_v1, up_block_v1, reparameterize
 from poregen.models.vae.base import VAEConfig, VAEOutput
 from poregen.models.vae.registry import register_vae
 
 
-# ── building blocks ─────────────────────────────────────────────────────
-
-def _down_block(in_ch: int, out_ch: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Conv3d(in_ch, out_ch, 4, stride=2, padding=1),
-        nn.GroupNorm(min(32, out_ch), out_ch),
-        nn.SiLU(inplace=True),
-        nn.Conv3d(out_ch, out_ch, 3, padding=1),
-        nn.GroupNorm(min(32, out_ch), out_ch),
-        nn.SiLU(inplace=True),
-    )
-
-
-def _up_block(in_ch: int, out_ch: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.ConvTranspose3d(in_ch, out_ch, 4, stride=2, padding=1),
-        nn.GroupNorm(min(32, out_ch), out_ch),
-        nn.SiLU(inplace=True),
-        nn.Conv3d(out_ch, out_ch, 3, padding=1),
-        nn.GroupNorm(min(32, out_ch), out_ch),
-        nn.SiLU(inplace=True),
-    )
-
-
-# ── model ────────────────────────────────────────────────────────────────
-
 @register_vae("conv_noattn")
-class ConvVAE3D_NoAttn(nn.Module):
+class ConvVAE3DNoAttn(nn.Module):
     """Purely convolutional 3-D VAE — no bottleneck attention, no skip connections.
-
-    Identical to ``conv`` but without the ``BottleneckAttention3D`` module.
-    Use this to ablate the contribution of bottleneck attention.
 
     With default ``VAEConfig(n_blocks=2, base_channels=32)`` the encoder
     path is::
@@ -61,7 +40,7 @@ class ConvVAE3D_NoAttn(nn.Module):
         enc: list[nn.Module] = []
         in_ch = cfg.in_channels
         for i in range(cfg.n_blocks):
-            enc.append(_down_block(in_ch, ch[i]))
+            enc.append(down_block_v1(in_ch, ch[i]))
             in_ch = ch[i]
         self.encoder = nn.Sequential(*enc)
 
@@ -73,18 +52,13 @@ class ConvVAE3D_NoAttn(nn.Module):
         dec: list[nn.Module] = []
         in_ch = cfg.z_channels
         for i in range(cfg.n_blocks - 1, -1, -1):
-            dec.append(_up_block(in_ch, ch[i]))
+            dec.append(up_block_v1(in_ch, ch[i]))
             in_ch = ch[i]
         self.decoder = nn.Sequential(*dec)
 
         # ── heads (logits — no activation) ──
         self.xct_head  = nn.Conv3d(ch[0], 1, 1)
         self.mask_head = nn.Conv3d(ch[0], 1, 1)
-
-    @staticmethod
-    def _reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = (0.5 * logvar).exp()
-        return mu + std * torch.randn_like(std)
 
     def forward(self, xct: torch.Tensor, mask: torch.Tensor) -> VAEOutput:
         """
@@ -93,12 +67,12 @@ class ConvVAE3D_NoAttn(nn.Module):
         xct  : (B, 1, D, H, W) float32 in [0, 1]
         mask : (B, 1, D, H, W) float32 {0, 1}
         """
-        x = torch.cat([xct, mask], dim=1)  # (B, 2, D, H, W)
+        x = torch.cat([xct, mask], dim=1)   # (B, 2, D, H, W)
         h = self.encoder(x)
 
         mu     = self.to_mu(h)
         logvar = self.to_logvar(h)
-        z      = self._reparameterize(mu, logvar)
+        z      = reparameterize(mu, logvar)
 
         dec = self.decoder(z)
         return VAEOutput(

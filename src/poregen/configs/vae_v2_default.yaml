@@ -1,0 +1,69 @@
+# PoreGen VAE — v2 architecture default configuration
+#
+# Inherits all training/loss/data settings from vae_default.yaml.
+# Only model.name differs: points to the second-generation architecture family.
+#
+# v2 improvements over v1:
+#   - BatchNorm3d instead of GroupNorm  (faster at bs>=32, stable statistics)
+#   - GELU instead of SiLU             (de-facto diffusion-model standard)
+#   - Upsample+Conv instead of ConvTranspose3d  (faster, no checkerboard artefacts)
+#   - float32-safe reparameterization  (stable at higher beta values)
+#
+# Select architecture:
+#   "v2.conv_noattn"  — pure conv, no attention (fastest, good baseline)
+#   "v2.conv"         — bottleneck self-attention (captures long-range pore structure)
+#   "v2.unet"         — skip connections (sharpest reconstructions)
+#
+# compile: true enables torch.compile(mode="reduce-overhead") — ~25-30% throughput
+# gain at the cost of a ~10s compilation on first forward pass.
+
+model:
+  name: v2.conv_noattn      # fastest v2 baseline; swap to v2.conv or v2.unet as needed
+  z_channels: 8
+  base_channels: 32
+  n_blocks: 2
+  patch_size: 64
+
+loss:
+  xct_loss_type: charbonnier
+  xct_weight: 1.0
+  mask_bce_weight: 1.0
+  mask_bce_pos_weight: 17.16
+  mask_dice_weight: 1.0
+  use_tversky: true
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  kl_free_bits: 0.0
+  kl_warmup_steps: 0
+  kl_max_beta: 0.05
+
+training:
+  seed: 42
+  lr: 2.0e-4
+  weight_decay: 0.01
+  total_steps: 71690
+  max_grad_norm: null
+  scheduler: none
+  lr_min: 2.0e-5
+  warmup_steps: 0
+  log_every: 1
+  eval_every: 62
+  val_batches: 20
+  test_every: 625
+  test_batches: 20
+  save_every: 1000
+  image_log_every: 62
+  montecarlo_every: 100
+  montecarlo_batch_size: 8
+  final_full_eval: true
+  sample_every: 12500
+  n_patch_samples: 8
+  compile: false            # set true to enable torch.compile (requires PyTorch >= 2.0)
+  deterministic: false      # set true for bit-exact reproducibility (disables cuDNN autotuning)
+
+data:
+  dataset_root: split_v2    # v2 models pair naturally with the stratified split
+  batch_size: 128
+  num_workers: 8            # tuned for DGX Spark (16+ cores); reduce if I/O saturates
+  prefetch_factor: 4        # batches prefetched per worker
+  pin_memory: true

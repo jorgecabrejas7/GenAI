@@ -62,9 +62,12 @@ training:
   final_full_eval: true   # run full validation and test passes at the end
   sample_every: 12500     # steps between 3-D patch sample saves      (÷8 from bs=8 baseline)
   n_patch_samples: 8      # patches per split (train/val/test) per save
+  compile: false          # set true to enable torch.compile (requires PyTorch >= 2.0)
+  deterministic: false    # set true for bit-exact reproducibility (disables cuDNN autotuning)
 
 data:
   dataset_root: split_v1  # folder under repo data/: split_v1 | split_v2
   batch_size: 128
-  num_workers: 4
+  num_workers: 8           # tuned for DGX Spark (16+ cores); reduce if I/O saturates
+  prefetch_factor: 4       # batches prefetched per worker
   pin_memory: true

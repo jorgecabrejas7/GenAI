@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,13 +95,7 @@ def compute_mask(xct: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     pore_mask : uint8 array, values in {0, 1}
     sample_mask : bool array, True where material (not background/air)
     """
-    try:
-        from onlypores import onlypores as _onlypores
-    except ImportError:
-        repo_root = str(Path(__file__).resolve().parents[3])
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
-        from onlypores import onlypores as _onlypores
+    from poregen.dataset.segmentation import onlypores as _onlypores
 
     pore_mask, sample_mask, _binary = _onlypores(xct)
 

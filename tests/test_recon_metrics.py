@@ -2,7 +2,7 @@ import json
 
 import torch
 
-from poregen.analysis import AuxiliaryXCTDecoder
+from poregen.experiments.r03 import AuxiliaryXCTDecoder
 from poregen.metrics.recon import sharpness_proxy
 from poregen.models.vae.base import VAEConfig, VAEOutput
 from poregen.training.engine import _run_eval, train_loop

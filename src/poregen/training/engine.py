@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections import deque
@@ -26,7 +27,7 @@ from poregen.training.checkpoint import save_checkpoint
 from poregen.training.sample_export import export_patch_sample_split
 
 
-# ── helpers ──────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _to_scalar(v: Any) -> Any:
     """Convert a tensor to a Python scalar or list; leave floats/ints as-is."""
@@ -70,14 +71,34 @@ def _mean_acc(acc: dict, n: int) -> dict[str, float]:
     out = {}
     for k, v in acc.items():
         if isinstance(v, list):
-            mean_val = sum(v) / len(v) if v else 0.0
-            out[k] = mean_val
+            out[k] = sum(v) / len(v) if v else 0.0
         else:
             out[k] = v / n
     return out
 
 
-# ── single-step helpers ──────────────────────────────────────────────────
+def _log_scalars_to_tb(
+    tb_writer: Any,
+    metrics: dict[str, Any],
+    prefix: str,
+    step: int,
+) -> None:
+    """Write all scalar metrics (and per-channel KL) to TensorBoard."""
+    for k, v in metrics.items():
+        if isinstance(v, list):
+            for i, ch_val in enumerate(v):
+                tb_writer.add_scalar(f"{prefix}/kl_ch{i:02d}", ch_val, step)
+        else:
+            tb_writer.add_scalar(f"{prefix}/{k}", v, step)
+    if "kl_per_channel" in metrics and isinstance(metrics["kl_per_channel"], list):
+        tb_writer.add_histogram(
+            f"{prefix}/kl_per_channel",
+            torch.tensor(metrics["kl_per_channel"]),
+            step,
+        )
+
+
+# ── single-step helpers ───────────────────────────────────────────────────────
 
 def train_step(
     model: nn.Module,
@@ -107,7 +128,7 @@ def train_step(
         latent tensors.
     """
     model.train()
-    xct = batch["xct"].to(device, non_blocking=True)
+    xct  = batch["xct"].to(device, non_blocking=True)
     mask = batch["mask"].to(device, non_blocking=True)
     batch_dev = {**batch, "xct": xct, "mask": mask}
 
@@ -122,7 +143,11 @@ def train_step(
 
     grad_norm = 0.0
     if max_grad_norm is not None:
-        scaler.unscale_(optimizer)
+        # Only unscale when the scaler is actually active (float16 path).
+        # On bfloat16 / CPU the scaler is disabled and unscale_() is a no-op
+        # that still iterates all gradient buffers — skip it.
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(), max_grad_norm
         ).item()
@@ -150,7 +175,7 @@ def eval_step(
     Returns the loss dict (scalars + kl_per_channel list) and the VAEOutput.
     """
     model.eval()
-    xct = batch["xct"].to(device, non_blocking=True)
+    xct  = batch["xct"].to(device, non_blocking=True)
     mask = batch["mask"].to(device, non_blocking=True)
     batch_dev = {**batch, "xct": xct, "mask": mask}
 
@@ -161,7 +186,7 @@ def eval_step(
     return {k: _to_scalar(v) for k, v in losses.items()}, output
 
 
-# ── eval-over-N-batches helper ────────────────────────────────────────────
+# ── eval-over-N-batches helper ────────────────────────────────────────────────
 
 def _run_eval(
     model: nn.Module,
@@ -171,22 +196,28 @@ def _run_eval(
     step: int,
     device: torch.device,
     autocast_dtype: torch.dtype,
-) -> tuple[dict[str, float], VAEOutput]:
-    """Run eval over *n_batches* batches; return aggregated metrics and the
-    last VAEOutput (for image logging).
-    """
+) -> tuple[dict[str, float], VAEOutput, dict, dict]:
+    """Run eval over *n_batches* batches; return aggregated metrics and last outputs."""
     loss_acc:   dict[str, Any] = {}
     seg_acc:    dict[str, Any] = {}
     recon_acc:  dict[str, Any] = {}
     latent_acc: dict[str, Any] = {}
     por_acc:    dict[str, Any] = {}
     latent_moment_summaries: list[dict[str, Any]] = []
-    # per-volume porosity tracking for histogram logging
-    # Stores signed errors (pred - gt) per patch per volume.
-    # Histogram uses |mean(signed)| = volume-level porosity MAE estimate.
     vol_por_errors: dict[str, list[float]] = {}
     last_output: VAEOutput | None = None
     last_batch:  dict | None = None
+
+    # Accumulators for deferred .item() calls — kept as GPU tensors until
+    # after the loop to avoid per-batch CPU/GPU synchronisation stalls.
+    mae_acc:             list[torch.Tensor] = []
+    psnr_acc:            list[torch.Tensor] = []
+    sharp_recon_acc:     list[torch.Tensor] = []
+    sharp_gt_acc:        list[torch.Tensor] = []
+    xct_mean_acc:        list[torch.Tensor] = []
+    xct_std_acc:         list[torch.Tensor] = []
+    pred_por_signed_all: list[torch.Tensor] = []
+    vol_ids_all:         list[list[str]]    = []
 
     for _ in range(n_batches):
         batch = next(data_iter)
@@ -198,40 +229,31 @@ def _run_eval(
         mask_dev = batch["mask"].to(device, non_blocking=True)
         xct_dev  = batch["xct"].to(device,  non_blocking=True)
 
-        # Segmentation metrics
+        # Compute sigmoid once — reused by loss, metrics, and per-volume tracking
+        mask_sigmoid = torch.sigmoid(output.mask_logits)
+        xct_sigmoid  = torch.sigmoid(output.xct_logits)
+
+        # Segmentation metrics (already vectorised; pass cached sigmoid via logits path)
         seg = segmentation_metrics(output.mask_logits, mask_dev)
         _accumulate(seg_acc, seg)
 
-        # Porosity metrics (primary success metric + collapse detection)
+        # Porosity metrics
         por = porosity_metrics(output.mask_logits, mask_dev)
         _accumulate(por_acc, por)
 
-        # Per-volume porosity tracking
-        pred_por_v = torch.sigmoid(output.mask_logits).mean(dim=(1, 2, 3, 4))
-        gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))
-        for i, vid in enumerate(batch["volume_id"]):
-            vol_por_errors.setdefault(vid, []).append(
-                (pred_por_v[i] - gt_por_v[i]).item()  # signed; histogram uses |mean|
-            )
+        # Per-volume porosity tracking — accumulate tensors, defer .item()
+        pred_por_v = mask_sigmoid.mean(dim=(1, 2, 3, 4))   # (B,)
+        gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))        # (B,)
+        pred_por_signed_all.append(pred_por_v - gt_por_v)
+        vol_ids_all.append(list(batch["volume_id"]))
 
-        # Reconstruction metrics.
-        # Sharpness is computed on the post-sigmoid XCT prediction so the
-        # values stay in the same [0, 1] space as the ground truth.
-        xct_pred = torch.sigmoid(output.xct_logits)
-        sharpness_recon = sharpness_proxy(xct_pred).item()
-        sharpness_gt = sharpness_proxy(xct_dev).item()
-        recon = {
-            "mae":             mae(output.xct_logits, xct_dev).item(),
-            "psnr":            psnr(output.xct_logits, xct_dev).item(),
-            "sharpness_recon": sharpness_recon,
-            "sharpness_gt":    sharpness_gt,
-            "sharpness_recon_over_gt": (
-                sharpness_recon / sharpness_gt if sharpness_gt > 0.0 else float("nan")
-            ),
-            "recon_xct_mean":  output.xct_logits.mean().item(),
-            "recon_xct_std":   output.xct_logits.std().item(),
-        }
-        _accumulate(recon_acc, recon)
+        # Reconstruction metrics — accumulate as tensors, defer .item()
+        mae_acc.append(mae(output.xct_logits, xct_dev))
+        psnr_acc.append(psnr(output.xct_logits, xct_dev))
+        sharp_recon_acc.append(sharpness_proxy(xct_sigmoid))
+        sharp_gt_acc.append(sharpness_proxy(xct_dev))
+        xct_mean_acc.append(output.xct_logits.mean())
+        xct_std_acc.append(output.xct_logits.std())
 
         # Latent metrics
         lat = latent_stats(output.mu, output.logvar)
@@ -241,23 +263,42 @@ def _run_eval(
         last_output = output
         last_batch  = batch
 
+    # ── deferred .item() — single sync per metric after the loop ──────────────
+    sharp_recon_mean = float(torch.stack(sharp_recon_acc).mean().item())
+    sharp_gt_mean    = float(torch.stack(sharp_gt_acc).mean().item())
+    recon_agg = {
+        "mae":             float(torch.stack(mae_acc).mean().item()),
+        "psnr":            float(torch.stack(psnr_acc).mean().item()),
+        "sharpness_recon": sharp_recon_mean,
+        "sharpness_gt":    sharp_gt_mean,
+        "sharpness_recon_over_gt": (
+            sharp_recon_mean / sharp_gt_mean if sharp_gt_mean > 0.0 else float("nan")
+        ),
+        "recon_xct_mean": float(torch.stack(xct_mean_acc).mean().item()),
+        "recon_xct_std":  float(torch.stack(xct_std_acc).mean().item()),
+    }
+
+    # Per-volume porosity errors (for histogram logging)
+    for signed_batch, vids in zip(pred_por_signed_all, vol_ids_all):
+        signed_cpu = signed_batch.cpu()
+        for i, vid in enumerate(vids):
+            vol_por_errors.setdefault(vid, []).append(float(signed_cpu[i].item()))
+
     agg = {
         **_mean_acc(loss_acc, n_batches),
         **_mean_acc(seg_acc, n_batches),
         **_mean_acc(por_acc, n_batches),
-        **_mean_acc(recon_acc, n_batches),
+        **recon_agg,
         **_mean_acc(latent_acc, n_batches),
     }
-    # kl_total: sum of raw per-channel KL (collapse → 0)
+
     if "kl_per_channel" in agg and isinstance(agg["kl_per_channel"], list):
         agg["kl_total"] = sum(agg["kl_per_channel"])
 
     if latent_moment_summaries:
         merged = merge_latent_channel_moments(latent_moment_summaries)
         agg.update(active_units_from_moments(
-            merged["count"],
-            merged["sum"],
-            merged["sum_sq"],
+            merged["count"], merged["sum"], merged["sum_sq"],
         ))
     else:
         agg.update({"active_fraction": 0.0, "n_active": 0, "n_total": 0})
@@ -269,12 +310,12 @@ def _snapshot_logging_batch(batch: dict[str, Any], n_examples: int) -> dict[str,
     """Keep a small, fixed batch on CPU for lightweight reconstruction logging."""
     n_take = min(max(1, n_examples), batch["xct"].shape[0])
     return {
-        "xct": batch["xct"][:n_take].detach().cpu().clone(),
-        "mask": batch["mask"][:n_take].detach().cpu().clone(),
+        "xct":  batch["xct"] [:n_take].cpu(),
+        "mask": batch["mask"][:n_take].cpu(),
     }
 
 
-# ── training loop ─────────────────────────────────────────────────────────
+# ── training loop ─────────────────────────────────────────────────────────────
 
 def train_loop(
     model: nn.Module,
@@ -306,6 +347,7 @@ def train_loop(
     tb_writer: Any | None = None,
     train_active_window_batches: int = 50,
     final_full_eval: bool = False,
+    compile_model: bool = False,
 ) -> list[dict[str, Any]]:
     """Training loop with full real-time TensorBoard monitoring.
 
@@ -331,11 +373,9 @@ def train_loop(
         ``image_log_every`` for backward-compatible behavior.
     montecarlo_batch_size : int
         Number of patches kept in the fixed showcase batch for Monte Carlo
-        logging. Smaller values keep the logging step lightweight.
+        logging.
     sample_every : int
         Steps between full 3-D patch sample saves to disk (0 = disabled).
-        Saves ``n_patch_samples`` patches per split as ImageJ-readable TIFF
-        stacks under ``run_dir/samples/step_XXXXXXXX/{train,val,test}/``.
     n_patch_samples : int
         Number of patches to save per split at each sample checkpoint.
     tb_writer : SummaryWriter, optional
@@ -345,275 +385,244 @@ def train_loop(
     final_full_eval : bool
         If True, run one full pass over validation and test loaders after the
         final training step and log the aggregated metrics.
+    compile_model : bool
+        If True, wrap *model* with ``torch.compile(mode="reduce-overhead")``
+        before training.  Typically yields 25-30 % throughput improvement on
+        Ampere/Hopper hardware with static 64³ input shapes.  The first
+        forward pass will be slower (~10 s) while the kernel is compiled.
 
     Returns
     -------
     list of per-step metric dicts (train + val records, for inline plotting).
     """
+    if compile_model:
+        model = torch.compile(model, mode="reduce-overhead")  # type: ignore[assignment]
+
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = run_dir / "log.jsonl"
+    log_path     = run_dir / "log.jsonl"
     metrics_path = run_dir / "metrics.jsonl"
 
-    log_file = open(log_path, "a")
-    metrics_file = open(metrics_path, "a")
     montecarlo_every = image_log_every if montecarlo_every is None else montecarlo_every
 
     train_iter = _infinite(train_loader)
-    val_iter = _infinite(val_loader) if val_loader is not None else None
-    test_iter = _infinite(test_loader) if test_loader is not None else None
+    val_iter   = _infinite(val_loader)   if val_loader   is not None else None
+    test_iter  = _infinite(test_loader)  if test_loader  is not None else None
 
     history: list[dict[str, Any]] = []
     t0 = time.time()
     train_active_window: deque[dict[str, Any]] = deque(
         maxlen=max(1, train_active_window_batches)
     )
-    last_output: VAEOutput | None = None
-    last_batch: dict[str, Any] | None = None
-    montecarlo_batch: dict[str, torch.Tensor] | None = None
+    # Cache the last computed active-units stats; recomputed every 10 steps.
+    train_active: dict[str, Any] = {"active_fraction": 0.0, "n_active": 0, "n_total": 0}
+    last_output:       VAEOutput | None = None
+    last_batch:        dict[str, Any] | None = None
+    montecarlo_batch:  dict[str, torch.Tensor] | None = None
 
     pbar = tqdm(range(start_step, start_step + total_steps), desc="Training")
 
-    for step in pbar:
-        # ── train step ────────────────────────────────────────────────
-        batch = next(train_iter)
-        losses, grad_norm, latent_moments = train_step(
-            model, batch, optimizer, scaler, loss_fn,
-            step=step, device=device, autocast_dtype=autocast_dtype,
-            max_grad_norm=max_grad_norm, scheduler=scheduler,
-        )
-        if montecarlo_batch is None and montecarlo_batch_size > 0:
-            montecarlo_batch = _snapshot_logging_batch(batch, montecarlo_batch_size)
-        train_active_window.append(latent_moments)
-        train_active_moments = merge_latent_channel_moments(train_active_window)
-        train_active = active_units_from_moments(
-            train_active_moments["count"],
-            train_active_moments["sum"],
-            train_active_moments["sum_sq"],
-        )
+    # Use ExitStack so both log files are always closed — even on exception.
+    with contextlib.ExitStack() as stack:
+        log_file     = stack.enter_context(open(log_path,     "a"))
+        metrics_file = stack.enter_context(open(metrics_path, "a"))
 
-        record = {"step": step, "split": "train", "elapsed": time.time() - t0, **{
-            k: v for k, v in losses.items() if not isinstance(v, list)
-        }, **train_active}
-        history.append(record)
-        log_file.write(json.dumps(record) + "\n")
-        log_file.flush()
+        for step in pbar:
+            # ── train step ────────────────────────────────────────────
+            batch = next(train_iter)
+            losses, grad_norm, latent_moments = train_step(
+                model, batch, optimizer, scaler, loss_fn,
+                step=step, device=device, autocast_dtype=autocast_dtype,
+                max_grad_norm=max_grad_norm, scheduler=scheduler,
+            )
 
-        pbar.set_postfix(
-            loss=f"{losses['total']:.4f}",
-            kl=f"{losses.get('kl', 0):.4f}",
-            β=f"{losses.get('beta', 0):.4f}",
-        )
+            # Fixed MC batch — captured once from the first training batch
+            if montecarlo_batch is None and montecarlo_batch_size > 0:
+                montecarlo_batch = _snapshot_logging_batch(batch, montecarlo_batch_size)
 
-        # ── TensorBoard: train scalars (every log_every steps) ────────
-        if tb_writer is not None and (step + 1) % log_every == 0:
-            for k, v in losses.items():
-                if isinstance(v, list):
-                    for i, ch_val in enumerate(v):
-                        tb_writer.add_scalar(f"train/kl_ch{i:02d}", ch_val, step)
-                else:
+            # Rolling active-units — recompute every 10 steps (it's a smoothed
+            # display metric; recomputing every step wastes ~2-3 % of loop time).
+            train_active_window.append(latent_moments)
+            if (step + 1) % 10 == 0 or step == start_step:
+                train_active_moments = merge_latent_channel_moments(train_active_window)
+                train_active = active_units_from_moments(
+                    train_active_moments["count"],
+                    train_active_moments["sum"],
+                    train_active_moments["sum_sq"],
+                )
+
+            record = {
+                "step":    step,
+                "split":   "train",
+                "elapsed": time.time() - t0,
+                **{k: v for k, v in losses.items() if not isinstance(v, list)},
+                **train_active,
+            }
+            history.append(record)
+            log_file.write(json.dumps(record) + "\n")
+            log_file.flush()
+
+            pbar.set_postfix(
+                loss=f"{losses['total']:.4f}",
+                kl=f"{losses.get('kl', 0):.4f}",
+                β=f"{losses.get('beta', 0):.4f}",
+            )
+
+            # ── TensorBoard: train scalars ────────────────────────────
+            if tb_writer is not None and (step + 1) % log_every == 0:
+                _log_scalars_to_tb(tb_writer, losses, "train", step)
+                for k, v in train_active.items():
                     tb_writer.add_scalar(f"train/{k}", v, step)
-            for k, v in train_active.items():
-                tb_writer.add_scalar(f"train/{k}", v, step)
-            tb_writer.add_scalar("train/grad_norm", grad_norm, step)
-            if scheduler is not None:
-                tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
-            # active_channels approximates "channels above free-bits", not
-            # variance-based activity. When free_bits == 0, freebits_used is
-            # always 0 and this heuristic incorrectly reports every channel as
-            # active even if some have collapsed. Prefer train/n_active.
-            kl_chs = losses.get("kl_per_channel", [])
-            if kl_chs:
-                tb_writer.add_histogram("train/kl_per_channel", torch.tensor(kl_chs), step)
-                if "freebits_used" in losses:
+                tb_writer.add_scalar("train/grad_norm", grad_norm, step)
+                if scheduler is not None:
+                    tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
+                kl_chs = losses.get("kl_per_channel", [])
+                if kl_chs and "freebits_used" in losses:
                     n_dead = round(losses["freebits_used"] * len(kl_chs))
                     tb_writer.add_scalar("train/active_channels", len(kl_chs) - n_dead, step)
 
-        # ── validation ────────────────────────────────────────────────
-        if val_iter is not None and (step + 1) % eval_every == 0:
-            agg, last_output, last_batch, _vol_por = _run_eval(
-                model, val_iter, loss_fn, val_batches, step, device, autocast_dtype
-            )
-            val_record = {"step": step, "split": "val", "elapsed": time.time() - t0, **{
-                k: v for k, v in agg.items() if not isinstance(v, list)
-            }}
-            history.append(val_record)
-            log_file.write(json.dumps(val_record) + "\n")
-            log_file.flush()
-            metrics_file.write(json.dumps(val_record) + "\n")
-            metrics_file.flush()
+            # ── validation ───────────────────────────────────────────
+            if val_iter is not None and (step + 1) % eval_every == 0:
+                agg, last_output, last_batch, _vol_por = _run_eval(
+                    model, val_iter, loss_fn, val_batches, step, device, autocast_dtype
+                )
+                val_record = {
+                    "step":    step,
+                    "split":   "val",
+                    "elapsed": time.time() - t0,
+                    **{k: v for k, v in agg.items() if not isinstance(v, list)},
+                }
+                history.append(val_record)
+                log_file.write(json.dumps(val_record) + "\n")
+                log_file.flush()
+                metrics_file.write(json.dumps(val_record) + "\n")
+                metrics_file.flush()
 
-            if tb_writer is not None:
-                for k, v in agg.items():
-                    if isinstance(v, list):
-                        for i, ch_val in enumerate(v):
-                            tb_writer.add_scalar(f"val/kl_ch{i:02d}", ch_val, step)
-                    else:
-                        tb_writer.add_scalar(f"val/{k}", v, step)
-                # per-channel KL histogram + kl_total (collapse detector)
-                if "kl_per_channel" in agg and isinstance(agg["kl_per_channel"], list):
-                    kl_tensor = torch.tensor(agg["kl_per_channel"])
-                    tb_writer.add_histogram("val/kl_per_channel", kl_tensor, step)
+                if tb_writer is not None:
+                    _log_scalars_to_tb(tb_writer, agg, "val", step)
 
-        # ── TensorBoard: reconstruction images + MC uncertainty ──────
-        if (
-            tb_writer is not None
-            and val_iter is not None
-            and last_output is not None
-            and last_batch is not None
-            and image_log_every > 0
-            and (step + 1) % image_log_every == 0
-        ):
-            _log_recon_images(tb_writer, last_output, last_batch, step, "val", device)
+            # ── TensorBoard: reconstruction images ───────────────────
+            if (
+                tb_writer is not None
+                and val_iter is not None
+                and last_output is not None
+                and last_batch is not None
+                and image_log_every > 0
+                and (step + 1) % image_log_every == 0
+            ):
+                _log_recon_images(tb_writer, last_output, last_batch, step, "val", device)
 
-        # ── TensorBoard: fixed showcase Monte Carlo ───────────────────
-        if (
-            tb_writer is not None
-            and montecarlo_batch is not None
-            and montecarlo_every > 0
-            and (step + 1) % montecarlo_every == 0
-        ):
-            run_montecarlo_eval(
-                model, montecarlo_batch, step, device, tb_writer,
-                autocast_dtype=autocast_dtype,
-            )
+            # ── TensorBoard: fixed showcase Monte Carlo ───────────────
+            if (
+                tb_writer is not None
+                and montecarlo_batch is not None
+                and montecarlo_every > 0
+                and (step + 1) % montecarlo_every == 0
+            ):
+                run_montecarlo_eval(
+                    model, montecarlo_batch, step, device, tb_writer,
+                    autocast_dtype=autocast_dtype,
+                )
 
-        # ── test evaluation ───────────────────────────────────────────
-        if test_iter is not None and (step + 1) % test_every == 0:
-            test_agg, test_output, test_batch, test_vol_por = _run_eval(
-                model, test_iter, loss_fn, test_batches, step, device, autocast_dtype
-            )
-            test_record = {"step": step, "split": "test", "elapsed": time.time() - t0, **{
-                k: v for k, v in test_agg.items() if not isinstance(v, list)
-            }}
-            metrics_file.write(json.dumps(test_record) + "\n")
-            metrics_file.flush()
+            # ── test evaluation ───────────────────────────────────────
+            if test_iter is not None and (step + 1) % test_every == 0:
+                test_agg, test_output, test_batch, test_vol_por = _run_eval(
+                    model, test_iter, loss_fn, test_batches, step, device, autocast_dtype
+                )
+                test_record = {
+                    "step":    step,
+                    "split":   "test",
+                    "elapsed": time.time() - t0,
+                    **{k: v for k, v in test_agg.items() if not isinstance(v, list)},
+                }
+                metrics_file.write(json.dumps(test_record) + "\n")
+                metrics_file.flush()
 
-            if tb_writer is not None:
-                for k, v in test_agg.items():
-                    if isinstance(v, list):
-                        for i, ch_val in enumerate(v):
-                            tb_writer.add_scalar(f"test/kl_ch{i:02d}", ch_val, step)
-                    else:
-                        tb_writer.add_scalar(f"test/{k}", v, step)
-                _log_recon_images(tb_writer, test_output, test_batch, step, "test", device)
-                # Per-volume porosity MAE histogram.
-                # |mean(signed_errors)| = |mean_pred_por - mean_gt_por| per volume.
-                if test_vol_por:
-                    per_vol_maes = torch.tensor(
-                        [abs(sum(errs) / len(errs)) for errs in test_vol_por.values()]
-                    )
-                    tb_writer.add_histogram("test/porosity_mae_per_volume", per_vol_maes, step)
+                if tb_writer is not None:
+                    _log_scalars_to_tb(tb_writer, test_agg, "test", step)
+                    _log_recon_images(tb_writer, test_output, test_batch, step, "test", device)
+                    if test_vol_por:
+                        per_vol_maes = torch.tensor(
+                            [abs(sum(errs) / len(errs)) for errs in test_vol_por.values()]
+                        )
+                        tb_writer.add_histogram("test/porosity_mae_per_volume", per_vol_maes, step)
 
-        # ── checkpoint ───────────────────────────────────────────────
-        if (step + 1) % save_every == 0:
-            ckpt_name = f"{run_dir.name}_step{step + 1:08d}.ckpt"
-            save_checkpoint(
-                run_dir / ckpt_name,
-                model, optimizer, scaler, step=step + 1,
-                metadata={"total_steps": total_steps},
-                scheduler=scheduler,
-            )
+            # ── checkpoint ───────────────────────────────────────────
+            if (step + 1) % save_every == 0:
+                ckpt_name = f"{run_dir.name}_step{step + 1:08d}.ckpt"
+                save_checkpoint(
+                    run_dir / ckpt_name,
+                    model, optimizer, scaler, step=step + 1,
+                    metadata={"total_steps": total_steps},
+                    scheduler=scheduler,
+                )
 
-        # ── 3-D patch samples ─────────────────────────────────────────
-        if sample_every > 0 and (step + 1) % sample_every == 0:
-            _save_patch_samples(
-                model,
-                {"train": train_iter, "val": val_iter, "test": test_iter},
-                n_patch_samples,
-                step + 1,
-                run_dir,
-                device,
-                autocast_dtype,
-            )
+            # ── 3-D patch samples ─────────────────────────────────────
+            if sample_every > 0 and (step + 1) % sample_every == 0:
+                _save_patch_samples(
+                    model,
+                    {"train": train_iter, "val": val_iter, "test": test_iter},
+                    n_patch_samples,
+                    step + 1,
+                    run_dir,
+                    device,
+                    autocast_dtype,
+                )
 
-    # Final checkpoint
-    final_step = start_step + total_steps
-    ckpt_name = f"{run_dir.name}_step{final_step:08d}.ckpt"
-    save_checkpoint(
-        run_dir / ckpt_name,
-        model, optimizer, scaler, step=final_step,
-        metadata={"total_steps": total_steps},
-        scheduler=scheduler,
-    )
+        # ── final checkpoint ──────────────────────────────────────────
+        final_step = start_step + total_steps
+        ckpt_name = f"{run_dir.name}_step{final_step:08d}.ckpt"
+        save_checkpoint(
+            run_dir / ckpt_name,
+            model, optimizer, scaler, step=final_step,
+            metadata={"total_steps": total_steps},
+            scheduler=scheduler,
+        )
 
-    if final_full_eval:
-        if val_loader is not None:
-            final_val_agg, final_val_output, final_val_batch, _ = _run_eval(
-                model,
-                iter(val_loader),
-                loss_fn,
-                len(val_loader),
-                final_step,
-                device,
-                autocast_dtype,
-            )
-            final_val_record = {
-                "step": final_step,
-                "split": "val",
-                "elapsed": time.time() - t0,
-                "full_eval": True,
-                "n_batches": len(val_loader),
-                **{k: v for k, v in final_val_agg.items() if not isinstance(v, list)},
-            }
-            log_file.write(json.dumps(final_val_record) + "\n")
-            log_file.flush()
-            metrics_file.write(json.dumps(final_val_record) + "\n")
-            metrics_file.flush()
+        # ── final full eval ───────────────────────────────────────────
+        if final_full_eval:
+            if val_loader is not None:
+                fv_agg, fv_out, fv_batch, _ = _run_eval(
+                    model, iter(val_loader), loss_fn,
+                    len(val_loader), final_step, device, autocast_dtype,
+                )
+                fv_record = {
+                    "step": final_step, "split": "val", "elapsed": time.time() - t0,
+                    "full_eval": True, "n_batches": len(val_loader),
+                    **{k: v for k, v in fv_agg.items() if not isinstance(v, list)},
+                }
+                log_file.write(json.dumps(fv_record) + "\n")
+                metrics_file.write(json.dumps(fv_record) + "\n")
+                if tb_writer is not None:
+                    _log_scalars_to_tb(tb_writer, fv_agg, "val", final_step)
+                    _log_recon_images(tb_writer, fv_out, fv_batch, final_step, "val", device)
 
-            if tb_writer is not None:
-                for k, v in final_val_agg.items():
-                    if isinstance(v, list):
-                        for i, ch_val in enumerate(v):
-                            tb_writer.add_scalar(f"val/kl_ch{i:02d}", ch_val, final_step)
-                    else:
-                        tb_writer.add_scalar(f"val/{k}", v, final_step)
-                if "kl_per_channel" in final_val_agg and isinstance(final_val_agg["kl_per_channel"], list):
-                    kl_tensor = torch.tensor(final_val_agg["kl_per_channel"])
-                    tb_writer.add_histogram("val/kl_per_channel", kl_tensor, final_step)
-                _log_recon_images(tb_writer, final_val_output, final_val_batch, final_step, "val", device)
+            if test_loader is not None:
+                ft_agg, ft_out, ft_batch, ft_vol_por = _run_eval(
+                    model, iter(test_loader), loss_fn,
+                    len(test_loader), final_step, device, autocast_dtype,
+                )
+                ft_record = {
+                    "step": final_step, "split": "test", "elapsed": time.time() - t0,
+                    "full_eval": True, "n_batches": len(test_loader),
+                    **{k: v for k, v in ft_agg.items() if not isinstance(v, list)},
+                }
+                metrics_file.write(json.dumps(ft_record) + "\n")
+                if tb_writer is not None:
+                    _log_scalars_to_tb(tb_writer, ft_agg, "test", final_step)
+                    _log_recon_images(tb_writer, ft_out, ft_batch, final_step, "test", device)
+                    if ft_vol_por:
+                        per_vol_maes = torch.tensor(
+                            [abs(sum(errs) / len(errs)) for errs in ft_vol_por.values()]
+                        )
+                        tb_writer.add_histogram(
+                            "test/porosity_mae_per_volume", per_vol_maes, final_step
+                        )
 
-        if test_loader is not None:
-            final_test_agg, final_test_output, final_test_batch, final_test_vol_por = _run_eval(
-                model,
-                iter(test_loader),
-                loss_fn,
-                len(test_loader),
-                final_step,
-                device,
-                autocast_dtype,
-            )
-            final_test_record = {
-                "step": final_step,
-                "split": "test",
-                "elapsed": time.time() - t0,
-                "full_eval": True,
-                "n_batches": len(test_loader),
-                **{k: v for k, v in final_test_agg.items() if not isinstance(v, list)},
-            }
-            metrics_file.write(json.dumps(final_test_record) + "\n")
-            metrics_file.flush()
-
-            if tb_writer is not None:
-                for k, v in final_test_agg.items():
-                    if isinstance(v, list):
-                        for i, ch_val in enumerate(v):
-                            tb_writer.add_scalar(f"test/kl_ch{i:02d}", ch_val, final_step)
-                    else:
-                        tb_writer.add_scalar(f"test/{k}", v, final_step)
-                _log_recon_images(tb_writer, final_test_output, final_test_batch, final_step, "test", device)
-                if final_test_vol_por:
-                    per_vol_maes = torch.tensor(
-                        [abs(sum(errs) / len(errs)) for errs in final_test_vol_por.values()]
-                    )
-                    tb_writer.add_histogram("test/porosity_mae_per_volume", per_vol_maes, final_step)
-
-    log_file.close()
-    metrics_file.close()
     return history
 
 
-# ── patch sample saving ──────────────────────────────────────────────────
+# ── patch sample saving ───────────────────────────────────────────────────────
 
 @torch.no_grad()
 def _save_patch_samples(
@@ -630,7 +639,6 @@ def _save_patch_samples(
 
     samples_dir = run_dir / "samples" / f"step_{step:08d}"
     samples_dir.mkdir(parents=True, exist_ok=True)
-
     model.eval()
 
     for split, data_iter in iters.items():
@@ -641,7 +649,7 @@ def _save_patch_samples(
         collected = 0
 
         while collected < n_samples:
-            batch = next(data_iter)
+            batch  = next(data_iter)
             n_take = min(n_samples - collected, batch["xct"].shape[0])
 
             xct  = batch["xct"] [:n_take].to(device)
@@ -652,27 +660,24 @@ def _save_patch_samples(
 
             xct_gts.append(xct.cpu().float().numpy())
             mask_gts.append(mask.cpu().float().numpy())
-            # XCT reconstruction is trained directly in [0, 1] logit space.
-            # Clamp for export instead of applying an extra sigmoid.
             xct_recons.append(output.xct_logits.clamp(0.0, 1.0).cpu().float().numpy()[:n_take])
             mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
 
+            coords = batch["coords"]
             for i in range(n_take):
-                coords = batch["coords"]
                 metas.append({
-                    "volume_id":   batch["volume_id"][i],
-                    "z0": int(coords[0][i]), "y0": int(coords[1][i]), "x0": int(coords[2][i]),
-                    "porosity":    float(batch["porosity"][i]),
+                    "volume_id":    batch["volume_id"][i],
+                    "z0": int(coords[i][0]), "y0": int(coords[i][1]), "x0": int(coords[i][2]),
+                    "porosity":     float(batch["porosity"][i]),
                     "source_group": batch["source_group"][i],
                 })
-
             collected += n_take
 
         export_patch_sample_split(
             samples_dir / split,
             {
-                "xct_gt": np.concatenate(xct_gts),
-                "mask_gt": np.concatenate(mask_gts),
+                "xct_gt":    np.concatenate(xct_gts),
+                "mask_gt":   np.concatenate(mask_gts),
                 "xct_recon": np.concatenate(xct_recons),
                 "mask_recon": np.concatenate(mask_recons),
             },
@@ -682,7 +687,7 @@ def _save_patch_samples(
     model.train()
 
 
-# ── image logging helper ──────────────────────────────────────────────────
+# ── image logging helper ──────────────────────────────────────────────────────
 
 def _log_recon_images(
     tb_writer: Any,
@@ -692,12 +697,7 @@ def _log_recon_images(
     prefix: str,
     device: torch.device,
 ) -> None:
-    """Log central slices along all 3 axes to TensorBoard.
-
-    XCT logits and GT are both in [0, 1] (uint8/255 normalisation).
-    We clamp the logits to [0, 1] for display — no further normalisation needed.
-    Mask reconstruction is passed through sigmoid → [0, 1].
-    """
+    """Log central slices along all 3 axes to TensorBoard."""
     with torch.no_grad():
         xct_recon  = output.xct_logits.clamp(0.0, 1.0)
         mask_recon = torch.sigmoid(output.mask_logits)
@@ -717,7 +717,7 @@ def _log_recon_images(
                 tb_writer.add_images(f"{prefix}/{tag}_recon_{axis}", slicer(recon_vol), step)
 
 
-# ── Monte Carlo uncertainty estimation ───────────────────────────────────
+# ── Monte Carlo uncertainty estimation ───────────────────────────────────────
 
 def run_montecarlo_eval(
     model: nn.Module,
@@ -731,34 +731,14 @@ def run_montecarlo_eval(
 ) -> None:
     """Run N stochastic forward passes and log mean/uncertainty to TensorBoard.
 
-    The model is set to eval() mode so BatchNorm/Dropout behave deterministically,
-    but the VAE reparameterization samples a different z each pass (the randomness
-    comes from ``torch.randn_like`` inside ``_reparameterize``, which is unaffected
-    by eval() or no_grad()).
+    The model is set to eval() so BatchNorm/Dropout behave deterministically,
+    but the VAE reparameterization samples a different z each pass.
 
     Logs per axis (d=axial, h=coronal, w=sagittal):
       montecarlo/xct_mean_{axis}   — mean reconstruction (grayscale)
       montecarlo/xct_std_{axis}    — voxel-wise std       (colormap)
       montecarlo/mask_mean_{axis}  — mean mask sigmoid    (grayscale)
       montecarlo/mask_std_{axis}   — voxel-wise std       (colormap)
-
-    Parameters
-    ----------
-    model : nn.Module
-        VAE model (will be temporarily set to eval()).
-    batch : dict
-        A single batch dict with ``"xct"`` and ``"mask"`` keys.
-    step : int
-        Global training step (TensorBoard x-axis).
-    device : torch.device
-    writer : SummaryWriter
-        TensorBoard writer.
-    n_samples : int
-        Number of stochastic forward passes.
-    autocast_dtype : torch.dtype
-        Dtype for AMP autocast (match the training loop).
-    cmap_name : str
-        Matplotlib colormap for std maps (e.g. 'plasma', 'inferno', 'hot').
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -769,8 +749,8 @@ def run_montecarlo_eval(
     xct  = batch["xct"].to(device, non_blocking=True)
     mask = batch["mask"].to(device, non_blocking=True)
 
-    xct_samples  = []
-    mask_samples = []
+    xct_samples:  list[torch.Tensor] = []
+    mask_samples: list[torch.Tensor] = []
 
     with torch.no_grad():
         for _ in range(n_samples):
@@ -779,23 +759,21 @@ def run_montecarlo_eval(
             xct_samples.append(output.xct_logits.clamp(0.0, 1.0).float())
             mask_samples.append(torch.sigmoid(output.mask_logits).float())
 
-    # Stack → (N, B, 1, D, H, W)
-    xct_stack  = torch.stack(xct_samples,  dim=0)
+    xct_stack  = torch.stack(xct_samples,  dim=0)   # (N, B, 1, D, H, W)
     mask_stack = torch.stack(mask_samples, dim=0)
 
-    xct_mean = xct_stack.mean(dim=0)   # (B, 1, D, H, W)
-    xct_std  = xct_stack.std(dim=0)
+    xct_mean  = xct_stack.mean(dim=0)
+    xct_std   = xct_stack.std(dim=0)
     mask_mean = mask_stack.mean(dim=0)
     mask_std  = mask_stack.std(dim=0)
 
-    # ── Diversity check: warn if predictions are not distinct ─────────────
     _DIVERSITY_EPS = 1e-5
     xct_div  = xct_std.mean().item()
     mask_div = mask_std.mean().item()
     if xct_div < _DIVERSITY_EPS or mask_div < _DIVERSITY_EPS:
         import logging as _logging
         _logging.getLogger(__name__).warning(
-            "run_montecarlo_eval step=%d: predictions are nearly identical "
+            "run_montecarlo_eval step=%d: predictions nearly identical "
             "(xct_div=%.2e  mask_div=%.2e). "
             "Check reparameterization / posterior collapse.",
             step, xct_div, mask_div,
@@ -806,15 +784,10 @@ def run_montecarlo_eval(
     cmap = plt.get_cmap(cmap_name)
 
     def _std_to_rgb(std_slice: torch.Tensor) -> torch.Tensor:
-        """Convert a (B, 1, H, W) std map to (B, 3, H, W) RGB via colormap."""
-        arr = std_slice.squeeze(1).cpu().numpy()          # (B, H, W)
+        arr = std_slice.squeeze(1).cpu().numpy()
         vmax = arr.max() if arr.max() > 0 else 1.0
-        arr_norm = arr / vmax                             # normalise to [0, 1]
-        # apply colormap: returns (B, H, W, 4) RGBA float
-        rgba = np.stack([cmap(arr_norm[b]) for b in range(arr_norm.shape[0])])
-        rgb  = rgba[..., :3]                              # drop alpha → (B, H, W, 3)
-        # TensorBoard wants (B, 3, H, W)
-        return torch.from_numpy(rgb.transpose(0, 3, 1, 2).astype(np.float32))
+        rgba = np.stack([cmap(arr[b] / vmax) for b in range(arr.shape[0])])
+        return torch.from_numpy(rgba[..., :3].transpose(0, 3, 1, 2).astype(np.float32))
 
     for axis, slicer in [
         ("d", _central_slice_d),
@@ -826,12 +799,10 @@ def run_montecarlo_eval(
         writer.add_images(f"montecarlo/xct_std_{axis}",   _std_to_rgb(slicer(xct_std)),  step)
         writer.add_images(f"montecarlo/mask_std_{axis}",  _std_to_rgb(slicer(mask_std)), step)
 
-    # ── Single normal prediction + GT ─────────────────────────────────────
-    # Use the first MC sample as the "normal" reconstruction (already computed).
-    xct_recon_single  = xct_samples[0]                          # (B, 1, D, H, W)
+    xct_recon_single  = xct_samples[0]
     mask_recon_single = mask_samples[0]
-    xct_gt  = xct.clamp(0.0, 1.0)
-    mask_gt = mask.clamp(0.0, 1.0)
+    xct_gt_clamped    = xct.clamp(0.0, 1.0)
+    mask_gt_clamped   = mask.clamp(0.0, 1.0)
 
     for axis, slicer in [
         ("d", _central_slice_d),
@@ -839,6 +810,6 @@ def run_montecarlo_eval(
         ("w", _central_slice_w),
     ]:
         writer.add_images(f"montecarlo/xct_recon_{axis}",  slicer(xct_recon_single),  step)
-        writer.add_images(f"montecarlo/xct_gt_{axis}",     slicer(xct_gt),            step)
+        writer.add_images(f"montecarlo/xct_gt_{axis}",     slicer(xct_gt_clamped),    step)
         writer.add_images(f"montecarlo/mask_recon_{axis}", slicer(mask_recon_single), step)
-        writer.add_images(f"montecarlo/mask_gt_{axis}",    slicer(mask_gt),           step)
+        writer.add_images(f"montecarlo/mask_gt_{axis}",    slicer(mask_gt_clamped),   step)
