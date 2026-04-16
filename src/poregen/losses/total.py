@@ -48,7 +48,7 @@ def compute_total_loss(
     -------
     dict with keys:
         total, xct_loss, mask_bce, mask_dice (or mask_tversky),
-        kl, beta, freebits_used, kl_per_channel
+        kl, beta, kl_collapsed_fraction, kl_per_channel
     """
     c = cfg["loss"]
 
@@ -79,7 +79,7 @@ def compute_total_loss(
     )
 
     # ── KL ────────────────────────────────────────────────────────────
-    kl, freebits_used, kl_per_channel = kl_divergence(
+    kl, kl_collapsed_fraction, kl_per_channel = kl_divergence(
         output.mu, output.logvar, free_bits=c["kl_free_bits"],
     )
     beta = beta_schedule(step, c["kl_warmup_steps"], c["kl_max_beta"])
@@ -95,10 +95,10 @@ def compute_total_loss(
         "total":          total,
         "xct_loss":       xct_loss,
         "mask_bce":       mask_dict["mask_bce"],
-        "kl":             kl,
-        "beta":           beta,
-        "freebits_used":  freebits_used,
-        "kl_per_channel": kl_per_channel,   # (C,) — for monitoring and ablation
+        "kl":                    kl,
+        "beta":                  beta,
+        "kl_collapsed_fraction": kl_collapsed_fraction,
+        "kl_per_channel":        kl_per_channel,   # (C,) — for monitoring and ablation
     }
     # Add the region loss under its actual key (mask_dice or mask_tversky)
     for k, v in mask_dict.items():

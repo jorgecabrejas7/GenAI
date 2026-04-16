@@ -19,15 +19,23 @@ from poregen.models.vae.registry import register_vae
 class ConvVAE3DNoAttnV2(nn.Module):
     """Second-generation purely convolutional VAE — no attention, no skip connections.
 
-    With default ``VAEConfig(n_blocks=2, base_channels=32)``::
+    R03+ design: encoder receives XCT only (``in_channels=1``).  The pore
+    mask is a deterministic Sauvola-threshold of the XCT intensity and adds
+    no information not already present in the continuous XCT signal.  At the
+    16³ latent resolution individual pores (median diameter 1.79 vx) map to
+    0.45 latent voxels — below latent resolution — so the mask is redundant
+    at the encoder.  The ``mask_head`` on the decoder acts as a segmentation
+    head that predicts pore density from XCT-derived latent features.
 
-        (B,  2, 64, 64, 64)
+    With ``VAEConfig(n_blocks=2, base_channels=32, in_channels=1, z_channels=16)``::
+
+        (B,  1, 64, 64, 64)
           → down_v2 → (B,  32, 32, 32, 32)
           → down_v2 → (B,  64, 16, 16, 16)
-          → 1×1     → mu / logvar  (B, 8, 16, 16, 16)
+          → 1×1     → mu / logvar  (B, 16, 16, 16, 16)
           → up_v2   → (B,  64, 32, 32, 32)
           → up_v2   → (B,  32, 64, 64, 64)
-          → 1×1 heads → xct_logits, mask_logits
+          → 1×1 heads → xct_logits, mask_logits  (B, 1, 64, 64, 64) each
     """
 
     def __init__(self, cfg: VAEConfig) -> None:
@@ -59,11 +67,11 @@ class ConvVAE3DNoAttnV2(nn.Module):
         """
         Parameters
         ----------
-        xct  : (B, 1, D, H, W) float32 in [0, 1]
-        mask : (B, 1, D, H, W) float32 {0, 1}
+        xct  : (B, 1, D, H, W) float32 — XCT intensity, z-scored
+        mask : (B, 1, D, H, W) float32 {0, 1} — pore mask (reconstruction
+               target only; not fed to the encoder)
         """
-        x = torch.cat([xct, mask], dim=1)
-        h = self.encoder(x)
+        h = self.encoder(xct)  # encoder sees XCT only
 
         mu     = self.to_mu(h)
         logvar = self.to_logvar(h)

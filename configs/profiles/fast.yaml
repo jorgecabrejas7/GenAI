@@ -1,0 +1,12 @@
+training:
+  compile: true
+  deterministic: false
+
+runtime:
+  profile:
+    name: fast
+    description: Max throughput, lower determinism, stronger auto-tuning.
+  preflight:
+    enabled: true
+    loader_warmup_batches: 2
+    auto_reduce_workers: true

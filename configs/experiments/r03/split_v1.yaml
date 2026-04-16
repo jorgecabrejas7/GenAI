@@ -1,0 +1,13 @@
+extends: r03/base
+
+experiment:
+  name: r03
+  variant: split_v1
+  description: R03 comparison run on split_v1.
+
+components:
+  dataset: datasets/split_v1.yaml
+
+overrides:
+  training:
+    val_batches: 100

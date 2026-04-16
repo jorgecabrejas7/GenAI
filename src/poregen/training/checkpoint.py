@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +75,14 @@ def load_checkpoint(
         Arbitrary metadata dict stored alongside the checkpoint.
     """
     state = torch.load(path, map_location=map_location, weights_only=False)
-    model.load_state_dict(state["model"])
+
+    # torch.compile wraps the model and prefixes all keys with "_orig_mod.".
+    # Strip the prefix so the state dict loads into an uncompiled model.
+    model_state = state["model"]
+    if any(k.startswith("_orig_mod.") for k in model_state):
+        model_state = {k.removeprefix("_orig_mod."): v for k, v in model_state.items()}
+
+    model.load_state_dict(model_state)
 
     if optimizer is not None and "optimizer" in state:
         optimizer.load_state_dict(state["optimizer"])
@@ -89,8 +97,19 @@ def load_checkpoint(
         if "rng_numpy" in state:
             np.random.set_state(state["rng_numpy"])
         if "rng_torch" in state:
-            torch.set_rng_state(state["rng_torch"])
+            torch.set_rng_state(state["rng_torch"].cpu())
         if "rng_cuda" in state and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(state["rng_cuda"])
+            torch.cuda.set_rng_state_all([s.cpu() for s in state["rng_cuda"]])
 
     return state.get("step", 0), state.get("metadata", {})
+
+
+def copy_checkpoint(src: str | Path, dst: str | Path) -> Path:
+    """Copy an existing checkpoint atomically to another path."""
+    src_path = Path(src)
+    dst_path = Path(dst)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dst_path.with_suffix(".tmp")
+    shutil.copy2(src_path, tmp_path)
+    tmp_path.replace(dst_path)
+    return dst_path

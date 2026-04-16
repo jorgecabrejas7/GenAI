@@ -17,6 +17,7 @@ def segmentation_metrics(
     logits: torch.Tensor,
     target: torch.Tensor,
     threshold: float = 0.5,
+    apply_sigmoid: bool = True,
 ) -> dict[str, float]:
     """Compute Dice, IoU, precision, recall, F1 for a batch.
 
@@ -26,11 +27,15 @@ def segmentation_metrics(
     Parameters
     ----------
     logits : (B, 1, D, H, W)
-        Raw mask logits from the model.
+        Raw mask logits, or pre-activated probabilities when
+        ``apply_sigmoid=False``.
     target : (B, 1, D, H, W)
         Binary ground-truth mask {0, 1}.
     threshold : float
-        Sigmoid threshold for binarising predictions.
+        Threshold for binarising predictions.
+    apply_sigmoid : bool
+        When False, ``logits`` is treated as already-activated (avoids a
+        redundant sigmoid when the caller pre-computes it).
 
     Returns
     -------
@@ -40,7 +45,8 @@ def segmentation_metrics(
         f1_all, f1_pos_only.
     """
     # Binarise predictions — single GPU op for whole batch
-    pred = (torch.sigmoid(logits) >= threshold).float()   # (B, 1, D, H, W)
+    activated = torch.sigmoid(logits) if apply_sigmoid else logits
+    pred = (activated >= threshold).float()               # (B, 1, D, H, W)
 
     # Flatten spatial dims, keep batch dim
     B = pred.shape[0]
@@ -101,6 +107,7 @@ def segmentation_metrics(
 def porosity_metrics(
     mask_logits: torch.Tensor,
     target: torch.Tensor,
+    apply_sigmoid: bool = True,
 ) -> dict[str, float]:
     """Porosity MAE, bias, and collapse-detection stats per batch.
 
@@ -108,8 +115,12 @@ def porosity_metrics(
 
     Parameters
     ----------
-    mask_logits : (B, 1, D, H, W)  — raw logits
+    mask_logits : (B, 1, D, H, W)  — raw logits, or pre-activated
+        probabilities when ``apply_sigmoid=False``.
     target      : (B, 1, D, H, W)  — binary ground-truth mask {0, 1}
+    apply_sigmoid : bool
+        When False, ``mask_logits`` is treated as already-activated
+        (avoids a redundant sigmoid when the caller pre-computes it).
 
     Returns
     -------
@@ -118,7 +129,7 @@ def porosity_metrics(
       porosity_bias     — mean (pred − gt), detects systematic over/under-prediction
       mask_pred_mean    — mean sigmoid(mask_logits) over batch (collapse: → 0 or 1)
     """
-    pred_sigmoid = torch.sigmoid(mask_logits)
+    pred_sigmoid = torch.sigmoid(mask_logits) if apply_sigmoid else mask_logits
     pred_por = pred_sigmoid.mean(dim=(1, 2, 3, 4))  # (B,)
     gt_por   = target.mean(dim=(1, 2, 3, 4))         # (B,)
     signed   = pred_por - gt_por
@@ -127,3 +138,33 @@ def porosity_metrics(
         "porosity_bias":  signed.mean().item(),
         "mask_pred_mean": pred_sigmoid.mean().item(),
     }
+
+
+@torch.no_grad()
+def porosity_binned_mae(
+    pred_por: torch.Tensor,
+    gt_por: torch.Tensor,
+    bins: tuple[float, ...] = (0.0, 0.01, 0.03, 0.06, float("inf")),
+) -> dict[str, float]:
+    """MAE per GT-porosity bin over the full aggregated eval set.
+
+    Parameters
+    ----------
+    pred_por : (N,) — predicted porosity per patch (sigmoid already applied)
+    gt_por   : (N,) — GT porosity per patch
+    bins     : monotonically increasing bin edges; creates len(bins)-1 bins
+
+    Returns
+    -------
+    dict with keys ``porosity_mae_bin_0`` … ``porosity_mae_bin_{n-1}``.
+    Bins with no samples get ``float("nan")``.
+    """
+    abs_err = (pred_por - gt_por).abs()
+    result: dict[str, float] = {}
+    for i in range(len(bins) - 1):
+        lo, hi = bins[i], bins[i + 1]
+        sel = (gt_por >= lo) & (gt_por < hi)
+        result[f"porosity_mae_bin_{i}"] = (
+            float(abs_err[sel].mean().item()) if sel.sum() > 0 else float("nan")
+        )
+    return result

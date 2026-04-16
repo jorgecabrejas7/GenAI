@@ -72,16 +72,20 @@ class BottleneckAttention3D(nn.Module):
 class ConvVAE3DV2(nn.Module):
     """Second-generation convolutional VAE with bottleneck attention.
 
-    With default ``VAEConfig(n_blocks=2, base_channels=32)``::
+    R03+ design: encoder receives XCT only (``in_channels=1``).  See
+    :class:`poregen.models.vae.v2.conv_noattn.ConvVAE3DNoAttnV2` for the
+    full rationale.
 
-        (B,  2, 64, 64, 64)
+    With ``VAEConfig(n_blocks=2, base_channels=32, in_channels=1, z_channels=16)``::
+
+        (B,  1, 64, 64, 64)
           → down_v2 → (B,  32, 32, 32, 32)
           → down_v2 → (B,  64, 16, 16, 16)
           → attn
-          → 1×1     → mu / logvar  (B, 8, 16, 16, 16)
+          → 1×1     → mu / logvar  (B, 16, 16, 16, 16)
           → up_v2   → (B,  64, 32, 32, 32)
           → up_v2   → (B,  32, 64, 64, 64)
-          → 1×1 heads → xct_logits, mask_logits
+          → 1×1 heads → xct_logits, mask_logits  (B, 1, 64, 64, 64) each
     """
 
     def __init__(self, cfg: VAEConfig) -> None:
@@ -115,11 +119,11 @@ class ConvVAE3DV2(nn.Module):
         """
         Parameters
         ----------
-        xct  : (B, 1, D, H, W) float32 in [0, 1]
-        mask : (B, 1, D, H, W) float32 {0, 1}
+        xct  : (B, 1, D, H, W) float32 — XCT intensity, z-scored
+        mask : (B, 1, D, H, W) float32 {0, 1} — pore mask (reconstruction
+               target only; not fed to the encoder)
         """
-        x = torch.cat([xct, mask], dim=1)
-        h = self.encoder(x)
+        h = self.encoder(xct)  # encoder sees XCT only
         h = self.bottleneck_attn(h)
 
         mu     = self.to_mu(h)

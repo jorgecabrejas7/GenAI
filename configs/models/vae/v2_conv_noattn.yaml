@@ -1,0 +1,7 @@
+model:
+  name: v2.conv_noattn
+  in_channels: 1
+  z_channels: 8
+  base_channels: 32
+  n_blocks: 2
+  patch_size: 64

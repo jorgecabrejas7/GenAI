@@ -1,0 +1,12 @@
+training:
+  compile: false
+  deterministic: true
+
+runtime:
+  profile:
+    name: repro
+    description: More deterministic and conservative, easier to debug.
+  preflight:
+    enabled: true
+    loader_warmup_batches: 1
+    auto_reduce_workers: false

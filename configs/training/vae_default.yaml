@@ -1,0 +1,75 @@
+training:
+  seed: 42
+  lr: 2.0e-4
+  weight_decay: 0.01
+  total_steps: 71690
+  max_grad_norm: null
+  scheduler: none
+  lr_min: 2.0e-5
+  warmup_steps: 0
+  log_every: 1
+  eval_every: 62
+  val_batches: 60
+  test_every: 625
+  test_batches: 20
+  save_every: 1000
+  image_log_every: 62
+  montecarlo_every: 100
+  montecarlo_batch_size: 8
+  final_full_eval: true
+  sample_every: 12500
+  n_patch_samples: 8
+  compile: true
+  deterministic: false
+
+runtime:
+  runs_root: runs/vae
+  device:
+    gpu_id: null
+  checkpoints:
+    save_latest: true
+    save_best: true
+    best_metric: val_full.total
+    best_mode: min
+  resume:
+    mode: exact
+    prune_jsonl: true
+    clear_tensorboard: false
+  preflight:
+    enabled: true
+    loader_warmup_batches: 2
+    warmup_splits:
+      - train
+      - val
+    auto_reduce_workers: true
+    worker_retry_min: 0
+    max_prefetch_ram_gb: 24.0
+  metadata:
+    capture_git: true
+    capture_machine: true
+    capture_environment: true
+  run_name:
+    timestamp_format: "%Y%m%d-%H%M%S"
+    run_index_width: 4
+    fields:
+      - label: arch
+        path: model.name
+        transform: slug
+      - label: z
+        path: model.z_channels
+      - label: c
+        path: model.base_channels
+      - label: bs
+        path: data.batch_size
+      - label: lr
+        path: training.lr
+        transform: sci
+      - label: b
+        path: loss.kl_max_beta
+        transform: fixed3
+      - label: fb
+        path: loss.kl_free_bits
+      - label: klw
+        path: loss.kl_warmup_steps
+      - label: sched
+        path: training.scheduler

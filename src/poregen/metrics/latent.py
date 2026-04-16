@@ -73,9 +73,8 @@ def active_units_from_moments(
     n_total = int(var.numel())
     n_active = int((var > threshold).sum().item())
     return {
-        "active_fraction": n_active / n_total if n_total > 0 else 0.0,
-        "n_active": n_active,
-        "n_total": n_total,
+        "mu_active_fraction": n_active / n_total if n_total > 0 else 0.0,
+        "mu_n_active": n_active,
     }
 
 
@@ -96,7 +95,7 @@ def active_units(
 
     Returns
     -------
-    dict with ``active_fraction`` and ``n_active`` / ``n_total``.
+    dict with ``mu_active_fraction`` and ``mu_n_active``.
     """
     moments = latent_channel_moments(mu)
     return active_units_from_moments(

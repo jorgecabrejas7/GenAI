@@ -1,0 +1,28 @@
+experiment:
+  name: r03
+  variant: base
+  description: R03 production baseline on split_v2 using the no-attention VAE.
+
+components:
+  model: models/vae/v2_conv_noattn.yaml
+  loss: losses/vae_charbonnier_mask_kl.yaml
+  dataset: datasets/split_v2.yaml
+  training: training/vae_default.yaml
+  profile: profiles/fast.yaml
+  machine: machines/dgx_spark.yaml
+
+overrides:
+  model:
+    z_channels: 16
+    base_channels: 32
+    n_blocks: 2
+    patch_size: 64
+  loss:
+    tversky_alpha: 0.5
+    tversky_beta: 0.5
+    kl_free_bits: 0.25
+    kl_warmup_steps: 0
+    kl_max_beta: 0.05
+  training:
+    val_batches: 60
+    final_full_eval: true

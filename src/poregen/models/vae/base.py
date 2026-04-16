@@ -14,7 +14,8 @@ class VAEConfig:
     Parameters
     ----------
     in_channels : int
-        Number of input channels (XCT + mask = 2).
+        Number of encoder input channels.  Use 1 for XCT-only (R03+); 2 for
+        legacy XCT+mask runs (R00–R02, v1 checkpoints).
     z_channels : int
         Number of latent channels.
     base_channels : int

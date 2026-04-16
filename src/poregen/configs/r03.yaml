@@ -1,10 +1,28 @@
 # PoreGen VAE — R03
 #
-# R03 = ConvVAE3D no-attention + split_v2 estratificado + KL corregido.
+# R03 = ConvVAE3D no-attention, XCT-only encoder (1ch), z_channels=16,
+#        split_v2 stratified, free_bits=0.25, constant LR, no KL warmup.
+#
+# in_channels=1: the pore mask is a deterministic Sauvola-threshold of the
+#   XCT intensity; it contains no information not already in the XCT signal.
+#   At 16³ latent resolution (4× spatial downsampling) individual pores
+#   (median diameter 1.79 vx) map to 0.45 latent voxels — below resolution.
+#   The mask head on the decoder acts as a segmentation head that learns to
+#   predict pore density from XCT-derived latent features.
+#
+# z_channels=16: PCA at 16³ shows k@90%=9 (well covered by 8) and k@95%=31.
+#   16 channels sits at ~92–93% explained variance, providing slightly more
+#   latent capacity for the harder XCT-only encoder task without over-fitting.
+#
+# free_bits=0.25 per channel: R02 had 3/8 channels collapse at free_bits=0;
+#   with 16 channels to protect this is critical.
+#
+# kl_warmup_steps=0: confirmed unnecessary in R00/R01; constant β from step 0.
 
 model:
-  name: conv_noattn
-  z_channels: 8
+  name: v2.conv_noattn
+  in_channels: 1          # XCT only — mask is not an encoder input (see above)
+  z_channels: 16          # up from 8; ~92–93% explained variance at 16³
   base_channels: 32
   n_blocks: 2
   patch_size: 64
@@ -16,10 +34,10 @@ loss:
   mask_bce_pos_weight: 17.16
   mask_dice_weight: 1.0
   use_tversky: true
-  tversky_alpha: 0.3
-  tversky_beta: 0.7
-  kl_free_bits: 0.25
-  kl_warmup_steps: 4000
+  tversky_alpha: 0.5
+  tversky_beta: 0.5
+  kl_free_bits: 0.25      # 0.25 nats/channel; protects all 16 channels from collapse
+  kl_warmup_steps: 0      # no KL warmup; β=kl_max_beta from step 0
   kl_max_beta: 0.05
 
 training:

@@ -1,0 +1,12 @@
+loss:
+  xct_loss_type: charbonnier
+  xct_weight: 1.0
+  mask_bce_weight: 1.0
+  mask_bce_pos_weight: 17.16
+  mask_dice_weight: 1.0
+  use_tversky: true
+  tversky_alpha: 0.5
+  tversky_beta: 0.5
+  kl_free_bits: 0.25
+  kl_warmup_steps: 0
+  kl_max_beta: 0.05

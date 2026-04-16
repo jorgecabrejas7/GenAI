@@ -1,0 +1,5 @@
+data:
+  dataset_root: split_v1
+  split_version: v1
+  batch_size: 128
+  pin_memory: true

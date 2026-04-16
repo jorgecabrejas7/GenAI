@@ -22,6 +22,7 @@ import yaml
 @dataclass
 class ModelConfig:
     name: str
+    in_channels: int = 2
     z_channels: int = 8
     base_channels: int = 32
     n_blocks: int = 2
@@ -103,7 +104,9 @@ class DataConfig:
     batch_size: int = 128
     num_workers: int = 4
     pin_memory: bool = True
+    persistent_workers: bool = False
     prefetch_factor: int | None = None
+    timeout: int = 0
     split_version: str | None = None
 
     def __post_init__(self) -> None:
@@ -111,6 +114,8 @@ class DataConfig:
             raise ValueError(f"batch_size must be ≥ 1, got {self.batch_size}")
         if self.num_workers < 0:
             raise ValueError(f"num_workers must be ≥ 0, got {self.num_workers}")
+        if self.timeout < 0:
+            raise ValueError(f"timeout must be ≥ 0, got {self.timeout}")
         if self.split_version is not None and self.split_version not in {"v1", "v2"}:
             raise ValueError(
                 f"split_version must be 'v1' or 'v2', got {self.split_version!r}"

@@ -1,0 +1,15 @@
+data:
+  num_workers: 4
+  prefetch_factor: 1
+  pin_memory: false
+  persistent_workers: true
+  timeout: 180
+
+runtime:
+  machine:
+    name: dgx_spark
+    accelerator: NVIDIA GB10 Blackwell
+    shared_system_ram_gb: 128
+  preflight:
+    max_num_workers: 8
+    max_prefetch_ram_gb: 20.0

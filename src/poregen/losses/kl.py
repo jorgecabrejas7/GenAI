@@ -24,8 +24,8 @@ def kl_divergence(
     -------
     kl : scalar tensor
         Sum KL across channels (after free-bits clamping).
-    freebits_used : scalar tensor
-        Fraction of channels that were clamped by free-bits.
+    kl_collapsed_fraction : scalar tensor
+        Fraction of channels whose raw KL is below ``free_bits`` (i.e. clamped).
     kl_per_channel : (C,) tensor
         Raw (pre-clamp) per-channel KL for monitoring and ablation
         decisions (e.g. z_channels active-units criterion).
