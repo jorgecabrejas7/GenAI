@@ -50,6 +50,11 @@ class LossConfig:
     kl_free_bits: float = 0.0
     kl_warmup_steps: int = 0
     kl_max_beta: float = 0.05
+    # R04+: Focal loss (replaces BCE when use_focal=True)
+    # mask_bce_weight is reused as the focal-term weight for backward compat.
+    use_focal: bool = False
+    focal_gamma: float = 2.0    # focusing exponent; Lin et al. default=2.0
+    focal_alpha: float = 0.25   # positive-class weight; Lin et al. default=0.25
 
     def __post_init__(self) -> None:
         valid = {"l1", "mse", "charbonnier"}
@@ -61,6 +66,12 @@ class LossConfig:
             raise ValueError(
                 "tversky_alpha + tversky_beta must be in (0, 2], "
                 f"got {self.tversky_alpha} + {self.tversky_beta}"
+            )
+        if self.focal_gamma < 0.0:
+            raise ValueError(f"focal_gamma must be ≥ 0, got {self.focal_gamma}")
+        if not (0.0 < self.focal_alpha < 1.0):
+            raise ValueError(
+                f"focal_alpha must be in (0, 1), got {self.focal_alpha}"
             )
 
 
@@ -88,6 +99,10 @@ class TrainingConfig:
     n_patch_samples: int = 8
     compile: bool = False
     deterministic: bool = False
+    # When False, configure_training_schedule() preserves the eval_every and
+    # image_log_every values from config rather than overriding them from the
+    # dataset size.  Set to false in experiments that fix a specific cadence.
+    auto_schedule: bool = True
 
     def __post_init__(self) -> None:
         if self.scheduler not in {"none", "cosine"}:

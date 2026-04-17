@@ -1,0 +1,114 @@
+# PoreGen VAE — R04
+#
+# R04 = dual-branch encoder + focal mask loss + 2D adversarial XCT training
+#
+# What changed from R03
+# ---------------------
+# 1. Architecture: v2.conv_noattn_dualbranch
+#    Two independent encoder branches (A: structural, B: detail) both take the
+#    same 1-ch XCT input.  Outputs are concat-fused before mu/logvar projection.
+#    Total VAE params ≈ 800 K (vs ≈ 510 K for R03).  Decoder unchanged.
+#
+# 2. Mask loss: focal (γ=2, α=0.25) + Tversky (α=β=0.5)
+#    BCE replaced by focal loss to suppress false-positive pore predictions
+#    (the dominant failure mode in R03).  Focal down-weights easy background
+#    voxels via the (1−p_t)^γ modulating factor.  Tversky is kept unchanged.
+#
+# 3. XCT loss: Charbonnier + LSGAN adversarial
+#    2D PatchGAN discriminator classifies real vs. reconstructed XCT slices
+#    (one random axial/coronal/sagittal slice per sample per step).
+#    disc_weight=0.01 — keep small until convergence is confirmed.
+#
+# Batch size and LR
+# -----------------
+# Bottleneck is decoder stage 2: stores ~14 GB of activations at bs=128.
+# Full peak (activations + grads + Adam state): ~30–34 GB @ bs=128.
+#
+# GB10 SPARK 128 GB unified memory — no separate VRAM budget:
+#   bs=128 → ~30–34 GB  (26 % of pool) ← default; very comfortable
+#   bs=256 → ~70 GB     (55 % of pool) ← feasible; lr ≈ 2.83e-4 (sqrt rule)
+#   Confirm actual peak via `train/peak_gpu_mem_gb` after step 1 before scaling.
+#
+# Other hardware reference:
+#   H100 80 GB    ✓ bs=128; bs=192 marginal
+#   A100 40 GB    ✓ bs=128 (~80 % VRAM); bs=96 → lr ≈ 1.73e-4 if needed
+#   RTX 3090 24 GB  ✗ bs=128 OOM; use bs=64 → lr ≈ 1.41e-4
+#
+# Scaling rules for Adam: sqrt rule (lr × sqrt(bs_new/bs_old)) is empirically
+# more stable than the linear rule (lr × bs_new/bs_old) which is derived for SGD.
+#
+# KL
+# --
+# Same as R03: constant β=0.05 from step 0, free_bits=0.25/channel.
+# No warmup confirmed unnecessary in R00/R01.
+
+model:
+  name: v2.conv_noattn_dualbranch
+  in_channels: 1          # XCT only — same rationale as R03
+  z_channels: 16
+  base_channels: 32
+  n_blocks: 2
+  patch_size: 64
+
+loss:
+  xct_loss_type: charbonnier
+  xct_weight: 1.0
+  # Focal replaces BCE for the mask primary term (mask_bce_weight is reused as
+  # the focal-term scale for backward-compatible loss magnitude comparison).
+  use_focal: true
+  focal_gamma: 2.0        # Lin et al. 2017 default
+  focal_alpha: 0.25       # positive-class (pore) weight; down-weights easy negatives
+  mask_bce_weight: 1.0    # weight on focal term (reused from BCE weight slot)
+  mask_bce_pos_weight: 1.0  # unused when use_focal=true — kept for schema compat
+  mask_dice_weight: 1.0   # weight on Tversky term
+  use_tversky: true
+  tversky_alpha: 0.5
+  tversky_beta: 0.5
+  kl_free_bits: 0.25
+  kl_warmup_steps: 0
+  kl_max_beta: 0.05
+
+training:
+  seed: 42
+  lr: 2.0e-4              # adjust if bs < 128 (see header comments)
+  weight_decay: 0.01
+  total_steps: 71690
+  max_grad_norm: null
+  scheduler: none
+  lr_min: 2.0e-5
+  warmup_steps: 0
+  log_every: 1
+  eval_every: 62             # overwritten at runtime by configure_training_schedule
+  val_batches: 20            # partial eval only; val_full covers the full set once/epoch
+  test_every: 625
+  test_batches: 20
+  save_every: 1000
+  image_log_every: 62        # overwritten at runtime to match eval_every
+  montecarlo_every: 250
+  montecarlo_batch_size: 8
+  final_full_eval: true
+  sample_every: 12500
+  n_patch_samples: 8
+  compile: true           # torch.compile — disable to debug
+  deterministic: false
+
+data:
+  split_version: v2
+  batch_size: 128
+  # GB10 SPARK has unified memory — DataLoader workers fork the parent process
+  # and each worker holds its own copy of cached dataset state. With 128 GB
+  # shared between CPU and GPU, 16 workers can consume 60–80 GB on its own
+  # (observed ~80–90 GB total in previous R03 runs).
+  # 4 workers is a practical starting point: keeps prefetch alive without
+  # exhausting the pool. Raise if GPU becomes I/O-bound (check train/steps_per_sec).
+  num_workers: 4
+  pin_memory: true
+
+discriminator:
+  enabled: true
+  in_channels: 1          # single-channel XCT slices
+  base_channels: 64       # feature width at first layer; ~661 K params total
+  lr: 2.0e-4              # discriminator LR (independent of VAE LR)
+  weight_decay: 0.01
+  disc_weight: 0.01       # scale on gen_adv_loss added to total VAE loss;
+                          # increase to 0.05 if adversarial signal is too weak

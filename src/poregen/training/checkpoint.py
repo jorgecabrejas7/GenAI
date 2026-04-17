@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,88 @@ def save_checkpoint(
     torch.save(state, tmp)
     tmp.rename(path)
     return path
+
+
+def save_checkpoint_async(
+    path: str | Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    step: int,
+    metadata: dict[str, Any] | None = None,
+    scheduler: Any | None = None,
+    latest_path: str | Path | None = None,
+    *,
+    thread_holder: list | None = None,
+) -> None:
+    """Collect state dicts synchronously, then write to disk in a background thread.
+
+    This eliminates training stalls caused by large checkpoint I/O:
+
+    * ``model.state_dict()`` and friends are called on the **calling thread**
+      (a GPU→CPU copy — unavoidable but fast compared to disk I/O).
+    * Only the ``torch.save()`` + atomic rename are offloaded to a daemon thread.
+
+    Parameters
+    ----------
+    thread_holder : list, optional
+        A single-element mutable ``[thread_or_None]`` list shared across calls.
+        The previous thread is ``join()``-ed before a new one starts, ensuring
+        at most one background write is in flight at any time.  If ``None``,
+        no joining is done (fire-and-forget — use only for one-shot saves).
+    latest_path : optional
+        If given, atomically copy the written checkpoint to this path in the
+        same background thread (implements the ``save_latest`` pattern without
+        blocking the training loop).
+
+    Notes
+    -----
+    The discriminator is not included in this checkpoint.  If discriminator
+    state is needed for exact resumption, save it separately via a second call.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Collect state on the calling thread (may do GPU→CPU transfers) ────────
+    state: dict[str, Any] = {
+        "step":       step,
+        "model":      model.state_dict(),
+        "optimizer":  optimizer.state_dict(),
+        "scaler":     scaler.state_dict(),
+        "metadata":   metadata or {},
+        "rng_python": random.getstate(),
+        "rng_numpy":  np.random.get_state(),
+        "rng_torch":  torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["rng_cuda"] = torch.cuda.get_rng_state_all()
+    if scheduler is not None:
+        state["scheduler"] = scheduler.state_dict()
+
+    # ── Join previous background save if one is tracked ───────────────────────
+    if thread_holder is not None and thread_holder and thread_holder[0] is not None:
+        thread_holder[0].join()
+
+    # ── Spawn background thread for the heavy disk I/O ────────────────────────
+    def _write() -> None:
+        tmp = path.with_suffix(".tmp")
+        torch.save(state, tmp)
+        tmp.rename(path)
+        if latest_path is not None:
+            lp = Path(latest_path)
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            tmp2 = lp.with_suffix(".tmp")
+            shutil.copy2(path, tmp2)
+            tmp2.replace(lp)
+
+    t = threading.Thread(target=_write, daemon=True, name="poregen-ckpt-writer")
+    t.start()
+
+    if thread_holder is not None:
+        if thread_holder:
+            thread_holder[0] = t
+        else:
+            thread_holder.append(t)
 
 
 def load_checkpoint(

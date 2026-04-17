@@ -75,6 +75,9 @@ def compute_total_loss(
         tversky_alpha=c.get("tversky_alpha", 0.3),
         tversky_beta=c.get("tversky_beta", 0.7),
         pos_weight=pos_weight,
+        use_focal=c.get("use_focal", False),
+        focal_gamma=c.get("focal_gamma", 2.0),
+        focal_alpha=c.get("focal_alpha", 0.25),
         sigmoid=mask_sigmoid,
     )
 

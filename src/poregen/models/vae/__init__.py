@@ -5,7 +5,8 @@ Architecture families
 * ``poregen.models.vae.v1`` — first-gen (GroupNorm, SiLU, ConvTranspose3d).
   Registered as ``"conv"``, ``"conv_noattn"``, ``"unet"``.
 * ``poregen.models.vae.v2`` — second-gen (BatchNorm3d, GELU, Upsample+Conv).
-  Registered as ``"v2.conv"``, ``"v2.conv_noattn"``, ``"v2.unet"``.
+  Registered as ``"v2.conv"``, ``"v2.conv_noattn"``,
+  ``"v2.conv_noattn_dualbranch"``, ``"v2.unet"``.
 
 Usage
 -----

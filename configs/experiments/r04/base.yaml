@@ -1,0 +1,65 @@
+experiment:
+  name: r04
+  variant: base
+  description: >-
+    R04 — dual-branch encoder (conv_noattn_dualbranch) + focal mask loss
+    (γ=2, α=0.25) + LSGAN 2D PatchGAN discriminator (disc_weight=0.01) on split_v2.
+
+# ── Memory analysis (GB10 SPARK, unified 128 GB, bs=128, fp16, patch 64³) ───
+# GPU activation memory (stored tensors for backward):
+#   Encoder dual-branch: ~1.9 GB  |  Fusion: ~0.13 GB
+#   Decoder stage 1 (32→64):  ~5.5 GB
+#   Decoder stage 2 (64→32): ~14 GB  ← bottleneck
+#   Discriminator slices (fp32): ~0.1 GB
+#   Activations subtotal:  ~22–26 GB
+#   + grads + Adam state:  ~8 GB
+#   GPU allocations total: ~30–34 GB
+#
+# DOMINANT COST on SPARK: DataLoader worker processes
+#   On unified memory, fork() gives each worker a copy of the parent heap.
+#   If the dataset caches volumes for patch cropping, each worker can hold
+#   several GB. Prior R03 runs (simpler model, no disc) measured 80–90 GB
+#   total system RAM at num_workers=16.
+#   Estimated: 16 workers × ~4–5 GB ≈ 64–80 GB workers + ~30 GB GPU ≈ 95–110 GB
+#
+#   Fix: reduce num_workers (set to 4 in data section below). Raise only if
+#   GPU becomes I/O-bound (watch train/steps_per_sec).
+# ───────────────────────────────────────────────────────────────────────────
+
+extends: r03/base
+
+overrides:
+  # Change 1: dual-branch encoder (new architecture — R03 unchanged for reproducibility)
+  model:
+    name: v2.conv_noattn_dualbranch
+
+  # Change 2: focal loss replaces BCE for mask supervision
+  loss:
+    use_focal: true
+    focal_gamma: 2.0
+    focal_alpha: 0.25
+    mask_bce_pos_weight: 1.0   # unused when use_focal=true; set to neutral value
+
+  # Reduce workers — on unified memory, each worker fork costs ~4–5 GB
+  data:
+    num_workers: 4
+
+  # Validation / logging cadence.
+  # eval_every and image_log_every are auto-derived from the dataset size by
+  # configure_training_schedule() (auto_schedule=true, the default).
+  # Formula: eval_every = floor(train_steps_per_epoch / ceil(val_steps/val_batches))
+  # With 71,690 total steps = 5 epochs → train_steps/epoch ≈ 14,338 steps.
+  # val_batches=20 spreads evals evenly; full exhaustive val runs once per epoch.
+  training:
+    val_batches: 20            # batches per partial eval; auto_schedule spaces these evenly
+    montecarlo_every: 250      # MC uncertainty log every 250 steps
+
+  # Change 3: discriminator (read by build_discriminator in train_vae.py)
+  # Note: this section is extra — not validated by parse_config, just preserved.
+discriminator:
+  enabled: true
+  in_channels: 1
+  base_channels: 64
+  lr: 2.0e-4
+  weight_decay: 0.01
+  disc_weight: 0.01

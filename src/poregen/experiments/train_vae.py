@@ -51,7 +51,13 @@ def configure_training_schedule(
     train_steps_per_epoch: int,
     val_steps_per_epoch: int,
 ) -> int:
-    """Derive validation cadence from ``training.val_batches``."""
+    """Derive validation cadence from ``training.val_batches``.
+
+    When ``training.auto_schedule`` is ``false`` the function only clamps
+    ``val_batches`` to the available number of validation batches and leaves
+    ``eval_every`` / ``image_log_every`` unchanged (they are taken directly
+    from config).  This lets individual experiments pin an exact cadence.
+    """
     if train_steps_per_epoch < 1 or val_steps_per_epoch < 1:
         raise ValueError("Training and validation loaders must each have at least one batch.")
 
@@ -59,13 +65,16 @@ def configure_training_schedule(
         1,
         min(val_steps_per_epoch, int(cfg["training"]["val_batches"])),
     )
-    val_windows_per_epoch = max(
-        1,
-        (val_steps_per_epoch + cfg["training"]["val_batches"] - 1)
-        // cfg["training"]["val_batches"],
-    )
-    cfg["training"]["eval_every"] = max(1, train_steps_per_epoch // val_windows_per_epoch)
-    cfg["training"]["image_log_every"] = cfg["training"]["eval_every"]
+
+    if cfg["training"].get("auto_schedule", True):
+        val_windows_per_epoch = max(
+            1,
+            (val_steps_per_epoch + cfg["training"]["val_batches"] - 1)
+            // cfg["training"]["val_batches"],
+        )
+        cfg["training"]["eval_every"] = max(1, train_steps_per_epoch // val_windows_per_epoch)
+        cfg["training"]["image_log_every"] = cfg["training"]["eval_every"]
+
     return train_steps_per_epoch
 
 
@@ -80,6 +89,55 @@ def build_model(cfg: dict[str, Any], device: torch.device) -> torch.nn.Module:
         n_blocks=model_cfg["n_blocks"],
         patch_size=model_cfg["patch_size"],
     ).to(device)
+
+
+def build_discriminator(
+    cfg: dict[str, Any],
+    device: torch.device,
+) -> tuple[torch.nn.Module | None, torch.optim.Optimizer | None, float]:
+    """Build the optional 2D PatchGAN discriminator from config.
+
+    Reads the optional ``discriminator`` section of the config::
+
+        discriminator:
+          enabled: true
+          in_channels: 1
+          base_channels: 64
+          lr: 2.0e-4
+          weight_decay: 0.01
+          disc_weight: 0.01
+
+    Returns (discriminator, disc_optimizer, disc_weight).  All are ``None``/0
+    when the section is absent or ``enabled: false``.
+    """
+    from poregen.models.discriminator import PatchDiscriminator2D
+
+    disc_cfg = cfg.get("discriminator", {})
+    if not disc_cfg or not disc_cfg.get("enabled", True):
+        return None, None, 0.0
+
+    disc = PatchDiscriminator2D(
+        in_channels=disc_cfg.get("in_channels", 1),
+        base_channels=disc_cfg.get("base_channels", 64),
+    ).to(device)
+
+    disc_optimizer = torch.optim.AdamW(
+        disc.parameters(),
+        lr=float(disc_cfg.get("lr", 2e-4)),
+        weight_decay=float(disc_cfg.get("weight_decay", 0.01)),
+        betas=(0.5, 0.999),   # standard GAN betas — lower β1 for stability
+    )
+    disc_weight = float(disc_cfg.get("disc_weight", 0.01))
+
+    logger.info(
+        "Discriminator enabled: PatchDiscriminator2D(in=%d, base=%d) | "
+        "disc_weight=%.4f | disc_lr=%.2e",
+        disc_cfg.get("in_channels", 1),
+        disc_cfg.get("base_channels", 64),
+        disc_weight,
+        float(disc_cfg.get("lr", 2e-4)),
+    )
+    return disc, disc_optimizer, disc_weight
 
 
 def build_optimizer(
@@ -280,6 +338,7 @@ def run_experiment(
     optimizer = build_optimizer(cfg, model)
     scheduler = build_scheduler(cfg, optimizer)
     loss_fn = _make_loss_fn(cfg)
+    discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
 
     logger.info("Launching %s from %s", resolved.experiment_id, resolved.experiment_path)
     logger.info("Run dir: %s", run_ctx.run_dir)
@@ -345,6 +404,9 @@ def run_experiment(
                 save_latest=bool(cfg["runtime"]["checkpoints"].get("save_latest", True)),
                 best_metric=cfg["runtime"]["checkpoints"].get("best_metric"),
                 best_mode=cfg["runtime"]["checkpoints"].get("best_mode", "min"),
+                discriminator=discriminator,
+                disc_optimizer=disc_optimizer,
+                disc_weight=disc_weight,
             )
         except Exception as exc:
             update_run_metadata(
@@ -420,6 +482,9 @@ def resume_run(
         device=device,
     )
     loss_fn = _make_loss_fn(cfg)
+    # Discriminator is not checkpointed; it restarts from scratch on resume.
+    # This causes a short instability window but is acceptable for R04.
+    discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
 
     try:
         from torch.utils.tensorboard import SummaryWriter
@@ -481,6 +546,9 @@ def resume_run(
                 save_latest=bool(cfg["runtime"]["checkpoints"].get("save_latest", True)),
                 best_metric=cfg["runtime"]["checkpoints"].get("best_metric"),
                 best_mode=cfg["runtime"]["checkpoints"].get("best_mode", "min"),
+                discriminator=discriminator,
+                disc_optimizer=disc_optimizer,
+                disc_weight=disc_weight,
             )
         except Exception as exc:
             update_run_metadata(

@@ -16,6 +16,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from poregen.models.vae.base import VAEOutput
+from poregen.models.discriminator import (
+    extract_multiplane_slices,
+    lsgan_gen_loss,
+    lsgan_disc_loss,
+)
 from poregen.metrics.seg import segmentation_metrics, porosity_metrics, porosity_binned_mae
 from poregen.metrics.recon import sharpness_proxy
 from poregen.metrics.latent import (
@@ -24,8 +29,11 @@ from poregen.metrics.latent import (
     latent_stats,
     merge_latent_channel_moments,
 )
-from poregen.training.checkpoint import copy_checkpoint, save_checkpoint
+from poregen.training.checkpoint import copy_checkpoint, save_checkpoint, save_checkpoint_async
 from poregen.training.sample_export import export_patch_sample_split
+
+import logging as _logging
+_logger = _logging.getLogger(__name__)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -127,24 +135,39 @@ def train_step(
     autocast_dtype: torch.dtype = torch.float16,
     max_grad_norm: float | None = None,
     scheduler: Any | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
+    disc_weight: float = 0.01,
 ) -> tuple[dict[str, Any], float, dict[str, Any], dict[str, float]]:
     """Single training step with AMP, optional gradient clipping, and scheduler.
+
+    Parameters
+    ----------
+    discriminator : optional PatchDiscriminator2D
+        When provided (together with ``disc_optimizer``), runs one generator and
+        one discriminator update per training step.  The discriminator operates
+        in float32 (no AMP) for stability.
+    disc_optimizer : optional
+        Dedicated optimizer for the discriminator.  Must be provided when
+        ``discriminator`` is not None.
+    disc_weight : float
+        Scale factor applied to the generator adversarial loss before adding it
+        to the VAE total loss.  Typical range: 0.001–0.05.
 
     Returns
     -------
     losses : dict
-        Per-component loss values plus ``mask_pred_mean``. Scalars are Python
-        floats; ``kl_per_channel`` is a list of length C.
+        Per-component loss values plus ``mask_pred_mean``.  When a discriminator
+        is active, also includes ``disc_loss``, ``gen_adv_loss``,
+        ``disc_acc_real``, ``disc_acc_fake``.  Scalars are Python floats;
+        ``kl_per_channel`` is a list of length C.
     grad_norm : float
-        Global gradient norm (after unscaling, before clipping). Always
-        computed; clipping only applied when max_grad_norm is not None.
+        Global generator gradient norm (after unscaling, before clipping).
     latent_moments : dict
-        Channel-wise aggregated moments for ``output.mu``. Used to compute
-        train-time ``mu_n_active`` over a rolling window without storing all
-        latent tensors.
+        Channel-wise aggregated moments for ``output.mu``.
     module_grad_norms : dict
-        Per-module gradient norms (encoder, decoder, mask_head) computed after
-        unscaling and before global clipping.
+        Per-module gradient norms (encoder / encoder_a / encoder_b / decoder /
+        mask_head) computed after unscaling and before global clipping.
     """
     model.train()
     xct  = batch["xct"].to(device, non_blocking=True)
@@ -156,8 +179,25 @@ def train_step(
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
         output: VAEOutput = model(xct, mask)
         losses = loss_fn(output, batch_dev, step)
-    latent_moments = latent_channel_moments(output.mu)
 
+    # ── Adversarial: generator side (float32 outside AMP) ────────────────────
+    _fake_slices: torch.Tensor | None = None
+    _real_slices: torch.Tensor | None = None
+    _gen_adv_loss: torch.Tensor | None = None
+
+    if discriminator is not None and disc_optimizer is not None and disc_weight > 0.0:
+        # Cast from AMP dtype (fp16/bf16) to float32 — D runs in float32
+        _fake_slices = extract_multiplane_slices(output.xct_logits).float()   # (3B,1,64,64)
+        _real_slices = extract_multiplane_slices(xct).float()                  # (3B,1,64,64)
+
+        # Generator wants D(fake) → 1; gradients flow through D back to the VAE
+        d_fake_gen = discriminator(_fake_slices)
+        _gen_adv_loss = lsgan_gen_loss(d_fake_gen)
+
+        # Add to total BEFORE backward so generator gets adversarial signal
+        losses["total"] = losses["total"] + disc_weight * _gen_adv_loss
+
+    latent_moments = latent_channel_moments(output.mu)
     mask_pred_mean = float(torch.sigmoid(output.mask_logits).mean().item())
 
     scaler.scale(losses["total"]).backward()
@@ -165,9 +205,9 @@ def train_step(
     if scaler.is_enabled():
         scaler.unscale_(optimizer)
 
-    # Per-module gradient norms (no clipping; computed before global clip)
+    # Per-module gradient norms — support both single-branch and dual-branch encoders
     module_grad_norms: dict[str, float] = {}
-    for name in ("encoder", "decoder", "mask_head"):
+    for name in ("encoder", "encoder_a", "encoder_b", "decoder", "mask_head"):
         module = getattr(model, name, None)
         if module is not None:
             module_grad_norms[f"grad_norm_{name}"] = torch.nn.utils.clip_grad_norm_(
@@ -185,8 +225,34 @@ def train_step(
     if scheduler is not None:
         scheduler.step()
 
+    # ── Adversarial: discriminator update (float32, no scaler) ───────────────
+    disc_metrics: dict[str, float] = {}
+    if (
+        discriminator is not None
+        and disc_optimizer is not None
+        and _fake_slices is not None
+        and _gen_adv_loss is not None
+    ):
+        # Zero D grads (clears any accumulated from the generator backward)
+        disc_optimizer.zero_grad(set_to_none=True)
+
+        d_real = discriminator(_real_slices)                        # float32, with grad
+        d_fake = discriminator(_fake_slices.detach())               # detached from G graph
+
+        disc_loss = lsgan_disc_loss(d_real, d_fake)
+        disc_loss.backward()
+        disc_optimizer.step()
+
+        disc_metrics = {
+            "disc_loss":     float(disc_loss.item()),
+            "gen_adv_loss":  float(_gen_adv_loss.item()),
+            "disc_acc_real": float((d_real > 0.5).float().mean().item()),
+            "disc_acc_fake": float((d_fake < 0.5).float().mean().item()),
+        }
+
     result = {k: _to_scalar(v) for k, v in losses.items()}
     result["mask_pred_mean"] = mask_pred_mean
+    result.update(disc_metrics)
     return result, grad_norm, latent_moments, module_grad_norms
 
 
@@ -225,6 +291,7 @@ def _run_eval(
     step: int,
     device: torch.device,
     autocast_dtype: torch.dtype,
+    desc: str = "Eval",
 ) -> tuple[dict[str, float], dict]:
     """Run eval over *n_batches* batches; return aggregated metrics and per-volume errors."""
     loss_acc:   dict[str, Any] = {}
@@ -248,7 +315,7 @@ def _run_eval(
     # sharpness_gt computed once from the first eval batch only
     sharpness_gt_first: float | None = None
 
-    for batch_idx in range(n_batches):
+    for batch_idx in tqdm(range(n_batches), desc=desc, leave=False, unit="batch"):
         batch = next(data_iter)
         losses, output = eval_step(
             model, batch, loss_fn, step, device, autocast_dtype
@@ -435,6 +502,9 @@ def train_loop(
     save_latest: bool = True,
     best_metric: str | None = None,
     best_mode: str = "min",
+    discriminator: nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
+    disc_weight: float = 0.01,
 ) -> list[dict[str, Any]]:
     """Training loop with full real-time TensorBoard monitoring.
 
@@ -492,6 +562,18 @@ def train_loop(
         ``<split>.<metric>`` (for example ``val_full.total``).
     best_mode : str
         ``"min"`` or ``"max"`` comparison mode for *best_metric*.
+    discriminator : nn.Module, optional
+        2D PatchGAN discriminator (e.g. ``PatchDiscriminator2D``).  When
+        provided, adversarial training is enabled: one generator and one
+        discriminator update are performed per training step.  Logs
+        ``disc_loss``, ``gen_adv_loss``, ``disc_acc_real``, ``disc_acc_fake``
+        to TensorBoard under the ``train/`` prefix.
+    disc_optimizer : optional
+        Dedicated optimizer for *discriminator*.  Required when discriminator
+        is not None.
+    disc_weight : float
+        Weight applied to the generator adversarial loss.  Start small
+        (0.01) and increase if the adversarial signal is too weak.
 
     Returns
     -------
@@ -509,9 +591,12 @@ def train_loop(
     best_target_split, best_target_key = _parse_metric_target(best_metric)
     best_metric_value: float | None = None
 
+    # Train workers stay alive throughout (needed for continuous prefetch).
+    # Val/test workers are only created inside their respective eval blocks and
+    # released immediately afterwards — DataLoader iterators keep the worker
+    # pool alive; deleting the iterator lets the OS reclaim those processes and
+    # the pinned memory they hold.
     train_iter = _infinite(train_loader)
-    val_iter   = _infinite(val_loader)   if val_loader   is not None else None
-    test_iter  = _infinite(test_loader)  if test_loader  is not None else None
 
     history: list[dict[str, Any]] = []
     t0 = time.time()
@@ -522,6 +607,10 @@ def train_loop(
     train_active: dict[str, Any] = {"mu_active_fraction": 0.0, "mu_n_active": 0}
     _sharpness_gt_logged = False
     montecarlo_batch:  dict[str, torch.Tensor] | None = None
+
+    # Background checkpoint thread — holds [thread_or_None]; at most one save
+    # in flight at a time. Joined before every new save and at loop exit.
+    _ckpt_thread_holder: list = [None]
 
     pbar = tqdm(range(start_step, start_step + total_steps), desc="Training")
 
@@ -568,9 +657,24 @@ def train_loop(
                 model, batch, optimizer, scaler, loss_fn,
                 step=step, device=device, autocast_dtype=autocast_dtype,
                 max_grad_norm=max_grad_norm, scheduler=scheduler,
+                discriminator=discriminator,
+                disc_optimizer=disc_optimizer,
+                disc_weight=disc_weight,
             )
             _step_elapsed = time.perf_counter() - _step_t0
+            step_time_ms  = _step_elapsed * 1000.0
             steps_per_sec = 1.0 / _step_elapsed if _step_elapsed > 0 else float("inf")
+
+            # ── GPU memory: log once after the first training step ────
+            if step == start_step and torch.cuda.is_available():
+                peak_mem_gb = torch.cuda.max_memory_allocated() / 1e9
+                _logger.info(
+                    "Step %d — peak GPU memory allocated: %.2f GB  "
+                    "(reduce batch_size if near VRAM limit)",
+                    step, peak_mem_gb,
+                )
+                if tb_writer is not None:
+                    tb_writer.add_scalar("train/peak_gpu_mem_gb", peak_mem_gb, step)
 
             # Fixed MC batch — captured once from the first training batch
             if montecarlo_batch is None and montecarlo_batch_size > 0:
@@ -588,9 +692,10 @@ def train_loop(
                 )
 
             record = {
-                "step":    step,
-                "split":   "train",
-                "elapsed": time.time() - t0,
+                "step":         step,
+                "split":        "train",
+                "elapsed":      time.time() - t0,
+                "step_time_ms": step_time_ms,
                 **{k: v for k, v in losses.items() if not isinstance(v, list)},
                 **train_active,
             }
@@ -617,18 +722,24 @@ def train_loop(
                     tb_writer.add_scalar(f"train/{k}", v, step)
                 tb_writer.add_scalar("train/grad_scaler_scale", scaler.get_scale(), step)
                 tb_writer.add_scalar("train/steps_per_sec", steps_per_sec, step)
+                tb_writer.add_scalar("train/step_time_ms", step_time_ms, step)
                 if scheduler is not None:
                     tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
                 kl_chs = losses.get("kl_per_channel", [])
                 if kl_chs and "kl_collapsed_fraction" in losses:
                     n_dead = round(losses["kl_collapsed_fraction"] * len(kl_chs))
                     tb_writer.add_scalar("train/kl_active_channels", len(kl_chs) - n_dead, step)
+                # Discriminator metrics are scalar floats in `losses` and are
+                # already written by _log_scalars_to_tb above — no extra loop needed.
 
             # ── validation ───────────────────────────────────────────
-            if val_iter is not None and (step + 1) % eval_every == 0:
+            if val_loader is not None and (step + 1) % eval_every == 0:
+                _val_iter = iter(val_loader)
                 agg, _vol_por = _run_eval(
-                    model, val_iter, loss_fn, val_batches, step, device, autocast_dtype
+                    model, _val_iter, loss_fn, val_batches, step, device, autocast_dtype,
+                    desc=f"Val step {step + 1}",
                 )
+                del _val_iter
                 val_record = {
                     "step":    step,
                     "split":   "val",
@@ -658,6 +769,7 @@ def train_loop(
                 fv_agg, _ = _run_eval(
                     model, iter(val_loader), loss_fn,
                     len(val_loader), step, device, autocast_dtype,
+                    desc=f"Val full step {step + 1}",
                 )
                 fv_record = {
                     "step":    step,
@@ -691,10 +803,13 @@ def train_loop(
                 )
 
             # ── test evaluation ───────────────────────────────────────
-            if test_iter is not None and (step + 1) % test_every == 0:
+            if test_loader is not None and (step + 1) % test_every == 0:
+                _test_iter = iter(test_loader)
                 test_agg, test_vol_por = _run_eval(
-                    model, test_iter, loss_fn, test_batches, step, device, autocast_dtype
+                    model, _test_iter, loss_fn, test_batches, step, device, autocast_dtype,
+                    desc=f"Test step {step + 1}",
                 )
+                del _test_iter
                 test_record = {
                     "step":    step,
                     "split":   "test",
@@ -723,23 +838,23 @@ def train_loop(
                         )
                 _maybe_save_best(test_record)
 
-            # ── checkpoint ───────────────────────────────────────────
+            # ── checkpoint (non-blocking I/O via background thread) ──
             if (step + 1) % save_every == 0:
                 ckpt_name = f"{run_dir.name}_step{step + 1:08d}.ckpt"
-                ckpt_path = save_checkpoint(
+                save_checkpoint_async(
                     run_dir / ckpt_name,
                     model, optimizer, scaler, step=step + 1,
                     metadata={"total_steps": total_steps},
                     scheduler=scheduler,
+                    latest_path=run_dir / "latest.ckpt" if save_latest else None,
+                    thread_holder=_ckpt_thread_holder,
                 )
-                if save_latest:
-                    copy_checkpoint(ckpt_path, run_dir / "latest.ckpt")
 
             # ── 3-D patch samples ─────────────────────────────────────
             if sample_every > 0 and (step + 1) % sample_every == 0:
                 _save_patch_samples(
                     model,
-                    {"train": train_iter, "val": val_iter, "test": test_iter},
+                    {"train": train_loader, "val": val_loader, "test": test_loader},
                     n_patch_samples,
                     step + 1,
                     run_dir,
@@ -747,7 +862,10 @@ def train_loop(
                     autocast_dtype,
                 )
 
-        # ── final checkpoint ──────────────────────────────────────────
+        # ── final checkpoint — wait for any in-flight background save ─
+        if _ckpt_thread_holder and _ckpt_thread_holder[0] is not None:
+            _ckpt_thread_holder[0].join()
+
         final_step = start_step + total_steps
         ckpt_name = f"{run_dir.name}_step{final_step:08d}.ckpt"
         final_ckpt_path = save_checkpoint(
@@ -765,6 +883,7 @@ def train_loop(
                 fv_agg, _ = _run_eval(
                     model, iter(val_loader), loss_fn,
                     len(val_loader), final_step, device, autocast_dtype,
+                    desc="Final val",
                 )
                 fv_record = {
                     "step": final_step, "split": "val_full", "elapsed": time.time() - t0,
@@ -784,6 +903,7 @@ def train_loop(
                 ft_agg, ft_vol_por = _run_eval(
                     model, iter(test_loader), loss_fn,
                     len(test_loader), final_step, device, autocast_dtype,
+                    desc="Final test",
                 )
                 ft_record = {
                     "step": final_step, "split": "test_full", "elapsed": time.time() - t0,
@@ -825,24 +945,29 @@ def train_loop(
 @torch.no_grad()
 def _save_patch_samples(
     model: nn.Module,
-    iters: dict[str, Iterator | None],
+    loaders: dict[str, DataLoader | None],
     n_samples: int,
     step: int,
     run_dir: Path,
     device: torch.device,
     autocast_dtype: torch.dtype,
 ) -> None:
-    """Save full 3-D patch reconstructions as per-patch TIFF stacks."""
+    """Save full 3-D patch reconstructions as per-patch TIFF stacks.
+
+    Creates a fresh iterator for each split and deletes it when done so that
+    DataLoader workers (and their pinned memory) are released immediately.
+    """
     import numpy as np
 
     samples_dir = run_dir / "samples" / f"step_{step:08d}"
     samples_dir.mkdir(parents=True, exist_ok=True)
     model.eval()
 
-    for split, data_iter in iters.items():
-        if data_iter is None:
+    for split, loader in loaders.items():
+        if loader is None:
             continue
 
+        data_iter = iter(loader)
         xct_gts, mask_gts, xct_recons, mask_recons, metas = [], [], [], [], []
         collected = 0
 
@@ -870,6 +995,8 @@ def _save_patch_samples(
                     "source_group": batch["source_group"][i],
                 })
             collected += n_take
+
+        del data_iter  # release workers and pinned memory for this split
 
         export_patch_sample_split(
             samples_dir / split,
