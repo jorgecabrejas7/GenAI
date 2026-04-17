@@ -205,6 +205,36 @@ def pore_morphology(binary: np.ndarray, max_pores: int = 500) -> dict[str, float
     }
 
 
+# ── Boundary / seam consistency ──────────────────────────────────────────────
+
+def boundary_mae(vol: np.ndarray, patch_size: int = PATCH_SIZE) -> float:
+    """Mean absolute voxel discontinuity at patch seams in a stitched volume.
+
+    For each face where two adjacent non-overlapping ``patch_size``³ patches
+    meet, computes the mean absolute difference between the last voxel slice
+    on one side and the first voxel slice on the other.  Averaged across all
+    D, H, and W seams.
+
+    A value near 0 means adjacent patches blend smoothly; a high value
+    indicates the decoder produces discontinuous outputs at boundaries.
+
+    Returns 0.0 for volumes smaller than two patches along every axis.
+    """
+    D, H, W = vol.shape
+    diffs: list[float] = []
+
+    for z in range(patch_size, D, patch_size):
+        diffs.append(float(np.abs(vol[z - 1] - vol[z]).mean()))
+
+    for y in range(patch_size, H, patch_size):
+        diffs.append(float(np.abs(vol[:, y - 1, :] - vol[:, y, :]).mean()))
+
+    for x in range(patch_size, W, patch_size):
+        diffs.append(float(np.abs(vol[:, :, x - 1] - vol[:, :, x]).mean()))
+
+    return float(np.mean(diffs)) if diffs else 0.0
+
+
 # ── Memorization score ────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -287,7 +317,9 @@ def eval_volume(
     por_err  = abs(por_pred - por_gt)
 
     # XCT reconstruction quality
-    mae_val  = float(np.abs(xct_recon - xct_gt).mean())
+    mae_val      = float(np.abs(xct_recon - xct_gt).mean())
+    xct_seam_mae = boundary_mae(xct_recon)
+    msk_seam_mae = boundary_mae(mask_recon)
 
     # S2(r)
     r_vals, s2_gt   = s2_radial(bin_gt,   r_max=r_max)
@@ -304,16 +336,20 @@ def eval_volume(
     morph_pred = pore_morphology(bin_pred)
 
     elapsed = time.perf_counter() - t0
-    logger.info("  done in %.1fs  por_err=%.4f  s2_w1=%.4f  psd_w1=%.4f",
-                elapsed, por_err, s2_w1, psd_w1)
+    logger.info(
+        "  done in %.1fs  por_err=%.4f  s2_w1=%.4f  psd_w1=%.4f  xct_seam=%.4f",
+        elapsed, por_err, s2_w1, psd_w1, xct_seam_mae,
+    )
 
     return {
-        "volume_id":      volume_id,
-        "porosity_gt":    por_gt,
-        "porosity_pred":  por_pred,
-        "porosity_error": por_err,
-        "xct_mae":        mae_val,
-        "s2_wasserstein": s2_w1,
+        "volume_id":         volume_id,
+        "porosity_gt":       por_gt,
+        "porosity_pred":     por_pred,
+        "porosity_error":    por_err,
+        "xct_mae":           mae_val,
+        "xct_boundary_mae":  xct_seam_mae,
+        "mask_boundary_mae": msk_seam_mae,
+        "s2_wasserstein":    s2_w1,
         "s2_gt":          s2_gt.tolist(),
         "s2_pred":        s2_pred.tolist(),
         "s2_r_vals":      r_vals.tolist(),
@@ -398,7 +434,11 @@ def main(argv: list[str] | None = None) -> None:
             logger.error("Failed on %s: %s", vol_id, exc)
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
-    scalar_keys = ["porosity_error", "xct_mae", "s2_wasserstein", "psd_wasserstein"]
+    scalar_keys = [
+        "porosity_error", "xct_mae",
+        "xct_boundary_mae", "mask_boundary_mae",
+        "s2_wasserstein", "psd_wasserstein",
+    ]
     agg: dict = {"step": step, "n_volumes": len(volume_results)}
     for k in scalar_keys:
         vals = [r[k] for r in volume_results if not np.isnan(r.get(k, float("nan")))]
@@ -431,7 +471,7 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("EVAL COMPLETE  step=%d  volumes=%d  time=%.1fs", step, len(volume_results), elapsed)
     for k in scalar_keys:
-        logger.info("  %-25s %.4f ± %.4f", k, agg.get(f"{k}_mean", float("nan")), agg.get(f"{k}_std", float("nan")))
+        logger.info("  %-28s %.4f ± %.4f", k, agg.get(f"{k}_mean", float("nan")), agg.get(f"{k}_std", float("nan")))
     if "memorization_nn_dist_mean" in agg:
         logger.info("  %-25s %.4f", "memorization_nn_dist", agg["memorization_nn_dist_mean"])
     logger.info("=" * 60)

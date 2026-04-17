@@ -244,10 +244,15 @@ def train_step(
         disc_optimizer.step()
 
         disc_metrics = {
-            "disc_loss":     float(disc_loss.item()),
-            "gen_adv_loss":  float(_gen_adv_loss.item()),
-            "disc_acc_real": float((d_real > 0.5).float().mean().item()),
-            "disc_acc_fake": float((d_fake < 0.5).float().mean().item()),
+            "disc_loss":       float(disc_loss.item()),
+            "d_loss_real":     float(0.5 * (d_real - 1.0).pow(2).mean().item()),
+            "d_loss_fake":     float(0.5 * d_fake.pow(2).mean().item()),
+            "gen_adv_loss":    float(_gen_adv_loss.item()),
+            "disc_acc_real":   float((d_real > 0.5).float().mean().item()),
+            "disc_acc_fake":   float((d_fake < 0.5).float().mean().item()),
+            "disc_score_real": float(d_real.mean().item()),
+            "disc_score_fake": float(d_fake.mean().item()),
+            "disc_margin":     float((d_real - d_fake).mean().item()),
         }
 
     result = {k: _to_scalar(v) for k, v in losses.items()}
@@ -304,16 +309,12 @@ def _run_eval(
     # Accumulators for deferred .item() calls — kept as GPU tensors until
     # after the loop to avoid per-batch CPU/GPU synchronisation stalls.
     mae_acc:             list[torch.Tensor] = []
-    psnr_acc:            list[torch.Tensor] = []
     sharp_recon_acc:     list[torch.Tensor] = []
-    xct_mean_acc:        list[torch.Tensor] = []
-    xct_std_acc:         list[torch.Tensor] = []
+    sharp_gt_acc:        list[torch.Tensor] = []
     pred_por_signed_all: list[torch.Tensor] = []
     pred_por_all:        list[torch.Tensor] = []
     gt_por_all:          list[torch.Tensor] = []
     vol_ids_all:         list[list[str]]    = []
-    # sharpness_gt computed once from the first eval batch only
-    sharpness_gt_first: float | None = None
 
     for batch_idx in tqdm(range(n_batches), desc=desc, leave=False, unit="batch"):
         batch = next(data_iter)
@@ -332,10 +333,7 @@ def _run_eval(
         xct_sigmoid  = torch.sigmoid(output.xct_logits)
 
         # Segmentation metrics — pass pre-activated to skip internal sigmoid
-        # Exclude *_all variants — inflated by all-zero patches
         seg = segmentation_metrics(mask_sigmoid, mask_dev, apply_sigmoid=False)
-        for _k in ("dice_all", "iou_all", "f1_all"):
-            seg.pop(_k, None)
         _accumulate(seg_acc, seg)
 
         # Porosity metrics — pass pre-activated to skip internal sigmoid
@@ -352,20 +350,8 @@ def _run_eval(
 
         # Reconstruction metrics — use pre-activated xct_sigmoid, no double sigmoid
         mae_acc.append(F.l1_loss(xct_sigmoid, xct_dev))
-        mse_v = F.mse_loss(xct_sigmoid, xct_dev)
-        psnr_v = (
-            10.0 * torch.log10(torch.tensor(1.0, device=device) / mse_v)
-            if mse_v.item() > 0
-            else torch.tensor(float("inf"), device=device)
-        )
-        psnr_acc.append(psnr_v)
         sharp_recon_acc.append(sharpness_proxy(xct_sigmoid))
-        xct_mean_acc.append(xct_sigmoid.mean())
-        xct_std_acc.append(xct_sigmoid.std())
-
-        # sharpness_gt: compute once from the first batch only
-        if batch_idx == 0:
-            sharpness_gt_first = float(sharpness_proxy(xct_dev).item())
+        sharp_gt_acc.append(sharpness_proxy(xct_dev))
 
         # Latent metrics
         lat = latent_stats(output.mu, output.logvar)
@@ -379,17 +365,12 @@ def _run_eval(
 
     # ── deferred .item() — single sync per metric after the loop ──────────────
     sharp_recon_mean = float(torch.stack(sharp_recon_acc).mean().item())
-    sharpness_gt_val = sharpness_gt_first if sharpness_gt_first is not None else 0.0
+    sharp_gt_mean    = float(torch.stack(sharp_gt_acc).mean().item())
     recon_agg = {
-        "mae":             float(torch.stack(mae_acc).mean().item()),
-        "psnr":            float(torch.stack(psnr_acc).mean().item()),
-        "sharpness_recon": sharp_recon_mean,
-        "sharpness_gt":    sharpness_gt_val,
+        "mae": float(torch.stack(mae_acc).mean().item()),
         "sharpness_recon_over_gt": (
-            sharp_recon_mean / sharpness_gt_val if sharpness_gt_val > 0.0 else float("nan")
+            sharp_recon_mean / sharp_gt_mean if sharp_gt_mean > 0.0 else float("nan")
         ),
-        "recon_xct_mean": float(torch.stack(xct_mean_acc).mean().item()),
-        "recon_xct_std":  float(torch.stack(xct_std_acc).mean().item()),
     }
 
     # Free GPU accumulator stacks; everything we need is already on CPU
@@ -605,7 +586,6 @@ def train_loop(
     )
     # Cache the last computed active-units stats; recomputed every 10 steps.
     train_active: dict[str, Any] = {"mu_active_fraction": 0.0, "mu_n_active": 0}
-    _sharpness_gt_logged = False
     montecarlo_batch:  dict[str, torch.Tensor] | None = None
 
     # Background checkpoint thread — holds [thread_or_None]; at most one save
@@ -722,13 +702,8 @@ def train_loop(
                     tb_writer.add_scalar(f"train/{k}", v, step)
                 tb_writer.add_scalar("train/grad_scaler_scale", scaler.get_scale(), step)
                 tb_writer.add_scalar("train/steps_per_sec", steps_per_sec, step)
-                tb_writer.add_scalar("train/step_time_ms", step_time_ms, step)
                 if scheduler is not None:
                     tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
-                kl_chs = losses.get("kl_per_channel", [])
-                if kl_chs and "kl_collapsed_fraction" in losses:
-                    n_dead = round(losses["kl_collapsed_fraction"] * len(kl_chs))
-                    tb_writer.add_scalar("train/kl_active_channels", len(kl_chs) - n_dead, step)
                 # Discriminator metrics are scalar floats in `losses` and are
                 # already written by _log_scalars_to_tb above — no extra loop needed.
 
@@ -753,11 +728,7 @@ def train_loop(
                 metrics_file.flush()
 
                 if tb_writer is not None:
-                    _VAL_SKIP = frozenset({"sharpness_gt"})
-                    _log_scalars_to_tb(tb_writer, agg, "val", step, skip_keys=_VAL_SKIP)
-                    if not _sharpness_gt_logged:
-                        tb_writer.add_scalar("val/sharpness_gt", agg.get("sharpness_gt", 0.0), 0)
-                        _sharpness_gt_logged = True
+                    _log_scalars_to_tb(tb_writer, agg, "val", step)
                 _maybe_save_best(val_record)
 
             # ── full-loader validation (once per epoch) ───────────────
@@ -784,10 +755,7 @@ def train_loop(
                 metrics_file.flush()
 
                 if tb_writer is not None:
-                    _log_scalars_to_tb(
-                        tb_writer, fv_agg, "val_full", step,
-                        skip_keys=frozenset({"sharpness_gt"}),
-                    )
+                    _log_scalars_to_tb(tb_writer, fv_agg, "val_full", step)
                 _maybe_save_best(fv_record)
 
             # ── TensorBoard: fixed showcase Monte Carlo ───────────────
@@ -820,8 +788,7 @@ def train_loop(
                 metrics_file.flush()
 
                 if tb_writer is not None:
-                    _TEST_SKIP = frozenset({"sharpness_gt"})
-                    _log_scalars_to_tb(tb_writer, test_agg, "test", step, skip_keys=_TEST_SKIP)
+                    _log_scalars_to_tb(tb_writer, test_agg, "test", step)
                     if test_vol_por:
                         per_vol_maes = torch.tensor(
                             [abs(sum(errs) / len(errs)) for errs in test_vol_por.values()]
@@ -893,10 +860,7 @@ def train_loop(
                 log_file.write(json.dumps(fv_record) + "\n")
                 metrics_file.write(json.dumps(fv_record) + "\n")
                 if tb_writer is not None:
-                    _log_scalars_to_tb(
-                        tb_writer, fv_agg, "val_full", final_step,
-                        skip_keys=frozenset({"sharpness_gt"}),
-                    )
+                    _log_scalars_to_tb(tb_writer, fv_agg, "val_full", final_step)
                 _maybe_save_best(fv_record)
 
             if test_loader is not None:
@@ -912,10 +876,7 @@ def train_loop(
                 }
                 metrics_file.write(json.dumps(ft_record) + "\n")
                 if tb_writer is not None:
-                    _log_scalars_to_tb(
-                        tb_writer, ft_agg, "test_full", final_step,
-                        skip_keys=frozenset({"sharpness_gt"}),
-                    )
+                    _log_scalars_to_tb(tb_writer, ft_agg, "test_full", final_step)
                     if ft_vol_por:
                         per_vol_maes = torch.tensor(
                             [abs(sum(errs) / len(errs)) for errs in ft_vol_por.values()]
@@ -1103,8 +1064,6 @@ def run_montecarlo_eval(
             "Check reparameterization / posterior collapse.",
             step, xct_div, mask_div,
         )
-    writer.add_scalar("montecarlo/xct_diversity",  xct_div,  step)
-    writer.add_scalar("montecarlo/mask_diversity", mask_div, step)
 
     cmap = plt.get_cmap(cmap_name)
 

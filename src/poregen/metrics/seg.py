@@ -19,10 +19,12 @@ def segmentation_metrics(
     threshold: float = 0.5,
     apply_sigmoid: bool = True,
 ) -> dict[str, float]:
-    """Compute Dice, IoU, precision, recall, F1 for a batch.
+    """Compute Dice, precision, and recall for non-empty patches only.
 
-    Returns ``*_all`` (full batch) and ``*_pos_only`` (excluding samples
-    where the ground-truth mask is entirely empty).
+    Only ``pos_only`` variants are returned — samples where the ground-truth
+    mask is entirely empty are excluded, as they inflate overlap metrics.
+    IoU (monotone in Dice) and F1 (identical to Dice for binary masks) have
+    been removed to reduce TensorBoard noise.
 
     Parameters
     ----------
@@ -40,67 +42,44 @@ def segmentation_metrics(
     Returns
     -------
     dict
-        Keys: dice_all, dice_pos_only, iou_all, iou_pos_only,
-        precision_all, precision_pos_only, recall_all, recall_pos_only,
-        f1_all, f1_pos_only.
+        Keys: dice_pos_only, precision_pos_only, recall_pos_only.
     """
-    # Binarise predictions — single GPU op for whole batch
     activated = torch.sigmoid(logits) if apply_sigmoid else logits
-    pred = (activated >= threshold).float()               # (B, 1, D, H, W)
+    pred = (activated >= threshold).float()
 
-    # Flatten spatial dims, keep batch dim
     B = pred.shape[0]
-    pred_flat   = pred.reshape(B, -1)    # (B, N)
-    target_flat = target.reshape(B, -1)  # (B, N)
+    pred_flat   = pred.reshape(B, -1)
+    target_flat = target.reshape(B, -1)
 
-    # Vectorised TP / FP / FN — all (B,) tensors, still on GPU
     tp = (pred_flat * target_flat).sum(dim=1)
     fp = (pred_flat * (1.0 - target_flat)).sum(dim=1)
     fn = ((1.0 - pred_flat) * target_flat).sum(dim=1)
     gt_sum = target_flat.sum(dim=1)
 
-    # Per-sample Dice and IoU — (B,) tensors
     dice_per = (2.0 * tp + 1e-7) / (2.0 * tp + fp + fn + 1e-7)
-    iou_per  = (tp + 1e-7) / (tp + fp + fn + 1e-7)
 
-    # Move to CPU in one transfer
     tp_cpu     = tp.cpu()
     fp_cpu     = fp.cpu()
     fn_cpu     = fn.cpu()
     gt_sum_cpu = gt_sum.cpu()
     dice_cpu   = dice_per.cpu()
-    iou_cpu    = iou_per.cpu()
 
-    results: dict[str, float] = {}
+    sel = (gt_sum_cpu > 0).nonzero(as_tuple=True)[0]
+    if sel.numel() == 0:
+        return {"dice_pos_only": 0.0, "precision_pos_only": 0.0, "recall_pos_only": 0.0}
 
-    for suffix, mask in [
-        ("all",      torch.ones(B, dtype=torch.bool)),
-        ("pos_only", gt_sum_cpu > 0),
-    ]:
-        sel = mask.nonzero(as_tuple=True)[0]
-        if sel.numel() == 0:
-            results[f"dice_{suffix}"]      = 0.0
-            results[f"iou_{suffix}"]       = 0.0
-            results[f"precision_{suffix}"] = 0.0
-            results[f"recall_{suffix}"]    = 0.0
-            results[f"f1_{suffix}"]        = 0.0
-            continue
+    tp_s = tp_cpu[sel].sum().item()
+    fp_s = fp_cpu[sel].sum().item()
+    fn_s = fn_cpu[sel].sum().item()
 
-        tp_s = tp_cpu[sel].sum().item()
-        fp_s = fp_cpu[sel].sum().item()
-        fn_s = fn_cpu[sel].sum().item()
+    precision = (tp_s + 1e-7) / (tp_s + fp_s + 1e-7)
+    recall    = (tp_s + 1e-7) / (tp_s + fn_s + 1e-7)
 
-        precision = (tp_s + 1e-7) / (tp_s + fp_s + 1e-7)
-        recall    = (tp_s + 1e-7) / (tp_s + fn_s + 1e-7)
-        f1        = (2 * precision * recall) / (precision + recall + 1e-7)
-
-        results[f"dice_{suffix}"]      = float(dice_cpu[sel].mean().item())
-        results[f"iou_{suffix}"]       = float(iou_cpu[sel].mean().item())
-        results[f"precision_{suffix}"] = float(precision)
-        results[f"recall_{suffix}"]    = float(recall)
-        results[f"f1_{suffix}"]        = float(f1)
-
-    return results
+    return {
+        "dice_pos_only":      float(dice_cpu[sel].mean().item()),
+        "precision_pos_only": float(precision),
+        "recall_pos_only":    float(recall),
+    }
 
 
 @torch.no_grad()
