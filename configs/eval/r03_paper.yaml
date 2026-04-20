@@ -1,0 +1,28 @@
+# PoreGen VAE — evaluation configuration: R03 "paper" tier
+#
+# Full evaluation suite intended for a final best-checkpoint run before
+# writing up results.  Enables all metrics including the slow "paper only"
+# ones: Ripley's K, 3D pore GIFs, and memorization NN distance.
+#
+# Expected wall-clock time: 60–120 min per run depending on GPU and volume size.
+#
+# See configs/eval/r03_base.yaml for full field documentation.
+
+eval:
+  tier: paper
+  n_stochastic_samples: 50
+  n_volumes: 3
+  run_tiff_reconstruction: true
+  run_s2r: true
+  run_psd: true
+  run_fid: true
+  run_ripley: true
+  run_pore_gifs: true
+  run_memorization: true
+  r_max: 50
+  patch_batches: null
+  latent_patches: 512
+  stochastic_seed: 42
+  ldm_sigma_low: 0.3
+  ldm_sigma_high: 0.7
+  batch_size: 32

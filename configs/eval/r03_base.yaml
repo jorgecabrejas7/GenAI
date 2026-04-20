@@ -1,0 +1,66 @@
+# PoreGen VAE — evaluation configuration: R03 "best checkpoint" tier
+#
+# This file is referenced as a component from an experiment YAML:
+#
+#   components:
+#     eval: eval/r03_base.yaml
+#
+# It can also be passed explicitly on the CLI:
+#
+#   train_vae eval r03-run-0002-... --eval-config eval/r03_base
+#
+# Tier "best_checkpoint" enables all fast required metrics plus the
+# moderately-expensive structural metrics (S2/PSD/FID) and full-volume
+# TIFF reconstruction.  The slow "paper only" metrics (Ripley's K,
+# 3D pore GIFs, memorization NN distance) are disabled — use
+# eval/r03_paper.yaml for a full paper evaluation.
+#
+# Field reference
+# ---------------
+# tier                  : "required" | "best_checkpoint" | "paper"
+#                         Informational label; does not gate logic by itself —
+#                         each run_* flag controls what actually executes.
+# n_stochastic_samples  : N for stochastic-mean and std reconstruction.
+#                         Each patch is decoded N times (z = μ + σε) and the
+#                         outputs are averaged.  N=50 gives stable statistics.
+# n_volumes             : How many test volumes to fully reconstruct from TIFF.
+#                         Volumes are selected to span low / mid / high porosity.
+# run_tiff_reconstruction : Load raw TIFFs, tile into 64³ patches, stitch back.
+#                         Required for all volume-level metrics and TIFFs.
+# run_s2r               : Two-point correlation function S2(r) + W1 distance.
+# run_psd               : Pore size distribution (equiv. diameter) + W1 distance.
+# run_fid               : Fréchet Inception Distance on 2D axial/coronal/sagittal
+#                         slices extracted from reconstructed and GT volumes.
+# run_ripley            : Ripley's K(r) on pore centroid point cloud.  Slow.
+# run_pore_gifs         : Rotating 3-D GIFs for small/medium/large pores.  Slow.
+# run_memorization      : Latent nearest-neighbour distance (test → train).  Slow.
+# r_max                 : Maximum radius in voxels for S2(r) computation.
+# patch_batches         : Limit patch-metric evaluation to this many batches.
+#                         null = use the full test set.
+# latent_patches        : Number of random test patches for the latent audit and
+#                         the posterior-tightness recon_std_mean computation.
+# stochastic_seed       : torch.manual_seed value set before every volume's
+#                         reconstruction loop.  Guarantees reproducibility.
+# ldm_sigma_low         : Lower bound of the per-channel σ target range for the
+#                         LDM readiness gate.
+# ldm_sigma_high        : Upper bound of the per-channel σ target range.
+# batch_size            : Batch size for patch-level evaluation DataLoader.
+
+eval:
+  tier: best_checkpoint
+  n_stochastic_samples: 50
+  n_volumes: 3
+  run_tiff_reconstruction: true
+  run_s2r: true
+  run_psd: true
+  run_fid: true
+  run_ripley: false
+  run_pore_gifs: false
+  run_memorization: false
+  r_max: 50
+  patch_batches: null
+  latent_patches: 512
+  stochastic_seed: 42
+  ldm_sigma_low: 0.3
+  ldm_sigma_high: 0.7
+  batch_size: 32

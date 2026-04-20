@@ -36,6 +36,7 @@ class DeferredAction:
     kind: str
     primary: str
     secondary: str | None = None
+    tertiary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,28 @@ def build_parser() -> argparse.ArgumentParser:
     clone_parser.add_argument("target", nargs="?", default=None, help="Target experiment id.")
 
     subparsers.add_parser("menu", help="Open the interactive keyboard UI.")
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="Run the full evaluation suite on a checkpoint.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    eval_parser.add_argument(
+        "run_ref",
+        help="Run directory name (e.g. r03-run-0002-…) or full path.",
+    )
+    eval_parser.add_argument(
+        "--checkpoint",
+        default="best.ckpt",
+        help="Checkpoint filename (relative to run dir) or absolute path.",
+    )
+    eval_parser.add_argument(
+        "--eval-config",
+        default="eval/r03_base",
+        dest="eval_config",
+        help="Eval config id (e.g. 'eval/r03_base' or 'eval/r03_paper') or YAML path.",
+    )
+
     return parser
 
 
@@ -260,6 +283,8 @@ def _action_options(mode: str) -> list[ActionOption]:
     return [
         ActionOption("Resume latest checkpoint", "Continue the selected run from latest.ckpt.", "resume_latest"),
         ActionOption("Choose checkpoint", "Pick a specific checkpoint before resuming.", "resume_pick"),
+        ActionOption("Run evaluation", "Evaluate best.ckpt with the default eval config (best_checkpoint tier).", "eval_best"),
+        ActionOption("Run evaluation (choose config)", "Pick a checkpoint and eval config tier, then run evaluation.", "eval_custom"),
         ActionOption("Open full run details", "View the run metadata, summary, and resolved config.", "view"),
         ActionOption("Refresh runs", "Reload available runs from disk.", "refresh"),
         ActionOption("Switch to experiments", "Go back to experiment definitions.", "switch_experiments"),
@@ -1351,6 +1376,25 @@ def _refresh_after_clone(
     return entries_by_mode, cache
 
 
+def _select_eval_config_interactive(stdscr: Any, repo_root: Path) -> str | None:
+    """Let the user pick an eval config from configs/eval/ using the item picker."""
+    from poregen.eval.config import list_eval_configs
+    configs = list_eval_configs(repo_root)
+    if not configs:
+        _show_message(stdscr, "Eval Config", "No eval configs found in configs/eval/.")
+        return None
+    items = [(c["id"], f"tier: {c['tier']}") for c in configs]
+    selected = _select_item(
+        stdscr,
+        "Select Eval Config",
+        items,
+        empty_message="No eval configs found.",
+    )
+    if selected is None:
+        return None
+    return configs[selected]["id"]
+
+
 def _execute_action(
     stdscr: Any,
     *,
@@ -1430,6 +1474,36 @@ def _execute_action(
         entries_by_mode, cache = _refresh_after_clone(repo_root=repo_root, state=state, target_id=target_id)
         state.status = f"Saved {target_id} to {Path(target_path).name}."
         return None, entries_by_mode, cache
+
+    if action.action_id == "eval_best":
+        run_dir = next(
+            (path for path in list_run_directories(repo_root=repo_root) if path.name == entry.identifier),
+            None,
+        )
+        if run_dir is None:
+            state.status = f"Run not found: {entry.identifier}"
+            return None, entries_by_mode, cache
+        # Use best.ckpt if it exists, otherwise fall back to latest.ckpt
+        ckpt = "best.ckpt" if (run_dir / "best.ckpt").exists() else "latest.ckpt"
+        return DeferredAction("eval", entry.identifier, ckpt, "eval/r03_base"), entries_by_mode, cache
+
+    if action.action_id == "eval_custom":
+        run_dir = next(
+            (path for path in list_run_directories(repo_root=repo_root) if path.name == entry.identifier),
+            None,
+        )
+        if run_dir is None:
+            state.status = f"Run not found: {entry.identifier}"
+            return None, entries_by_mode, cache
+        checkpoint_name = _choose_checkpoint_interactive(stdscr, run_dir)
+        if checkpoint_name is None:
+            state.status = "Checkpoint selection cancelled."
+            return None, entries_by_mode, cache
+        eval_config_id = _select_eval_config_interactive(stdscr, repo_root)
+        if eval_config_id is None:
+            state.status = "Eval config selection cancelled."
+            return None, entries_by_mode, cache
+        return DeferredAction("eval", entry.identifier, checkpoint_name, eval_config_id), entries_by_mode, cache
 
     state.status = f"Unhandled action: {action.label}"
     return None, entries_by_mode, cache
@@ -1641,6 +1715,63 @@ def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
             continue
 
 
+def _run_eval_action(
+    *,
+    run_name: str,
+    checkpoint_name: str,
+    eval_config_ref: str,
+    repo_root: Path,
+) -> None:
+    """Resolve paths, load eval config, and call ``run_eval``.
+
+    This helper is shared between the TUI deferred-action path and the
+    ``eval`` CLI subcommand so that both surfaces use identical logic.
+
+    Parameters
+    ----------
+    run_name : str
+        Run directory name (e.g. ``r03-run-0002-…``).
+    checkpoint_name : str
+        Checkpoint filename (e.g. ``best.ckpt``) or absolute path.
+    eval_config_ref : str
+        Eval config id (e.g. ``"eval/r03_base"``) or YAML path.
+    repo_root : Path
+    """
+    from poregen.eval.config import load_eval_config
+    from poregen.eval.runner import run_eval
+
+    # Resolve run directory
+    run_dirs = list_run_directories(repo_root=repo_root)
+    run_dir = next((d for d in run_dirs if d.name == run_name), None)
+    if run_dir is None:
+        # Maybe the caller passed a full path
+        candidate = Path(run_name)
+        if candidate.is_dir():
+            run_dir = candidate
+        else:
+            raise FileNotFoundError(
+                f"Run directory not found: {run_name!r}. "
+                f"Available: {[d.name for d in run_dirs]}"
+            )
+
+    # Resolve checkpoint path
+    ckpt_path = Path(checkpoint_name)
+    if not ckpt_path.is_absolute():
+        ckpt_path = run_dir / checkpoint_name
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    # Load eval config
+    eval_cfg = load_eval_config(eval_config_ref, repo_root=repo_root)
+    logger.info(
+        "Starting eval: run=%s  checkpoint=%s  tier=%s",
+        run_name, ckpt_path.name, eval_cfg.tier,
+    )
+
+    out_dir = run_eval(run_dir, ckpt_path, eval_cfg, repo_root)
+    print(f"Eval complete. Results: {out_dir}")
+
+
 def interactive_menu(repo_root: Path) -> None:
     """Open the interactive dashboard UI."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -1663,6 +1794,14 @@ def interactive_menu(repo_root: Path) -> None:
             repo_root=repo_root,
         )
         print(run_dir)
+        return
+    if action.kind == "eval":
+        _run_eval_action(
+            run_name=action.primary,
+            checkpoint_name=action.secondary or "best.ckpt",
+            eval_config_ref=action.tertiary or "eval/r03_base",
+            repo_root=repo_root,
+        )
         return
     raise ValueError(f"Unknown deferred action: {action.kind}")
 
@@ -1711,6 +1850,15 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("A target experiment id is required to clone an experiment.")
         path = clone_experiment_definition(args.source, target, repo_root=repo_root)
         print(path)
+        return
+
+    if args.command == "eval":
+        _run_eval_action(
+            run_name=args.run_ref,
+            checkpoint_name=args.checkpoint,
+            eval_config_ref=args.eval_config,
+            repo_root=repo_root,
+        )
         return
 
     raise ValueError(f"Unhandled command: {args.command}")
