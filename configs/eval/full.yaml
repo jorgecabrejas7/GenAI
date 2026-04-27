@@ -1,0 +1,45 @@
+# PoreGen VAE — full evaluation config
+#
+# Complete evaluation suite for reporting.  All metrics enabled.
+# Includes TIFF reconstruction, S2(r)/PSD/FID, and full val+test patch metrics
+# in all three decoding modes (deterministic, stoch_single, stoch_mean).
+#
+# Expected wall-clock time: 30–90 min depending on GPU and volume size.
+#
+# Field reference
+# ---------------
+# tier                       : Informational label only — does not gate logic.
+# n_stochastic_samples       : N for volume-level stochastic reconstruction.
+# patch_n_stochastic_samples : N for the patch-level stoch_mean mode.
+#                              Kept low (5) to avoid O(N × 222k) cost.
+# n_volumes                  : Test volumes to reconstruct. Set to -1 for all.
+# run_tiff_reconstruction    : Full volume TIFF reconstruction + volume metrics.
+# run_s2r                    : S2(r) two-point correlation + Wasserstein-1.
+# run_psd                    : Pore size distribution + Wasserstein-1.
+# run_fid                    : FID on 2D axial/coronal/sagittal slices.
+# run_ripley                 : Ripley's K(r). Slow (O(N²)). Off by default.
+# run_pore_gifs              : Rotating 3-D pore GIFs. Slow. Off by default.
+# run_memorization           : Latent NN distance (test→train). Off by default.
+# patch_batches              : null = full dataset.
+# latent_patches             : Random patches for latent audit and recon_std_mean.
+# ldm_sigma_low/high         : Per-channel σ target range for LDM readiness gate.
+
+eval:
+  tier: full
+  n_stochastic_samples: 50
+  patch_n_stochastic_samples: 5
+  n_volumes: 3
+  run_tiff_reconstruction: true
+  run_s2r: true
+  run_psd: true
+  run_fid: true
+  run_ripley: false
+  run_pore_gifs: false
+  run_memorization: false
+  r_max: 50
+  patch_batches: null
+  latent_patches: 512
+  stochastic_seed: 42
+  ldm_sigma_low: 0.3
+  ldm_sigma_high: 0.7
+  batch_size: 32

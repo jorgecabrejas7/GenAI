@@ -77,7 +77,8 @@ from poregen.eval.outputs import (
     volume_out_dir,
     write_readme,
 )
-from poregen.eval.stochastic import VolumeReconstruction, reconstruct_volume_three_modes
+from poregen.eval.blended import reconstruct_volume_from_arrays
+from poregen.eval.stochastic import VolumeReconstruction
 from poregen.eval.visualise import (
     save_latent_audit_plot,
     save_pore_gifs,
@@ -402,12 +403,13 @@ def run_eval(
                 logger.error("  Unexpected error loading %s: %s — skipping", vol_id, exc)
                 continue
 
-            # Reconstruct in all three modes
-            logger.info("  Reconstructing (N=%d stochastic samples) …",
+            # Reconstruct with cosine-taper blending (overlapping patches)
+            logger.info("  Reconstructing (blended, N=%d stochastic samples) …",
                         eval_cfg.n_stochastic_samples)
-            vol = reconstruct_volume_three_modes(
+            vol = reconstruct_volume_from_arrays(
                 model, vol_id, xct_u8, mask_u8, device,
                 n_samples=eval_cfg.n_stochastic_samples,
+                batch_size=eval_cfg.batch_size,
                 seed=eval_cfg.stochastic_seed,
             )
             logger.info("  Reconstruction done in %.1fs",
@@ -470,30 +472,40 @@ def run_eval(
         logger.error("  Split loss eval failed: %s", exc)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Patch-level metrics (full test set)
+    # Patch-level metrics (full val + test sets, three decoding modes)
     # ══════════════════════════════════════════════════════════════════════════
-    logger.info("\n── Patch metrics (full test set) ──")
-    try:
-        pm = eval_patches(model, zarr_root, device, eval_cfg)
-    except Exception as exc:
-        logger.error("  Patch eval failed: %s", exc)
-        # Create an empty fallback so downstream code doesn't break
-        from poregen.eval.metrics import Stat
-        pm = PatchMetrics(
-            n_patches=0,
-            psnr=Stat(float("nan"), float("nan")),
-            ssim=Stat(float("nan"), float("nan")),
-            mae=Stat(float("nan"), float("nan")),
-            dice=Stat(float("nan"), float("nan")),
-            precision=Stat(float("nan"), float("nan")),
-            recall=Stat(float("nan"), float("nan")),
-            f1=Stat(float("nan"), float("nan")),
-            porosity_mae=Stat(float("nan"), float("nan")),
-            porosity_bias=Stat(float("nan"), float("nan")),
-            porosity_volume_mae=Stat(float("nan"), float("nan")),
-            sharpness_ratio=Stat(float("nan"), float("nan")),
-            recon_std_mean=float("nan"),
+    from poregen.eval.metrics import Stat
+
+    def _empty_pm() -> PatchMetrics:
+        nan_stat = Stat(float("nan"), float("nan"))
+        return PatchMetrics(
+            n_patches=0, psnr=nan_stat, ssim=nan_stat, mae=nan_stat,
+            dice=nan_stat, precision=nan_stat, recall=nan_stat,
+            f1=nan_stat, iou=nan_stat, porosity_mae=nan_stat,
+            porosity_bias=nan_stat, porosity_volume_mae=nan_stat,
+            sharpness_ratio=nan_stat, recon_std_mean=float("nan"),
         )
+
+    def _empty_pm_dict() -> dict:
+        return {m: _empty_pm() for m in ("deterministic", "stoch_single", "stoch_mean")}
+
+    logger.info("\n── Patch metrics (val split) ──")
+    pm_val: dict[str, PatchMetrics] = _empty_pm_dict()
+    try:
+        pm_val = eval_patches(model, zarr_root, device, eval_cfg, split="val")
+    except Exception as exc:
+        logger.error("  Val patch eval failed: %s", exc)
+
+    logger.info("\n── Patch metrics (test split) ──")
+    pm_test: dict[str, PatchMetrics] = _empty_pm_dict()
+    try:
+        pm_test = eval_patches(model, zarr_root, device, eval_cfg, split="test")
+    except Exception as exc:
+        logger.error("  Test patch eval failed: %s", exc)
+
+    # Use test/deterministic as the canonical single PatchMetrics for
+    # downstream visualisation functions that expect a single object
+    pm = pm_test.get("deterministic", _empty_pm())
 
     # ══════════════════════════════════════════════════════════════════════════
     # Latent audit
@@ -576,7 +588,7 @@ def run_eval(
     # ══════════════════════════════════════════════════════════════════════════
     logger.info("\n── Saving JSON outputs ──")
     save_eval_metrics_json(
-        all_vol_metrics, pm, la, eval_cfg,
+        all_vol_metrics, pm_val, pm_test, la, eval_cfg,
         step=step,
         run_name=run_name,
         checkpoint_path=str(checkpoint_path),

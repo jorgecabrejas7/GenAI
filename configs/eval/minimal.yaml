@@ -1,0 +1,27 @@
+# PoreGen VAE — minimal evaluation config
+#
+# Quick convergence check: patch metrics (deterministic only) + latent audit.
+# No TIFF reconstruction, no S2/PSD/FID.  Runs in a few minutes on GPU.
+# Use this after each training run to check that the model is learning.
+#
+# See configs/eval/full.yaml for the complete evaluation suite.
+
+eval:
+  tier: minimal
+  n_stochastic_samples: 1
+  patch_n_stochastic_samples: 1
+  n_volumes: 0
+  run_tiff_reconstruction: false
+  run_s2r: false
+  run_psd: false
+  run_fid: false
+  run_ripley: false
+  run_pore_gifs: false
+  run_memorization: false
+  r_max: 50
+  patch_batches: null
+  latent_patches: 512
+  stochastic_seed: 42
+  ldm_sigma_low: 0.3
+  ldm_sigma_high: 0.7
+  batch_size: 32

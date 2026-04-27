@@ -32,10 +32,14 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from poregen.eval.stochastic import VolumeReconstruction
 
 logger = logging.getLogger(__name__)
 
@@ -262,3 +266,187 @@ def reconstruct_volume(
         "n_patches":           n_patches_total,
         "padded_shape":        padded_shape,
     }
+
+
+# ---------------------------------------------------------------------------
+# Array-based API for the eval runner
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def reconstruct_volume_from_arrays(
+    model: nn.Module,
+    volume_id: str,
+    xct_u8: np.ndarray,
+    mask_u8: np.ndarray,
+    device: "str | torch.device" = "cuda",
+    *,
+    patch_size: int = 64,
+    stride: int = 48,
+    n_samples: int = 5,
+    batch_size: int = 32,
+    seed: int = 42,
+) -> "VolumeReconstruction":
+    """Reconstruct a full volume with cosine-taper blending from in-memory arrays.
+
+    Wraps the overlapping-patch algorithm in :func:`reconstruct_volume` but
+    accepts numpy arrays directly (no TIFF I/O) and returns a
+    :class:`~poregen.eval.stochastic.VolumeReconstruction` with all three
+    decoding modes: stochastic mean (N passes), stochastic single (pass 0),
+    and deterministic (z = μ).
+
+    Parameters
+    ----------
+    model : nn.Module
+        VAE in eval mode.
+    volume_id : str
+        Identifier stored in the returned dataclass.
+    xct_u8 : ndarray, uint8, (D, H, W)
+        Raw XCT intensities.
+    mask_u8 : ndarray, uint8 {0,1}, (D, H, W)
+        Binary pore mask (ground truth).
+    device : str or torch.device
+    patch_size : int
+    stride : int
+        Patch step with overlap. ``stride < patch_size`` enables blending.
+    n_samples : int
+        Number of stochastic passes for the mean / std reconstruction.
+    batch_size : int
+    seed : int
+
+    Returns
+    -------
+    VolumeReconstruction
+    """
+    from poregen.eval.stochastic import VolumeReconstruction
+
+    if isinstance(device, str):
+        device = torch.device(device)
+
+    D, H, W = xct_u8.shape
+    xct_f = xct_u8.astype(np.float32) / 255.0
+
+    # ── Padding ──────────────────────────────────────────────────────────────
+    alpha = 0.5
+    taper_half = max(1, int(patch_size * alpha / 2))
+    pre = taper_half
+
+    D_pre = D + 2 * pre
+    H_pre = H + 2 * pre
+    W_pre = W + 2 * pre
+
+    padded_pre = np.pad(xct_f, ((pre, pre), (pre, pre), (pre, pre)), mode="reflect")
+    pad_d = _pad_size(D_pre, patch_size, stride)
+    pad_h = _pad_size(H_pre, patch_size, stride)
+    pad_w = _pad_size(W_pre, patch_size, stride)
+    padded_shape = (pad_d, pad_h, pad_w)
+
+    padded = np.pad(
+        padded_pre,
+        ((0, pad_d - D_pre), (0, pad_h - H_pre), (0, pad_w - W_pre)),
+        mode="reflect",
+    )
+
+    # ── Tukey window & patch coordinates ─────────────────────────────────────
+    W3d = _tukey_window_3d(patch_size)
+    coords = [
+        (z, y, x)
+        for z in range(0, pad_d - patch_size + 1, stride)
+        for y in range(0, pad_h - patch_size + 1, stride)
+        for x in range(0, pad_w - patch_size + 1, stride)
+    ]
+    n_patches_total = len(coords)
+
+    weight_acc = np.zeros(padded_shape, dtype=np.float32)
+    for z0, y0, x0 in coords:
+        weight_acc[z0:z0 + patch_size, y0:y0 + patch_size, x0:x0 + patch_size] += W3d
+    safe_w = np.where(weight_acc > 0, weight_acc, 1.0)
+
+    logger.info(
+        "reconstruct_volume_from_arrays: vol=(%d,%d,%d) padded=%s patches=%d stride=%d N=%d",
+        D, H, W, padded_shape, n_patches_total, stride, n_samples,
+    )
+
+    # ── Shared batch sweep helper ─────────────────────────────────────────────
+    def _sweep(use_stochastic: bool, pass_seed: int) -> tuple[np.ndarray, np.ndarray]:
+        """Run one blending sweep. Returns (xct_blended, mask_blended)."""
+        torch.manual_seed(pass_seed)
+        xct_wsum  = np.zeros(padded_shape, dtype=np.float32)
+        mask_wsum = np.zeros(padded_shape, dtype=np.float32)
+
+        for b0 in range(0, n_patches_total, batch_size):
+            b_coords = coords[b0: b0 + batch_size]
+            patches_np = np.stack(
+                [padded[z0:z0 + patch_size, y0:y0 + patch_size, x0:x0 + patch_size]
+                 for z0, y0, x0 in b_coords]
+            )
+            xct_t = torch.from_numpy(patches_np).unsqueeze(1).to(device)
+
+            h      = _encode(model, xct_t)
+            mu     = model.to_mu(h)
+
+            if use_stochastic:
+                logvar = model.to_logvar(h)
+                eps    = torch.randn_like(mu)
+                z_t    = mu + torch.exp(0.5 * logvar) * eps
+            else:
+                z_t = mu  # deterministic
+
+            dec        = model.decoder(z_t)
+            xct_logit  = model.xct_head(dec)
+            mask_logit = model.mask_head(dec)
+
+            xct_np  = xct_logit .squeeze(1).cpu().numpy().astype(np.float32)
+            mask_np = mask_logit.squeeze(1).cpu().numpy().astype(np.float32)
+
+            for i, (z0, y0, x0) in enumerate(b_coords):
+                sl = np.s_[z0:z0 + patch_size, y0:y0 + patch_size, x0:x0 + patch_size]
+                xct_wsum [sl] += W3d * xct_np [i]
+                mask_wsum[sl] += W3d * mask_np[i]
+
+        xct_blended  = np.clip(xct_wsum / safe_w, 0.0, 1.0)
+        mask_blended = (1.0 / (1.0 + np.exp(-(mask_wsum / safe_w)))).astype(np.float32)
+        return xct_blended, mask_blended
+
+    # ── N stochastic passes ───────────────────────────────────────────────────
+    model.eval()
+    xct_passes: list[np.ndarray] = []
+    mask_passes: list[np.ndarray] = []
+    for s in range(n_samples):
+        xb, mb = _sweep(use_stochastic=True, pass_seed=seed + s)
+        xct_passes.append(xb)
+        mask_passes.append(mb)
+        logger.info("  Stochastic pass %d/%d done", s + 1, n_samples)
+
+    xct_arr  = np.stack(xct_passes,  axis=0)
+    mask_arr = np.stack(mask_passes, axis=0)
+
+    stoch_mean_xct  = xct_arr .mean(axis=0).astype(np.float32)
+    stoch_mean_mask = mask_arr.mean(axis=0).astype(np.float32)
+    stoch_std_xct   = xct_arr .std(axis=0).astype(np.float32)
+    stoch_std_mask  = mask_arr.std(axis=0).astype(np.float32)
+    stoch_single_xct  = xct_passes[0]
+    stoch_single_mask = mask_passes[0]
+
+    # ── Deterministic pass: z = μ ─────────────────────────────────────────────
+    mu_xct, mu_mask = _sweep(use_stochastic=False, pass_seed=seed + n_samples)
+    logger.info("  Deterministic pass done")
+
+    # ── Crop back to original (remove symmetric pre-padding) ─────────────────
+    def _crop(vol: np.ndarray) -> np.ndarray:
+        return vol[pre:pre + D, pre:pre + H, pre:pre + W]
+
+    return VolumeReconstruction(
+        volume_id=volume_id,
+        xct_gt=xct_f,
+        mask_gt=mask_u8.astype(np.float32),
+        xct_stoch_mean=_crop(stoch_mean_xct),
+        mask_stoch_mean=_crop(stoch_mean_mask),
+        xct_stoch_std=_crop(stoch_std_xct),
+        mask_stoch_std=_crop(stoch_std_mask),
+        xct_stoch_single=_crop(stoch_single_xct),
+        mask_stoch_single=_crop(stoch_single_mask),
+        xct_mu=_crop(mu_xct),
+        mask_mu=_crop(mu_mask),
+        shape_original=(D, H, W),
+        shape_tiled=(D, H, W),
+    )

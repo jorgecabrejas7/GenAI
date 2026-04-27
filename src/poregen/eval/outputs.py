@@ -251,7 +251,7 @@ def save_volume_tiffs(
 # ---------------------------------------------------------------------------
 
 def save_patch_npz(
-    patch_metrics: "PatchMetrics",
+    patch_metrics: "PatchMetrics | dict",
     out_dir: Path,
 ) -> Path:
     """Save per-patch arrays for scatter plots and detailed offline analysis.
@@ -285,6 +285,10 @@ def save_patch_npz(
     Path
     """
     path = out_dir / "patch_arrays.npz"
+    # Accept either a single PatchMetrics or a dict (mode → PatchMetrics);
+    # in the latter case use "deterministic" as the canonical scatter source.
+    if isinstance(patch_metrics, dict):
+        patch_metrics = patch_metrics.get("deterministic", next(iter(patch_metrics.values())))
     sc = patch_metrics._porosity_scatter
 
     np.savez_compressed(
@@ -354,7 +358,8 @@ def save_volume_metrics_json(
 
 def save_eval_metrics_json(
     vol_metrics: list["VolumeMetrics"],
-    patch_metrics: "PatchMetrics",
+    patch_metrics_val: "dict[str, PatchMetrics]",
+    patch_metrics_test: "dict[str, PatchMetrics]",
     latent_audit: "LatentAudit",
     eval_cfg: "EvalConfig",
     step: int,
@@ -364,18 +369,21 @@ def save_eval_metrics_json(
 ) -> Path:
     """Save the consolidated scalar metrics summary to ``<out_dir>/eval_metrics.json``.
 
-    This file is the primary machine-readable output of an eval run.  It
-    contains every scalar metric and the eval configuration so the file is
-    self-contained.
+    This file is the primary machine-readable output of an eval run.
+
+    The ``patch_metrics_val`` and ``patch_metrics_test`` parameters are dicts
+    keyed by decoding mode (``"deterministic"``, ``"stoch_single"``,
+    ``"stoch_mean"``).  In the JSON they appear as
+    ``patch_metrics_val_<mode>`` and ``patch_metrics_test_<mode>``.
 
     Parameters
     ----------
     vol_metrics : list of VolumeMetrics
-    patch_metrics : PatchMetrics
+    patch_metrics_val : dict[str, PatchMetrics]
+    patch_metrics_test : dict[str, PatchMetrics]
     latent_audit : LatentAudit
     eval_cfg : EvalConfig
     step : int
-        Training step of the evaluated checkpoint.
     run_name : str
     checkpoint_path : str
     out_dir : Path
@@ -395,12 +403,16 @@ def save_eval_metrics_json(
     def _clean_pm(pm: "PatchMetrics") -> dict:
         return {k: v for k, v in asdict(pm).items() if k not in _large}
 
+    def _clean_pm_dict(pm_dict: "dict[str, PatchMetrics]") -> dict:
+        return {mode: _clean_pm(pm) for mode, pm in pm_dict.items()}
+
     doc = {
         "run_name": run_name,
         "checkpoint_path": checkpoint_path,
         "step": step,
         "eval_config": eval_cfg.to_dict(),
-        "patch_metrics": _clean_pm(patch_metrics),
+        "patch_metrics_val":  _clean_pm_dict(patch_metrics_val),
+        "patch_metrics_test": _clean_pm_dict(patch_metrics_test),
         "latent_audit": asdict(latent_audit),
         "volume_metrics": [_clean_vm(vm) for vm in vol_metrics],
     }
@@ -559,21 +571,31 @@ def write_readme(
 
     metrics_snippet = textwrap.dedent("""\
         ```python
-        import json, pandas as pd
+        import json
 
         with open("eval_metrics.json") as f:
             d = json.load(f)
 
-        # Patch-level summary
-        pm = d["patch_metrics"]
+        # Patch-level summary — test set, deterministic mode
+        pm = d["patch_metrics_test"]["deterministic"]
         print(f"PSNR:  {pm['psnr']['mean']:.2f} ± {pm['psnr']['std']:.2f}")
         print(f"Dice:  {pm['dice']['mean']:.4f} ± {pm['dice']['std']:.4f}")
+        print(f"IoU:   {pm['iou']['mean']:.4f}")
         print(f"Por. MAE: {pm['porosity_mae']['mean']:.4f}")
+        print(f"Sharpness ratio: {pm['sharpness_ratio']['mean']:.3f}")
+
+        # Per-porosity-bin breakdown
+        for bin_name, bin_data in pm['per_bin'].items():
+            print(bin_name, "n=", bin_data['n'], "dice=", bin_data['dice']['mean'])
+
+        # All three modes (test set)
+        for mode in ("deterministic", "stoch_single", "stoch_mean"):
+            pm_m = d["patch_metrics_test"][mode]
+            print(f"{mode}: PSNR={pm_m['psnr']['mean']:.2f}  dice={pm_m['dice']['mean']:.4f}")
 
         # Latent audit
         la = d["latent_audit"]
         print(f"LDM ready: {la['ldm_ready']}")
-        print(f"Flagged low:  channels {la['channels_flagged_low']}")
         print(f"Flagged high: channels {la['channels_flagged_high']}")
 
         # Volume-level
@@ -685,7 +707,10 @@ def write_readme(
 
         ## Metric Glossary
 
-        ### Patch-level metrics (over full test set)
+        ### Patch-level metrics (val and test splits × three decoding modes)
+
+        JSON keys: `patch_metrics_val` / `patch_metrics_test`, each containing
+        `deterministic`, `stoch_single`, `stoch_mean` sub-dicts.
 
         | Metric | Description | Expected range |
         |--------|-------------|----------------|
@@ -693,13 +718,15 @@ def write_readme(
         | `ssim` | Structural similarity (XCT) | > 0.85 = good |
         | `mae` | Mean absolute error (XCT) | < 0.03 = good |
         | `dice` | Dice coefficient (pore mask) | > 0.7 = good |
+        | `iou` | Intersection-over-union (pore mask) | > 0.55 = good |
         | `precision` | Mask precision (TP / (TP+FP)) | — |
         | `recall` | Mask recall (TP / (TP+FN)) | — |
         | `f1` | F1 score (= Dice for binary) | > 0.7 = good |
         | `porosity_mae` | Mean absolute porosity error per patch | < 0.005 = good |
         | `porosity_bias` | Signed mean porosity error (pred − gt) | near 0 = good |
-        | `sharpness_ratio` | Recon sharpness / GT sharpness | near 1.0 = good |
+        | `sharpness_ratio` | Recon/GT sharpness ratio (porous patches only) | near 1.0 = good |
         | `recon_std_mean` | Mean per-patch std across N stochastic passes | < 0.01 for LDM |
+        | `per_bin` | Per-porosity-bin breakdown (4 bins): psnr, dice, porosity_mae | — |
 
         ### Volume-level metrics (per reconstructed TIFF volume)
 

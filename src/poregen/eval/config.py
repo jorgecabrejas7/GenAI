@@ -66,6 +66,7 @@ class EvalConfig:
     n_volumes : int
         Number of test volumes for full-volume TIFF reconstruction.  Volumes
         are chosen to span low / mid / high porosity using the test-split index.
+        Set to ``-1`` or ``0`` to evaluate all available test volumes.
     run_tiff_reconstruction : bool
         If True, load raw TIFFs, tile into 64³ patches, stitch back, and run
         all volume-level metrics.  Prerequisite for S2(r), PSD, FID, Ripley,
@@ -106,6 +107,11 @@ class EvalConfig:
         Upper bound of the per-channel σ readiness range.  Default 0.7.
     batch_size : int
         DataLoader batch size for patch-level evaluation.  Default 32.
+    patch_n_stochastic_samples : int
+        Number of stochastic passes used for the N-pass patch metric mode.
+        Decoupled from ``n_stochastic_samples`` so volume reconstruction can
+        use N=50 while patch evaluation (over 200k+ patches) uses a smaller N.
+        Default 5.
     """
 
     tier: str = "best_checkpoint"
@@ -125,6 +131,7 @@ class EvalConfig:
     ldm_sigma_low: float = 0.3
     ldm_sigma_high: float = 0.7
     batch_size: int = 32
+    patch_n_stochastic_samples: int = 5
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -188,7 +195,7 @@ def load_eval_config(
     2. If *eval_ref* looks like ``eval/r03_base`` (no extension), resolve
        relative to ``<repo_root>/configs/``.
     3. If *eval_ref* is ``None``, fall back to
-       ``<repo_root>/configs/eval/r03_base.yaml``.
+       ``<repo_root>/configs/eval/full.yaml``.
     4. After loading the YAML, apply *overrides* (shallow merge on the ``eval``
        sub-dict) to allow CLI arguments to override individual fields.
 
@@ -214,7 +221,7 @@ def load_eval_config(
     configs_root = repo_root / "configs"
 
     if eval_ref is None:
-        yaml_path = configs_root / "eval" / "r03_base.yaml"
+        yaml_path = configs_root / "eval" / "full.yaml"
     else:
         candidate = Path(eval_ref)
         if candidate.is_absolute():

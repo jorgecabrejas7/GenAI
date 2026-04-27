@@ -103,14 +103,14 @@ class Stat:
 
 @dataclass
 class PatchMetrics:
-    """Aggregated patch-level metrics over the full test set.
+    """Aggregated patch-level metrics over one dataset split and one decoding mode.
 
     All ``Stat`` fields summarise per-patch scalar values (mean ± std).
 
     Attributes
     ----------
     n_patches : int
-        Total number of test patches evaluated.
+        Total number of patches evaluated.
     psnr : Stat
         Peak signal-to-noise ratio of XCT reconstruction.  Computed as
         ``20 * log10(1 / sqrt(MSE))``.
@@ -126,22 +126,27 @@ class PatchMetrics:
         Mask recall (TP / (TP + FN)).
     f1 : Stat
         F1 score (== Dice for binary segmentation).
+    iou : Stat
+        Intersection-over-union of the binarised mask.
     porosity_mae : Stat
         Absolute porosity error per patch: ``|φ_pred − φ_gt|``.
     porosity_bias : Stat
         Signed porosity error per patch: ``φ_pred − φ_gt``.  A positive mean
         indicates systematic over-prediction.
     porosity_volume_mae : Stat
-        Per-volume mean absolute porosity error: first aggregate patch
-        porosities per volume, then compute the absolute difference between
-        mean predicted and mean GT porosity.
+        Per-volume mean absolute porosity error.
     sharpness_ratio : Stat
-        Ratio of reconstruction sharpness to GT sharpness.  Values near 1.0
-        indicate the decoder preserves high-frequency structure.
+        Ratio of reconstruction sharpness to GT sharpness computed on porous
+        patches only (``gt.mean() > 0.005``).  Values near 1.0 indicate the
+        decoder preserves high-frequency structure.
     recon_std_mean : float
-        Mean over ~512 random test patches of the per-patch spatial mean of
-        the voxel-wise std across N stochastic passes.  Low values (< 0.01)
+        Mean over ~512 random patches of the per-patch spatial mean of the
+        voxel-wise std across N stochastic passes.  Low values (< 0.01)
         indicate a tight posterior — a prerequisite for LDM training.
+    per_bin : dict
+        Per-porosity-bin breakdown. Keys: ``"0to1pct"``, ``"1to3pct"``,
+        ``"3to8pct"``, ``"8pct_plus"``.  Each value is a dict with ``"n"``,
+        ``"psnr"``, ``"dice"``, ``"porosity_mae"`` (each a mean/std pair).
     _porosity_scatter : dict
         Private dict with lists ``"gt"``, ``"pred"``, ``"volume_id"`` for
         scatter-plot generation.  Not serialised to JSON.
@@ -155,11 +160,13 @@ class PatchMetrics:
     precision: Stat
     recall: Stat
     f1: Stat
+    iou: Stat
     porosity_mae: Stat
     porosity_bias: Stat
     porosity_volume_mae: Stat
     sharpness_ratio: Stat
     recon_std_mean: float
+    per_bin: dict = field(default_factory=dict)
     _porosity_scatter: dict = field(default_factory=dict, repr=False)
 
 
@@ -517,149 +524,223 @@ def eval_patches(
     data_zarr_root: Path,
     device: torch.device,
     eval_cfg: "EvalConfig",
-) -> PatchMetrics:
-    """Evaluate patch-level metrics over the test split of the Zarr dataset.
+    split: str = "test",
+) -> dict[str, PatchMetrics]:
+    """Evaluate patch-level metrics for *split* in three decoding modes.
 
-    All metrics except ``recon_std_mean`` use a single deterministic forward
-    pass (z = μ, no reparameterisation) for speed.  ``recon_std_mean`` is
-    computed on a random subset of ``eval_cfg.latent_patches`` patches using
-    ``eval_cfg.n_stochastic_samples`` stochastic passes.
+    Three modes are computed in a single pass over the dataset:
+    - **deterministic**: z = μ (no reparameterisation).
+    - **stoch_single**: one stochastic pass z = μ + σε.
+    - **stoch_mean**: mean of ``eval_cfg.patch_n_stochastic_samples`` passes.
+
+    Sharpness is computed only on porous patches (``gt.mean() > 0.005``) to
+    avoid the NaN / extreme-value problem on solid patches.
 
     Parameters
     ----------
     model : nn.Module
-        ConvVAE3DNoAttnV2 in eval mode.  Encoder receives XCT only.
     data_zarr_root : Path
-        Root of the patch dataset (contains ``volumes.zarr`` and
-        ``patch_index.parquet``).
     device : torch.device
     eval_cfg : EvalConfig
+    split : str
+        Dataset split: ``"test"`` (default) or ``"val"``.
 
     Returns
     -------
-    PatchMetrics
+    dict with keys ``"deterministic"``, ``"stoch_single"``, ``"stoch_mean"``,
+    each mapping to a :class:`PatchMetrics`.
     """
-    from torch.utils.data import DataLoader, Subset
+    from torch.utils.data import DataLoader
 
     from poregen.dataset.loader import PatchDataset, zarr_worker_init_fn
 
+    POROSITY_BINS = [0.0, 0.01, 0.03, 0.08, float("inf")]
+    BIN_NAMES = ["0to1pct", "1to3pct", "3to8pct", "8pct_plus"]
+    N_BINS = len(BIN_NAMES)
+
     index_path = data_zarr_root / "patch_index.parquet"
-    test_ds = PatchDataset(index_path, data_zarr_root, split="test")
+    ds = PatchDataset(index_path, data_zarr_root, split=split)
     loader = DataLoader(
-        test_ds,
-        batch_size=eval_cfg.batch_size,
-        shuffle=False,
-        num_workers=2,
-        worker_init_fn=zarr_worker_init_fn,
+        ds, batch_size=eval_cfg.batch_size, shuffle=False,
+        num_workers=2, worker_init_fn=zarr_worker_init_fn,
     )
 
-    psnr_vals:     list[float] = []
-    ssim_vals:     list[float] = []
-    mae_vals:      list[float] = []
-    dice_vals:     list[float] = []
-    prec_vals:     list[float] = []
-    rec_vals:      list[float] = []
-    f1_vals:       list[float] = []
-    por_mae_vals:  list[float] = []
-    por_bias_vals: list[float] = []
-    sharp_ratio:   list[float] = []
+    def _new_accum() -> dict:
+        return {
+            "psnr": [], "ssim": [], "mae": [],
+            "dice": [], "prec": [], "rec": [], "f1": [], "iou": [],
+            "por_mae": [], "por_bias": [],
+            "sharp_ratio": [],
+            "por_scatter_gt": [], "por_scatter_pred": [], "por_scatter_vid": [],
+            "vol_por_gt": {}, "vol_por_pred": {},
+            "bin_psnr":    [[] for _ in range(N_BINS)],
+            "bin_dice":    [[] for _ in range(N_BINS)],
+            "bin_por_mae": [[] for _ in range(N_BINS)],
+        }
 
-    por_scatter_gt:  list[float] = []
-    por_scatter_pred: list[float] = []
-    por_scatter_vid:  list[str]  = []
+    accums: dict[str, dict] = {
+        "deterministic": _new_accum(),
+        "stoch_single":  _new_accum(),
+        "stoch_mean":    _new_accum(),
+    }
 
-    vol_por_gt:   dict[str, list[float]] = {}
-    vol_por_pred: dict[str, list[float]] = {}
+    def _bin_idx(porosity: float) -> int:
+        for i in range(N_BINS - 1):
+            if porosity < POROSITY_BINS[i + 1]:
+                return i
+        return N_BINS - 1
+
+    def _acc_patch(acc: dict, g: np.ndarray, r: np.ndarray,
+                   mg: np.ndarray, mp: np.ndarray,
+                   pg: float, pp: float, vid: str) -> None:
+        mse_i = float(np.mean((g - r) ** 2))
+        acc["mae"].append(float(np.abs(g - r).mean()))
+        acc["psnr"].append(20.0 * math.log10(1.0 / math.sqrt(max(mse_i, 1e-12))))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            acc["ssim"].append(float(structural_similarity(g, r, data_range=1.0, win_size=5)))
+
+        seg = _dice_precision_recall(mg, mp)
+        acc["dice"].append(seg["dice"])
+        acc["prec"].append(seg["precision"])
+        acc["rec"].append(seg["recall"])
+        acc["f1"].append(seg["dice"])
+        acc["iou"].append(seg["iou"])
+
+        acc["por_mae"].append(abs(pp - pg))
+        acc["por_bias"].append(pp - pg)
+
+        # Sharpness only on porous patches to avoid solid-patch NaN problem
+        if g.mean() > 0.005:
+            sg = _sharpness_proxy(g)
+            sr = _sharpness_proxy(r)
+            if sg > 1e-9:
+                acc["sharp_ratio"].append(sr / sg)
+
+        acc["por_scatter_gt"].append(pg)
+        acc["por_scatter_pred"].append(pp)
+        acc["por_scatter_vid"].append(vid)
+        acc["vol_por_gt"].setdefault(vid, []).append(pg)
+        acc["vol_por_pred"].setdefault(vid, []).append(pp)
+
+        b = _bin_idx(pg)
+        acc["bin_psnr"][b].append(acc["psnr"][-1])
+        acc["bin_dice"][b].append(seg["dice"])
+        acc["bin_por_mae"][b].append(abs(pp - pg))
 
     model.eval()
+    n_passes = getattr(eval_cfg, "patch_n_stochastic_samples", 5)
 
     for batch_idx, batch in enumerate(loader):
         if eval_cfg.patch_batches is not None and batch_idx >= eval_cfg.patch_batches:
             break
 
-        xct_b = batch["xct"].to(device, non_blocking=True)  # (B,1,64,64,64)
-        mask_b = batch["mask"]                               # stays on CPU
-
-        # Deterministic pass: z = μ
-        h       = _encode(model, xct_b)
-        mu_b    = model.to_mu(h)
-        dec_b   = model.decoder(mu_b)
-        xct_out = model.xct_head(dec_b).clamp(0.0, 1.0)
-        msk_out = torch.sigmoid(model.mask_head(dec_b))
-
-        xct_np   = xct_b .squeeze(1).cpu().numpy()   # (B,64,64,64)
-        recon_np = xct_out.squeeze(1).cpu().numpy()
-        mask_np  = mask_b .squeeze(1).numpy()
-        pred_np  = msk_out.squeeze(1).cpu().numpy()
+        xct_b   = batch["xct"].to(device, non_blocking=True)
+        mask_b  = batch["mask"]
         por_gt_b = batch["porosity"]
         vol_ids  = batch["volume_id"]
 
-        for i in range(xct_np.shape[0]):
-            g  = xct_np [i]
-            r  = recon_np[i]
-            mg = (mask_np[i] >= 0.5)
-            mp = (pred_np[i] >= 0.5)
-            pg = float(por_gt_b[i])
-            pp = float(pred_np[i].mean())
-            vid = vol_ids[i]
+        # Encode once, decode in three modes
+        h     = _encode(model, xct_b)
+        mu_b  = model.to_mu(h)
+        lv_b  = model.to_logvar(h)
+        std_b = torch.exp(0.5 * lv_b)
 
-            mse_i = float(np.mean((g - r) ** 2))
-            mae_vals.append(float(np.abs(g - r).mean()))
-            psnr_vals.append(20.0 * math.log10(1.0 / math.sqrt(max(mse_i, 1e-12))))
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                ssim_vals.append(float(structural_similarity(g, r, data_range=1.0, win_size=5)))
+        # Deterministic: z = μ
+        dec_det = model.decoder(mu_b)
+        xct_det = model.xct_head(dec_det).clamp(0.0, 1.0)
+        msk_det = torch.sigmoid(model.mask_head(dec_det))
 
-            seg = _dice_precision_recall(mg, mp)
-            dice_vals.append(seg["dice"])
-            prec_vals.append(seg["precision"])
-            rec_vals.append(seg["recall"])
-            f1_vals.append(seg["dice"])  # F1 == Dice for binary
+        # Stochastic passes (single + N-mean in one loop)
+        torch.manual_seed(eval_cfg.stochastic_seed + batch_idx)
+        xct_runs: list[torch.Tensor] = []
+        msk_runs: list[torch.Tensor] = []
+        for _ in range(n_passes):
+            eps = torch.randn_like(mu_b)
+            z   = mu_b + std_b * eps
+            dec = model.decoder(z)
+            xct_runs.append(model.xct_head(dec).clamp(0.0, 1.0))
+            msk_runs.append(torch.sigmoid(model.mask_head(dec)))
 
-            por_mae_vals.append(abs(pp - pg))
-            por_bias_vals.append(pp - pg)
+        xct_s1 = xct_runs[0]
+        msk_s1 = msk_runs[0]
+        xct_sm = torch.stack(xct_runs, dim=0).mean(dim=0)
+        msk_sm = torch.stack(msk_runs, dim=0).mean(dim=0)
 
-            sg = _sharpness_proxy(g)
-            sr = _sharpness_proxy(r)
-            sharp_ratio.append(sr / sg if sg > 1e-9 else float("nan"))
+        xct_np  = xct_b.squeeze(1).cpu().numpy()
+        mask_np = mask_b.squeeze(1).numpy()
 
-            por_scatter_gt.append(pg)
-            por_scatter_pred.append(pp)
-            por_scatter_vid.append(str(vid))
-            vol_por_gt  .setdefault(str(vid), []).append(pg)
-            vol_por_pred.setdefault(str(vid), []).append(pp)
+        for mode, xct_out, msk_out in [
+            ("deterministic", xct_det, msk_det),
+            ("stoch_single",  xct_s1,  msk_s1),
+            ("stoch_mean",    xct_sm,  msk_sm),
+        ]:
+            recon_np = xct_out.squeeze(1).cpu().numpy()
+            pred_np  = msk_out.squeeze(1).cpu().numpy()
+            acc = accums[mode]
+
+            for i in range(xct_np.shape[0]):
+                _acc_patch(
+                    acc,
+                    xct_np[i], recon_np[i],
+                    (mask_np[i] >= 0.5), (pred_np[i] >= 0.5),
+                    float(por_gt_b[i]), float(pred_np[i].mean()),
+                    str(vol_ids[i]),
+                )
 
         if (batch_idx + 1) % 20 == 0:
-            logger.info("  Patch eval: %d batches / %d patches …",
-                        batch_idx + 1, len(psnr_vals))
+            logger.info("  Patch eval [%s]: %d batches / %d patches …",
+                        split, batch_idx + 1, len(accums["deterministic"]["psnr"]))
 
-    # Per-volume porosity MAE
-    vol_maes = [abs(np.mean(vol_por_pred[v]) - np.mean(vol_por_gt[v]))
-                for v in vol_por_gt]
+    # recon_std_mean on latent_patches random patches (shared across modes)
+    recon_std_mean = _compute_recon_std_mean(model, ds, device, eval_cfg)
 
-    # recon_std_mean on latent_patches random patches
-    recon_std_mean = _compute_recon_std_mean(model, test_ds, device, eval_cfg)
+    def _build(acc: dict) -> PatchMetrics:
+        vol_maes = [
+            abs(np.mean(acc["vol_por_pred"][v]) - np.mean(acc["vol_por_gt"][v]))
+            for v in acc["vol_por_gt"]
+        ]
+        per_bin: dict = {}
+        for bi, bname in enumerate(BIN_NAMES):
+            per_bin[bname] = {
+                "n": len(acc["bin_psnr"][bi]),
+                "psnr": {
+                    "mean": float(np.mean(acc["bin_psnr"][bi]))    if acc["bin_psnr"][bi]    else float("nan"),
+                    "std":  float(np.std(acc["bin_psnr"][bi]))     if acc["bin_psnr"][bi]    else float("nan"),
+                },
+                "dice": {
+                    "mean": float(np.mean(acc["bin_dice"][bi]))    if acc["bin_dice"][bi]    else float("nan"),
+                    "std":  float(np.std(acc["bin_dice"][bi]))     if acc["bin_dice"][bi]    else float("nan"),
+                },
+                "porosity_mae": {
+                    "mean": float(np.mean(acc["bin_por_mae"][bi])) if acc["bin_por_mae"][bi] else float("nan"),
+                    "std":  float(np.std(acc["bin_por_mae"][bi]))  if acc["bin_por_mae"][bi] else float("nan"),
+                },
+            }
+        return PatchMetrics(
+            n_patches=len(acc["psnr"]),
+            psnr=Stat.from_list(acc["psnr"]),
+            ssim=Stat.from_list(acc["ssim"]),
+            mae=Stat.from_list(acc["mae"]),
+            dice=Stat.from_list(acc["dice"]),
+            precision=Stat.from_list(acc["prec"]),
+            recall=Stat.from_list(acc["rec"]),
+            f1=Stat.from_list(acc["f1"]),
+            iou=Stat.from_list(acc["iou"]),
+            porosity_mae=Stat.from_list(acc["por_mae"]),
+            porosity_bias=Stat.from_list(acc["por_bias"]),
+            porosity_volume_mae=Stat.from_list(vol_maes),
+            sharpness_ratio=Stat.from_list(acc["sharp_ratio"]),
+            recon_std_mean=recon_std_mean,
+            per_bin=per_bin,
+            _porosity_scatter={
+                "gt":        acc["por_scatter_gt"],
+                "pred":      acc["por_scatter_pred"],
+                "volume_id": acc["por_scatter_vid"],
+            },
+        )
 
-    return PatchMetrics(
-        n_patches=len(psnr_vals),
-        psnr=Stat.from_list(psnr_vals),
-        ssim=Stat.from_list(ssim_vals),
-        mae=Stat.from_list(mae_vals),
-        dice=Stat.from_list(dice_vals),
-        precision=Stat.from_list(prec_vals),
-        recall=Stat.from_list(rec_vals),
-        f1=Stat.from_list(f1_vals),
-        porosity_mae=Stat.from_list(por_mae_vals),
-        porosity_bias=Stat.from_list(por_bias_vals),
-        porosity_volume_mae=Stat.from_list(vol_maes),
-        sharpness_ratio=Stat.from_list([v for v in sharp_ratio if not math.isnan(v)]),
-        recon_std_mean=recon_std_mean,
-        _porosity_scatter={
-            "gt": por_scatter_gt,
-            "pred": por_scatter_pred,
-            "volume_id": por_scatter_vid,
-        },
-    )
+    return {mode: _build(accums[mode]) for mode in accums}
 
 
 @torch.no_grad()
@@ -1210,6 +1291,8 @@ def select_test_volumes(data_zarr_root: Path, n_volumes: int) -> list[str]:
     ----------
     data_zarr_root : Path
     n_volumes : int
+        Number of volumes to select.  Pass ``-1`` or ``0`` to return all
+        available test volumes.
 
     Returns
     -------
@@ -1225,7 +1308,7 @@ def select_test_volumes(data_zarr_root: Path, n_volumes: int) -> list[str]:
         .mean()
         .sort_values()
     )
-    if n_volumes >= len(test):
+    if n_volumes <= 0 or n_volumes >= len(test):
         return list(test.index)
 
     positions = np.linspace(0, len(test) - 1, n_volumes, dtype=int)
