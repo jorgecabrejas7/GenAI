@@ -1,0 +1,18 @@
+experiment:
+  name: r05
+  variant: base
+  description: >-
+    R05 — same as R04 but lower free_bits (0.1 nats/channel) to allow more KL
+    pressure and higher disc_weight (0.05) to strengthen the adversarial signal.
+
+extends: r04/base
+
+overrides:
+  # Change 1: lower free_bits threshold so more channels contribute to KL
+  loss:
+    kl_free_bits: 0.1
+
+# Change 2: stronger discriminator weight (was 0.01 in R04)
+# Kept at top level (not inside overrides) — same convention as R04.
+discriminator:
+  disc_weight: 0.05

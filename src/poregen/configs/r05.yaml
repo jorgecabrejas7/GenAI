@@ -1,0 +1,80 @@
+# PoreGen VAE — R05
+#
+# R05 = R04 + lower free_bits + stronger discriminator weight
+#
+# What changed from R04
+# ---------------------
+# 1. free_bits: 0.25 → 0.1
+#    R04 confirmed no channel collapse at free_bits=0.25; reducing to 0.1
+#    allows more channels to contribute non-trivially to the KL term while
+#    still protecting against full posterior collapse.
+#
+# 2. disc_weight: 0.01 → 0.05
+#    R04 training showed the adversarial signal was present but weak
+#    (gen_adv_loss contribution small relative to recon losses).
+#    Increasing to 0.05 strengthens the sharpness pressure from the
+#    discriminator without destabilising the VAE objective.
+#
+# Everything else is identical to R04.
+
+model:
+  name: v2.conv_noattn_dualbranch
+  in_channels: 1
+  z_channels: 16
+  base_channels: 32
+  n_blocks: 2
+  patch_size: 64
+
+loss:
+  xct_loss_type: charbonnier
+  xct_weight: 1.0
+  use_focal: true
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  mask_bce_weight: 1.0
+  mask_bce_pos_weight: 1.0
+  mask_dice_weight: 1.0
+  use_tversky: true
+  tversky_alpha: 0.5
+  tversky_beta: 0.5
+  kl_free_bits: 0.1        # R05: reduced from 0.25 → 0.1 nats/channel
+  kl_warmup_steps: 0
+  kl_max_beta: 0.05
+
+training:
+  seed: 42
+  lr: 2.0e-4
+  weight_decay: 0.01
+  total_steps: 71690
+  max_grad_norm: null
+  scheduler: none
+  lr_min: 2.0e-5
+  warmup_steps: 0
+  log_every: 1
+  eval_every: 62
+  val_batches: 20
+  test_every: 625
+  test_batches: 20
+  save_every: 1000
+  image_log_every: 62
+  montecarlo_every: 250
+  montecarlo_batch_size: 8
+  final_full_eval: true
+  sample_every: 12500
+  n_patch_samples: 8
+  compile: true
+  deterministic: false
+
+data:
+  split_version: v2
+  batch_size: 128
+  num_workers: 4
+  pin_memory: true
+
+discriminator:
+  enabled: true
+  in_channels: 1
+  base_channels: 64
+  lr: 2.0e-4
+  weight_decay: 0.01
+  disc_weight: 0.05        # R05: increased from 0.01 → 0.05
