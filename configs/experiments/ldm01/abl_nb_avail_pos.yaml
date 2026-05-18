@@ -1,0 +1,10 @@
+extends: ldm01/base
+experiment:
+  name: ldm01
+  variant: abl_nb_avail_pos
+  description: >-
+    Ablation D — neighbors + availability + spatial position, no porosity
+    conditioning. BFS generation order.
+
+model:
+  use_por_cond: false

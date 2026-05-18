@@ -21,6 +21,7 @@ def save_checkpoint(
     step: int,
     metadata: dict[str, Any] | None = None,
     scheduler: Any | None = None,
+    ema_state_dict: dict | None = None,
 ) -> Path:
     """Save model + optimizer + scaler + scheduler state atomically.
 
@@ -45,6 +46,8 @@ def save_checkpoint(
         state["rng_cuda"] = torch.cuda.get_rng_state_all()
     if scheduler is not None:
         state["scheduler"] = scheduler.state_dict()
+    if ema_state_dict is not None:
+        state["ema"] = ema_state_dict
 
     tmp = path.with_suffix(".tmp")
     torch.save(state, tmp)
@@ -63,6 +66,7 @@ def save_checkpoint_async(
     latest_path: str | Path | None = None,
     *,
     thread_holder: list | None = None,
+    ema_state_dict: dict | None = None,
 ) -> None:
     """Collect state dicts synchronously, then write to disk in a background thread.
 
@@ -107,6 +111,8 @@ def save_checkpoint_async(
         state["rng_cuda"] = torch.cuda.get_rng_state_all()
     if scheduler is not None:
         state["scheduler"] = scheduler.state_dict()
+    if ema_state_dict is not None:
+        state["ema"] = ema_state_dict
 
     # ── Join previous background save if one is tracked ───────────────────────
     if thread_holder is not None and thread_holder and thread_holder[0] is not None:

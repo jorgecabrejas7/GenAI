@@ -1,0 +1,12 @@
+extends: ldm01/base
+experiment:
+  name: ldm01
+  variant: abl_nb_only
+  description: >-
+    Ablation B — neighbor latent content (6 directions) but no availability
+    state embedding and no scalar conditioning. BFS generation order.
+
+model:
+  use_avail_embedding: false
+  use_pos_cond: false
+  use_por_cond: false

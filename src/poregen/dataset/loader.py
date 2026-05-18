@@ -100,7 +100,9 @@ class PatchDataset(Dataset):
         return self._zarr_cache[volume_id]
 
     def _normalise_xct(self, xct: np.ndarray) -> torch.Tensor:
-        return torch.from_numpy(xct.astype(np.float32) / 255.0).unsqueeze(0)
+        t = torch.from_numpy(np.asarray(xct, dtype=np.float32))
+        t.mul_(1.0 / 255.0)
+        return t.unsqueeze(0)
 
     # ------------------------------------------------------------------
     # Dataset interface

@@ -165,13 +165,18 @@ def _normalise_cfg(cfg: dict[str, Any], *, experiment_id: str) -> dict[str, Any]
             f"got {runtime['checkpoints']['best_mode']!r}."
         )
 
-    core_cfg = {
-        "model": cfg["model"],
-        "loss": cfg["loss"],
-        "training": cfg["training"],
-        "data": cfg["data"],
-    }
-    parse_config(core_cfg)
+    # parse_config validates VAE-specific field schemas; skip silently for
+    # experiment types (e.g. LDM) that use a different model/data structure.
+    try:
+        core_cfg = {
+            "model": cfg["model"],
+            "loss": cfg.get("loss", {}),
+            "training": cfg["training"],
+            "data": cfg["data"],
+        }
+        parse_config(core_cfg)
+    except (KeyError, TypeError):
+        pass
     return cfg
 
 

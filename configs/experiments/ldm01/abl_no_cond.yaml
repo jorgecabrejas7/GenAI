@@ -1,0 +1,13 @@
+extends: ldm01/base
+experiment:
+  name: ldm01
+  variant: abl_no_cond
+  description: >-
+    Ablation A — timestep conditioning only, no spatial or semantic context.
+    Independent patch generation (no BFS ordering needed).
+
+model:
+  use_neighbor_cond: false
+  use_avail_embedding: false
+  use_pos_cond: false
+  use_por_cond: false

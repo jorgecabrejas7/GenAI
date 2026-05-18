@@ -30,8 +30,8 @@ def latent_channel_moments(mu: torch.Tensor) -> dict[str, Any]:
     mu_flat = _flatten_mu_channels(mu).to(dtype=torch.float64)
     return {
         "count": int(mu_flat.shape[1]),
-        "sum": mu_flat.sum(dim=1).cpu(),
-        "sum_sq": mu_flat.square().sum(dim=1).cpu(),
+        "sum": mu_flat.sum(dim=1),
+        "sum_sq": mu_flat.square().sum(dim=1),
     }
 
 

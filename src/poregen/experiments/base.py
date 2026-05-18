@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from poregen.configs.config import load_config
-from poregen.dataset.loader import PatchDataset
+from poregen.dataset.loader import PatchDataset, zarr_worker_init_fn
 from poregen.training import load_checkpoint, select_device
 
 
@@ -76,12 +76,15 @@ def build_patch_loader(
         shuffle=shuffle,
         num_workers=effective_workers,
         pin_memory=bool(
-            data_cfg.get("pin_memory", False) if pin_memory is None else pin_memory
+            data_cfg.get("pin_memory", True) if pin_memory is None else pin_memory
         ),
         drop_last=drop_last,
     )
-    if effective_workers > 0 and data_cfg.get("prefetch_factor") is not None:
-        kwargs["prefetch_factor"] = int(data_cfg["prefetch_factor"])
+    if effective_workers > 0:
+        kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", True))
+        kwargs["worker_init_fn"]     = zarr_worker_init_fn
+        if data_cfg.get("prefetch_factor") is not None:
+            kwargs["prefetch_factor"] = int(data_cfg["prefetch_factor"])
 
     return DataLoader(dataset, **kwargs)
 

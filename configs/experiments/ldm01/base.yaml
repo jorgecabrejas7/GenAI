@@ -1,0 +1,84 @@
+experiment:
+  name: ldm01
+  variant: base
+  description: >-
+    First LDM run — 3D U-Net DDPM denoiser, cosine schedule T=1000,
+    conditioned on 6-connected neighbors + availability + spatial position + dual-porosity VVF.
+
+loss: {}
+
+model:
+  type: unet3d
+  z_channels: 16
+  base_channels: 128
+  channel_mult: [1, 2, 4]
+  n_res_blocks: 2
+  attn_at_bottleneck: true
+  cond_embed_dim: 512
+  nb_avail_embed_dim: 8
+  n_attn_heads: 8
+  dropout: 0.0
+
+noise_schedule:
+  type: cosine
+  T: 1000
+  s: 0.008
+
+training:
+  seed: 42
+  batch_size: 16
+  ema_decay: 0.9999
+  lr: 1.0e-4
+  weight_decay: 0.01
+  total_steps: 200000
+  max_grad_norm: 1.0
+  scheduler: cosine
+  lr_min: 1.0e-5
+  warmup_steps: 2000
+  log_every: 10
+  eval_every: 500
+  val_batches: 50
+  save_every: 5000
+  compile: true
+
+data:
+  latents_root: data/split_v2/latents
+  patch_stride: 32
+  nb_dropout_prob: 0.20
+  num_workers: 4
+  pin_memory: false
+  persistent_workers: true
+  prefetch_factor: 1
+
+runtime:
+  runs_root: runs/ldm
+  device:
+    gpu_id: null
+  checkpoints:
+    save_latest: true
+    save_best: true
+    best_metric: val.loss
+    best_mode: min
+  resume:
+    prune_jsonl: true
+  metadata:
+    capture_git: true
+    capture_machine: true
+    capture_environment: true
+  run_name:
+    timestamp_format: "%Y%m%d-%H%M%S"
+    run_index_width: 4
+    fields:
+      - label: z
+        path: model.z_channels
+      - label: c
+        path: model.base_channels
+      - label: bs
+        path: training.batch_size
+      - label: lr
+        path: training.lr
+        transform: sci
+
+  machine:
+    name: dgx_spark
+    accelerator: NVIDIA GB10 Blackwell

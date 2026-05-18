@@ -27,6 +27,8 @@ def focal_loss(
     target: torch.Tensor,
     gamma: float = 2.0,
     alpha: float = 0.25,
+    *,
+    sigmoid: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Focal loss (Lin et al. 2017) for imbalanced binary segmentation.
 
@@ -47,7 +49,7 @@ def focal_loss(
         for the negative (background) class.  Lin et al. default is ``0.25``.
     """
     bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-    prob   = torch.sigmoid(logits)
+    prob   = sigmoid if sigmoid is not None else torch.sigmoid(logits)
     p_t    = prob * target + (1.0 - prob) * (1.0 - target)
     alpha_t = alpha * target + (1.0 - alpha) * (1.0 - target)
     weight  = alpha_t * (1.0 - p_t).pow(gamma)
@@ -166,7 +168,7 @@ def combined_mask_loss(
     - ``mask_total``: weighted sum.
     """
     if use_focal:
-        primary = focal_loss(logits, target, gamma=focal_gamma, alpha=focal_alpha)
+        primary = focal_loss(logits, target, gamma=focal_gamma, alpha=focal_alpha, sigmoid=sigmoid)
         result_extra = {"mask_focal": primary}
     else:
         primary = bce_logits_loss(logits, target, pos_weight=pos_weight)

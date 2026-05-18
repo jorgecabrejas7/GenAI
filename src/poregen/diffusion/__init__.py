@@ -1,4 +1,12 @@
-"""Diffusion module — placeholder for latent-patch diffusion model.
+"""Latent Diffusion Model components for PoreGen."""
 
-TODO: implement denoising network, noise schedule, sampling.
-"""
+from poregen.diffusion.noise_schedule import DDPMSchedule
+from poregen.diffusion.latent_dataset import LatentPatchDataset
+from poregen.diffusion.sampler import DDPMSampler, VolumeGenerator
+
+__all__ = [
+    "DDPMSchedule",
+    "LatentPatchDataset",
+    "DDPMSampler",
+    "VolumeGenerator",
+]

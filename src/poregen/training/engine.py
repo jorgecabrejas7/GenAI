@@ -198,21 +198,24 @@ def train_step(
         losses["total"] = losses["total"] + disc_weight * _gen_adv_loss
 
     latent_moments = latent_channel_moments(output.mu)
-    mask_pred_mean = float(torch.sigmoid(output.mask_logits).mean().item())
+    _mask_pred_tensor = torch.sigmoid(output.mask_logits).mean().detach()
 
     scaler.scale(losses["total"]).backward()
 
     if scaler.is_enabled():
         scaler.unscale_(optimizer)
 
-    # Per-module gradient norms — support both single-branch and dual-branch encoders
-    module_grad_norms: dict[str, float] = {}
+    # Per-module gradient norms — accumulate on GPU, single sync at end
+    _norm_gpu: dict[str, torch.Tensor] = {}
     for name in ("encoder", "encoder_a", "encoder_b", "decoder", "mask_head"):
         module = getattr(model, name, None)
         if module is not None:
-            module_grad_norms[f"grad_norm_{name}"] = torch.nn.utils.clip_grad_norm_(
-                module.parameters(), float("inf")
-            ).item()
+            grads = [p.grad.detach() for p in module.parameters() if p.grad is not None]
+            if grads:
+                _norm_gpu[f"grad_norm_{name}"] = torch.stack(
+                    [g.norm(2) for g in grads]
+                ).norm(2)
+    module_grad_norms: dict[str, float] = {k: v.item() for k, v in _norm_gpu.items()}
 
     grad_norm = torch.nn.utils.clip_grad_norm_(
         model.parameters(),
@@ -256,7 +259,7 @@ def train_step(
         }
 
     result = {k: _to_scalar(v) for k, v in losses.items()}
-    result["mask_pred_mean"] = mask_pred_mean
+    result["mask_pred_mean"] = float(_mask_pred_tensor.item())
     result.update(disc_metrics)
     return result, grad_norm, latent_moments, module_grad_norms
 
@@ -269,10 +272,12 @@ def eval_step(
     step: int,
     device: torch.device,
     autocast_dtype: torch.dtype = torch.float16,
-) -> tuple[dict[str, Any], VAEOutput]:
+) -> tuple[dict[str, Any], VAEOutput, torch.Tensor, torch.Tensor]:
     """Single eval step (no grad, AMP for speed).
 
-    Returns the loss dict (scalars + kl_per_channel list) and the VAEOutput.
+    Returns the loss dict (scalars + kl_per_channel list), the VAEOutput,
+    and the device-side xct/mask tensors to avoid redundant H→D transfers
+    in the caller.
     """
     model.eval()
     xct  = batch["xct"].to(device, non_blocking=True)
@@ -283,7 +288,7 @@ def eval_step(
         output: VAEOutput = model(xct, mask)
         losses = loss_fn(output, batch_dev, step)
 
-    return {k: _to_scalar(v) for k, v in losses.items()}, output
+    return {k: _to_scalar(v) for k, v in losses.items()}, output, xct, mask
 
 
 # ── eval-over-N-batches helper ────────────────────────────────────────────────
@@ -318,13 +323,10 @@ def _run_eval(
 
     for batch_idx in tqdm(range(n_batches), desc=desc, leave=False, unit="batch"):
         batch = next(data_iter)
-        losses, output = eval_step(
+        losses, output, xct_dev, mask_dev = eval_step(
             model, batch, loss_fn, step, device, autocast_dtype
         )
         _accumulate(loss_acc, losses)
-
-        mask_dev = batch["mask"].to(device, non_blocking=True)
-        xct_dev  = batch["xct"].to(device,  non_blocking=True)
 
         # Compute sigmoid ONCE — passed to all metrics to avoid redundant sigmoid
         # calls inside each metric function (each would otherwise create a full
@@ -343,9 +345,9 @@ def _run_eval(
         # Per-volume porosity tracking — accumulate tensors, defer .item()
         pred_por_v = mask_sigmoid.mean(dim=(1, 2, 3, 4))   # (B,)
         gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))        # (B,)
-        pred_por_signed_all.append((pred_por_v - gt_por_v).cpu())
-        pred_por_all.append(pred_por_v.cpu())
-        gt_por_all.append(gt_por_v.cpu())
+        pred_por_signed_all.append((pred_por_v - gt_por_v).detach())
+        pred_por_all.append(pred_por_v.detach())
+        gt_por_all.append(gt_por_v.detach())
         vol_ids_all.append(list(batch["volume_id"]))
 
         # Reconstruction metrics — use pre-activated xct_sigmoid, no double sigmoid
@@ -561,7 +563,10 @@ def train_loop(
     list of per-step metric dicts (train + val records, for inline plotting).
     """
     if compile_model:
-        model = torch.compile(model, mode="reduce-overhead")  # type: ignore[assignment]
+        model = torch.compile(model, mode="max-autotune", dynamic=False)  # type: ignore[assignment]
+        if discriminator is not None:
+            discriminator = torch.compile(discriminator, mode="max-autotune", dynamic=False)  # type: ignore[assignment]
+        loss_fn = torch.compile(loss_fn, mode="max-autotune")  # type: ignore[assignment]
 
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -936,8 +941,8 @@ def _save_patch_samples(
             batch  = next(data_iter)
             n_take = min(n_samples - collected, batch["xct"].shape[0])
 
-            xct  = batch["xct"] [:n_take].to(device)
-            mask = batch["mask"][:n_take].to(device)
+            xct  = batch["xct"] [:n_take].to(device, non_blocking=True)
+            mask = batch["mask"][:n_take].to(device, non_blocking=True)
 
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 output = model(xct, mask)
