@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Iterator
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -47,7 +49,8 @@ class EMAModel:
         return self.shadow
 
     def load_state_dict(self, state: dict[str, torch.Tensor]) -> None:
-        self.shadow = {k: v.clone().float() for k, v in state.items()}
+        device = next(iter(self.shadow.values())).device if self.shadow else torch.device("cpu")
+        self.shadow = {k: v.clone().float().to(device) for k, v in state.items()}
 
     def apply_to(self, model: nn.Module) -> None:
         """Copy EMA weights into *model* in-place (for inference)."""
@@ -194,6 +197,172 @@ def _run_eval(
     return _mean_acc(acc, n_batches)
 
 
+@torch.no_grad()
+def _run_full_eval(
+    model: nn.Module,
+    val_loader: Any,
+    schedule: Any,
+    device: torch.device,
+    autocast_dtype: torch.dtype,
+    desc: str = "Full val",
+) -> dict[str, float]:
+    """Pass through the entire validation set."""
+    acc: dict[str, float] = {}
+    n = 0
+    for batch in tqdm(val_loader, desc=desc, leave=False, unit="batch"):
+        _accumulate(acc, ldm_eval_step(model, batch, schedule, device, autocast_dtype))
+        n += 1
+    return _mean_acc(acc, max(n, 1))
+
+
+# ── sample visualisation ─────────────────────────────────────────────────────
+
+def _gaussian_por_grid(
+    grid: tuple[int, int, int],
+    global_por: float,
+    sigma: float = 1.0,
+) -> dict[tuple[int, int, int], float]:
+    """Return per-patch local porosity values following a 3-D Gaussian centred on
+    the volume, normalised so the mean over all patches equals *global_por*."""
+    nz, ny, nx = grid
+    cz, cy, cx = (nz - 1) / 2.0, (ny - 1) / 2.0, (nx - 1) / 2.0
+    weights: dict[tuple[int, int, int], float] = {}
+    for iz in range(nz):
+        for iy in range(ny):
+            for ix in range(nx):
+                d2 = (iz - cz) ** 2 + (iy - cy) ** 2 + (ix - cx) ** 2
+                weights[(iz, iy, ix)] = math.exp(-d2 / (2.0 * sigma ** 2))
+    total_w = sum(weights.values())
+    scale = (global_por * nz * ny * nx) / total_w
+    return {k: v * scale for k, v in weights.items()}
+
+
+@torch.no_grad()
+def _log_sample_volume(
+    *,
+    model: nn.Module,
+    ema: "EMAModel",
+    schedule: Any,
+    vae: nn.Module | None,
+    step: int,
+    run_dir: Path,
+    tb_writer: Any | None,
+    device: torch.device,
+    autocast_dtype: torch.dtype,
+    ddim_steps: int = 20,
+    grid: tuple[int, int, int] = (3, 3, 3),
+    global_por: float = 0.02,
+    latent_std: float = 1.0,
+    patch_size: int = 64,
+    patch_stride: int = 64,
+    latent_size: int = 16,
+) -> None:
+    """Generate a small volume with DDIM, decode with VAE if available.
+
+    When vae is None the raw latents are logged as grayscale heatmaps instead
+    of decoded XCT/mask — sample generation always runs regardless.
+    """
+    from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator
+
+    _logger.info(
+        "Generating sample volume at step %d  grid=%s  DDIM steps=%d  vae=%s",
+        step, grid, ddim_steps, "yes" if vae is not None else "no (raw latents)",
+    )
+
+    orig_state = {k: v.clone() for k, v in model.state_dict().items()}
+    ema.apply_to(model)
+    model.eval()
+
+    samples_dir = run_dir / "samples"
+    samples_dir.mkdir(exist_ok=True)
+    step_dir = samples_dir / f"step_{step:08d}"
+    step_dir.mkdir(exist_ok=True)
+
+    try:
+        sampler = DDIMSampler(model, schedule, device, n_steps=ddim_steps)
+        local_por_map = _gaussian_por_grid(grid, global_por)
+        vol_shape: tuple[int, int, int] = tuple(  # type: ignore[assignment]
+            (g - 1) * patch_stride + patch_size for g in grid
+        )
+
+        if vae is not None:
+            generator = VolumeGenerator(
+                sampler=sampler,
+                vae=vae,
+                device=device,
+                patch_size=patch_size,
+                patch_stride=patch_stride,
+                latent_size=latent_size,
+                latent_std=latent_std,
+            )
+            xct, mask = generator.generate(
+                volume_shape=vol_shape,
+                target_porosity=global_por,
+                local_por_map=local_por_map,
+                autocast_dtype=autocast_dtype,
+            )
+            VolumeGenerator.save_tiff(xct, mask, step_dir / "xct.tif", step_dir / "mask.tif")
+            _logger.info("Saved sample TIFFs → %s", step_dir)
+
+            if tb_writer is not None:
+                D, H, W = xct.shape
+
+                def _img(arr2d: np.ndarray) -> torch.Tensor:
+                    return torch.from_numpy(arr2d.astype(np.float32) / 255.0).unsqueeze(0)
+
+                tb_writer.add_image("samples/xct_dslice",  _img(xct[D // 2]),       step)
+                tb_writer.add_image("samples/xct_hslice",  _img(xct[:, H // 2]),    step)
+                tb_writer.add_image("samples/xct_wslice",  _img(xct[:, :, W // 2]), step)
+                tb_writer.add_image("samples/mask_dslice", _img(mask[D // 2]),       step)
+                tb_writer.add_image("samples/mask_hslice", _img(mask[:, H // 2]),    step)
+                tb_writer.add_image("samples/mask_wslice", _img(mask[:, :, W // 2]), step)
+
+        else:
+            # No VAE — generate latents (via the shared two-phase checkerboard
+            # schedule) and log channel-mean heatmaps without decoding.
+            generator = VolumeGenerator(
+                sampler=sampler,
+                vae=None,  # type: ignore[arg-type]
+                device=device,
+                patch_size=patch_size,
+                patch_stride=patch_stride,
+                latent_size=latent_size,
+                latent_std=latent_std,
+            )
+            generated, grid_origins = generator._generate_latents(
+                volume_shape=vol_shape,
+                target_porosity=global_por,
+                local_por_map=local_por_map,
+                autocast_dtype=autocast_dtype,
+            )
+
+            # Assemble channel-mean latent volume and save as npy + log to TB
+            C, LS = sampler.model.cfg.z_channels, latent_size
+            lat_vol = np.zeros(vol_shape, dtype=np.float32)
+            wgt_vol = np.zeros(vol_shape, dtype=np.float32)
+            for gi, z_gen in generated.items():
+                z0, y0, x0 = grid_origins[gi]
+                ze, ye, xe = z0 + patch_size, y0 + patch_size, x0 + patch_size
+                lat_vol[z0:ze, y0:ye, x0:xe] += z_gen.float().cpu().mean(0).numpy()
+                wgt_vol[z0:ze, y0:ye, x0:xe] += 1.0
+            lat_vol /= np.maximum(wgt_vol, 1e-8)
+            np.save(step_dir / "latents_mean.npy", lat_vol)
+            _logger.info("Saved raw latent volume (channel mean) → %s", step_dir)
+
+            if tb_writer is not None:
+                D, H, W = lat_vol.shape
+                def _norm(arr2d: np.ndarray) -> torch.Tensor:
+                    lo, hi = arr2d.min(), arr2d.max()
+                    norm = (arr2d - lo) / max(hi - lo, 1e-8)
+                    return torch.from_numpy(norm).unsqueeze(0)
+                tb_writer.add_image("samples/latent_dslice", _norm(lat_vol[D // 2]),       step)
+                tb_writer.add_image("samples/latent_hslice", _norm(lat_vol[:, H // 2]),    step)
+                tb_writer.add_image("samples/latent_wslice", _norm(lat_vol[:, :, W // 2]), step)
+
+    finally:
+        model.load_state_dict(orig_state)
+
+
 # ── training loop ─────────────────────────────────────────────────────────────
 
 def ldm_train_loop(
@@ -212,12 +381,16 @@ def ldm_train_loop(
     scheduler: Any | None = None,
     ema_decay: float = 0.9999,
     ema_state: dict | None = None,
+    vae: nn.Module | None = None,
+    latent_std: float = 1.0,
 ) -> list[dict[str, Any]]:
     """Step-based LDM training loop mirroring the VAE train_loop.
 
     Reads from cfg["training"]:
       total_steps, log_every, eval_every, val_batches, save_every,
-      max_grad_norm, compile
+      max_grad_norm, compile,
+      full_val_every,
+      sample_every, sample_ddim_steps, sample_grid, sample_global_por
     """
     if device is None:
         device = next(model.parameters()).device
@@ -231,6 +404,14 @@ def ldm_train_loop(
     max_grad_norm = training_cfg.get("max_grad_norm")
     if max_grad_norm is not None:
         max_grad_norm = float(max_grad_norm)
+
+    full_val_every    = int(training_cfg.get("full_val_every",    0))
+    sample_every      = int(training_cfg.get("sample_every", 0))
+    sample_ddim_steps = int(training_cfg.get("sample_ddim_steps", 20))
+    _raw_grid         = training_cfg.get("sample_grid", [3, 3, 3])
+    sample_grid       = tuple(int(x) for x in _raw_grid)
+    sample_global_por = float(training_cfg.get("sample_global_por", 0.02))
+    sample_patch_stride = int(cfg.get("data", {}).get("patch_stride", 64))
 
     compile_model = bool(training_cfg.get("compile", False))
     if compile_model:
@@ -337,6 +518,49 @@ def ldm_train_loop(
                         ema_state_dict=ema.state_dict(),
                     )
                     _logger.info("New best val loss=%.6f at step %d → best.ckpt", best_val_loss, step + 1)
+
+            # ── full validation pass ─────────────────────────────────────────
+            if val_loader is not None and full_val_every > 0 and (step + 1) % full_val_every == 0:
+                full_agg = _run_full_eval(
+                    model, val_loader, schedule, device, autocast_dtype,
+                    desc=f"Full val {step + 1}",
+                )
+                full_record = {
+                    "step":    step,
+                    "split":   "val_full",
+                    "elapsed": time.time() - t0,
+                    **full_agg,
+                }
+                history.append(full_record)
+                log_file.write(json.dumps(full_record) + "\n")
+                log_file.flush()
+                metrics_file.write(json.dumps(full_record) + "\n")
+                metrics_file.flush()
+                if tb_writer is not None:
+                    tb_writer.add_scalar("val_full/loss", full_agg["loss"], step)
+                _logger.info("Full val step %d — loss=%.6f", step + 1, full_agg["loss"])
+
+            # ── sample visualisation ─────────────────────────────────────────
+            if sample_every > 0 and (step + 1) % sample_every == 0:
+                try:
+                    _log_sample_volume(
+                        model=model,
+                        ema=ema,
+                        schedule=schedule,
+                        vae=vae,
+                        step=step,
+                        run_dir=run_dir,
+                        tb_writer=tb_writer,
+                        device=device,
+                        autocast_dtype=autocast_dtype,
+                        ddim_steps=sample_ddim_steps,
+                        grid=sample_grid,
+                        global_por=sample_global_por,
+                        latent_std=latent_std,
+                        patch_stride=sample_patch_stride,
+                    )
+                except Exception as _exc:
+                    _logger.warning("Sample generation failed at step %d: %s", step, _exc)
 
             # ── checkpoint ──────────────────────────────────────────────────
             if (step + 1) % save_every == 0:

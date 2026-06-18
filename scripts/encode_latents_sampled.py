@@ -1,41 +1,43 @@
-"""Pre-compute VAE latents for all patches and store them in Zarr.
+"""Pre-compute VAE posterior parameters (mu, logvar) for all patches.
+
+Stores mu and logvar packed into a SINGLE zarr array:
+    latents.zarr/latents  (N, 2*z_ch, 16, 16, 16) float16
+    first z_ch channels = mu
+    last  z_ch channels = logvar
+
+One zarr read per item at training time (same as ldm01) — halves I/O vs a
+two-array design.  ldm01's mu-only store is NOT touched.
 
 Usage
 -----
-python scripts/encode_latents.py \\
+python scripts/encode_latents_sampled.py \\
     --experiment r05/base \\
-    --checkpoint runs/vae/r05/<run>/checkpoints/best.ckpt \\
+    --checkpoint runs/vae/r05/<run>/best.ckpt \\
     --data-root data/split_v2 \\
-    --output data/split_v2/latents_s64 \\
-    [--stride 64] \\
+    --output data/split_v2/latents_s64_sampled \\
+    [--stride 32] \\
     [--batch-size 64] \\
     [--device cuda] \\
-    [--splits train val test]
+    [--n-scale-samples 50000]
 
 On-disk layout produced
 -----------------------
 <output>/
 ├── latents.zarr/
-│   └── latents    (N_total, z_ch, 16, 16, 16) float16  Blosc-zstd
-└── latents_index.parquet
-    columns: volume_id, z0, y0, x0, ps, stride, porosity, vol_porosity, split,
-             source_group, vol_depth, vol_height, vol_width,
-             grid_iz, grid_iy, grid_ix, parity
-
-Row i of the parquet corresponds to latents.zarr/latents[i].
-
-Parity
-------
-parity = (grid_iz + grid_iy + grid_ix) % 2, where grid_i* = coord // stride.
-Parity-0 patches are "anchors" (generated first at inference with all in-bounds
-neighbors UNKNOWN).  Parity-1 patches are "non-anchors" (generated after
-anchors, seeing all in-bounds neighbors as EXISTS).
+│   └── latents   (N, 2*z_ch, 16, 16, 16) float16
+│                 channels 0..z_ch-1   = mu
+│                 channels z_ch..2*z_ch-1 = logvar
+├── latents_index.parquet
+│   columns: volume_id, z0, y0, x0, ps, stride, porosity, vol_porosity, split,
+│             source_group, vol_depth, vol_height, vol_width,
+│             grid_iz, grid_iy, grid_ix, parity
+└── latent_scale_stats.json
+    {"z_channels": C, "mean": <mean of z_train>, "std": <std of z_train>}
+    where z = mu + exp(0.5*logvar)*eps computed from train-split patches only.
 
 Restartability
 --------------
-If the Zarr array already exists and matches the expected shape, rows that
-already have non-zero latents are skipped (detected by checking the first
-voxel of each stored tensor).
+Encodes by batch; skips batches where latents[i, 0, 0, 0, 0] is already non-zero.
 """
 
 from __future__ import annotations
@@ -95,18 +97,12 @@ def _build_patch_index(
     stride: int,
     splits_json: Path,
 ) -> pd.DataFrame:
-    """Build a fresh patch index at the requested stride from volumes.zarr.
-
-    Patch coordinates and per-patch porosity are computed directly from the
-    volume data — independent of any pre-existing patch_index.parquet.
-    """
     import zarr as _zarr
 
     from poregen.dataset.patch_index import build_patch_index_for_volume
     from poregen.dataset.splits import load_splits
 
     split_map: dict[str, str] = load_splits(splits_json)
-
     volumes_root = _zarr.open_group(str(data_root / "volumes.zarr"), mode="r")
 
     frames = []
@@ -116,20 +112,13 @@ def _build_patch_index(
             logger.warning("Volume %s not in splits.json — skipping", vid)
             continue
 
-        mask_arr = volumes_root[vid]["mask"]
-        mask = np.array(mask_arr, dtype=np.uint8)
-
-        # True volume VVF — computed directly from the full mask, not from
-        # patch means, which are biased when stride < patch_size (overlapping).
+        mask = np.array(volumes_root[vid]["mask"], dtype=np.uint8)
         vol_porosity = float(mask.mean())
-
-        # source_group: infer from splits.json key structure (best-effort)
-        source_group = "unknown"
 
         df_vol = build_patch_index_for_volume(
             mask=mask,
             volume_id=vid,
-            source_group=source_group,
+            source_group="unknown",
             split=split,
             patch_size=64,
             stride=stride,
@@ -146,29 +135,34 @@ def _build_patch_index(
 
 
 def _open_zarr_store(n_patches: int, output_dir: Path, z_channels: int) -> zarr.Array:
-    zarr_path    = output_dir / "latents.zarr"
-    latents_path = str(zarr_path / "latents")
+    """Open (or create) single zarr array storing [mu | logvar] along channel axis."""
+    zarr_path = output_dir / "latents.zarr"
+    arr_path  = str(zarr_path / "latents")
+    n_ch = 2 * z_channels   # first half = mu, second half = logvar
 
     try:
-        arr = zarr.open_array(latents_path, mode="r+")
-        if arr.shape == (n_patches, z_channels, 16, 16, 16):
-            logger.info("Resuming into existing Zarr array %s", latents_path)
+        arr = zarr.open_array(arr_path, mode="r+")
+        if arr.shape == (n_patches, n_ch, 16, 16, 16):
+            logger.info("Resuming into existing zarr array %s", arr_path)
             return arr
         logger.warning(
-            "Existing Zarr shape %s does not match expected (%d, %d, 16, 16, 16) — recreating.",
-            arr.shape, n_patches, z_channels,
+            "Existing zarr shape %s does not match expected (%d, %d, 16, 16, 16) — recreating.",
+            arr.shape, n_patches, n_ch,
         )
     except Exception:
         pass
 
     arr = zarr.open_array(
-        latents_path,
+        arr_path,
         mode="w",
-        shape=(n_patches, z_channels, 16, 16, 16),
+        shape=(n_patches, n_ch, 16, 16, 16),
         dtype="float16",
-        chunks=(256, z_channels, 16, 16, 16),
+        chunks=(256, n_ch, 16, 16, 16),
     )
-    logger.info("Created Zarr array: shape=%s, dtype=float16, no compression", arr.shape)
+    logger.info(
+        "Created zarr array: shape=%s  dtype=float16  (ch 0..%d=mu, ch %d..%d=logvar)",
+        arr.shape, z_channels - 1, z_channels, n_ch - 1,
+    )
     return arr
 
 
@@ -185,78 +179,24 @@ def _volume_shapes(data_root: Path) -> dict[str, tuple[int, int, int]]:
     return shapes
 
 
-def _add_vol_porosity(data_root: Path, output_dir: Path) -> None:
-    """Patch an existing latents_index.parquet with the true per-volume VVF.
-
-    Reads volumes.zarr masks, computes mask.mean() per volume, and writes the
-    result back as a ``vol_porosity`` column.  The latent Zarr array is not
-    touched.
-    """
-    import zarr as _zarr
-
-    parquet_path = output_dir / "latents_index.parquet"
-    if not parquet_path.exists():
-        raise FileNotFoundError(f"No latents_index.parquet found at {parquet_path}")
-
-    df = pd.read_parquet(str(parquet_path))
-    volumes_root = _zarr.open_group(str(data_root / "volumes.zarr"), mode="r")
-
-    unique_vids = df["volume_id"].unique()
-    logger.info("Computing vol_porosity for %d volumes …", len(unique_vids))
-
-    vol_por: dict[str, float] = {}
-    for vid in sorted(unique_vids):
-        if vid not in volumes_root:
-            logger.warning("Volume %s not found in volumes.zarr — skipping", vid)
-            continue
-        mask = np.array(volumes_root[vid]["mask"], dtype=np.uint8)
-        vol_por[vid] = float(mask.mean())
-        logger.info("  %s  vol_porosity=%.6f", vid, vol_por[vid])
-
-    df["vol_porosity"] = df["volume_id"].map(vol_por).astype(np.float32)
-
-    missing = df["vol_porosity"].isna().sum()
-    if missing:
-        logger.warning("%d rows have no vol_porosity (volume not in zarr) — filling with patch mean", missing)
-        fallback = df.groupby("volume_id")["porosity"].transform("mean")
-        df["vol_porosity"] = df["vol_porosity"].fillna(fallback.astype(np.float32))
-
-    df.to_parquet(str(parquet_path), index=True)
-    logger.info(
-        "Updated %s with vol_porosity (min=%.4f  max=%.4f  mean=%.4f)",
-        parquet_path,
-        df["vol_porosity"].min(),
-        df["vol_porosity"].max(),
-        df["vol_porosity"].mean(),
-    )
-
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Encode VAE latents for all patches.")
-    ap.add_argument("--experiment",  help="Experiment ref, e.g. 'r05/base'")
-    ap.add_argument("--checkpoint",  help="Path to VAE .ckpt file")
+    ap = argparse.ArgumentParser(
+        description="Encode VAE posterior (mu+logvar packed) for all patches — ldm02 latent store."
+    )
+    ap.add_argument("--experiment",  required=True, help="Experiment ref, e.g. 'r05/base'")
+    ap.add_argument("--checkpoint",  required=True, help="Path to VAE .ckpt file")
     ap.add_argument("--data-root",   required=True, help="Data root dir (contains volumes.zarr, splits.json)")
-    ap.add_argument("--output",      required=True, help="Output directory for latents")
+    ap.add_argument("--output",      required=True, help="Output directory (separate from ldm01 latent store)")
     ap.add_argument("--stride",      type=int, default=64, help="Patch stride in voxels (default: 64)")
     ap.add_argument("--batch-size",  type=int, default=64)
     ap.add_argument("--device",      default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument(
-        "--add-vol-porosity", action="store_true",
-        help="Only patch an existing latents_index.parquet with the true per-volume "
-             "VVF (mask.mean()).  No VAE loading or latent encoding is performed.",
-    )
+    ap.add_argument("--n-scale-samples", type=int, default=50000,
+                    help="Number of train-split patches sampled to compute z-std (default 50000)")
     args = ap.parse_args()
 
     data_root  = Path(args.data_root).resolve()
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.add_vol_porosity:
-        _add_vol_porosity(data_root, output_dir)
-        return
-
-    if not args.experiment or not args.checkpoint:
-        ap.error("--experiment and --checkpoint are required unless --add-vol-porosity is set")
 
     device = torch.device(args.device)
     autocast_dtype = torch.bfloat16
@@ -266,36 +206,33 @@ def main() -> None:
 
     model = _load_vae(args.experiment, args.checkpoint, device)
 
-    # Infer z_channels from a dummy forward pass
     with torch.no_grad():
         dummy_xct  = torch.zeros(1, 1, 64, 64, 64, device=device)
         dummy_mask = torch.zeros(1, 1, 64, 64, 64, device=device)
         with torch.autocast(device_type=device.type, dtype=autocast_dtype):
             out = model(dummy_xct, dummy_mask)
         z_channels = out.mu.shape[1]
-    logger.info("z_channels=%d  (inferred from dummy forward pass)", z_channels)
+    logger.info("z_channels=%d  packed array will have %d channels", z_channels, 2 * z_channels)
 
-    # Build patch index at the requested stride (independent of pre-built parquet)
     splits_json = data_root / "splits.json"
     df_full = _build_patch_index(data_root, args.stride, splits_json)
 
     arr = _open_zarr_store(len(df_full), output_dir, z_channels)
 
-    vol_shapes    = _volume_shapes(data_root)
+    vol_shapes   = _volume_shapes(data_root)
     import zarr as _zarr
-    volumes_root  = _zarr.open_group(str(data_root / "volumes.zarr"), mode="r")
+    volumes_root = _zarr.open_group(str(data_root / "volumes.zarr"), mode="r")
 
-    # Encode in row order to preserve parquet alignment
     bs      = args.batch_size
     n_total = len(df_full)
 
-    with tqdm(total=n_total, desc="Encoding", unit="patch") as pbar:
+    with tqdm(total=n_total, desc="Encoding (mu+logvar packed)", unit="patch") as pbar:
         i = 0
         while i < n_total:
             j    = min(i + bs, n_total)
             rows = df_full.iloc[i:j]
 
-            # Skip already-encoded blocks (first voxel non-zero heuristic)
+            # Skip already-encoded blocks (first voxel of mu channel non-zero heuristic)
             existing = np.array(arr[i:j, 0, 0, 0, 0], dtype=np.float32)
             if np.all(existing != 0.0):
                 pbar.update(j - i)
@@ -305,9 +242,7 @@ def main() -> None:
             xct_list = []
             for _, row in rows.iterrows():
                 vid = row["volume_id"]
-                z0  = int(row["z0"])
-                y0  = int(row["y0"])
-                x0  = int(row["x0"])
+                z0  = int(row["z0"]); y0 = int(row["y0"]); x0 = int(row["x0"])
                 ps  = int(row["ps"])
                 xct_patch = np.array(
                     volumes_root[vid]["xct"][z0:z0+ps, y0:y0+ps, x0:x0+ps],
@@ -320,23 +255,20 @@ def main() -> None:
 
             with torch.no_grad(), torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 out = model(xct_batch, mask_batch)
-            mu = out.mu.float().cpu().numpy().astype(np.float16)
 
-            arr[i:j] = mu
+            # Pack [mu | logvar] along channel axis → (B, 2*C, 16, 16, 16)
+            packed = torch.cat([out.mu, out.logvar], dim=1).float().cpu().numpy().astype(np.float16)
+            arr[i:j] = packed
             pbar.update(j - i)
             i = j
 
-    logger.info("Encoded %d patches → %s", n_total, output_dir / "latents.zarr")
+    logger.info("Encoded %d patches (mu+logvar packed) → %s", n_total, output_dir)
 
-    # Build latents_index.parquet
+    # Build latents_index.parquet (same structure as ldm01)
     df_idx = df_full.copy()
-
-    # Volume shape columns
     df_idx["vol_depth"]  = df_idx["volume_id"].map(lambda v: vol_shapes.get(v, (0, 0, 0))[0])
     df_idx["vol_height"] = df_idx["volume_id"].map(lambda v: vol_shapes.get(v, (0, 0, 0))[1])
     df_idx["vol_width"]  = df_idx["volume_id"].map(lambda v: vol_shapes.get(v, (0, 0, 0))[2])
-
-    # Grid indices and parity for inference-faithful conditioning
     df_idx["grid_iz"] = (df_idx["z0"] // args.stride).astype(np.int32)
     df_idx["grid_iy"] = (df_idx["y0"] // args.stride).astype(np.int32)
     df_idx["grid_ix"] = (df_idx["x0"] // args.stride).astype(np.int32)
@@ -344,24 +276,43 @@ def main() -> None:
         (df_idx["grid_iz"] + df_idx["grid_iy"] + df_idx["grid_ix"]) % 2
     ).astype(np.int8)
 
-    parity_counts = df_idx["parity"].value_counts().to_dict()
-    logger.info("Parity distribution: %s", parity_counts)
-
     out_parquet = output_dir / "latents_index.parquet"
     df_idx.to_parquet(str(out_parquet), index=True)
     logger.info("Saved index → %s  (%d rows)", out_parquet, len(df_idx))
 
-    # Latent scale stats (train split only to avoid leakage)
-    logger.info("Computing latent stats from train split …")
+    # Compute scale stats on sampled z from train split only
+    logger.info("Computing sampled-z stats from train split (n_samples=%d) …", args.n_scale_samples)
     train_idxs = df_full.index[df_full["split"] == "train"].to_numpy()
     if len(train_idxs) == 0:
         raise RuntimeError("No 'train' split rows — cannot compute scale stats.")
-    sample_idxs = np.random.choice(train_idxs, min(10000, len(train_idxs)), replace=False)
-    sample = np.array(arr.get_orthogonal_selection(sample_idxs), dtype=np.float32)
-    stats = {"mean": float(sample.mean()), "std": float(sample.std())}
+
+    rng = np.random.default_rng(seed=42)
+    sample_idxs = rng.choice(train_idxs, min(args.n_scale_samples, len(train_idxs)), replace=False)
+
+    all_z: list[np.ndarray] = []
+    chunk = 2048
+    for start in range(0, len(sample_idxs), chunk):
+        batch_idxs = sample_idxs[start:start + chunk]
+        packed_b = np.array(arr.get_orthogonal_selection(batch_idxs), dtype=np.float32)
+        mu_b     = packed_b[:, :z_channels]
+        logvar_b = packed_b[:, z_channels:]
+        sigma_b  = np.exp(0.5 * logvar_b)
+        eps      = rng.standard_normal(mu_b.shape).astype(np.float32)
+        z_b      = mu_b + sigma_b * eps
+        all_z.append(z_b.reshape(-1))
+
+    z_flat = np.concatenate(all_z)
+    stats = {
+        "z_channels": int(z_channels),
+        "mean": float(z_flat.mean()),
+        "std":  float(z_flat.std()),
+    }
     stats_path = output_dir / "latent_scale_stats.json"
     stats_path.write_text(json.dumps(stats, indent=2))
-    logger.info("Latent stats (train-only): mean=%.4f  std=%.4f", stats["mean"], stats["std"])
+    logger.info(
+        "Sampled-z stats (train-only): mean=%.4f  std=%.4f  (ldm01 mu-std ≈ 0.4571)",
+        stats["mean"], stats["std"],
+    )
     logger.info("Done.")
 
 

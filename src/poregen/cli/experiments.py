@@ -99,6 +99,33 @@ class DashboardState:
     status: str = "Ready."
 
 
+@dataclass(frozen=True)
+class TuiConfig:
+    """Configuration that differentiates VAE and LDM TUI instances."""
+
+    title: str
+    experiment_prefix: str | None  # None = show all; "ldm" = only ldm*/…
+    runs_root: str                 # e.g. "runs/vae" or "runs/ldm"
+    run_fn: Any                    # (experiment_ref, *, repo_root) -> Path
+    resume_fn: Any                 # (run_ref, *, checkpoint_name, repo_root) -> Path
+    show_eval_actions: bool
+    default_checkpoint: str        # e.g. "latest.ckpt" or "checkpoints/latest.ckpt"
+    checkpoint_glob: str           # e.g. "*.ckpt" or "checkpoints/*.ckpt"
+
+
+def _make_vae_tui_config() -> TuiConfig:
+    return TuiConfig(
+        title="PoreGen VAE Experiments",
+        experiment_prefix=None,
+        runs_root="runs/vae",
+        run_fn=run_experiment,
+        resume_fn=resume_run,
+        show_eval_actions=True,
+        default_checkpoint="latest.ckpt",
+        checkpoint_glob="*.ckpt",
+    )
+
+
 SECTION_DESCRIPTIONS: dict[str, str] = {
     "model": "Architecture and latent-space configuration.",
     "loss": "Loss weights and KL-related settings.",
@@ -269,7 +296,7 @@ def _default_variant_id(source_id: str) -> str:
     return f"{prefix}/{leaf}-variant"
 
 
-def _action_options(mode: str) -> list[ActionOption]:
+def _action_options(mode: str, tui_cfg: TuiConfig) -> list[ActionOption]:
     if mode == "experiments":
         return [
             ActionOption("Run selected experiment", "Launch a new run from the highlighted experiment.", "run"),
@@ -280,16 +307,22 @@ def _action_options(mode: str) -> list[ActionOption]:
             ActionOption("Help", "Show the navigation guide.", "help"),
         ]
 
-    return [
-        ActionOption("Resume latest checkpoint", "Continue the selected run from latest.ckpt.", "resume_latest"),
+    options = [
+        ActionOption("Resume latest checkpoint", "Continue the selected run from the latest checkpoint.", "resume_latest"),
         ActionOption("Choose checkpoint", "Pick a specific checkpoint before resuming.", "resume_pick"),
-        ActionOption("Run evaluation", "Evaluate best.ckpt with the default eval config (best_checkpoint tier).", "eval_best"),
-        ActionOption("Run evaluation (choose config)", "Pick a checkpoint and eval config tier, then run evaluation.", "eval_custom"),
+    ]
+    if tui_cfg.show_eval_actions:
+        options += [
+            ActionOption("Run evaluation", "Evaluate best.ckpt with the default eval config (best_checkpoint tier).", "eval_best"),
+            ActionOption("Run evaluation (choose config)", "Pick a checkpoint and eval config tier, then run evaluation.", "eval_custom"),
+        ]
+    options += [
         ActionOption("Open full run details", "View the run metadata, summary, and resolved config.", "view"),
         ActionOption("Refresh runs", "Reload available runs from disk.", "refresh"),
         ActionOption("Switch to experiments", "Go back to experiment definitions.", "switch_experiments"),
         ActionOption("Help", "Show the navigation guide.", "help"),
     ]
+    return options
 
 
 def _section(lines: list[DetailLine], title: str) -> None:
@@ -311,9 +344,12 @@ def _preview_run_name(cfg: dict[str, Any], repo_root: Path) -> str:
     return build_run_name(cfg, run_index=run_index)
 
 
-def _build_experiment_entries(repo_root: Path) -> list[BrowserEntry]:
+def _build_experiment_entries(repo_root: Path, tui_cfg: TuiConfig) -> list[BrowserEntry]:
     entries: list[BrowserEntry] = []
-    for experiment in list_experiment_definitions(repo_root=repo_root):
+    experiments = list_experiment_definitions(repo_root=repo_root)
+    if tui_cfg.experiment_prefix is not None:
+        experiments = [e for e in experiments if e["id"].startswith(tui_cfg.experiment_prefix)]
+    for experiment in experiments:
         subtitle = experiment.get("description") or ""
         if not subtitle and experiment.get("extends"):
             subtitle = f"extends {experiment['extends']}"
@@ -330,9 +366,9 @@ def _build_experiment_entries(repo_root: Path) -> list[BrowserEntry]:
     return entries
 
 
-def _build_run_entries(repo_root: Path) -> list[BrowserEntry]:
+def _build_run_entries(repo_root: Path, tui_cfg: TuiConfig) -> list[BrowserEntry]:
     entries: list[BrowserEntry] = []
-    for run_dir in list_run_directories(repo_root=repo_root):
+    for run_dir in list_run_directories(repo_root=repo_root, runs_root=tui_cfg.runs_root):
         summary = _load_json(run_dir / "summary.json") or {}
         subtitle_parts: list[str] = []
         if "best_val_full_total" in summary:
@@ -340,7 +376,7 @@ def _build_run_entries(repo_root: Path) -> list[BrowserEntry]:
         elif "best_val_total" in summary:
             subtitle_parts.append(f"best val {summary['best_val_total']:.4f}")
 
-        checkpoint_count = sum(1 for _ in run_dir.glob("*.ckpt"))
+        checkpoint_count = sum(1 for _ in run_dir.glob(tui_cfg.checkpoint_glob))
         if checkpoint_count:
             subtitle_parts.append(f"{checkpoint_count} ckpt")
 
@@ -422,8 +458,12 @@ def _build_experiment_document(experiment_id: str, repo_root: Path) -> DetailDoc
     )
 
 
-def _build_run_document(run_name: str, repo_root: Path) -> DetailDocument:
-    run_dir = next((path for path in list_run_directories(repo_root=repo_root) if path.name == run_name), None)
+def _build_run_document(run_name: str, repo_root: Path, tui_cfg: TuiConfig) -> DetailDocument:
+    run_dir = next(
+        (path for path in list_run_directories(repo_root=repo_root, runs_root=tui_cfg.runs_root)
+         if path.name == run_name),
+        None,
+    )
     if run_dir is None:
         return DetailDocument(
             title=f"Run {run_name}",
@@ -434,7 +474,7 @@ def _build_run_document(run_name: str, repo_root: Path) -> DetailDocument:
     metadata = _load_json(run_dir / "run_metadata.json") or {}
     summary = _load_json(run_dir / "summary.json") or {}
     resolved_cfg = _load_yaml(run_dir / "resolved_config.yaml")
-    checkpoints = sorted(path.name for path in run_dir.glob("*.ckpt"))
+    checkpoints = sorted(str(p.relative_to(run_dir)) for p in run_dir.glob(tui_cfg.checkpoint_glob))
 
     lines: list[DetailLine] = []
     _section(lines, "Overview")
@@ -691,9 +731,17 @@ def _prompt_text(stdscr: Any, title: str, prompt: str, default: str = "") -> str
             buffer += chr(key)
 
 
-def _choose_checkpoint_interactive(stdscr: Any, run_dir: Path) -> str | None:
-    checkpoints = sorted(run_dir.glob("*.ckpt"))
-    items = [(path.name, datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")) for path in checkpoints]
+def _choose_checkpoint_interactive(
+    stdscr: Any, run_dir: Path, checkpoint_glob: str = "*.ckpt"
+) -> str | None:
+    checkpoints = sorted(run_dir.glob(checkpoint_glob))
+    items = [
+        (
+            str(path.relative_to(run_dir)),
+            datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+        )
+        for path in checkpoints
+    ]
     selected = _select_item(
         stdscr,
         f"Resume {run_dir.name}",
@@ -1076,9 +1124,10 @@ def _draw_header(
     counts: dict[str, int],
     current_label: str | None,
     theme: dict[str, int],
+    title: str = "PoreGen Experiment Control Center",
 ) -> None:
     height, width = stdscr.getmaxyx()
-    _safe_add_line(stdscr, 0, 2, "PoreGen Experiment Control Center", theme["header"])
+    _safe_add_line(stdscr, 0, 2, title, theme["header"])
     count_text = f"{counts['experiments']} experiments | {counts['runs']} runs"
     _safe_add_line(stdscr, 0, max(2, width - len(count_text) - 2), count_text, curses.A_DIM)
 
@@ -1326,6 +1375,7 @@ def _current_document(
     repo_root: Path,
     entries_by_mode: dict[str, list[BrowserEntry]],
     cache: dict[str, dict[str, DetailDocument]],
+    tui_cfg: TuiConfig,
 ) -> DetailDocument:
     entry = _selected_entry(state, entries_by_mode)
     if entry is None:
@@ -1340,14 +1390,14 @@ def _current_document(
         if state.mode == "experiments":
             mode_cache[entry.identifier] = _build_experiment_document(entry.identifier, repo_root)
         else:
-            mode_cache[entry.identifier] = _build_run_document(entry.identifier, repo_root)
+            mode_cache[entry.identifier] = _build_run_document(entry.identifier, repo_root, tui_cfg)
     return mode_cache[entry.identifier]
 
 
-def _refresh_dashboard_data(repo_root: Path) -> dict[str, list[BrowserEntry]]:
+def _refresh_dashboard_data(repo_root: Path, tui_cfg: TuiConfig) -> dict[str, list[BrowserEntry]]:
     return {
-        "experiments": _build_experiment_entries(repo_root),
-        "runs": _build_run_entries(repo_root),
+        "experiments": _build_experiment_entries(repo_root, tui_cfg),
+        "runs": _build_run_entries(repo_root, tui_cfg),
     }
 
 
@@ -1363,8 +1413,9 @@ def _refresh_after_clone(
     repo_root: Path,
     state: DashboardState,
     target_id: str,
+    tui_cfg: TuiConfig,
 ) -> tuple[dict[str, list[BrowserEntry]], dict[str, dict[str, DetailDocument]]]:
-    entries_by_mode = _refresh_dashboard_data(repo_root)
+    entries_by_mode = _refresh_dashboard_data(repo_root, tui_cfg)
     cache: dict[str, dict[str, DetailDocument]] = {"experiments": {}, "runs": {}}
     state.mode = "experiments"
     state.focus = "browser"
@@ -1403,6 +1454,7 @@ def _execute_action(
     action: ActionOption,
     entries_by_mode: dict[str, list[BrowserEntry]],
     cache: dict[str, dict[str, DetailDocument]],
+    tui_cfg: TuiConfig,
 ) -> tuple[DeferredAction | None, dict[str, list[BrowserEntry]], dict[str, dict[str, DetailDocument]]]:
     entry = _selected_entry(state, entries_by_mode)
 
@@ -1412,13 +1464,13 @@ def _execute_action(
         return None, entries_by_mode, cache
 
     if action.action_id == "view":
-        document = _current_document(state, repo_root, entries_by_mode, cache)
+        document = _current_document(state, repo_root, entries_by_mode, cache, tui_cfg)
         _view_text(stdscr, document.title, document.full_text)
         state.status = f"Viewing {document.title}."
         return None, entries_by_mode, cache
 
     if action.action_id == "refresh":
-        entries_by_mode = _refresh_dashboard_data(repo_root)
+        entries_by_mode = _refresh_dashboard_data(repo_root, tui_cfg)
         cache = {"experiments": {}, "runs": {}}
         state.status = (
             f"Refreshed: {len(entries_by_mode['experiments'])} experiments, "
@@ -1446,14 +1498,18 @@ def _execute_action(
         return DeferredAction("run", entry.identifier), entries_by_mode, cache
 
     if action.action_id == "resume_latest":
-        return DeferredAction("resume", entry.identifier, "latest.ckpt"), entries_by_mode, cache
+        return DeferredAction("resume", entry.identifier, tui_cfg.default_checkpoint), entries_by_mode, cache
 
     if action.action_id == "resume_pick":
-        run_dir = next((path for path in list_run_directories(repo_root=repo_root) if path.name == entry.identifier), None)
+        run_dir = next(
+            (path for path in list_run_directories(repo_root=repo_root, runs_root=tui_cfg.runs_root)
+             if path.name == entry.identifier),
+            None,
+        )
         if run_dir is None:
             state.status = f"Run not found: {entry.identifier}"
             return None, entries_by_mode, cache
-        checkpoint_name = _choose_checkpoint_interactive(stdscr, run_dir)
+        checkpoint_name = _choose_checkpoint_interactive(stdscr, run_dir, tui_cfg.checkpoint_glob)
         if checkpoint_name is None:
             state.status = "Checkpoint selection cancelled."
             return None, entries_by_mode, cache
@@ -1471,13 +1527,16 @@ def _execute_action(
             return None, entries_by_mode, cache
 
         target_id, target_path = clone_result
-        entries_by_mode, cache = _refresh_after_clone(repo_root=repo_root, state=state, target_id=target_id)
+        entries_by_mode, cache = _refresh_after_clone(
+            repo_root=repo_root, state=state, target_id=target_id, tui_cfg=tui_cfg
+        )
         state.status = f"Saved {target_id} to {Path(target_path).name}."
         return None, entries_by_mode, cache
 
     if action.action_id == "eval_best":
         run_dir = next(
-            (path for path in list_run_directories(repo_root=repo_root) if path.name == entry.identifier),
+            (path for path in list_run_directories(repo_root=repo_root, runs_root=tui_cfg.runs_root)
+             if path.name == entry.identifier),
             None,
         )
         if run_dir is None:
@@ -1489,13 +1548,14 @@ def _execute_action(
 
     if action.action_id == "eval_custom":
         run_dir = next(
-            (path for path in list_run_directories(repo_root=repo_root) if path.name == entry.identifier),
+            (path for path in list_run_directories(repo_root=repo_root, runs_root=tui_cfg.runs_root)
+             if path.name == entry.identifier),
             None,
         )
         if run_dir is None:
             state.status = f"Run not found: {entry.identifier}"
             return None, entries_by_mode, cache
-        checkpoint_name = _choose_checkpoint_interactive(stdscr, run_dir)
+        checkpoint_name = _choose_checkpoint_interactive(stdscr, run_dir, tui_cfg.checkpoint_glob)
         if checkpoint_name is None:
             state.status = "Checkpoint selection cancelled."
             return None, entries_by_mode, cache
@@ -1509,7 +1569,7 @@ def _execute_action(
     return None, entries_by_mode, cache
 
 
-def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
+def _dashboard_impl(stdscr: Any, repo_root: Path, tui_cfg: TuiConfig) -> DeferredAction | None:
     try:
         curses.curs_set(0)
     except curses.error:
@@ -1517,7 +1577,7 @@ def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
     stdscr.keypad(True)
     theme = _init_theme()
     state = DashboardState()
-    entries_by_mode = _refresh_dashboard_data(repo_root)
+    entries_by_mode = _refresh_dashboard_data(repo_root, tui_cfg)
     cache: dict[str, dict[str, DetailDocument]] = {"experiments": {}, "runs": {}}
     state.status = (
         f"Loaded {len(entries_by_mode['experiments'])} experiments and "
@@ -1540,7 +1600,7 @@ def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
         current_entry = _selected_entry(state, entries_by_mode)
         current_label = current_entry.identifier if current_entry is not None else None
         counts = {mode: len(entries) for mode, entries in entries_by_mode.items()}
-        _draw_header(stdscr, state, counts, current_label, theme)
+        _draw_header(stdscr, state, counts, current_label, theme, tui_cfg.title)
 
         content_y = 4
         content_height = height - 7
@@ -1584,7 +1644,7 @@ def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
         )
 
         entries = entries_by_mode[state.mode]
-        actions = _action_options(state.mode)
+        actions = _action_options(state.mode, tui_cfg)
         state.browser_offset[state.mode] = _draw_browser_panel(
             browser_window,
             entries,
@@ -1602,7 +1662,7 @@ def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
             theme=theme,
         )
 
-        document = _current_document(state, repo_root, entries_by_mode, cache)
+        document = _current_document(state, repo_root, entries_by_mode, cache, tui_cfg)
         detail_title = document.title
         _safe_add_line(
             detail_window,
@@ -1706,6 +1766,7 @@ def _dashboard_impl(stdscr: Any, repo_root: Path) -> DeferredAction | None:
                 action=action,
                 entries_by_mode=entries_by_mode,
                 cache=cache,
+                tui_cfg=tui_cfg,
             )
             if deferred is not None:
                 return deferred
@@ -1772,7 +1833,7 @@ def _run_eval_action(
     print(f"Eval complete. Results: {out_dir}")
 
 
-def interactive_menu(repo_root: Path) -> None:
+def interactive_menu(repo_root: Path, tui_cfg: TuiConfig) -> None:
     """Open the interactive dashboard UI."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError(
@@ -1780,22 +1841,22 @@ def interactive_menu(repo_root: Path) -> None:
             "'list', 'show', 'run', or 'resume' in non-interactive contexts."
         )
 
-    action = curses.wrapper(lambda stdscr: _dashboard_impl(stdscr, repo_root))
+    action = curses.wrapper(lambda stdscr: _dashboard_impl(stdscr, repo_root, tui_cfg))
     if action is None:
         return
     if action.kind == "run":
-        run_dir = run_experiment(action.primary, repo_root=repo_root)
+        run_dir = tui_cfg.run_fn(action.primary, repo_root=repo_root)
         print(run_dir)
         return
     if action.kind == "resume":
-        run_dir = resume_run(
+        run_dir = tui_cfg.resume_fn(
             action.primary,
-            checkpoint_name=action.secondary or "latest.ckpt",
+            checkpoint_name=action.secondary or tui_cfg.default_checkpoint,
             repo_root=repo_root,
         )
         print(run_dir)
         return
-    if action.kind == "eval":
+    if tui_cfg.show_eval_actions and action.kind == "eval":
         _run_eval_action(
             run_name=action.primary,
             checkpoint_name=action.secondary or "best.ckpt",
@@ -1816,7 +1877,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command is None or args.command == "menu":
-        interactive_menu(repo_root)
+        interactive_menu(repo_root, _make_vae_tui_config())
         return
 
     if args.command == "list":
@@ -1859,6 +1920,95 @@ def main(argv: list[str] | None = None) -> None:
             eval_config_ref=args.eval_config,
             repo_root=repo_root,
         )
+        return
+
+    raise ValueError(f"Unhandled command: {args.command}")
+
+
+def _build_ldm_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Manage and launch config-driven PoreGen LDM experiments.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("list", help="List available LDM experiments.")
+    subparsers.add_parser("runs", help="List available LDM run directories.")
+    subparsers.add_parser("menu", help="Open the interactive keyboard UI.")
+
+    run_parser = subparsers.add_parser("run", help="Run an LDM experiment definition.")
+    run_parser.add_argument("experiment", help="Experiment id like ldm01/base or a YAML path.")
+
+    resume_parser = subparsers.add_parser("resume", help="Resume an interrupted LDM run.")
+    resume_parser.add_argument("run_ref", help="Run name or full run directory path.")
+    resume_parser.add_argument(
+        "checkpoint",
+        nargs="?",
+        default="checkpoints/latest.ckpt",
+        help="Checkpoint path within run dir when resuming.",
+    )
+
+    return parser
+
+
+def main_ldm(argv: list[str] | None = None) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(message)s",
+    )
+    from poregen.experiments.train_ldm import resume_ldm_run, run_ldm_experiment
+
+    repo_root = find_repo_root(__file__)
+    tui_cfg = TuiConfig(
+        title="PoreGen LDM Experiments",
+        experiment_prefix="ldm",
+        runs_root="runs/ldm",
+        run_fn=run_ldm_experiment,
+        resume_fn=resume_ldm_run,
+        show_eval_actions=False,
+        default_checkpoint="checkpoints/latest.ckpt",
+        checkpoint_glob="checkpoints/*.ckpt",
+    )
+
+    parser = _build_ldm_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None or args.command == "menu":
+        interactive_menu(repo_root, tui_cfg)
+        return
+
+    if args.command == "list":
+        experiments = [
+            e for e in list_experiment_definitions(repo_root=repo_root)
+            if e["id"].startswith("ldm")
+        ]
+        if not experiments:
+            print("No LDM experiment YAMLs found.")
+            return
+        for idx, exp in enumerate(experiments, 1):
+            description = exp.get("description") or ""
+            print(f"{idx:2d}. {exp['id']}")
+            if description:
+                print(f"    {description}")
+        return
+
+    if args.command == "runs":
+        runs = list_run_directories(repo_root=repo_root, runs_root="runs/ldm")
+        if not runs:
+            print("No LDM runs found.")
+            return
+        for idx, run_dir in enumerate(runs, 1):
+            print(f"{idx:2d}. {run_dir.name}")
+        return
+
+    if args.command == "run":
+        run_dir = run_ldm_experiment(args.experiment, repo_root=repo_root)
+        print(run_dir)
+        return
+
+    if args.command == "resume":
+        run_dir = resume_ldm_run(args.run_ref, checkpoint_name=args.checkpoint, repo_root=repo_root)
+        print(run_dir)
         return
 
     raise ValueError(f"Unhandled command: {args.command}")

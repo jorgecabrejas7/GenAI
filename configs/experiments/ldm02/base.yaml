@@ -1,0 +1,15 @@
+extends: ldm01/base
+
+experiment:
+  name: ldm02
+  variant: base
+  description: >-
+    Rombach-style LDM — trains on reparameterized latents z = μ+σε (sampled
+    from the VAE posterior) instead of the posterior mean μ used in ldm01.
+    Fresh ε is drawn per sample per epoch (stochastic encoding / noise
+    augmentation).  Architecture, schedule, conditioning, sampler, optimizer,
+    and data splits are identical to ldm01 for a clean ablation.
+
+data:
+  latents_root: data/split_v2/latents_s64_sampled
+  latent_mode: sampled

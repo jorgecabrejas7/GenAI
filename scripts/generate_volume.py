@@ -12,7 +12,6 @@ python scripts/generate_volume.py \\
     --output-dir outputs/ \\
     [--n-volumes 1] \\
     [--seed 42] \\
-    [--anchor-gap 3] \\
     [--patch-size 64] \\
     [--patch-stride 32]
 
@@ -105,7 +104,6 @@ def main() -> None:
     ap.add_argument("--output-dir",  default="outputs/generated")
     ap.add_argument("--n-volumes",   type=int, default=1)
     ap.add_argument("--seed",        type=int, default=None)
-    ap.add_argument("--anchor-gap",  type=int, default=3)
     ap.add_argument("--patch-size",  type=int, default=64)
     ap.add_argument("--patch-stride", type=int, default=32)
     ap.add_argument("--sampler",     choices=["ddpm", "ddim"], default="ddim",
@@ -188,7 +186,6 @@ def main() -> None:
         xct, mask = generator.generate(
             volume_shape,
             target_porosity=args.porosity,
-            anchor_gap=args.anchor_gap,
             autocast_dtype=autocast_dtype,
         )
         xct_path  = output_dir / f"vol_{i:03d}_xct.tiff"

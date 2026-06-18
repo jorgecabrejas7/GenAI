@@ -38,6 +38,7 @@ notebook = [
 build_dataset = "poregen.dataset.build_dataset:main"
 train_vae = "poregen.cli.experiments:main"
 experiments = "poregen.cli.experiments:main"
+train_ldm = "poregen.cli.experiments:main_ldm"
 
 [tool.setuptools.packages.find]
 where = ["src"]
