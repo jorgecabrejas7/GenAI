@@ -1,11 +1,10 @@
 """Generate a grid of synthetic XCT volumes across porosity and spatial distribution.
 
-Generates anisotropic volumes using a 50×20×2 (y×x×z) patch grid with
-no-overlap tiling (stride = patch_size = 64 voxels).  At 25 µm voxel size
-each 64³ patch is 1.6 mm³, so the assembled volume is:
-  z:  2 patches ×  64 vox =  128 vox  =  3.2 mm  (depth)
-  y: 50 patches × 64 vox = 3200 vox  = 80.0 mm  (height / 8 cm)
-  x: 20 patches ×  64 vox = 1280 vox  = 32.0 mm  (width / 3.2 cm)
+Generates anisotropic volumes at 25 µm/voxel with stride-32 half-overlap tiling
+(matching the LDM training stride).  Physical volume:
+  z:  3.2 mm  (128 vox)
+  y: 80.0 mm  (3200 vox)
+  x: 32.0 mm  (1280 vox)
 
 Sweeps porosity × spatial distribution.
 
@@ -47,22 +46,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # ── sweep parameters ──────────────────────────────────────────────────────────
-# Patch grid per axis (z=depth, y=height, x=width).
-# stride = patch_size → no overlap → exact physical dimensions at 25 µm/vox:
-#   z:  2 × 64 =  128 vox =  3.2 mm
-#   y: 50 × 64 = 3200 vox = 80.0 mm (8 cm)
-#   x: 20 × 64 = 1280 vox = 32.0 mm (3.2 cm)
-GRID_Z          = 2
-GRID_Y          = 50
-GRID_X          = 20
-PATCH_SIZE      = 64
-PATCH_STRIDE    = PATCH_SIZE                            # no overlap (stride = patch_size)
-VOLUME_Z        = GRID_Z * PATCH_SIZE                  # 128 voxels
-VOLUME_Y        = GRID_Y * PATCH_SIZE                  # 3200 voxels
-VOLUME_X        = GRID_X * PATCH_SIZE                  # 1280 voxels
-POROSITY_LEVELS = [0.005, 0.01, 0.02, 0.03, 0.05, 0.10]
-DISTRIBUTIONS   = ["center", "edges", "uniform"]
-DEFAULT_DDIM_STEPS = 250
+# Physical volume size (z, y, x) in mm and voxel pitch.
+# patch_stride MUST match the stride used during LDM training (data.patch_stride
+# in the resolved_config.yaml); the default LDM training config uses stride=32.
+VOLUME_SIZE_MM     = (3.2, 80.0, 32.0)   # z, y, x in mm
+VOXEL_SIZE_MM      = 0.025               # 25 µm / voxel
+PATCH_SIZE         = 64
+PATCH_STRIDE       = PATCH_SIZE // 2     # 32 — half-overlap, matches LDM training stride
+POROSITY_LEVELS    = [0.01, 0.02, 0.03, 0.05, 0.07, 0.10]
+DISTRIBUTIONS      = ["center", "edges", "uniform"]
+DEFAULT_DDIM_STEPS = 200
+# Batch sizes calibrated to ≤75% of 128 GB unified memory (GB10 DGX Spark).
+# Measured on CPU (conservative upper bound; GPU bfloat16 autocast uses ~half):
+#   UNet forward:  ~42 MB/patch  (empirical: B=2048 → 85 GB RSS)
+#   VAE decode:    ~40 MB/patch  (marginal slope B=32→64)
+# Fixed overhead: ~10.3 GB (models + OS + latent dict + 3 accumulators)
+# Budget: 128 × 0.75 = 96 GB → (96 - 10.3) GB / 42 MB ≈ 2040 → round to 2048
+GEN_BATCH_SIZE     = 32
+DECODE_BATCH_SIZE  = 64
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -202,6 +203,14 @@ def main() -> None:
                     help="Number of DDIM steps (ignored when --sampler ddpm)")
     ap.add_argument("--latent-std",  type=float, default=None,
                     help="Latent scale std (read from latent_scale_stats.json if omitted)")
+    ap.add_argument("--s-por", type=float, default=None,
+                    help="Porosity guidance scale (default: from resolved_config.yaml guidance.s_por, else 1.0)")
+    ap.add_argument("--s-nb",  type=float, default=None,
+                    help="Neighbour guidance scale (default: from resolved_config.yaml guidance.s_nb, else 1.0)")
+    ap.add_argument("--out-dir", type=str, default=None,
+                    help="Resume into this existing run directory instead of creating a new "
+                         "timestamped one (e.g. inference/<ldm_run>/<run_tag>). Combos whose "
+                         "volume.tif + mask.tif already exist there are skipped.")
     args = ap.parse_args()
 
     repo = _find_repo_root()
@@ -228,12 +237,20 @@ def main() -> None:
         device=device,
     )
 
+    # Resolve guidance scales: CLI flags override resolved config, which overrides 1.0 default.
+    guidance_cfg = ldm_cfg.get("guidance", {})
+    s_por = float(args.s_por if args.s_por is not None else guidance_cfg.get("s_por", 1.0))
+    s_nb  = float(args.s_nb  if args.s_nb  is not None else guidance_cfg.get("s_nb",  1.0))
+
     if args.sampler == "ddpm":
         sampler = DDPMSampler(ldm, schedule, device)
         logger.info("Using DDPM sampler (T=%d steps)", schedule.T)
     else:
-        sampler = DDIMSampler(ldm, schedule, device, n_steps=args.ddim_steps)
-        logger.info("Using DDIM sampler (%d steps)", args.ddim_steps)
+        sampler = DDIMSampler(ldm, schedule, device, n_steps=args.ddim_steps,
+                              s_por=s_por, s_nb=s_nb)
+        guided = s_por != 1.0 or s_nb != 1.0
+        logger.info("Using DDIM sampler (%d steps)  guided=%s  s_por=%.2f  s_nb=%.2f",
+                    args.ddim_steps, guided, s_por, s_nb)
     generator = VolumeGenerator(
         sampler=sampler,
         vae=vae,
@@ -242,17 +259,42 @@ def main() -> None:
         patch_stride=PATCH_STRIDE,
         latent_size=PATCH_SIZE // 4,
         latent_std=latent_std,
+        voxel_size_mm=VOXEL_SIZE_MM,
     )
 
-    vol_shape = (VOLUME_Z, VOLUME_Y, VOLUME_X)
-    out_root  = Path(Path(args.checkpoint).stem)
+    # Derive voxel dimensions (snapped to nearest patch_size multiple, downward)
+    vol_shape = tuple(
+        (round(d / VOXEL_SIZE_MM) // PATCH_SIZE) * PATCH_SIZE for d in VOLUME_SIZE_MM
+    )
+    # Stride-grid dimensions — patches live on the half-overlap grid
+    gz = len(range(0, vol_shape[0] - PATCH_SIZE + 1, PATCH_STRIDE))
+    gy = len(range(0, vol_shape[1] - PATCH_SIZE + 1, PATCH_STRIDE))
+    gx = len(range(0, vol_shape[2] - PATCH_SIZE + 1, PATCH_STRIDE))
+    n_patches_per_vol = gz * gy * gx
+
+    # Build a human-readable run folder under inference/.
+    # Format: inference/<ldm_run>/<timestamp>-<sampler>-steps<N>-lstd<F>-spor<F>-snb<F>
+    import datetime
+    ldm_run_name = Path(args.checkpoint).parent.parent.name   # e.g. ldm03-run-0001-...
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    sampler_tag = (
+        f"ddpm-T{schedule.T}" if args.sampler == "ddpm"
+        else f"ddim{args.ddim_steps}"
+    )
+    run_tag = (
+        f"{ts}"
+        f"-{sampler_tag}"
+        f"-lstd{latent_std:.4f}"
+        f"-spor{s_por:.2f}"
+        f"-snb{s_nb:.2f}"
+    )
+    out_root = Path(args.out_dir) if args.out_dir else Path("inference") / ldm_run_name / run_tag
     combinations = list(product(POROSITY_LEVELS, DISTRIBUTIONS))
-    n_patches_per_vol = GRID_Z * GRID_Y * GRID_X
 
     logger.info(
-        "Generating %d volumes  shape=%s  grid=%dx%dx%d  patches_per_vol=%d"
+        "Generating %d volumes  shape=%s  stride_grid=%dx%dx%d  patches_per_vol=%d"
         "  device=%s  ddim_steps=%d  latent_std=%.5f",
-        len(combinations), vol_shape, GRID_Z, GRID_Y, GRID_X, n_patches_per_vol,
+        len(combinations), vol_shape, gz, gy, gx, n_patches_per_vol,
         device, args.ddim_steps, latent_std,
     )
 
@@ -263,23 +305,30 @@ def main() -> None:
         for por_level, dist in combinations:
             vol_pbar.set_description(f"por={por_level:.3f} {dist}")
 
-            local_por_map = _build_local_por_map(GRID_Z, GRID_Y, GRID_X, por_level, dist)
+            out_dir = out_root / f"por_{por_level}" / dist
+            if (out_dir / "volume.tif").exists() and (out_dir / "mask.tif").exists():
+                logger.info("Skipping por=%.3f %s — already generated at %s", por_level, dist, out_dir)
+                vol_pbar.update(1)
+                continue
+
+            local_por_map = _build_local_por_map(gz, gy, gx, por_level, dist)
 
             patch_pbar.reset(total=n_patches_per_vol)
             patch_pbar.set_description("patches")
 
             with torch.no_grad():
                 xct_u8, mask_u8 = generator.generate(
-                    volume_shape=vol_shape,
+                    volume_size_mm=VOLUME_SIZE_MM,
                     target_porosity=por_level,
                     autocast_dtype=autocast_dtype,
                     local_por_map=local_por_map,
                     patch_pbar=patch_pbar,
+                    gen_batch_size=GEN_BATCH_SIZE,
+                    decode_batch_size=DECODE_BATCH_SIZE,
                 )
 
             xct_f32 = xct_u8.astype(np.float32) / 255.0
 
-            out_dir = out_root / f"por_{por_level}" / dist
             out_dir.mkdir(parents=True, exist_ok=True)
             tifffile.imwrite(str(out_dir / "volume.tif"), xct_f32)
             tifffile.imwrite(str(out_dir / "mask.tif"), mask_u8)

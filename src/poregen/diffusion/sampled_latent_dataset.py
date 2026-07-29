@@ -97,21 +97,60 @@ class SampledLatentPatchDataset(Dataset):
             )
         logger.info("SampledLatentPatchDataset [%s]: %d patches", split, len(self.df))
 
-        # Single combined zarr: (N, 2*C, 16, 16, 16) — first C = mu, last C = logvar
-        arr_path = str(self.latents_root / "latents.zarr" / "latents")
-        self._arr: zarr.Array = zarr.open_array(arr_path, mode="r")
+        # --- backend selection ---
+        _mmap_bin  = self.latents_root / "latents.bin"
+        _mmap_meta = self.latents_root / "latents_meta.json"
+        _zarr_arr  = self.latents_root / "latents.zarr" / "latents"
 
-        total_ch = self._arr.shape[1]
+        if _mmap_bin.exists() and _mmap_meta.exists():
+            with open(_mmap_meta) as _f:
+                _meta = json.load(_f)
+            if _meta.get("pack_scheme") != "mu_then_logvar":
+                raise ValueError(
+                    f"SampledLatentPatchDataset requires pack_scheme='mu_then_logvar' in "
+                    f"latents_meta.json, got {_meta.get('pack_scheme')!r}. "
+                    "Re-run encode_latents_sampled.py to rebuild."
+                )
+            assert len(df_full) == _meta["N"], (
+                f"Parquet has {len(df_full)} rows but latents_meta.json reports N={_meta['N']}."
+            )
+            total_ch = int(_meta["n_channels"])
+            self._mmap = np.memmap(
+                str(_mmap_bin), dtype=np.dtype(_meta["dtype"]), mode="r",
+                shape=(_meta["N"], total_ch, *_meta["spatial"]),
+            )
+            self._arr  = None
+            self.latent_size = int(_meta["spatial"][0])
+            logger.info(
+                "SampledLatentPatchDataset: memmap backend shape=%s z_channels=%d",
+                self._mmap.shape, _meta["z_channels"],
+            )
+        elif (_zarr_arr.parent.exists()):
+            self._mmap = None
+            self._arr  = zarr.open_array(str(_zarr_arr), mode="r")
+            total_ch = self._arr.shape[1]
+            self.latent_size = self._arr.shape[2]
+            logger.warning(
+                "SampledLatentPatchDataset: zarr fallback — latents.bin not found in %s. "
+                "Run scripts/convert_zarr_to_memmap.py to upgrade.",
+                self.latents_root,
+            )
+        else:
+            raise FileNotFoundError(
+                f"No latent store found in {self.latents_root}. "
+                "Expected latents.bin + latents_meta.json (memmap) or "
+                "latents.zarr/latents (legacy zarr)."
+            )
+
         if total_ch % 2 != 0:
             raise ValueError(
-                f"Expected packed zarr with even channel count (2*z_ch), got {total_ch}. "
+                f"Expected packed zarr/memmap with even channel count (2*z_ch), got {total_ch}. "
                 "Re-run encode_latents_sampled.py."
             )
-        self.z_channels  = total_ch // 2
-        self.latent_size = self._arr.shape[2]   # spatial side length (16)
+        self.z_channels = total_ch // 2
         logger.info(
-            "SampledLatentPatchDataset: zarr shape=%s  z_channels=%d  latent_size=%d",
-            self._arr.shape, self.z_channels, self.latent_size,
+            "SampledLatentPatchDataset: z_channels=%d  latent_size=%d",
+            self.z_channels, self.latent_size,
         )
 
         # Scale stats computed on sampled z (train split only)
@@ -153,8 +192,14 @@ class SampledLatentPatchDataset(Dataset):
             key = (row["volume_id"], int(row["z0"]), int(row["y0"]), int(row["x0"]))
             self._coord_to_global[key] = int(global_idx)
 
+    def _read_packed(self, global_idx: int) -> np.ndarray:
+        """Read one (2*z_channels, 16, 16, 16) packed [mu|logvar] item as float32."""
+        if self._mmap is not None:
+            return np.array(self._mmap[global_idx], dtype=np.float32)
+        return np.array(self._arr[global_idx], dtype=np.float32)
+
     def _sample_z(self, global_idx: int) -> torch.Tensor:
-        """One zarr read for packed [mu | logvar]; sample z = mu + sigma*eps.
+        """One read for packed [mu | logvar]; sample z = mu + sigma*eps.
 
         Uses torch.randn so that DataLoader's per-worker torch-seed (set
         automatically per worker) gives independent draws across workers.
@@ -162,7 +207,7 @@ class SampledLatentPatchDataset(Dataset):
         re-seeded per worker after fork.
         """
         packed = torch.from_numpy(
-            np.array(self._arr[global_idx], dtype=np.float32)
+            self._read_packed(global_idx)
         )   # (2*C, 16, 16, 16)
         mu     = packed[:self.z_channels]
         logvar = packed[self.z_channels:]

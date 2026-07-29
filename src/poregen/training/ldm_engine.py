@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from poregen.diffusion.conditioning import NB_UNKNOWN
 from poregen.training.checkpoint import copy_checkpoint, save_checkpoint, save_checkpoint_async
 
 import logging as _logging
@@ -105,8 +106,18 @@ def ldm_train_step(
     autocast_dtype: torch.dtype = torch.bfloat16,
     max_grad_norm: float | None = None,
     scheduler: Any | None = None,
+    drop_por_p: float = 0.0,
+    drop_joint_p: float = 0.0,
+    drop_nb_p: float = 0.0,
 ) -> dict[str, float]:
     """Single LDM training step.
+
+    CFG training dropout (ldm03+):
+    - drop_por_p   : probability of dropping porosity only
+    - drop_joint_p : probability of dropping porosity AND neighbours (unconditional base)
+    - drop_nb_p    : probability of dropping neighbours only
+
+    When all rates are 0 (ldm01/ldm02), the model is called exactly as before.
 
     Returns
     -------
@@ -122,6 +133,33 @@ def ldm_train_step(
     local_por  = b["local_por"].squeeze(1)   # (B,)
 
     B = z.shape[0]
+
+    # ── CFG per-sample dropout (mutually exclusive categories) ─────────────────
+    # Draw once per batch; categories are non-overlapping.  When all rates are 0
+    # the block is skipped entirely, preserving exact ldm01/ldm02 behaviour.
+    drop_por_mask: torch.Tensor | None = None
+    if drop_por_p > 0.0 or drop_joint_p > 0.0 or drop_nb_p > 0.0:
+        u   = torch.rand(B, device=device)
+        p0  = drop_por_p
+        p1  = drop_por_p + drop_joint_p
+        p2  = drop_por_p + drop_joint_p + drop_nb_p
+        por_only = u < p0                       # [0, p_por)
+        joint    = (u >= p0) & (u < p1)         # [p_por, p_por+p_joint)
+        nb_only  = (u >= p1) & (u < p2)         # [p_por+p_joint, ..+p_nb)
+
+        drop_por_mask = por_only | joint         # (B,) bool — drop porosity MLP output
+        drop_nb_mask  = joint | nb_only          # (B,) bool — force all-UNKNOWN avail
+
+        # Force ALL six neighbour slots to UNKNOWN for masked samples.
+        # nb_latents do NOT need to be touched — _build_nb_spatial applies an
+        # EXISTS mask so UNKNOWN entries zero themselves out automatically.
+        if drop_nb_mask.any():
+            all_unk   = torch.full_like(nb_avail, NB_UNKNOWN)
+            nb_avail  = torch.where(
+                drop_nb_mask.unsqueeze(1).expand_as(nb_avail),
+                all_unk, nb_avail,
+            )
+
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
     z_t    = schedule.q_sample(z, t, noise)
@@ -129,7 +167,8 @@ def ldm_train_step(
     optimizer.zero_grad(set_to_none=True)
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, pos_frac, global_por, local_por)
+        eps_pred = model(z_t, t, nb_latents, nb_avail, pos_frac, global_por, local_por,
+                         drop_por_mask)
         loss     = F.mse_loss(eps_pred, noise)
 
     scaler.scale(loss).backward()
@@ -256,6 +295,8 @@ def _log_sample_volume(
     patch_size: int = 64,
     patch_stride: int = 64,
     latent_size: int = 16,
+    s_por: float = 1.0,
+    s_nb: float = 1.0,
 ) -> None:
     """Generate a small volume with DDIM, decode with VAE if available.
 
@@ -279,7 +320,8 @@ def _log_sample_volume(
     step_dir.mkdir(exist_ok=True)
 
     try:
-        sampler = DDIMSampler(model, schedule, device, n_steps=ddim_steps)
+        sampler = DDIMSampler(model, schedule, device, n_steps=ddim_steps,
+                              s_por=s_por, s_nb=s_nb)
         local_por_map = _gaussian_por_grid(grid, global_por)
         vol_shape: tuple[int, int, int] = tuple(  # type: ignore[assignment]
             (g - 1) * patch_stride + patch_size for g in grid
@@ -295,8 +337,11 @@ def _log_sample_volume(
                 latent_size=latent_size,
                 latent_std=latent_std,
             )
+            # Convert voxel dims to physical mm for the new generate() API.
+            # vol_shape is already a multiple of patch_size so snapping is exact.
+            vol_size_mm = tuple(d * generator.voxel_size_mm for d in vol_shape)
             xct, mask = generator.generate(
-                volume_shape=vol_shape,
+                volume_size_mm=vol_size_mm,
                 target_porosity=global_por,
                 local_por_map=local_por_map,
                 autocast_dtype=autocast_dtype,
@@ -390,7 +435,11 @@ def ldm_train_loop(
       total_steps, log_every, eval_every, val_batches, save_every,
       max_grad_norm, compile,
       full_val_every,
-      sample_every, sample_ddim_steps, sample_grid, sample_global_por
+      sample_every, sample_ddim_steps, sample_grid, sample_global_por,
+      drop_por, drop_joint, drop_nb   (CFG training dropout; ldm03+)
+
+    Reads from cfg["guidance"]:
+      s_por, s_nb  (guidance scales for in-training sample viz; ldm03+)
     """
     if device is None:
         device = next(model.parameters()).device
@@ -405,13 +454,34 @@ def ldm_train_loop(
     if max_grad_norm is not None:
         max_grad_norm = float(max_grad_norm)
 
-    full_val_every    = int(training_cfg.get("full_val_every",    0))
+    full_val_every          = int(training_cfg.get("full_val_every",          0))
+    early_stopping_patience = int(training_cfg.get("early_stopping_patience", 0))
     sample_every      = int(training_cfg.get("sample_every", 0))
     sample_ddim_steps = int(training_cfg.get("sample_ddim_steps", 20))
     _raw_grid         = training_cfg.get("sample_grid", [3, 3, 3])
     sample_grid       = tuple(int(x) for x in _raw_grid)
     sample_global_por = float(training_cfg.get("sample_global_por", 0.02))
     sample_patch_stride = int(cfg.get("data", {}).get("patch_stride", 64))
+
+    # CFG training dropout rates (ldm03+; default 0.0 = no dropout, ldm01/02 behaviour)
+    drop_por_p   = float(training_cfg.get("drop_por",   0.0))
+    drop_joint_p = float(training_cfg.get("drop_joint", 0.0))
+    drop_nb_p    = float(training_cfg.get("drop_nb",    0.0))
+
+    # Guidance scales for in-training sample visualisation (ldm03+; default 1.0 = un-guided)
+    guidance_cfg = cfg.get("guidance", {})
+    s_por_scale  = float(guidance_cfg.get("s_por", 1.0))
+    s_nb_scale   = float(guidance_cfg.get("s_nb",  1.0))
+
+    if drop_por_p > 0 or drop_joint_p > 0 or drop_nb_p > 0:
+        _logger.info(
+            "CFG training dropout enabled — drop_por=%.2f  drop_joint=%.2f  drop_nb=%.2f",
+            drop_por_p, drop_joint_p, drop_nb_p,
+        )
+    if s_por_scale != 1.0 or s_nb_scale != 1.0:
+        _logger.info(
+            "Guided sample viz enabled — s_por=%.2f  s_nb=%.2f", s_por_scale, s_nb_scale,
+        )
 
     compile_model = bool(training_cfg.get("compile", False))
     if compile_model:
@@ -430,6 +500,8 @@ def ldm_train_loop(
     metrics_path = run_dir / "metrics.jsonl"
 
     best_val_loss:      float | None = None
+    best_val_full_loss: float | None = None
+    val_full_no_improve: int = 0
     train_iter = _infinite(train_loader)
     history:   list[dict[str, Any]] = []
     t0 = time.time()
@@ -451,6 +523,7 @@ def ldm_train_loop(
                 model, batch, optimizer, scaler, schedule,
                 step=step, device=device, autocast_dtype=autocast_dtype,
                 max_grad_norm=max_grad_norm, scheduler=scheduler,
+                drop_por_p=drop_por_p, drop_joint_p=drop_joint_p, drop_nb_p=drop_nb_p,
             )
             ema.update(model)
             _step_elapsed = time.perf_counter() - _step_t0
@@ -538,7 +611,27 @@ def ldm_train_loop(
                 metrics_file.flush()
                 if tb_writer is not None:
                     tb_writer.add_scalar("val_full/loss", full_agg["loss"], step)
-                _logger.info("Full val step %d — loss=%.6f", step + 1, full_agg["loss"])
+
+                full_loss = full_agg["loss"]
+                if best_val_full_loss is None or full_loss < best_val_full_loss:
+                    best_val_full_loss = full_loss
+                    val_full_no_improve = 0
+                    _logger.info("Full val step %d — loss=%.6f  (new best)", step + 1, full_loss)
+                else:
+                    val_full_no_improve += 1
+                    _logger.info(
+                        "Full val step %d — loss=%.6f  (no improve %d/%s)",
+                        step + 1, full_loss, val_full_no_improve,
+                        early_stopping_patience if early_stopping_patience > 0 else "∞",
+                    )
+
+                if early_stopping_patience > 0 and val_full_no_improve >= early_stopping_patience:
+                    _logger.info(
+                        "Early stopping triggered at step %d — "
+                        "no val_full improvement for %d consecutive checks (best=%.6f)",
+                        step + 1, val_full_no_improve, best_val_full_loss,
+                    )
+                    break
 
             # ── sample visualisation ─────────────────────────────────────────
             if sample_every > 0 and (step + 1) % sample_every == 0:
@@ -558,6 +651,8 @@ def ldm_train_loop(
                         global_por=sample_global_por,
                         latent_std=latent_std,
                         patch_stride=sample_patch_stride,
+                        s_por=s_por_scale,
+                        s_nb=s_nb_scale,
                     )
                 except Exception as _exc:
                     _logger.warning("Sample generation failed at step %d: %s", step, _exc)

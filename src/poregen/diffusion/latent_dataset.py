@@ -103,12 +103,42 @@ class LatentPatchDataset(Dataset):
             raise ValueError(f"LatentPatchDataset: no patches found for split='{split}' in {idx_path}")
         logger.info("LatentPatchDataset [%s]: %d patches", split, len(self.df))
 
-        # Open Zarr store (handle shared via fork across workers)
-        zarr_path = self.latents_root / "latents.zarr"
-        self._zarr: zarr.Array = zarr.open_array(str(zarr_path / "latents"), mode="r")
+        # --- backend selection ---
+        _mmap_bin  = self.latents_root / "latents.bin"
+        _mmap_meta = self.latents_root / "latents_meta.json"
+        _zarr_arr  = self.latents_root / "latents.zarr" / "latents"
 
-        self.z_channels  = self._zarr.shape[1]
-        self.latent_size = self._zarr.shape[2]   # spatial side length (16)
+        if _mmap_bin.exists() and _mmap_meta.exists():
+            with open(_mmap_meta) as _f:
+                _meta = json.load(_f)
+            assert len(df_full) == _meta["N"], (
+                f"Parquet has {len(df_full)} rows but latents_meta.json reports N={_meta['N']}. "
+                "Rebuild the latent store."
+            )
+            self._mmap = np.memmap(
+                str(_mmap_bin), dtype=np.dtype(_meta["dtype"]), mode="r",
+                shape=(_meta["N"], _meta["n_channels"], *_meta["spatial"]),
+            )
+            self._zarr = None
+            self.z_channels  = int(_meta["n_channels"])
+            self.latent_size = int(_meta["spatial"][0])
+            logger.info("LatentPatchDataset [%s]: memmap backend (%d items)", split, _meta["N"])
+        elif (_zarr_arr.parent.exists()):
+            self._mmap = None
+            self._zarr = zarr.open_array(str(_zarr_arr), mode="r")
+            self.z_channels  = self._zarr.shape[1]
+            self.latent_size = self._zarr.shape[2]
+            logger.warning(
+                "LatentPatchDataset [%s]: zarr fallback — latents.bin not found in %s. "
+                "Run scripts/convert_zarr_to_memmap.py to upgrade.",
+                split, self.latents_root,
+            )
+        else:
+            raise FileNotFoundError(
+                f"No latent store found in {self.latents_root}. "
+                "Expected latents.bin + latents_meta.json (memmap) or "
+                "latents.zarr/latents (legacy zarr)."
+            )
 
         # Latent scale stats for normalisation (computed from train split)
         _stats_path = self.latents_root / "latent_scale_stats.json"
@@ -148,6 +178,16 @@ class LatentPatchDataset(Dataset):
             key = (row["volume_id"], int(row["z0"]), int(row["y0"]), int(row["x0"]))
             self._coord_to_global[key] = int(global_idx)
 
+    def _read_item(self, global_idx: int) -> np.ndarray:
+        """Read one (z_channels, 16, 16, 16) item as float32.
+
+        The np.array() copy on the memmap path is intentional — it materialises
+        a heap copy so the kernel can evict the mmap page after use.
+        """
+        if self._mmap is not None:
+            return np.array(self._mmap[global_idx], dtype=np.float32)
+        return np.array(self._zarr[global_idx], dtype=np.float32)
+
     def __len__(self) -> int:
         return len(self.df)
 
@@ -166,7 +206,7 @@ class LatentPatchDataset(Dataset):
 
         # Target latent
         global_idx = self._coord_to_global[(vid, z0, y0, x0)]
-        raw_z = np.array(self._zarr[global_idx], dtype=np.float32)
+        raw_z = self._read_item(global_idx)
         z     = torch.from_numpy(raw_z) / self.latent_std    # (C, 16, 16, 16)
 
         # Neighbor conditioning — deterministic, inference-faithful
@@ -194,7 +234,7 @@ class LatentPatchDataset(Dataset):
             else:
                 # Non-anchor: neighbor is an anchor already generated → EXISTS
                 nb_global = self._coord_to_global[nb_key]
-                raw_nb = np.array(self._zarr[nb_global], dtype=np.float32)
+                raw_nb = self._read_item(nb_global)
                 nb_latents_list.append(torch.from_numpy(raw_nb) / self.latent_std)
                 nb_avail_list.append(NB_EXISTS)
 

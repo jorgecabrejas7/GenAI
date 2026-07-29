@@ -1,4 +1,4 @@
-"""Pre-compute VAE latents for all patches and store them in Zarr.
+"""Pre-compute VAE latents for all patches and store them in a numpy memmap.
 
 Usage
 -----
@@ -15,14 +15,16 @@ python scripts/encode_latents.py \\
 On-disk layout produced
 -----------------------
 <output>/
-├── latents.zarr/
-│   └── latents    (N_total, z_ch, 16, 16, 16) float16  Blosc-zstd
+├── latents.bin           — float16, C-contiguous, shape (N, z_ch, 16, 16, 16)
+├── latents_meta.json     — {"N": int, "n_channels": int, "spatial": [16,16,16],
+│                            "dtype": "float16", "pack_scheme": "none",
+│                            "z_channels": int}
 └── latents_index.parquet
     columns: volume_id, z0, y0, x0, ps, stride, porosity, vol_porosity, split,
              source_group, vol_depth, vol_height, vol_width,
              grid_iz, grid_iy, grid_ix, parity
 
-Row i of the parquet corresponds to latents.zarr/latents[i].
+Row i of the parquet corresponds to latents.bin row i.
 
 Parity
 ------
@@ -33,9 +35,9 @@ anchors, seeing all in-bounds neighbors as EXISTS).
 
 Restartability
 --------------
-If the Zarr array already exists and matches the expected shape, rows that
-already have non-zero latents are skipped (detected by checking the first
-voxel of each stored tensor).
+If the memmap bin exists and the metadata matches, rows that already have
+non-zero latents are skipped (detected by checking the first voxel of each
+stored tensor).
 """
 
 from __future__ import annotations
@@ -145,31 +147,30 @@ def _build_patch_index(
     return df
 
 
-def _open_zarr_store(n_patches: int, output_dir: Path, z_channels: int) -> zarr.Array:
-    zarr_path    = output_dir / "latents.zarr"
-    latents_path = str(zarr_path / "latents")
+def _open_memmap_store(n_patches: int, output_dir: Path, z_channels: int) -> np.ndarray:
+    """Open (or resume into) the float16 memmap output file."""
+    shape     = (n_patches, z_channels, 16, 16, 16)
+    bin_path  = output_dir / "latents.bin"
+    meta_path = output_dir / "latents_meta.json"
 
-    try:
-        arr = zarr.open_array(latents_path, mode="r+")
-        if arr.shape == (n_patches, z_channels, 16, 16, 16):
-            logger.info("Resuming into existing Zarr array %s", latents_path)
-            return arr
+    if bin_path.exists() and meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        existing_shape = (meta["N"], meta["n_channels"]) + tuple(meta["spatial"])
+        if existing_shape == shape:
+            logger.info("Resuming into existing memmap %s", bin_path)
+            return np.memmap(str(bin_path), dtype="float16", mode="r+", shape=shape)
         logger.warning(
-            "Existing Zarr shape %s does not match expected (%d, %d, 16, 16, 16) — recreating.",
-            arr.shape, n_patches, z_channels,
+            "Existing memmap shape %s does not match expected %s — recreating.",
+            existing_shape, shape,
         )
-    except Exception:
-        pass
 
-    arr = zarr.open_array(
-        latents_path,
-        mode="w",
-        shape=(n_patches, z_channels, 16, 16, 16),
-        dtype="float16",
-        chunks=(256, z_channels, 16, 16, 16),
+    mmap = np.memmap(str(bin_path), dtype="float16", mode="w+", shape=shape)
+    logger.info(
+        "Created memmap: %s  shape=%s  %.1f GB",
+        bin_path, shape, np.prod(shape) * 2 / 1e9,
     )
-    logger.info("Created Zarr array: shape=%s, dtype=float16, no compression", arr.shape)
-    return arr
+    return mmap
 
 
 def _volume_shapes(data_root: Path) -> dict[str, tuple[int, int, int]]:
@@ -279,7 +280,7 @@ def main() -> None:
     splits_json = data_root / "splits.json"
     df_full = _build_patch_index(data_root, args.stride, splits_json)
 
-    arr = _open_zarr_store(len(df_full), output_dir, z_channels)
+    mmap = _open_memmap_store(len(df_full), output_dir, z_channels)
 
     vol_shapes    = _volume_shapes(data_root)
     import zarr as _zarr
@@ -296,7 +297,7 @@ def main() -> None:
             rows = df_full.iloc[i:j]
 
             # Skip already-encoded blocks (first voxel non-zero heuristic)
-            existing = np.array(arr[i:j, 0, 0, 0, 0], dtype=np.float32)
+            existing = np.array(mmap[i:j, 0, 0, 0, 0], dtype=np.float32)
             if np.all(existing != 0.0):
                 pbar.update(j - i)
                 i = j
@@ -322,11 +323,29 @@ def main() -> None:
                 out = model(xct_batch, mask_batch)
             mu = out.mu.float().cpu().numpy().astype(np.float16)
 
-            arr[i:j] = mu
+            mmap[i:j] = mu
+            if (i // bs) % 256 == 0:
+                mmap.flush()
             pbar.update(j - i)
             i = j
 
-    logger.info("Encoded %d patches → %s", n_total, output_dir / "latents.zarr")
+    mmap.flush()
+    logger.info("Memmap write complete.")
+
+    _meta = {
+        "N":           n_total,
+        "n_channels":  z_channels,
+        "spatial":     [16, 16, 16],
+        "dtype":       "float16",
+        "pack_scheme": "none",
+        "z_channels":  z_channels,
+    }
+    _meta_tmp = output_dir / "latents_meta.json.tmp"
+    _meta_tmp.write_text(json.dumps(_meta, indent=2))
+    _meta_tmp.rename(output_dir / "latents_meta.json")
+    logger.info("Saved latents_meta.json → %s", output_dir / "latents_meta.json")
+
+    logger.info("Encoded %d patches → %s", n_total, output_dir / "latents.bin")
 
     # Build latents_index.parquet
     df_idx = df_full.copy()
@@ -357,7 +376,7 @@ def main() -> None:
     if len(train_idxs) == 0:
         raise RuntimeError("No 'train' split rows — cannot compute scale stats.")
     sample_idxs = np.random.choice(train_idxs, min(10000, len(train_idxs)), replace=False)
-    sample = np.array(arr.get_orthogonal_selection(sample_idxs), dtype=np.float32)
+    sample = np.asarray(mmap[sample_idxs], dtype=np.float32)
     stats = {"mean": float(sample.mean()), "std": float(sample.std())}
     stats_path = output_dir / "latent_scale_stats.json"
     stats_path.write_text(json.dumps(stats, indent=2))

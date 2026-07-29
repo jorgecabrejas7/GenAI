@@ -10,6 +10,11 @@ experiment:
     augmentation).  Architecture, schedule, conditioning, sampler, optimizer,
     and data splits are identical to ldm01 for a clean ablation.
 
+training:
+  total_steps: 100000
+  full_val_every: 500
+  early_stopping_patience: 10
+
 data:
   latents_root: data/split_v2/latents_s64_sampled
   latent_mode: sampled

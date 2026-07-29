@@ -31,7 +31,7 @@ training:
   ema_decay: 0.9999
   lr: 1.0e-4
   weight_decay: 0.01
-  total_steps: 25000
+  total_steps: 500000
   max_grad_norm: 1.0
   scheduler: cosine
   lr_min: 1.0e-5
@@ -39,7 +39,8 @@ training:
   log_every: 10
   eval_every: 62
   val_batches: 50
-  full_val_every: 2500
+  full_val_every: 1000
+  early_stopping_patience: 25
   save_every: 625
   compile: true
   sample_every: 625
@@ -51,10 +52,10 @@ training:
 data:
   latents_root: data/split_v2/latents_s64
   patch_stride: 32
-  num_workers: 4
-  pin_memory: false
+  num_workers: 8
+  pin_memory: true
   persistent_workers: true
-  prefetch_factor: 1
+  prefetch_factor: 4
 
 runtime:
   runs_root: runs/ldm

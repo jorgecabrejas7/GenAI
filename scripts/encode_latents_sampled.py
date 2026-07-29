@@ -1,12 +1,12 @@
 """Pre-compute VAE posterior parameters (mu, logvar) for all patches.
 
-Stores mu and logvar packed into a SINGLE zarr array:
-    latents.zarr/latents  (N, 2*z_ch, 16, 16, 16) float16
+Stores mu and logvar packed into a SINGLE numpy memmap file:
+    latents.bin  (N, 2*z_ch, 16, 16, 16) float16  C-contiguous
     first z_ch channels = mu
     last  z_ch channels = logvar
 
-One zarr read per item at training time (same as ldm01) — halves I/O vs a
-two-array design.  ldm01's mu-only store is NOT touched.
+One contiguous read per item at training time (same as ldm01) — halves I/O vs
+a two-array design.  ldm01's mu-only store is NOT touched.
 
 Usage
 -----
@@ -23,10 +23,12 @@ python scripts/encode_latents_sampled.py \\
 On-disk layout produced
 -----------------------
 <output>/
-├── latents.zarr/
-│   └── latents   (N, 2*z_ch, 16, 16, 16) float16
-│                 channels 0..z_ch-1   = mu
-│                 channels z_ch..2*z_ch-1 = logvar
+├── latents.bin           — float16, C-contiguous, shape (N, 2*z_ch, 16, 16, 16)
+│                           channels 0..z_ch-1      = mu
+│                           channels z_ch..2*z_ch-1 = logvar
+├── latents_meta.json     — {"N": int, "n_channels": int, "spatial": [16,16,16],
+│                            "dtype": "float16", "pack_scheme": "mu_then_logvar",
+│                            "z_channels": int}
 ├── latents_index.parquet
 │   columns: volume_id, z0, y0, x0, ps, stride, porosity, vol_porosity, split,
 │             source_group, vol_depth, vol_height, vol_width,
@@ -134,36 +136,30 @@ def _build_patch_index(
     return df
 
 
-def _open_zarr_store(n_patches: int, output_dir: Path, z_channels: int) -> zarr.Array:
-    """Open (or create) single zarr array storing [mu | logvar] along channel axis."""
-    zarr_path = output_dir / "latents.zarr"
-    arr_path  = str(zarr_path / "latents")
-    n_ch = 2 * z_channels   # first half = mu, second half = logvar
+def _open_memmap_store(n_patches: int, output_dir: Path, z_channels: int) -> np.ndarray:
+    """Open (or resume into) the float16 memmap output file."""
+    shape     = (n_patches, 2 * z_channels, 16, 16, 16)
+    bin_path  = output_dir / "latents.bin"
+    meta_path = output_dir / "latents_meta.json"
 
-    try:
-        arr = zarr.open_array(arr_path, mode="r+")
-        if arr.shape == (n_patches, n_ch, 16, 16, 16):
-            logger.info("Resuming into existing zarr array %s", arr_path)
-            return arr
+    if bin_path.exists() and meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        existing_shape = (meta["N"], meta["n_channels"]) + tuple(meta["spatial"])
+        if existing_shape == shape:
+            logger.info("Resuming into existing memmap %s", bin_path)
+            return np.memmap(str(bin_path), dtype="float16", mode="r+", shape=shape)
         logger.warning(
-            "Existing zarr shape %s does not match expected (%d, %d, 16, 16, 16) — recreating.",
-            arr.shape, n_patches, n_ch,
+            "Existing memmap shape %s does not match expected %s — recreating.",
+            existing_shape, shape,
         )
-    except Exception:
-        pass
 
-    arr = zarr.open_array(
-        arr_path,
-        mode="w",
-        shape=(n_patches, n_ch, 16, 16, 16),
-        dtype="float16",
-        chunks=(256, n_ch, 16, 16, 16),
-    )
+    mmap = np.memmap(str(bin_path), dtype="float16", mode="w+", shape=shape)
     logger.info(
-        "Created zarr array: shape=%s  dtype=float16  (ch 0..%d=mu, ch %d..%d=logvar)",
-        arr.shape, z_channels - 1, z_channels, n_ch - 1,
+        "Created memmap: %s  shape=%s  %.1f GB",
+        bin_path, shape, np.prod(shape) * 2 / 1e9,
     )
-    return arr
+    return mmap
 
 
 def _volume_shapes(data_root: Path) -> dict[str, tuple[int, int, int]]:
@@ -217,7 +213,7 @@ def main() -> None:
     splits_json = data_root / "splits.json"
     df_full = _build_patch_index(data_root, args.stride, splits_json)
 
-    arr = _open_zarr_store(len(df_full), output_dir, z_channels)
+    mmap = _open_memmap_store(len(df_full), output_dir, z_channels)
 
     vol_shapes   = _volume_shapes(data_root)
     import zarr as _zarr
@@ -233,7 +229,7 @@ def main() -> None:
             rows = df_full.iloc[i:j]
 
             # Skip already-encoded blocks (first voxel of mu channel non-zero heuristic)
-            existing = np.array(arr[i:j, 0, 0, 0, 0], dtype=np.float32)
+            existing = np.array(mmap[i:j, 0, 0, 0, 0], dtype=np.float32)
             if np.all(existing != 0.0):
                 pbar.update(j - i)
                 i = j
@@ -258,9 +254,27 @@ def main() -> None:
 
             # Pack [mu | logvar] along channel axis → (B, 2*C, 16, 16, 16)
             packed = torch.cat([out.mu, out.logvar], dim=1).float().cpu().numpy().astype(np.float16)
-            arr[i:j] = packed
+            mmap[i:j] = packed
+            if (i // bs) % 256 == 0:
+                mmap.flush()
             pbar.update(j - i)
             i = j
+
+    mmap.flush()
+    logger.info("Memmap write complete.")
+
+    _meta = {
+        "N":           n_total,
+        "n_channels":  2 * z_channels,
+        "spatial":     [16, 16, 16],
+        "dtype":       "float16",
+        "pack_scheme": "mu_then_logvar",
+        "z_channels":  z_channels,
+    }
+    _meta_tmp = output_dir / "latents_meta.json.tmp"
+    _meta_tmp.write_text(json.dumps(_meta, indent=2))
+    _meta_tmp.rename(output_dir / "latents_meta.json")
+    logger.info("Saved latents_meta.json → %s", output_dir / "latents_meta.json")
 
     logger.info("Encoded %d patches (mu+logvar packed) → %s", n_total, output_dir)
 
@@ -293,7 +307,7 @@ def main() -> None:
     chunk = 2048
     for start in range(0, len(sample_idxs), chunk):
         batch_idxs = sample_idxs[start:start + chunk]
-        packed_b = np.array(arr.get_orthogonal_selection(batch_idxs), dtype=np.float32)
+        packed_b = np.asarray(mmap[batch_idxs], dtype=np.float32)
         mu_b     = packed_b[:, :z_channels]
         logvar_b = packed_b[:, z_channels:]
         sigma_b  = np.exp(0.5 * logvar_b)

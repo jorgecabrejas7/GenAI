@@ -53,6 +53,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from poregen.diffusion.conditioning import NB_EXISTS
 from poregen.models.diffusion.blocks import (
     Downsample3D,
     ResBlock3D,
@@ -87,6 +88,7 @@ class UNet3DConfig:
     use_nb_global_cond: bool = True   # pool neighbour latents → add to AdaGN cond vector
     use_pos_cond: bool = True
     use_por_cond: bool = True
+    use_por_null: bool = False        # CFG: learn a null porosity embedding (ldm03+)
 
     @property
     def channels(self) -> list[int]:
@@ -120,6 +122,7 @@ class UNet3DConfig:
             use_nb_global_cond    = bool(m.get("use_nb_global_cond",  True)),
             use_pos_cond          = bool(m.get("use_pos_cond",        True)),
             use_por_cond          = bool(m.get("use_por_cond",        True)),
+            use_por_null          = bool(m.get("use_por_null",        False)),
         )
 
 
@@ -175,6 +178,10 @@ class UNet3DDenoiser(nn.Module):
             self.pos_mlp = _make_mlp(3, C)
         if cfg.use_por_cond:
             self.por_mlp = _make_mlp(2, C)
+            if cfg.use_por_null:
+                # Learned null porosity embedding for CFG — replaces por_mlp output
+                # when drop_por=True, so 0 (a real porosity) is never used as the null.
+                self.null_por = nn.Parameter(torch.zeros(C))
         # Global neighbour summary: pool each neighbour latent → (B, 6·z_ch) → MLP → (B, C)
         # Directions with OOB/UNKNOWN availability are zeroed before pooling so only
         # existing neighbours contribute.
@@ -258,13 +265,20 @@ class UNet3DDenoiser(nn.Module):
         local_por: torch.Tensor,
         nb_latents: torch.Tensor,
         nb_avail: torch.Tensor,
+        drop_por: "torch.Tensor | None" = None,
     ) -> torch.Tensor:
         cond = self.t_mlp(self.t_sin(t))
         if self.cfg.use_pos_cond:
             cond = cond + self.pos_mlp(pos_frac.float())
         if self.cfg.use_por_cond:
-            por  = torch.stack([global_por, local_por], dim=1).float()
-            cond = cond + self.por_mlp(por)
+            por     = torch.stack([global_por, local_por], dim=1).float()
+            por_emb = self.por_mlp(por)
+            if drop_por is not None and self.cfg.use_por_null:
+                # CFG: replace por_mlp output with learned null for dropped samples.
+                # null_por is (C,); broadcast to (B, C) for torch.where.
+                null = self.null_por.to(por_emb.dtype).unsqueeze(0).expand_as(por_emb)
+                por_emb = torch.where(drop_por.view(-1, 1), null, por_emb)
+            cond = cond + por_emb
         if self.cfg.use_neighbor_cond and self.cfg.use_nb_global_cond:
             # Pool each neighbour over spatial dims; zero out OOB/UNKNOWN directions.
             # nb_latents : (B, 6, z_ch, D, H, W)
@@ -283,6 +297,13 @@ class UNet3DDenoiser(nn.Module):
     ) -> torch.Tensor:
         B = nb_latents.shape[0]
         D, H, W = spatial_shape
+        # Zero out non-EXISTS neighbours so the spatial conv path is invariant to
+        # latent values when availability is UNKNOWN or OOB.  This is a no-op on
+        # training data (non-EXISTS entries are already zero by construction), but is
+        # required for CFG correctness: the guided sampler reuses one nb_latents
+        # tensor across all three passes and flips nb_avail only.
+        exists_mask = (nb_avail == NB_EXISTS).view(B, _N_NEIGHBORS, 1, 1, 1, 1)
+        nb_latents  = nb_latents * exists_mask.to(nb_latents.dtype)
         nb_flat = nb_latents.view(B, _N_NEIGHBORS * self.cfg.z_channels, D, H, W)
         if not self.cfg.use_avail_embedding:
             return nb_flat
@@ -304,6 +325,7 @@ class UNet3DDenoiser(nn.Module):
         pos_frac: torch.Tensor,
         global_por: torch.Tensor,
         local_por: torch.Tensor,
+        drop_por: "torch.Tensor | None" = None,
     ) -> torch.Tensor:
         """Predict noise ε in z_t.
 
@@ -316,13 +338,17 @@ class UNet3DDenoiser(nn.Module):
         pos_frac   : (B, 3) float
         global_por : (B,) float
         local_por  : (B,) float
+        drop_por   : (B,) bool or None — per-sample porosity dropout for CFG training.
+                     When True for a sample, por_mlp output is replaced with null_por
+                     (requires use_por_null=True in config).  None = no dropout.
 
         Returns
         -------
         eps_pred : (B, z_ch, D, H, W)
         """
         B, _, D, H, W = z_t.shape
-        cond = self._build_cond(t, pos_frac, global_por, local_por, nb_latents, nb_avail)
+        cond = self._build_cond(t, pos_frac, global_por, local_por, nb_latents, nb_avail,
+                                drop_por)
 
         if self.cfg.use_neighbor_cond:
             nb = self._build_nb_spatial(nb_latents, nb_avail, (D, H, W))

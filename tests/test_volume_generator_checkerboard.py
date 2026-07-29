@@ -27,7 +27,7 @@ class _FakeModel:
 
 
 class _FakeSampler:
-    """Stub sampler that just records the nb_avail tensor for each call."""
+    """Stub sampler that records per-patch nb_avail tensors via sample_batch."""
 
     def __init__(self) -> None:
         self.model = _FakeModel()
@@ -43,9 +43,26 @@ class _FakeSampler:
         autocast_dtype: torch.dtype = torch.bfloat16,
         return_intermediates: bool = False,
     ) -> torch.Tensor:
+        # Kept for back-compat; _generate_latents uses sample_batch instead.
         self.nb_avail_calls.append(nb_avail.clone())
         C, D = nb_latents.shape[1], nb_latents.shape[2]
         return torch.zeros(C, D, D, D)
+
+    def sample_batch(
+        self,
+        nb_latents: torch.Tensor,
+        nb_avail: torch.Tensor,
+        pos_frac: torch.Tensor,
+        global_por: torch.Tensor,
+        local_por: torch.Tensor,
+        autocast_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        # Record one nb_avail row per patch in the batch (in order).
+        B = nb_latents.shape[0]
+        for i in range(B):
+            self.nb_avail_calls.append(nb_avail[i].clone())
+        C, D = nb_latents.shape[2], nb_latents.shape[3]
+        return torch.zeros(B, C, D, D, D)
 
 
 def _parity(gi: tuple[int, int, int]) -> int:
