@@ -1,0 +1,32 @@
+model:
+  name: v2.vrrae
+  in_channels: 1
+  base_channels: 32
+  # n_blocks: encoder/decoder depth. The decoder is an EXACT mirror of the
+  # encoder (see src/poregen/models/vae/v2/vrrae.py module docstring) — no
+  # special extra stage. With base_channels=32, patch_size=64, n_blocks=5:
+  #   64^3@1ch -> 32^3@32ch -> 16^3@64ch -> 8^3@128ch -> 4^3@256ch -> 2^3@512ch
+  # This depth keeps every activation tensor's largest channel*resolution
+  # product well under the 2^31-element threshold where cuDNN's 3-D conv
+  # backward falls back to a much slower 64-bit-indexed kernel (a stricter,
+  # channel-heavy decoder — e.g. the previous asymmetric Upsample-based one —
+  # crossed that threshold at batch_size=256).
+  n_blocks: 5
+  patch_size: 64
+  # NOTE: no z_channels here — v2.vrrae has no spatial latent-channel concept
+  # at all (its latent is a flat (B, vrrae_rank) vector, not (B, C, d, h, w)).
+  # build_model() only forwards z_channels when present in this file, so
+  # omitting it here means VAEConfig's default applies and is simply unused.
+
+  # vrrae_dim: width of the FC-in projection the RR layer's SVD operates
+  # over. Set to a 2x reduction from the flattened encoder output
+  # (channel_schedule()[n_blocks-1] * latent_spatial**3 = 512*2^3 = 4096 -> 2048).
+  vrrae_dim: 2048
+  # vrrae_rank: target SVD truncation rank (k). RRLayer's SVD is computed
+  # across the batch dimension, so every training batch that reaches this
+  # model MUST have batch_size >= vrrae_rank (data.batch_size in
+  # configs/experiments/vrrae/base.yaml is set accordingly) — see
+  # vrrae_bottleneck.py's module docstring for the small-batch rank-clipping
+  # gotcha this constraint avoids.
+  vrrae_rank: 300
+  vrrae_basis_history_size: 20

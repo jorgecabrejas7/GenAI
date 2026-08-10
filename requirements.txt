@@ -26,6 +26,12 @@ fill-voids>=2.0
 joblib>=1.3
 pyyaml>=6.0
 
+# Vendored (see third_party/RR_layer, MIT licensed, pinned at commit
+# de2e8a5035cf0d5897a59f7f743fe8c3655a7caa) — RRLayer used by the VRRAE VAE
+# bottleneck (v2.vrrae). Local deviations: third_party/RR_layer/PATCHES.md.
+# Install editable: pip install -e third_party/RR_layer
+-e ./third_party/RR_layer
+
 # Dev
 pytest>=7.0
 

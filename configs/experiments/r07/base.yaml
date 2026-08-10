@@ -1,0 +1,21 @@
+experiment:
+  name: r07
+  variant: base
+  description: >-
+    R07 shared base — full-AE latent-compression sweep: XCT AND mask as
+    encoder input (in_channels=2, pre-D14 design) and both decoder heads,
+    on the R05 dual-branch trunk with all other R05 hyperparameters
+    (charbonnier + focal/Tversky + KL free_bits 0.1 + disc_weight 0.05).
+    Run the reduction-factor-X variants, not this base.
+
+extends: r05/base
+
+overrides:
+  model:
+    in_channels: 2
+  training:
+    early_stopping_patience: 12
+    early_stopping_metric: val.total
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 4500

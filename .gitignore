@@ -550,3 +550,4 @@ best_ddim_300/por_0.05/edges/volume.tif
 best_ddim_300/por_0.05/uniform/volume.tif
 best_ddim_300/por_0.05/center/volume.tif
 eval_results/stage4/eval_results.json
+/eval_results/

@@ -1,0 +1,26 @@
+experiment:
+  name: r06
+  variant: base
+  description: >-
+    R06 shared base — XCT-only latent-compression sweep. Single-branch
+    no-attention VAE (R03 encoder/decoder) with the mask head removed;
+    all other hyperparameters inherited from R05 (charbonnier recon,
+    free_bits 0.1, kl_max_beta 0.05, disc_weight 0.05, bs 128). The
+    mask-loss keys in the inherited loss config are unused because the
+    model emits mask_logits=None. Run the reduction-factor-X variants,
+    not this base: each sets z_channels for a total voxel-reduction
+    factor X = 64^3 / (z_channels * 16^3) = 64 / z_channels at the fixed
+    f=4 spatial downsampling used by all r0X experiments.
+
+extends: r05/base
+
+overrides:
+  model:
+    name: v2.conv_noattn_xctonly
+  training:
+    # Comparison sweep — same patience as the other queue experiments.
+    early_stopping_patience: 12
+    early_stopping_metric: val.total
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 4500

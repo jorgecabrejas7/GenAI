@@ -1,0 +1,12 @@
+experiment:
+  name: r07
+  variant: reduction-factor-2
+  description: >-
+    R07 full-AE (XCT+mask in/out) sweep point: total voxel reduction 2x
+    (z_channels=32 at f=4 spatial downsampling). See r07/base.
+
+extends: r07/base
+
+overrides:
+  model:
+    z_channels: 32

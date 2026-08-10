@@ -171,7 +171,11 @@ def load_checkpoint(
     if any(k.startswith("_orig_mod.") for k in model_state):
         model_state = {k.removeprefix("_orig_mod."): v for k, v in model_state.items()}
 
-    model.load_state_dict(model_state)
+    if any(key.endswith("inference_basis") for key in model_state):
+        from poregen.models.vae.v2.vrrae_finetune import load_vrrae_state_dict
+        load_vrrae_state_dict(model, model_state)
+    else:
+        model.load_state_dict(model_state)
 
     if optimizer is not None and "optimizer" in state:
         optimizer.load_state_dict(state["optimizer"])

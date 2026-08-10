@@ -11,6 +11,10 @@ overrides:
   # Change 1: lower free_bits threshold so more channels contribute to KL
   loss:
     kl_free_bits: 0.1
+  # r05 runs its full step budget — disable the early stopping inherited
+  # from r03/base → r04/base.
+  training:
+    early_stopping_patience: 0
 
 # Change 2: stronger discriminator weight (was 0.01 in R04)
 # Kept at top level (not inside overrides) — same convention as R04.

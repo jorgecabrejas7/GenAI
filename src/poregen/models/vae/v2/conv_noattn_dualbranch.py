@@ -141,11 +141,15 @@ class ConvVAE3DNoAttnDualBranchV2(nn.Module):
         Parameters
         ----------
         xct  : (B, 1, D, H, W) float32 — XCT intensity, z-scored.
-        mask : (B, 1, D, H, W) float32 {0, 1} — pore mask (decoder target only;
-               NOT fed to the encoder, consistent with the R03 XCT-only design).
+        mask : (B, 1, D, H, W) float32 {0, 1} — pore mask. With the default
+               ``in_channels=1`` it is a decoder target only (R03 XCT-only
+               design, D14); with ``in_channels=2`` (R07) it is concatenated
+               to the XCT as encoder input, so both modalities are encoded
+               and reconstructed — the pre-D14 full-AE design.
         """
-        h_a = self.encoder_a(xct)                         # (B, enc_out_ch, d, h, w)
-        h_b = self.encoder_b(xct)                         # (B, enc_out_ch, d, h, w)
+        enc_in = xct if self.cfg.in_channels == 1 else torch.cat([xct, mask], dim=1)
+        h_a = self.encoder_a(enc_in)                      # (B, enc_out_ch, d, h, w)
+        h_b = self.encoder_b(enc_in)                      # (B, enc_out_ch, d, h, w)
         h   = self.fusion(torch.cat([h_a, h_b], dim=1))   # (B, enc_out_ch, d, h, w)
 
         mu     = self.to_mu(h)
@@ -155,7 +159,7 @@ class ConvVAE3DNoAttnDualBranchV2(nn.Module):
         dec = self.decoder(z)
         return VAEOutput(
             xct_logits=self.xct_head(dec),
-            mask_logits=self.mask_head(dec),
+            mask_logits=self.mask_head(dec) if self.mask_head is not None else None,
             mu=mu,
             logvar=logvar,
             z=z,

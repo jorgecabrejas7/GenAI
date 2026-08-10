@@ -1,0 +1,120 @@
+experiment:
+  name: vrrae
+  variant: base
+  description: >-
+    VRRAE bottleneck — flatten+FC to vrrae_dim, truncated-SVD RR layer rank
+    reduction (SVD coefficients = posterior mean, f=identity), XCT-only
+    decoder (no mask segmentation head). vrrae_dim/vrrae_rank are
+    placeholders pending the Phase 3 hyperparameter sweep.
+
+extends: r03/base
+
+components:
+  model: models/vae/v2_vrrae.yaml
+  loss: losses/vae_charbonnier_kl.yaml
+
+overrides:
+  model:
+    # r03/base (which this experiment extends) sets z_channels: 16 in ITS
+    # OWN overrides — that value survives the deep-merge even though
+    # v2_vrrae.yaml doesn't set it, since merging is additive (a component
+    # not mentioning a key never removes an inherited one). Explicitly null
+    # it out here so the resolved config honestly shows "not applicable"
+    # instead of a fake latent-channel count v2.vrrae never uses.
+    z_channels: null
+    base_channels: 32
+    n_blocks: 5  # fully symmetric encoder/decoder, no special extra stage —
+                 # see configs/models/vae/v2_vrrae.yaml
+    patch_size: 64
+  training:
+    val_batches: 60
+    final_full_eval: true
+    # vae_default.yaml's total_steps=71690 is calibrated at batch_size=128
+    # (≈5.04 epochs over 1,822,599 train patches). Scaled inversely to hold
+    # total epochs constant at this experiment's batch_size=768:
+    # 71690 * 128 / 768 = 11948.3 -> 11948.
+    total_steps: 11948
+    # vae_default.yaml's max_grad_norm=null (no clipping) let the encoder's
+    # gradient explode unchecked in the first real run: train/grad_norm_encoder
+    # (TB) had median=873 and MAX=42,011,568 over 7118 steps, with the
+    # per-step median itself drifting up over training (61 in the first 500
+    # steps -> 2620 in the last 500) -- i.e. not just rare outliers, a
+    # compounding instability. train/grad_norm_decoder stayed flat and tiny
+    # (~0.08-0.3) the entire time by contrast, so this is encoder-specific,
+    # not a general training-scale issue. Root suspect: the RR layer's fresh
+    # per-batch truncated SVD (StableSVD.backward in
+    # third_party/RR_layer/RR_layer/rr_layer.py:26-81) has an F = 1/(S_i^2 -
+    # S_j^2) term guarded only below eps=1e-20 -- near-degenerate singular
+    # value pairs produce huge-but-finite gradients straight back through
+    # fc_in into every encoder conv layer. Clipping doesn't fix that
+    # ill-conditioning, it contains it: re-anchors step size near the
+    # pre-drift baseline (median=61 in the first 500 steps) rather than the
+    # already-compounded later median. This also directly explains the run's
+    # other two symptoms: kl exploding in lockstep with mu's growing scale
+    # (mu is the SVD coefficients of fc_in's output, which drifts with the
+    # encoder), and val/mae getting WORSE over training despite the decoder
+    # itself training calmly (it's just fed an increasingly corrupted z).
+    max_grad_norm: 1.0
+    # torch.compile(mode="max-autotune") enables CUDA graphs, which crashed
+    # ("accessing tensor output of CUDAGraphs that has been overwritten by a
+    # subsequent run", vrrae.py's decoder call) during a periodic TEST-set
+    # eval mid-training — val evals ran fine, test eval didn't, root cause
+    # not fully isolated (train/eval mode-switching confusing cudagraph
+    # buffer reuse across the compiled model's graph pool is the working
+    # theory). Disabled here rather than root-caused: eager-mode step time
+    # (measured directly via train_step, no compile) and this run's own
+    # compiled step time were nearly identical (~1.05-1.3s/step either way)
+    # once past the one-time compile warmup, so compile isn't buying real
+    # throughput for this model/config — not worth the crash risk over a
+    # 23897-step unattended run where the test-eval path fires ~38 times
+    # (test_every=625). Revisit if compile turns out to matter more at full
+    # scale, or if the crash gets root-caused and fixed properly.
+    compile: false
+    # NOTE: vae_default.yaml's montecarlo_batch_size=8 is fed through the
+    # model at batch=8 < model.vrrae_rank=300, which trips RRLayer's
+    # small-batch rank-clipping WARNING ("Requested rank=300, but the
+    # maximum achievable rank is 8") during run_montecarlo_eval. This is
+    # confirmed harmless, not left as a default deliberately without
+    # checking: run_montecarlo_eval calls model.eval() before any forward
+    # pass, and RRLayer's eval-mode branch (rr_layer.py's `else` branch)
+    # projects onto the already-finalized, fixed-width inference_basis via
+    # a plain `basis_used.T @ X` matmul — it does NOT re-run the SVD or
+    # re-derive rank from batch size (that only happens in the `elif
+    # self.training:` branch). mu/logvar still come back at full rank width
+    # (8, 300). The warning fires because it's raised unconditionally in
+    # _validate_inputs before the train/eval branch is even checked — a
+    # false alarm in this call path, not a real width mismatch. Left at the
+    # vae_default.yaml default (8) intentionally.
+  data:
+    batch_size: 768  # Must be >= model.vrrae_rank (RRLayer silently clips the
+                      # effective rank below batch_size — see vrrae_bottleneck
+                      # docstring). On the symmetric encoder/decoder, throughput
+                      # scales LINEARLY through bs=512 with no benefit to going
+                      # bigger for rank headroom alone (measured flat ms/sample
+                      # from bs=320 to bs=512) — this value was chosen for
+                      # other reasons than throughput. Real train_step profile
+                      # at bs=384 (the previously smoke-tested value): ~1.05s/
+                      # step, 18.4GiB peak. bs=512 was NOT re-smoke-tested after
+                      # this change (only benchmarked standalone, ~21.4GiB peak,
+                      # ~2.75ms/sample eager, no cliff) — vs. the OLD asymmetric
+                      # decoder's cuDNN indexing cliff past bs=256, up to 22.7s/
+                      # step and 86.2GiB at bs=512.
+  runtime:
+    run_name:
+      # Replaces r03/base's default field list, which includes a 'z' field
+      # reading model.z_channels — that key doesn't exist in this variant's
+      # model config (see v2_vrrae.yaml), so the inherited list would raise
+      # KeyError in build_run_name() at launch time. Swapped for the actual
+      # VRRAE hyperparameters (vrrae_dim/vrrae_rank), which are also more
+      # useful for telling Phase 3 sweep runs apart than z_channels ever was.
+      fields:
+        - {label: arch, path: model.name, transform: slug}
+        - {label: c, path: model.base_channels}
+        - {label: vd, path: model.vrrae_dim}
+        - {label: rank, path: model.vrrae_rank}
+        - {label: bs, path: data.batch_size}
+        - {label: lr, path: training.lr, transform: sci}
+        - {label: b, path: loss.kl_max_beta, transform: fixed3}
+        - {label: fb, path: loss.kl_free_bits}
+        - {label: klw, path: loss.kl_warmup_steps}
+        - {label: sched, path: training.scheduler}

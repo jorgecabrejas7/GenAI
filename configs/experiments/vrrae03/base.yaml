@@ -1,0 +1,35 @@
+experiment:
+  name: vrrae03
+  variant: base
+  description: >-
+    VRRAE capacity experiment: apply the rank-reduction layer directly to
+    the flattened 65536-wide encoder output, retain rank 500, and reshape the
+    reconstructed RR vector directly into the decoder. No learned FC layers
+    surround the bottleneck. Uses validation reconstruction early stopping.
+
+extends: vrrae/base
+
+overrides:
+  model:
+    # Stop after the 128-channel 8^3 stage: 128 * 8^3 = 65536 values.
+    # Matching this width makes both bottleneck.fc_in and decoder dec_b identities.
+    n_blocks: 3
+    vrrae_dim: 65536
+    vrrae_rank: 500
+  loss:
+    kl_warmup_steps: 1000
+  training:
+    # Preserve the previous run's sample/epoch budget after doubling batch.
+    total_steps: 11948
+    auto_schedule: false
+    eval_every: 62
+    # Begin judging only after the plateau window observed in prior runs.
+    # Patience counts validation checks, not optimizer steps.
+    early_stopping_patience: 12
+    early_stopping_metric: val.xct_loss
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 750
+  data:
+    # SVD rank is bounded by batch size during training.
+    batch_size: 768

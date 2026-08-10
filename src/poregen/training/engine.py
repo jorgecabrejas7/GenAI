@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import json
 import time
 from collections import deque
@@ -46,8 +47,29 @@ def _to_scalar(v: Any) -> Any:
 
 
 def _infinite(loader: DataLoader) -> Iterator:
+    """Cycle *loader* forever, refusing to spin on an exhausted loader.
+
+    If an inner pass yields zero batches, the bare ``while True: yield from
+    loader`` this replaces degenerates into a silent 100 %-of-one-core busy
+    spin: no batch is ever produced, so the caller never logs, never errors
+    and never touches the GPU — it just burns CPU indefinitely. That is the
+    exact signature vrrae-run-0001 exhibited (hung at step 9852 for 10.5 h,
+    16.7 h CPU vs 6.14 h of real training, GPU at 0 %). The DataLoader's own
+    ``timeout`` does NOT cover this: that guards a worker that *stalls*, not
+    a loader that *ends early* (e.g. workers torn down underneath a
+    ``persistent_workers`` loader), which ends iteration cleanly instead.
+    """
     while True:
-        yield from loader
+        n = 0
+        for batch in loader:
+            n += 1
+            yield batch
+        if n == 0:
+            raise RuntimeError(
+                "Training DataLoader yielded zero batches on a full pass — "
+                "refusing to spin. Its workers most likely died or were torn "
+                "down (check for worker OOM/segfault above)."
+            )
 
 
 def _central_slice_d(vol: torch.Tensor) -> torch.Tensor:
@@ -198,29 +220,65 @@ def train_step(
         losses["total"] = losses["total"] + disc_weight * _gen_adv_loss
 
     latent_moments = latent_channel_moments(output.mu)
-    _mask_pred_tensor = torch.sigmoid(output.mask_logits).mean().detach()
+    _mask_pred_tensor = (
+        torch.sigmoid(output.mask_logits).mean().detach()
+        if output.mask_logits is not None else None
+    )
 
     scaler.scale(losses["total"]).backward()
 
     if scaler.is_enabled():
         scaler.unscale_(optimizer)
 
-    # Per-module gradient norms — accumulate on GPU, single sync at end
-    _norm_gpu: dict[str, torch.Tensor] = {}
+    # Per-module AND global gradient norms — computed from ONE foreach pass
+    # over every parameter's gradient (each tensor's norm() is otherwise
+    # computed twice per step: once by a manual per-module loop, once again
+    # inside clip_grad_norm_'s own internal reduction over all parameters).
+    # torch._foreach_norm gives one norm per tensor via a single fused op;
+    # per-module and global aggregates are then just an algebraic combine
+    # (||concat(v1, v2, ...)||_2 == sqrt(sum ||vi||_2^2)), so no gradient
+    # tensor's norm is ever computed more than once. Values stay on GPU
+    # until the single .item()/clip below.
+    _owner_of: dict[int, str] = {}
     for name in ("encoder", "encoder_a", "encoder_b", "decoder", "mask_head"):
         module = getattr(model, name, None)
         if module is not None:
-            grads = [p.grad.detach() for p in module.parameters() if p.grad is not None]
-            if grads:
-                _norm_gpu[f"grad_norm_{name}"] = torch.stack(
-                    [g.norm(2) for g in grads]
-                ).norm(2)
+            for p in module.parameters():
+                _owner_of[id(p)] = name
+
+    _all_grads: list[torch.Tensor] = []
+    _owner_idx: dict[str, list[int]] = {}
+    for p in model.parameters():
+        if p.grad is None:
+            continue
+        idx = len(_all_grads)
+        _all_grads.append(p.grad.detach())
+        owner = _owner_of.get(id(p))
+        if owner is not None:
+            _owner_idx.setdefault(owner, []).append(idx)
+
+    if _all_grads:
+        _per_tensor_norms = torch.stack(torch._foreach_norm(_all_grads, 2))
+        _global_norm_gpu = torch.linalg.vector_norm(_per_tensor_norms, 2)
+    else:
+        _per_tensor_norms = None
+        _global_norm_gpu = torch.zeros((), device=device)
+
+    _norm_gpu: dict[str, torch.Tensor] = {
+        f"grad_norm_{name}": torch.linalg.vector_norm(_per_tensor_norms[idxs], 2)
+        for name, idxs in _owner_idx.items()
+    }
     module_grad_norms: dict[str, float] = {k: v.item() for k, v in _norm_gpu.items()}
 
-    grad_norm = torch.nn.utils.clip_grad_norm_(
-        model.parameters(),
-        max_grad_norm if max_grad_norm is not None else float("inf"),
-    ).item()
+    if _all_grads:
+        # Equivalent to clip_grad_norm_(model.parameters(), max_norm) but
+        # reuses _global_norm_gpu instead of recomputing the same reduction.
+        torch.nn.utils.clip_grads_with_norm_(
+            model.parameters(),
+            max_grad_norm if max_grad_norm is not None else float("inf"),
+            _global_norm_gpu,
+        )
+    grad_norm = _global_norm_gpu.item()
 
     scaler.step(optimizer)
     scaler.update()
@@ -239,8 +297,17 @@ def train_step(
         # Zero D grads (clears any accumulated from the generator backward)
         disc_optimizer.zero_grad(set_to_none=True)
 
-        d_real = discriminator(_real_slices)                        # float32, with grad
-        d_fake = discriminator(_fake_slices.detach())               # detached from G graph
+        # Real and fake go through ONE forward. Two forwards before one
+        # backward break under torch.compile: spectral norm's power iteration
+        # updates its u/v buffers in-place on the second forward, and AOT
+        # autograd saves the buffer itself (eager clones it), so the first
+        # forward's graph sees a version mismatch at backward. Safe to concat:
+        # the discriminator has no batch norm, scores are per-sample.
+        _n_real = _real_slices.shape[0]
+        d_all = discriminator(
+            torch.cat([_real_slices, _fake_slices.detach()], dim=0)
+        )                                                           # float32, with grad
+        d_real, d_fake = d_all[:_n_real], d_all[_n_real:]
 
         disc_loss = lsgan_disc_loss(d_real, d_fake)
         disc_loss.backward()
@@ -259,7 +326,8 @@ def train_step(
         }
 
     result = {k: _to_scalar(v) for k, v in losses.items()}
-    result["mask_pred_mean"] = float(_mask_pred_tensor.item())
+    if _mask_pred_tensor is not None:
+        result["mask_pred_mean"] = float(_mask_pred_tensor.item())
     result.update(disc_metrics)
     return result, grad_norm, latent_moments, module_grad_norms
 
@@ -331,24 +399,28 @@ def _run_eval(
         # Compute sigmoid ONCE — passed to all metrics to avoid redundant sigmoid
         # calls inside each metric function (each would otherwise create a full
         # (B,1,64,64,64) tensor = ~64 MB per call at batch_size=128, fp16).
-        mask_sigmoid = torch.sigmoid(output.mask_logits)
-        xct_sigmoid  = torch.sigmoid(output.xct_logits)
+        xct_sigmoid = torch.sigmoid(output.xct_logits)
 
-        # Segmentation metrics — pass pre-activated to skip internal sigmoid
-        seg = segmentation_metrics(mask_sigmoid, mask_dev, apply_sigmoid=False)
-        _accumulate(seg_acc, seg)
+        if output.mask_logits is not None:
+            mask_sigmoid = torch.sigmoid(output.mask_logits)
 
-        # Porosity metrics — pass pre-activated to skip internal sigmoid
-        por = porosity_metrics(mask_sigmoid, mask_dev, apply_sigmoid=False)
-        _accumulate(por_acc, por)
+            # Segmentation metrics — pass pre-activated to skip internal sigmoid
+            seg = segmentation_metrics(mask_sigmoid, mask_dev, apply_sigmoid=False)
+            _accumulate(seg_acc, seg)
 
-        # Per-volume porosity tracking — accumulate tensors, defer .item()
-        pred_por_v = mask_sigmoid.mean(dim=(1, 2, 3, 4))   # (B,)
-        gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))        # (B,)
-        pred_por_signed_all.append((pred_por_v - gt_por_v).detach())
-        pred_por_all.append(pred_por_v.detach())
-        gt_por_all.append(gt_por_v.detach())
-        vol_ids_all.append(list(batch["volume_id"]))
+            # Porosity metrics — pass pre-activated to skip internal sigmoid
+            por = porosity_metrics(mask_sigmoid, mask_dev, apply_sigmoid=False)
+            _accumulate(por_acc, por)
+
+            # Per-volume porosity tracking — accumulate tensors, defer .item()
+            pred_por_v = mask_sigmoid.mean(dim=(1, 2, 3, 4))   # (B,)
+            gt_por_v   = mask_dev.mean(dim=(1, 2, 3, 4))        # (B,)
+            pred_por_signed_all.append((pred_por_v - gt_por_v).detach())
+            pred_por_all.append(pred_por_v.detach())
+            gt_por_all.append(gt_por_v.detach())
+            vol_ids_all.append(list(batch["volume_id"]))
+        else:
+            mask_sigmoid = None
 
         # Reconstruction metrics — use pre-activated xct_sigmoid, no double sigmoid
         mae_acc.append(F.l1_loss(xct_sigmoid, xct_dev))
@@ -383,10 +455,14 @@ def _run_eval(
         for i, vid in enumerate(vids):
             vol_por_errors.setdefault(vid, []).append(float(signed_batch[i].item()))
 
-    # Porosity-binned MAE across the full eval set
-    all_pred_por = torch.cat(pred_por_all)
-    all_gt_por   = torch.cat(gt_por_all)
-    binned_mae_dict = porosity_binned_mae(all_pred_por, all_gt_por)
+    # Porosity-binned MAE across the full eval set (skipped when the model has
+    # no mask head — e.g. VRRAE's XCT-only decoder — since nothing was accumulated).
+    if pred_por_all:
+        all_pred_por = torch.cat(pred_por_all)
+        all_gt_por   = torch.cat(gt_por_all)
+        binned_mae_dict = porosity_binned_mae(all_pred_por, all_gt_por)
+    else:
+        binned_mae_dict = {}
 
     agg = {
         **_mean_acc(loss_acc, n_batches),
@@ -484,6 +560,11 @@ def train_loop(
     compile_model: bool = False,
     save_latest: bool = True,
     best_metric: str | None = None,
+    early_stopping_patience: int = 0,
+    early_stopping_metric: str = "val.xct_loss",
+    early_stopping_mode: str = "min",
+    early_stopping_min_delta: float = 0.0,
+    early_stopping_warmup_steps: int = 0,
     best_mode: str = "min",
     discriminator: nn.Module | None = None,
     disc_optimizer: torch.optim.Optimizer | None = None,
@@ -563,10 +644,20 @@ def train_loop(
     list of per-step metric dicts (train + val records, for inline plotting).
     """
     if compile_model:
-        model = torch.compile(model, mode="max-autotune", dynamic=False)  # type: ignore[assignment]
-        if discriminator is not None:
-            discriminator = torch.compile(discriminator, mode="max-autotune", dynamic=False)  # type: ignore[assignment]
-        loss_fn = torch.compile(loss_fn, mode="max-autotune")  # type: ignore[assignment]
+        # no-cudagraphs: keeps max-autotune's Triton kernel tuning (where the
+        # speedup for large 3D convs comes from) but disables CUDA-graph-tree
+        # replay, which cannot handle this loop — the train-mode graph emits
+        # the BatchNorm running-stat buffers as graph outputs, and the first
+        # eval-mode invocation then trips "accessing tensor output of
+        # CUDAGraphs that has been overwritten" when it takes them as inputs.
+        model = torch.compile(model, mode="max-autotune-no-cudagraphs", dynamic=False)  # type: ignore[assignment]
+        # The discriminator stays eager: it is invoked twice per step (generator
+        # adversarial path + its own update) and uses spectral norm, whose
+        # in-place power-iteration buffers break AOT autograd's saved tensors,
+        # while max-autotune's CUDA graphs overwrite the first invocation's
+        # output buffers on the second. It is a tiny 2D net (~661K params), so
+        # compiling it bought nothing anyway.
+        loss_fn = torch.compile(loss_fn, mode="max-autotune-no-cudagraphs")  # type: ignore[assignment]
 
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -576,6 +667,12 @@ def train_loop(
     montecarlo_every = image_log_every if montecarlo_every is None else montecarlo_every
     best_target_split, best_target_key = _parse_metric_target(best_metric)
     best_metric_value: float | None = None
+    early_target_split, early_target_key = _parse_metric_target(early_stopping_metric)
+    early_best_value: float | None = None
+    early_no_improve = 0
+    stop_requested = False
+    if early_stopping_mode not in {"min", "max"}:
+        raise ValueError("early_stopping_mode must be 'min' or 'max'")
 
     # Train workers stay alive throughout (needed for continuous prefetch).
     # Val/test workers are only created inside their respective eval blocks and
@@ -629,12 +726,56 @@ def train_loop(
             scheduler=scheduler,
         )
 
+    def _update_early_stopping(record: dict[str, Any]) -> bool:
+        nonlocal early_best_value, early_no_improve
+        if early_stopping_patience <= 0:
+            return False
+        if int(record["step"]) + 1 < early_stopping_warmup_steps:
+            return False
+        if record.get("split") != early_target_split or early_target_key is None:
+            return False
+        metric_value = record.get(early_target_key)
+        if metric_value is None:
+            return False
+
+        current = float(metric_value)
+        if early_best_value is None:
+            improved = True
+        elif early_stopping_mode == "min":
+            improved = current < early_best_value - early_stopping_min_delta
+        else:
+            improved = current > early_best_value + early_stopping_min_delta
+
+        if improved:
+            early_best_value = current
+            early_no_improve = 0
+            return False
+
+        early_no_improve += 1
+        return early_no_improve >= early_stopping_patience
+
+    # Hang watchdog. vrrae-run-0001 wedged mid-epoch at step 9852 and sat
+    # there for 10.5 h; because the process stayed alive and ptrace_scope=1
+    # blocks py-spy/gdb without root, there was no way to recover a stack
+    # trace after the fact. faulthandler needs no privileges: the timer is
+    # re-armed below on every iteration, so it only ever fires if a single
+    # iteration (batch fetch + train step + any eval/checkpoint) exceeds the
+    # budget, dumping every thread's Python stack to stderr and continuing.
+    # Budget is deliberately far above the slowest legitimate iteration
+    # observed (452 s, a full-validation epoch boundary).
+    _WATCHDOG_SECONDS = 1800.0
+    faulthandler.enable()
+
     # Use ExitStack so both log files are always closed — even on exception.
     with contextlib.ExitStack() as stack:
         log_file     = stack.enter_context(open(log_path,     "a"))
         metrics_file = stack.enter_context(open(metrics_path, "a"))
+        stack.callback(faulthandler.cancel_dump_traceback_later)
 
         for step in pbar:
+            # Re-arm: fires only if THIS iteration overruns the budget.
+            faulthandler.dump_traceback_later(_WATCHDOG_SECONDS, exit=False)
+
             # ── train step ────────────────────────────────────────────
             batch = next(train_iter)
             _step_t0 = time.perf_counter()
@@ -735,6 +876,7 @@ def train_loop(
                 if tb_writer is not None:
                     _log_scalars_to_tb(tb_writer, agg, "val", step)
                 _maybe_save_best(val_record)
+                stop_requested = _update_early_stopping(val_record) or stop_requested
 
             # ── full-loader validation (once per epoch) ───────────────
             if (
@@ -762,6 +904,7 @@ def train_loop(
                 if tb_writer is not None:
                     _log_scalars_to_tb(tb_writer, fv_agg, "val_full", step)
                 _maybe_save_best(fv_record)
+                stop_requested = _update_early_stopping(fv_record) or stop_requested
 
             # ── TensorBoard: fixed showcase Monte Carlo ───────────────
             if (
@@ -834,16 +977,66 @@ def train_loop(
                     autocast_dtype,
                 )
 
+
+            if stop_requested:
+                stop_record = {
+                    "step": step,
+                    "split": "event",
+                    "event": "early_stopping",
+                    "metric": early_stopping_metric,
+                    "best_value": early_best_value,
+                    "checks_without_improvement": early_no_improve,
+                    "patience": early_stopping_patience,
+                    "elapsed": time.time() - t0,
+                }
+                history.append(stop_record)
+                log_file.write(json.dumps(stop_record) + "\n")
+                log_file.flush()
+                metrics_file.write(json.dumps(stop_record) + "\n")
+                metrics_file.flush()
+                _logger.info("Early stopping at step %d: %s", step + 1, stop_record)
+                break
         # ── final checkpoint — wait for any in-flight background save ─
         if _ckpt_thread_holder and _ckpt_thread_holder[0] is not None:
             _ckpt_thread_holder[0].join()
 
-        final_step = start_step + total_steps
+        # VRRAE follows the reference's two-stage lifecycle: optimize with
+        # per-batch SVDs, then derive U_f from a separate full training-set
+        # pass before saving or running final validation/test.
+        basis_finalization = None
+        finalize_inference_basis = getattr(
+            model,
+            "finalize_inference_basis",
+            None,
+        )
+        if callable(finalize_inference_basis):
+            del train_iter
+            basis_finalization = finalize_inference_basis(
+                train_loader,
+                device=device,
+                autocast_dtype=autocast_dtype,
+            )
+            _logger.info(
+                "Finalized VRRAE U_f from %d samples in %d batches",
+                basis_finalization["n_samples"],
+                basis_finalization["n_batches"],
+            )
+
+        final_step = step + 1
         ckpt_name = f"{run_dir.name}_step{final_step:08d}.ckpt"
         final_ckpt_path = save_checkpoint(
             run_dir / ckpt_name,
             model, optimizer, scaler, step=final_step,
-            metadata={"total_steps": total_steps},
+            metadata={
+                "total_steps": total_steps,
+                "basis_finalization": basis_finalization,
+                "stopped_early": stop_requested,
+                "early_stopping_metric": early_stopping_metric,
+                "early_stopping_best_value": early_best_value,
+                "early_stopping_checks_without_improvement": early_no_improve,
+                "planned_final_step": start_step + total_steps,
+                "actual_final_step": final_step,
+            },
             scheduler=scheduler,
         )
         if save_latest:
@@ -950,7 +1143,8 @@ def _save_patch_samples(
             xct_gts.append(xct.cpu().float().numpy())
             mask_gts.append(mask.cpu().float().numpy())
             xct_recons.append(output.xct_logits.clamp(0.0, 1.0).cpu().float().numpy()[:n_take])
-            mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
+            if output.mask_logits is not None:
+                mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
 
             coords = batch["coords"]
             for i in range(n_take):
@@ -964,13 +1158,18 @@ def _save_patch_samples(
 
         del data_iter  # release workers and pinned memory for this split
 
+        xct_recon_arr = np.concatenate(xct_recons)
+        # export_patch_sample_split requires a mask_recon array for every variant;
+        # models with no mask head (e.g. VRRAE) have nothing to put there, so
+        # export zeros rather than change the shared export contract.
+        mask_recon_arr = np.concatenate(mask_recons) if mask_recons else np.zeros_like(xct_recon_arr)
         export_patch_sample_split(
             samples_dir / split,
             {
                 "xct_gt":    np.concatenate(xct_gts),
                 "mask_gt":   np.concatenate(mask_gts),
-                "xct_recon": np.concatenate(xct_recons),
-                "mask_recon": np.concatenate(mask_recons),
+                "xct_recon": xct_recon_arr,
+                "mask_recon": mask_recon_arr,
             },
             metas,
         )
@@ -991,14 +1190,15 @@ def _log_recon_images(
     """Log central slices along all 3 axes to TensorBoard."""
     with torch.no_grad():
         xct_recon  = output.xct_logits.clamp(0.0, 1.0)
-        mask_recon = torch.sigmoid(output.mask_logits)
         xct_gt  = batch["xct"].to(device, non_blocking=True)
-        mask_gt = batch["mask"].to(device, non_blocking=True)
 
-        for tag, gt_vol, recon_vol in [
-            ("xct",  xct_gt,  xct_recon),
-            ("mask", mask_gt, mask_recon),
-        ]:
+        pairs = [("xct", xct_gt, xct_recon)]
+        if output.mask_logits is not None:
+            mask_recon = torch.sigmoid(output.mask_logits)
+            mask_gt = batch["mask"].to(device, non_blocking=True)
+            pairs.append(("mask", mask_gt, mask_recon))
+
+        for tag, gt_vol, recon_vol in pairs:
             for axis, slicer in [
                 ("d", _central_slice_d),
                 ("h", _central_slice_h),
@@ -1040,6 +1240,7 @@ def run_montecarlo_eval(
     xct  = batch["xct"].to(device, non_blocking=True)
     mask = batch["mask"].to(device, non_blocking=True)
 
+    has_mask = None  # set from the first forward pass below
     xct_samples:  list[torch.Tensor] = []
     mask_samples: list[torch.Tensor] = []
 
@@ -1047,27 +1248,31 @@ def run_montecarlo_eval(
         for _ in range(n_samples):
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 output = model(xct, mask)
+            if has_mask is None:
+                has_mask = output.mask_logits is not None
             xct_samples.append(output.xct_logits.clamp(0.0, 1.0).float())
-            mask_samples.append(torch.sigmoid(output.mask_logits).float())
+            if has_mask:
+                mask_samples.append(torch.sigmoid(output.mask_logits).float())
 
     xct_stack  = torch.stack(xct_samples,  dim=0)   # (N, B, 1, D, H, W)
-    mask_stack = torch.stack(mask_samples, dim=0)
-
     xct_mean  = xct_stack.mean(dim=0)
     xct_std   = xct_stack.std(dim=0)
-    mask_mean = mask_stack.mean(dim=0)
-    mask_std  = mask_stack.std(dim=0)
+
+    if has_mask:
+        mask_stack = torch.stack(mask_samples, dim=0)
+        mask_mean = mask_stack.mean(dim=0)
+        mask_std  = mask_stack.std(dim=0)
 
     _DIVERSITY_EPS = 1e-5
     xct_div  = xct_std.mean().item()
-    mask_div = mask_std.mean().item()
-    if xct_div < _DIVERSITY_EPS or mask_div < _DIVERSITY_EPS:
+    mask_div = mask_std.mean().item() if has_mask else None
+    if xct_div < _DIVERSITY_EPS or (mask_div is not None and mask_div < _DIVERSITY_EPS):
         import logging as _logging
         _logging.getLogger(__name__).warning(
             "run_montecarlo_eval step=%d: predictions nearly identical "
-            "(xct_div=%.2e  mask_div=%.2e). "
+            "(xct_div=%.2e  mask_div=%s). "
             "Check reparameterization / posterior collapse.",
-            step, xct_div, mask_div,
+            step, xct_div, f"{mask_div:.2e}" if mask_div is not None else "n/a",
         )
 
     cmap = plt.get_cmap(cmap_name)
@@ -1084,14 +1289,13 @@ def run_montecarlo_eval(
         ("w", _central_slice_w),
     ]:
         writer.add_images(f"montecarlo/xct_mean_{axis}",  slicer(xct_mean),  step)
-        writer.add_images(f"montecarlo/mask_mean_{axis}", slicer(mask_mean), step)
         writer.add_images(f"montecarlo/xct_std_{axis}",   _std_to_rgb(slicer(xct_std)),  step)
-        writer.add_images(f"montecarlo/mask_std_{axis}",  _std_to_rgb(slicer(mask_std)), step)
+        if has_mask:
+            writer.add_images(f"montecarlo/mask_mean_{axis}", slicer(mask_mean), step)
+            writer.add_images(f"montecarlo/mask_std_{axis}",  _std_to_rgb(slicer(mask_std)), step)
 
     xct_recon_single  = xct_samples[0]
-    mask_recon_single = mask_samples[0]
     xct_gt_clamped    = xct.clamp(0.0, 1.0)
-    mask_gt_clamped   = mask.clamp(0.0, 1.0)
 
     for axis, slicer in [
         ("d", _central_slice_d),
@@ -1100,5 +1304,8 @@ def run_montecarlo_eval(
     ]:
         writer.add_images(f"montecarlo/xct_recon_{axis}",  slicer(xct_recon_single),  step)
         writer.add_images(f"montecarlo/xct_gt_{axis}",     slicer(xct_gt_clamped),    step)
-        writer.add_images(f"montecarlo/mask_recon_{axis}", slicer(mask_recon_single), step)
-        writer.add_images(f"montecarlo/mask_gt_{axis}",    slicer(mask_gt_clamped),   step)
+        if has_mask:
+            mask_recon_single = mask_samples[0]
+            mask_gt_clamped   = mask.clamp(0.0, 1.0)
+            writer.add_images(f"montecarlo/mask_recon_{axis}", slicer(mask_recon_single), step)
+            writer.add_images(f"montecarlo/mask_gt_{axis}",    slicer(mask_gt_clamped),   step)

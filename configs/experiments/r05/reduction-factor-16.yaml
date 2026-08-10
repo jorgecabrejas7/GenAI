@@ -1,0 +1,26 @@
+experiment:
+  name: r05
+  variant: reduction-factor-16
+  description: >-
+    R05 latent-compression sweep point: total voxel reduction 16x
+    (z_channels=4 at f=4 spatial downsampling). Full R05 setup —
+    dual-branch encoder, XCT + mask heads, focal + Tversky mask loss,
+    disc_weight 0.05 — with patience-12 early stopping (unlike r05/base).
+    Mask-carrying counterpart of r06/reduction-factor-16.
+
+extends: r05/base
+
+overrides:
+  model:
+    z_channels: 4
+  training:
+    # compile off: max-autotune's autotuner picks a pathological kernel for
+    # these z=4 dualbranch shapes (7.4 s/step compiled vs ~2.2 eager,
+    # measured on r05-run-0006 before restart). Same issue hit z=16 xctonly
+    # and z=32 dualbranch; it is shape-specific, so per-variant opt-out.
+    compile: false
+    early_stopping_patience: 12
+    early_stopping_metric: val.total
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 4500

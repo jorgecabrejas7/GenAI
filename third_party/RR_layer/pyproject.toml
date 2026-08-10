@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "RR_layer"
+version = "0.1.1"
+description= " A repo for RR layer in Pytorch."
+readme="README.md"
+requires-python= ">=3.10"
+license={text= "MIT"}
+authors=[{name="Jad Mounayer", email="jad.mounayer@outlook.com"}]
+dependencies = ["matplotlib", "numpy", "torch", "torchvision"]

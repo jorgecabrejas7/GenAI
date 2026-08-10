@@ -21,6 +21,12 @@ training:
   n_patch_samples: 8
   compile: true
   deterministic: false
+  # Disabled by default. Individual experiments opt in.
+  early_stopping_patience: 0
+  early_stopping_metric: val.xct_loss
+  early_stopping_mode: min
+  early_stopping_min_delta: 0.0
+  early_stopping_warmup_steps: 0
 
 runtime:
   runs_root: runs/vae

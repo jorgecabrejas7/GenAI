@@ -1,0 +1,17 @@
+model:
+  name: v2.vrrae_linear
+  in_channels: 1
+  base_channels: 32
+  # Identical topology to v2_vrrae.yaml (see that file's comments for the
+  # depth/throughput rationale) — this model is the SVD-ablation twin of
+  # v2.vrrae: same encoder/decoder/fc_in/dec_b, but mu comes from a learned
+  # Linear(vrrae_dim, vrrae_rank) and the (rank -> vrrae_dim) leg is a
+  # learned Linear instead of the per-batch SVD basis. No
+  # vrrae_basis_history_size — there is no basis machinery here.
+  n_blocks: 5
+  patch_size: 64
+  vrrae_dim: 2048
+  # vrrae_rank: flat latent width. Unlike v2.vrrae there is NO batch_size >=
+  # rank constraint (no SVD), but the ablation experiment keeps the same
+  # batch size anyway for comparability.
+  vrrae_rank: 300

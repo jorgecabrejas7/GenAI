@@ -80,8 +80,22 @@ class ConvVAE3DNoAttnV2(nn.Module):
         dec = self.decoder(z)
         return VAEOutput(
             xct_logits=self.xct_head(dec),
-            mask_logits=self.mask_head(dec),
+            mask_logits=self.mask_head(dec) if self.mask_head is not None else None,
             mu=mu,
             logvar=logvar,
             z=z,
         )
+
+
+@register_vae("v2.conv_noattn_xctonly")
+class ConvVAE3DNoAttnXCTOnlyV2(ConvVAE3DNoAttnV2):
+    """R06: the single-branch no-attention VAE with the mask head removed.
+
+    Identical to ``v2.conv_noattn`` in every other respect; ``forward``
+    returns ``mask_logits=None``, which the loss/eval/logging stack already
+    handles (same contract as ``v2.vrrae``).
+    """
+
+    def __init__(self, cfg: VAEConfig) -> None:
+        super().__init__(cfg)
+        self.mask_head = None

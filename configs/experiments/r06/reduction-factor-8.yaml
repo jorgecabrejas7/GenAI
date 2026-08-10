@@ -1,0 +1,14 @@
+experiment:
+  name: r06
+  variant: reduction-factor-8
+  description: >-
+    R06 latent-compression sweep point: total voxel reduction 8x
+    (z_channels=8 at f=4 spatial downsampling; latent 8 x 16^3 =
+    32768 values vs 262144 input voxels). See r06/base for the
+    shared XCT-only single-branch setup.
+
+extends: r06/base
+
+overrides:
+  model:
+    z_channels: 8

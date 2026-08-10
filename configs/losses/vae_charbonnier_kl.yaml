@@ -1,0 +1,26 @@
+loss:
+  xct_loss_type: charbonnier
+  xct_weight: 1.0
+  # Kept DISABLED. It was briefly set to 0.5 on the theory that
+  # "mu_n_active sat at 0-40 of rank=300" meant posterior collapse -- that
+  # reading was wrong for this architecture. mu here is the truncated SVD
+  # coefficients, which are sorted by singular value BY CONSTRUCTION, so
+  # small tail channels are the RRAE's intended "natural ordering of
+  # importance", not collapsed units. free_bits also cannot revive anything
+  # regardless: torch.clamp(x, min=fb) has zero gradient below the floor, so
+  # it only adds a constant to the loss. The real cause of the bad run was
+  # the decoder receiving raw coefficients instead of U @ alpha (see
+  # vrrae.py) plus an incorrect SVD backward (see third_party/RR_layer).
+  kl_free_bits: 0.0
+  # Ramp beta 0 -> kl_max_beta instead of applying full KL pressure at step 0
+  # against a still-random encoder, which gave early SGD every incentive to
+  # zero channels out rather than learn structure. Sized against the run
+  # length: at vrrae/base's batch_size=768 (total_steps=11948) this is ~17%
+  # of the run, reaching full beta at ~0.85 epochs and leaving ~4.2 epochs
+  # under full KL pressure.
+  kl_warmup_steps: 2000
+  # Deliberately UNCHANGED from run-0001. Lowering beta uniformly would slow
+  # collapse without removing the "killing a channel is free" dynamic that
+  # free_bits actually fixes; holding it constant keeps the next run a clean
+  # read on whether free_bits+warmup alone restore active units.
+  kl_max_beta: 0.025

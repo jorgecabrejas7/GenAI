@@ -1,0 +1,28 @@
+experiment:
+  name: vrrae
+  variant: smoke100
+  description: >-
+    THROWAWAY 100-step smoke test of the reworked symmetric encoder/decoder
+    v2.vrrae architecture against the real data/split_v2 memmap dataloader —
+    confirms real-I/O step time, checkpoint save, and eval-path correctness
+    before committing to the full vrrae/base run. Delete once vrrae/base is
+    confirmed healthy.
+
+extends: vrrae/base
+
+overrides:
+  training:
+    total_steps: 100
+    eval_every: 40
+    test_every: 100
+    save_every: 100
+    image_log_every: 40
+    montecarlo_every: 40
+    sample_every: 1000000  # skip patch-sample export for this short run
+    final_full_eval: false  # skip the full-dataset val/test pass — this is
+                             # a step-mechanics smoke test, not a quality
+                             # check; the periodic test_every=100 eval above
+                             # already exercises the same eval_step code
+                             # path (and is where the earlier CUDAGraph
+                             # crash occurred) without waiting on ~600+
+                             # batches per split

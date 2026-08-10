@@ -99,6 +99,11 @@ class TrainingConfig:
     n_patch_samples: int = 8
     compile: bool = False
     deterministic: bool = False
+    early_stopping_patience: int = 0
+    early_stopping_metric: str = "val.xct_loss"
+    early_stopping_mode: str = "min"
+    early_stopping_min_delta: float = 0.0
+    early_stopping_warmup_steps: int = 0
     # When False, configure_training_schedule() preserves the eval_every and
     # image_log_every values from config rather than overriding them from the
     # dataset size.  Set to false in experiments that fix a specific cadence.
@@ -112,6 +117,14 @@ class TrainingConfig:
         if self.total_steps < 1:
             raise ValueError(f"total_steps must be ≥ 1, got {self.total_steps}")
 
+        if self.early_stopping_patience < 0:
+            raise ValueError("early_stopping_patience must be ≥ 0")
+        if self.early_stopping_mode not in {"min", "max"}:
+            raise ValueError("early_stopping_mode must be 'min' or 'max'")
+        if self.early_stopping_min_delta < 0:
+            raise ValueError("early_stopping_min_delta must be ≥ 0")
+        if self.early_stopping_warmup_steps < 0:
+            raise ValueError("early_stopping_warmup_steps must be ≥ 0")
 
 @dataclass
 class DataConfig:

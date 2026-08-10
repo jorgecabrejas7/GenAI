@@ -79,16 +79,38 @@ def configure_training_schedule(
 
 
 def build_model(cfg: dict[str, Any], device: torch.device) -> torch.nn.Module:
-    """Construct the configured VAE model."""
+    """Construct the configured VAE model.
+
+    Forwards the 4 core ``VAEConfig`` keys every variant needs
+    (``in_channels``, ``base_channels``, ``n_blocks``, ``patch_size``), plus
+    ``z_channels`` for every variant EXCEPT ``v2.vrrae`` and its ablation
+    twin ``v2.vrrae_linear`` — they have no spatial latent-channel concept at
+    all (their latent is a flat ``(B, vrrae_rank)`` vector), so whatever value happens to be in its resolved config (e.g.
+    inherited from a parent experiment's own overrides — see
+    ``configs/experiments/vrrae/base.yaml``) is deliberately never forwarded
+    to ``build_vae``, keyed on the model name rather than key
+    presence/absence so this holds regardless of what the config-inheritance
+    chain happens to set. Also forwards (when present in ``model_cfg``) the
+    ``v2.vrrae``-specific keys (``vrrae_dim``, ``vrrae_rank``,
+    ``vrrae_basis_history_size``, ``vrrae_conv_channels``). These are only
+    forwarded if explicitly set in the experiment's model config — the other
+    4 variants (``v2.conv_noattn``, ``v2.conv``, ``v2.unet``,
+    ``v2.conv_noattn_dualbranch``) never set them, so nothing changes for
+    those; ``VAEConfig``'s own defaults apply when omitted.
+    """
     model_cfg = cfg["model"]
-    return build_vae(
-        model_cfg["name"],
+    kwargs: dict[str, Any] = dict(
         in_channels=model_cfg.get("in_channels", 2),
-        z_channels=model_cfg["z_channels"],
         base_channels=model_cfg["base_channels"],
         n_blocks=model_cfg["n_blocks"],
         patch_size=model_cfg["patch_size"],
-    ).to(device)
+    )
+    if model_cfg["name"] not in ("v2.vrrae", "v2.vrrae_linear"):
+        kwargs["z_channels"] = model_cfg.get("z_channels", 8)
+    for key in ("vrrae_dim", "vrrae_rank", "vrrae_basis_history_size", "vrrae_conv_channels"):
+        if key in model_cfg:
+            kwargs[key] = model_cfg[key]
+    return build_vae(model_cfg["name"], **kwargs).to(device)
 
 
 def build_discriminator(
@@ -404,6 +426,15 @@ def run_experiment(
                 save_latest=bool(cfg["runtime"]["checkpoints"].get("save_latest", True)),
                 best_metric=cfg["runtime"]["checkpoints"].get("best_metric"),
                 best_mode=cfg["runtime"]["checkpoints"].get("best_mode", "min"),
+                early_stopping_patience=int(cfg["training"].get("early_stopping_patience", 0)),
+                early_stopping_metric=cfg["training"].get("early_stopping_metric", "val.xct_loss"),
+                early_stopping_mode=cfg["training"].get("early_stopping_mode", "min"),
+                early_stopping_min_delta=float(
+                    cfg["training"].get("early_stopping_min_delta", 0.0)
+                ),
+                early_stopping_warmup_steps=int(
+                    cfg["training"].get("early_stopping_warmup_steps", 0)
+                ),
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
@@ -546,6 +577,15 @@ def resume_run(
                 save_latest=bool(cfg["runtime"]["checkpoints"].get("save_latest", True)),
                 best_metric=cfg["runtime"]["checkpoints"].get("best_metric"),
                 best_mode=cfg["runtime"]["checkpoints"].get("best_mode", "min"),
+                early_stopping_patience=int(cfg["training"].get("early_stopping_patience", 0)),
+                early_stopping_metric=cfg["training"].get("early_stopping_metric", "val.xct_loss"),
+                early_stopping_mode=cfg["training"].get("early_stopping_mode", "min"),
+                early_stopping_min_delta=float(
+                    cfg["training"].get("early_stopping_min_delta", 0.0)
+                ),
+                early_stopping_warmup_steps=int(
+                    cfg["training"].get("early_stopping_warmup_steps", 0)
+                ),
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,

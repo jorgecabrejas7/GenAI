@@ -53,6 +53,14 @@ overrides:
   training:
     val_batches: 20            # batches per partial eval; auto_schedule spaces these evenly
     montecarlo_every: 250      # MC uncertainty log every 250 steps
+    # Early stopping (inherits r03/base's block; restated for visibility since
+    # this run's eval cadence is auto-derived). Patience counts validation
+    # checks, not optimizer steps.
+    early_stopping_patience: 12
+    early_stopping_metric: val.total
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 4500
 
   # Change 3: discriminator (read by build_discriminator in train_vae.py)
   # Note: this section is extra — not validated by parse_config, just preserved.

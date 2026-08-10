@@ -1,0 +1,21 @@
+experiment:
+  name: r05
+  variant: reduction-factor-2
+  description: >-
+    R05 latent-compression sweep point: total voxel reduction 2x
+    (z_channels=32 at f=4 spatial downsampling). Full R05 setup —
+    dual-branch encoder, XCT + mask heads, focal + Tversky mask loss,
+    disc_weight 0.05 — with patience-12 early stopping (unlike r05/base).
+    Mask-carrying counterpart of r06/reduction-factor-2.
+
+extends: r05/base
+
+overrides:
+  model:
+    z_channels: 32
+  training:
+    early_stopping_patience: 12
+    early_stopping_metric: val.total
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 4500

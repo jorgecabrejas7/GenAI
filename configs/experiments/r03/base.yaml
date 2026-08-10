@@ -26,3 +26,11 @@ overrides:
   training:
     val_batches: 60
     final_full_eval: true
+    # Early stopping on the combined val loss (xct + mask + beta*kl; beta is
+    # constant since kl_warmup_steps=0, so the metric is comparable across
+    # steps). Patience counts validation checks, not optimizer steps.
+    early_stopping_patience: 12
+    early_stopping_metric: val.total
+    early_stopping_mode: min
+    early_stopping_min_delta: 1.0e-4
+    early_stopping_warmup_steps: 4500
