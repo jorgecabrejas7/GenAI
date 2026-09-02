@@ -529,12 +529,18 @@ def _run_eval(
 
 
 def _snapshot_logging_batch(batch: dict[str, Any], n_examples: int) -> dict[str, torch.Tensor]:
-    """Keep a small, fixed batch on CPU for lightweight reconstruction logging."""
+    """Keep a small, fixed batch on CPU for lightweight reconstruction logging.
+
+    EVERY tensor entry is kept, not a hand-listed pair: the consumers call
+    :func:`to_device_inputs`, so the snapshot has to carry whatever the model
+    declares in ``encoder_inputs`` — ``label`` for a 3-class variant, ``mask``
+    for a binary one — plus ``mask`` for the ground-truth image panel. Listing
+    keys here means a new variant crashes hundreds of steps into a run, at the
+    first Monte-Carlo eval, which is exactly what it did.
+    """
     n_take = min(max(1, n_examples), batch["xct"].shape[0])
-    return {
-        "xct":  batch["xct"] [:n_take].cpu(),
-        "mask": batch["mask"][:n_take].cpu(),
-    }
+    return {k: v[:n_take].cpu() for k, v in batch.items()
+            if isinstance(v, torch.Tensor)}
 
 
 def _parse_metric_target(metric: str | None) -> tuple[str | None, str | None]:
