@@ -53,7 +53,7 @@ from _real_windows import cell_ok_by_slice, find_region  # noqa: E402
 sys.path.insert(0, str(REPO / "src"))
 
 from poregen.diffusion.sampler import seam_discontinuity  # noqa: E402
-from poregen.eval.blended import _tukey_window_3d  # noqa: E402
+from poregen.eval.blended import tukey_window_3d  # noqa: E402
 from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 
 OUT_DIR = REPO / "runs/campaigns/08-pre-ldm06-diagnostics/vae_tile_seam"
@@ -162,7 +162,7 @@ def assemble_blended(model, padded: np.ndarray, padded_mask: np.ndarray,
               for z in range(0, D - PATCH + 1, STRIDE_B)
               for y in range(0, H - PATCH + 1, STRIDE_B)
               for x in range(0, W - PATCH + 1, STRIDE_B)]
-    w3 = _tukey_window_3d(PATCH)
+    w3 = tukey_window_3d(PATCH)
     xct_w = np.zeros(padded.shape, np.float32)
     mlog_w = np.zeros(padded.shape, np.float32)
     acc = np.zeros(padded.shape, np.float32)
@@ -404,7 +404,7 @@ def main() -> None:
         "patch_size": PATCH,
         "stride_tiled": STRIDE_A,
         "stride_overlapped": STRIDE_B,
-        "blend_window": "Tukey alpha=0.5 (poregen.eval.blended._tukey_window_3d)",
+        "blend_window": "Tukey alpha=0.5 (poregen.eval.blended.tukey_window_3d)",
         "latent_sampling": "posterior mean mu (no stochastic pass)",
         "decode_dtype": "bfloat16 autocast (matches VolumeGenerator)",
         "reference_generated": {

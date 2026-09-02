@@ -18,6 +18,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from poregen.diffusion.conditioning import (
+    NB_EXISTS,
+    NB_UNKNOWN,
     neighbour_shared_voxels,
     validate_neighbour_geometry,
 )
@@ -106,25 +108,80 @@ def _batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, A
 
 # ── single-step helpers ───────────────────────────────────────────────────────
 
-_COND_KEYS = ("cond_por", "cond_depth", "cond_dist", "cond_orient",
-              "nb_latents", "nb_avail")
+_COND_KEYS = ("cond_por", "cond_depth", "cond_dist6", "cond_orient",
+              "cond_material", "nb_latents", "nb_avail")
 
 
-def _unpack_cond(b: dict[str, Any]) -> tuple[torch.Tensor, ...]:
-    """Pull the D32 §5 conditioning tensors out of a device batch.
-
-    Returns ``(nb_latents, nb_avail, cond_por, cond_depth, cond_dist, cond_orient)``
-    in the order :meth:`UNet3DDenoiser.forward` takes them.
-    """
+def _unpack_cond(b: dict[str, Any]) -> dict[str, torch.Tensor]:
+    """Pull the ldm06 conditioning tensors out of a device batch."""
     missing = [k for k in _COND_KEYS if k not in b]
     if missing:
         raise KeyError(
-            f"Batch is missing {missing} — the LDM batch contract (D32 §5) requires "
-            f"z, std, {', '.join(_COND_KEYS)}. Rebuild the latent store with the "
-            "conditioning fields."
+            f"Batch is missing {missing} — the ldm06 batch contract requires "
+            f"z, std, {', '.join(_COND_KEYS)}. Rebuild the latent store and the "
+            "conditioning sidecar."
         )
-    return (b["nb_latents"], b["nb_avail"], b["cond_por"], b["cond_depth"],
-            b["cond_dist"], b["cond_orient"])
+    return {k: b[k] for k in _COND_KEYS}
+
+
+def noise_neighbours(
+    schedule: Any,
+    nb_latents: torch.Tensor,
+    nb_avail: torch.Tensor,
+    t: torch.Tensor,
+    *,
+    nb_t_mix: float,
+    drop_nb_p: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Noise each stored neighbour to its own timestep (ldm06 training).
+
+    The store serves CLEAN neighbour posterior means, but at generation time a
+    neighbour is never clean: inside a chunk it is the canvas at the current
+    timestep, and in a finished chunk it is a clean latent re-noised to that
+    same timestep.  A denoiser trained only on clean neighbours would meet an
+    input distribution it has never seen on its very first sampling step.
+
+    Per item and per neighbour::
+
+        with probability nb_t_mix   t_nb = t              (the sampler's case)
+        otherwise                   t_nb ~ Uniform{0..t}  (the general case)
+
+    then ``q_sample`` with fresh noise.  Separately, with probability
+    ``drop_nb_p`` an ITEM loses all six neighbours at once: availability
+    becomes UNKNOWN, latents zero, ``nb_t`` zero.  That is the neighbour null
+    arm of the nested CFG, so training and ``DDIMSampler`` share one definition
+    of "no neighbour information".
+
+    Parameters
+    ----------
+    nb_latents : (B, 6, C, D, H, W) clean neighbour latents
+    nb_avail   : (B, 6) long — EXISTS / OOB as served by the store
+    t          : (B,) long — the target's timestep
+
+    Returns
+    -------
+    (nb_noisy, nb_avail, nb_t) — all on the input device.
+    """
+    B, K = nb_avail.shape
+    device = nb_avail.device
+    t_exp = t.view(B, 1).expand(B, K)
+
+    # Uniform{0..t} inclusive: floor(u·(t+1)) with the clamp guarding u == 1.
+    u = torch.rand(B, K, device=device)
+    t_lower = (u * (t_exp.float() + 1.0)).floor().long().clamp_(max=t_exp)
+    same = torch.rand(B, K, device=device) < nb_t_mix
+    nb_t = torch.where(same, t_exp, t_lower)
+
+    if drop_nb_p > 0.0:
+        drop = (torch.rand(B, 1, device=device) < drop_nb_p).expand(B, K)
+        nb_avail = torch.where(drop, torch.full_like(nb_avail, NB_UNKNOWN), nb_avail)
+
+    exists = nb_avail == NB_EXISTS
+    nb_t = torch.where(exists, nb_t, torch.zeros_like(nb_t))
+
+    flat = nb_latents.reshape(B * K, *nb_latents.shape[2:])
+    noisy = schedule.q_sample(flat, nb_t.reshape(-1)).view_as(nb_latents)
+    return noisy * exists.view(B, K, 1, 1, 1, 1).to(noisy.dtype), nb_avail, nb_t
 
 
 def ldm_train_step(
@@ -140,16 +197,22 @@ def ldm_train_step(
     scheduler: Any | None = None,
     sample_posterior: bool = True,
     drop_por_p: float = 0.0,
+    drop_nb_p: float = 0.0,
+    nb_t_mix: float = 0.5,
 ) -> dict[str, float]:
-    """Single LDM training step on the ldm05 latent dataset (D32 §5 contract).
+    """Single LDM training step on the ldm06 latent dataset.
 
     Batch keys: ``z`` (normalised posterior mean), ``std`` (posterior std under
-    the same affine map), ``cond_por`` / ``cond_depth`` / ``cond_dist`` scalars,
-    ``cond_orient`` (2,16,16,16), ``nb_latents`` (6,C,16,16,16) already shifted
-    into the target frame, ``nb_avail`` (6,).  With ``sample_posterior=True``
-    the training target is a fresh posterior draw z = μ + σ·ε (stochastic
-    encoding).  ``drop_por_p`` is the CFG porosity dropout rate (requires
-    model.use_por_null; 0 = disabled).
+    the same affine map), ``cond_por`` / ``cond_depth`` scalars, ``cond_dist6``
+    (6,), ``cond_orient`` (2,16,16,16), ``cond_material`` (1,16,16,16),
+    ``nb_latents`` (6,C,16,16,16) CLEAN, ``nb_avail`` (6,).  With
+    ``sample_posterior=True`` the training target is a fresh posterior draw
+    z = mu + sigma*eps (stochastic encoding).
+
+    ``drop_por_p`` is the CFG porosity dropout rate and ``drop_nb_p`` the CFG
+    neighbour dropout rate; ``nb_t_mix`` is the probability that a neighbour is
+    noised to the target's own timestep instead of a lower one (see
+    :func:`noise_neighbours`).
 
     Returns
     -------
@@ -157,13 +220,13 @@ def ldm_train_step(
     """
     model.train()
     b = _batch_to_device(batch, device)
-    z = b["z"]                        # (B, C, D, H, W) — normalised μ
+    z = b["z"]                        # (B, C, D, H, W) — normalised mu
 
     if sample_posterior:
         z = z + b["std"] * torch.randn_like(z)
 
     B = z.shape[0]
-    nb_latents, nb_avail, cond_por, cond_depth, cond_dist, cond_orient = _unpack_cond(b)
+    c = _unpack_cond(b)
 
     drop_por_mask: torch.Tensor | None = None
     if drop_por_p > 0.0:
@@ -172,12 +235,17 @@ def ldm_train_step(
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
     z_t    = schedule.q_sample(z, t, noise)
+    nb_latents, nb_avail, nb_t = noise_neighbours(
+        schedule, c["nb_latents"], c["nb_avail"], t,
+        nb_t_mix=nb_t_mix, drop_nb_p=drop_nb_p,
+    )
 
     optimizer.zero_grad(set_to_none=True)
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, cond_por, cond_depth,
-                         cond_dist, cond_orient, drop_por_mask)
+        eps_pred = model(z_t, t, nb_latents, nb_avail, nb_t, c["cond_por"],
+                         c["cond_depth"], c["cond_dist6"], c["cond_orient"],
+                         c["cond_material"], drop_por_mask)
         loss     = F.mse_loss(eps_pred, noise)
 
     scaler.scale(loss).backward()
@@ -208,7 +276,7 @@ def ldm_eval_step(
     autocast_dtype: torch.dtype = torch.bfloat16,
     sample_posterior: bool = True,
 ) -> dict[str, float]:
-    """Single LDM eval step (no grad)."""
+    """Single LDM eval step (no grad): neighbours at t, no dropout."""
     model.eval()
     b = _batch_to_device(batch, device)
     z = b["z"]
@@ -217,15 +285,22 @@ def ldm_eval_step(
         z = z + b["std"] * torch.randn_like(z)
 
     B = z.shape[0]
-    nb_latents, nb_avail, cond_por, cond_depth, cond_dist, cond_orient = _unpack_cond(b)
+    c = _unpack_cond(b)
 
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
     z_t    = schedule.q_sample(z, t, noise)
+    # Eval pins the sampler's own case: every neighbour at the target timestep,
+    # no dropout — so val loss measures the situation generation actually runs
+    # in and is comparable across steps.
+    nb_latents, nb_avail, nb_t = noise_neighbours(
+        schedule, c["nb_latents"], c["nb_avail"], t, nb_t_mix=1.0, drop_nb_p=0.0,
+    )
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, cond_por, cond_depth,
-                         cond_dist, cond_orient)
+        eps_pred = model(z_t, t, nb_latents, nb_avail, nb_t, c["cond_por"],
+                         c["cond_depth"], c["cond_dist6"], c["cond_orient"],
+                         c["cond_material"])
         loss     = F.mse_loss(eps_pred, noise)
 
     return {"loss": loss.item()}
@@ -297,39 +372,41 @@ def _log_sample_volume(
     model: nn.Module,
     ema: "EMAModel",
     schedule: Any,
-    vae: nn.Module | None,
+    vae: nn.Module,
     step: int,
     run_dir: Path,
     tb_writer: Any | None,
     device: torch.device,
     autocast_dtype: torch.dtype,
-    ddim_steps: int = 20,
+    ddim_steps: int = 50,
     grid: tuple[int, int, int] = (3, 3, 3),
     global_por: float = 0.02,
     latent_mean: torch.Tensor | float = 0.0,
     latent_std: torch.Tensor | float = 1.0,
-    patch_size: int = 64,
-    generation_stride: int = 64,
-    neighbour_offset: int = 64,
-    neighbour_shift: bool = False,
+    patch_size: int = _PATCH_SIZE,
     latent_size: int = 16,
+    chunk_tiles: tuple[int, int, int] = (3, 3, 3),
+    window_stride: int = 32,
+    decode_stride: int = 32,
+    window_batch: int = 32,
     s_por: float = 1.0,
     s_nb: float = 1.0,
     por_log_stats: tuple[float, float] | None = None,
     layup_angles: "list[float] | None" = None,
     ply_thickness_vox: float = 19.6,
-    group_order: tuple | None = None,
 ) -> None:
-    """Generate a small volume with DDIM, decode with VAE if available.
+    """Generate a small volume with the production sampler and log it.
 
-    When vae is None the raw latents are logged as grayscale heatmaps instead
-    of decoded XCT/mask — sample generation always runs regardless.
+    ``grid`` is the sample volume's size in 64-voxel TILES; the whole thing
+    runs through the same :class:`~poregen.diffusion.sampler.VolumeGenerator`
+    a real generation run uses, so the seam metrics logged here are the same
+    numbers, measured the same way.
     """
     from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator, theta_from_layup
 
     _logger.info(
-        "Generating sample volume at step %d  grid=%s  DDIM steps=%d  vae=%s",
-        step, grid, ddim_steps, "yes" if vae is not None else "no (raw latents)",
+        "Generating sample volume at step %d  tiles=%s  chunk_tiles=%s  DDIM steps=%d",
+        step, grid, chunk_tiles, ddim_steps,
     )
 
     orig_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -344,98 +421,53 @@ def _log_sample_volume(
     try:
         sampler = DDIMSampler(model, schedule, device, n_steps=ddim_steps,
                               s_por=s_por, s_nb=s_nb)
+        vol_shape: tuple[int, int, int] = tuple(g * patch_size for g in grid)  # type: ignore[assignment]
         local_por_map = _gaussian_por_grid(grid, global_por)
-        vol_shape: tuple[int, int, int] = tuple(  # type: ignore[assignment]
-            (g - 1) * generation_stride + patch_size for g in grid
+        theta_deg = theta_from_layup(
+            vol_shape[0], layup_angles if layup_angles else _DEFAULT_LAYUP,
+            ply_thickness_vox,
         )
-        theta_deg = None
-        if sampler.model.cfg.use_orient_cond:
-            theta_deg = theta_from_layup(
-                vol_shape[0],
-                layup_angles if layup_angles else _DEFAULT_LAYUP,
-                ply_thickness_vox,
-            )
-        gen_kwargs = dict(
+        generator = VolumeGenerator(
+            sampler=sampler,
+            vae=vae,
             device=device,
             patch_size=patch_size,
-            generation_stride=generation_stride,
-            neighbour_offset=neighbour_offset,
-            neighbour_shift=neighbour_shift,
             latent_size=latent_size,
             latent_mean=latent_mean,
             latent_std=latent_std,
             por_log_stats=por_log_stats,
             theta_deg=theta_deg,
-            group_order=group_order,
+            chunk_tiles=chunk_tiles,
+            window_stride=window_stride,
+            decode_stride=decode_stride,
         )
+        vol_size_mm = tuple(d * generator.voxel_size_mm for d in vol_shape)
+        xct, label, gen_stats = generator.generate(
+            volume_size_mm=vol_size_mm,
+            target_porosity=global_por,
+            local_por_map=local_por_map,
+            autocast_dtype=autocast_dtype,
+            window_batch=window_batch,
+        )
+        VolumeGenerator.save_tiff(xct, label, step_dir / "xct.tif", step_dir / "label.tif")
+        _logger.info("Saved sample TIFFs → %s", step_dir)
 
-        if vae is not None:
-            generator = VolumeGenerator(sampler=sampler, vae=vae, **gen_kwargs)
-            # Convert voxel dims to physical mm for the new generate() API.
-            # vol_shape is already a multiple of patch_size so snapping is exact.
-            vol_size_mm = tuple(d * generator.voxel_size_mm for d in vol_shape)
-            xct, mask, gen_stats = generator.generate(
-                volume_size_mm=vol_size_mm,
-                target_porosity=global_por,
-                local_por_map=local_por_map,
-                autocast_dtype=autocast_dtype,
-            )
-            VolumeGenerator.save_tiff(xct, mask, step_dir / "xct.tif", step_dir / "mask.tif")
-            _logger.info("Saved sample TIFFs → %s", step_dir)
+        if tb_writer is not None:
+            for _k, _v in gen_stats.items():
+                if isinstance(_v, (int, float)) and not isinstance(_v, bool):
+                    tb_writer.add_scalar(f"samples/{_k}", _v, step)
+            D, H, W = xct.shape
 
-            if tb_writer is not None:
-                for _k, _v in gen_stats.items():
-                    if isinstance(_v, (int, float)) and _v is not None:
-                        tb_writer.add_scalar(f"samples/{_k}", _v, step)
-                D, H, W = xct.shape
+            def _img(arr2d: np.ndarray, scale: float) -> torch.Tensor:
+                return torch.from_numpy(arr2d.astype(np.float32) / scale).unsqueeze(0)
 
-                def _img(arr2d: np.ndarray) -> torch.Tensor:
-                    return torch.from_numpy(arr2d.astype(np.float32) / 255.0).unsqueeze(0)
-
-                tb_writer.add_image("samples/xct_dslice",  _img(xct[D // 2]),       step)
-                tb_writer.add_image("samples/xct_hslice",  _img(xct[:, H // 2]),    step)
-                tb_writer.add_image("samples/xct_wslice",  _img(xct[:, :, W // 2]), step)
-                tb_writer.add_image("samples/mask_dslice", _img(mask[D // 2]),       step)
-                tb_writer.add_image("samples/mask_hslice", _img(mask[:, H // 2]),    step)
-                tb_writer.add_image("samples/mask_wslice", _img(mask[:, :, W // 2]), step)
-
-        else:
-            # No VAE — generate latents (via the shared eight-group parity
-            # schedule) and log channel-mean heatmaps without decoding.
-            generator = VolumeGenerator(
-                sampler=sampler,
-                vae=None,  # type: ignore[arg-type]
-                **gen_kwargs,
-            )
-            generated, grid_origins = generator._generate_latents(
-                volume_shape=vol_shape,
-                target_porosity=global_por,
-                local_por_map=local_por_map,
-                autocast_dtype=autocast_dtype,
-            )
-
-            # Assemble channel-mean latent volume and save as npy + log to TB
-            C, LS = sampler.model.cfg.z_channels, latent_size
-            lat_vol = np.zeros(vol_shape, dtype=np.float32)
-            wgt_vol = np.zeros(vol_shape, dtype=np.float32)
-            for gi, z_gen in generated.items():
-                z0, y0, x0 = grid_origins[gi]
-                ze, ye, xe = z0 + patch_size, y0 + patch_size, x0 + patch_size
-                lat_vol[z0:ze, y0:ye, x0:xe] += z_gen.float().cpu().mean(0).numpy()
-                wgt_vol[z0:ze, y0:ye, x0:xe] += 1.0
-            lat_vol /= np.maximum(wgt_vol, 1e-8)
-            np.save(step_dir / "latents_mean.npy", lat_vol)
-            _logger.info("Saved raw latent volume (channel mean) → %s", step_dir)
-
-            if tb_writer is not None:
-                D, H, W = lat_vol.shape
-                def _norm(arr2d: np.ndarray) -> torch.Tensor:
-                    lo, hi = arr2d.min(), arr2d.max()
-                    norm = (arr2d - lo) / max(hi - lo, 1e-8)
-                    return torch.from_numpy(norm).unsqueeze(0)
-                tb_writer.add_image("samples/latent_dslice", _norm(lat_vol[D // 2]),       step)
-                tb_writer.add_image("samples/latent_hslice", _norm(lat_vol[:, H // 2]),    step)
-                tb_writer.add_image("samples/latent_wslice", _norm(lat_vol[:, :, W // 2]), step)
+            tb_writer.add_image("samples/xct_dslice",  _img(xct[D // 2], 255.0),       step)
+            tb_writer.add_image("samples/xct_hslice",  _img(xct[:, H // 2], 255.0),    step)
+            tb_writer.add_image("samples/xct_wslice",  _img(xct[:, :, W // 2], 255.0), step)
+            # label is {0 material, 1 pore, 2 air} — scale by 2 to fill [0, 1].
+            tb_writer.add_image("samples/label_dslice", _img(label[D // 2], 2.0),       step)
+            tb_writer.add_image("samples/label_hslice", _img(label[:, H // 2], 2.0),    step)
+            tb_writer.add_image("samples/label_wslice", _img(label[:, :, W // 2], 2.0), step)
 
     finally:
         model.load_state_dict(orig_state)
@@ -464,7 +496,6 @@ def ldm_train_loop(
     latent_std: torch.Tensor | float = 1.0,
     val_phi: "np.ndarray | None" = None,
     por_log_stats: tuple[float, float] | None = None,
-    group_order: tuple | None = None,
 ) -> list[dict[str, Any]]:
     """Step-based LDM training loop mirroring the VAE train_loop.
 
@@ -478,10 +509,16 @@ def ldm_train_loop(
       full_val_every, early_stopping_patience,
       gen_eval_every, gen_eval_samples, gen_eval_ddim_steps,
       sample_every, sample_ddim_steps, sample_grid, sample_global_por,
-      drop_por   (CFG porosity dropout; requires model.use_por_null)
+      drop_por   (CFG porosity dropout — learned null porosity token),
+      drop_nb    (CFG neighbour dropout — all six neighbours to UNKNOWN),
+      nb_t_mix   (probability a neighbour is noised to the target's own t)
 
     Reads from cfg["data"]:
-      latent_mode  ('sampled' — z=μ+σε per batch, default — or 'mean')
+      latent_mode  ('sampled' — z=mu+sigma*eps per batch, default — or 'mean')
+
+    Reads from cfg["generation"]:
+      chunk_tiles, window_stride, decode_stride, window_batch
+      (the sampler geometry the in-training sample volumes use)
 
     Reads from cfg["guidance"]:
       s_por, s_nb  (guidance scales for in-training sample viz)
@@ -509,26 +546,29 @@ def ldm_train_loop(
     sample_layup      = training_cfg.get("sample_layup") or _DEFAULT_LAYUP
     sample_ply_thickness_vox = float(training_cfg.get("sample_ply_thickness_vox", 19.6))
 
-    # D32 §3.1 — three distinct strides.  sample_stride (dataset density) is a
-    # data-side parameter and is only logged here; generation_stride drives the
-    # assembly grid and neighbour_offset the spatial relation the model was
+    # Three distinct strides.  sample_stride (dataset density) is a data-side
+    # parameter and is only logged here; generation_stride drives the decode
+    # tiling grid and neighbour_offset the spatial relation the model is
     # trained on.  The last two must be >= patch_size so neighbours only touch.
     data_cfg          = cfg.get("data", {})
     sample_stride     = int(data_cfg.get("sample_stride", 32))
     generation_stride = int(data_cfg.get("generation_stride", 64))
     neighbour_offset  = int(data_cfg.get("neighbour_offset", 64))
-    neighbour_shift   = bool(data_cfg.get("neighbour_shift", False))
-    validate_neighbour_geometry(
-        neighbour_offset,
-        _PATCH_SIZE,
-        allow_neighbour_overlap=bool(data_cfg.get("allow_neighbour_overlap", False)),
-    )
+    validate_neighbour_geometry(neighbour_offset, _PATCH_SIZE)
     _logger.info(
-        "Strides — sample_stride=%d (data density)  generation_stride=%d (assembly grid)  "
-        "neighbour_offset=%d (neighbour relation, %d shared voxels)  neighbour_shift=%s",
+        "Strides — sample_stride=%d (data density)  generation_stride=%d (tiling grid)  "
+        "neighbour_offset=%d (neighbour relation, %d shared voxels)",
         sample_stride, generation_stride, neighbour_offset,
-        neighbour_shared_voxels(neighbour_offset, _PATCH_SIZE), neighbour_shift,
+        neighbour_shared_voxels(neighbour_offset, _PATCH_SIZE),
     )
+
+    # Sampler geometry for the in-training sample volumes — the same knobs a
+    # production generation run uses, so the sample is not a special case.
+    generation_cfg = cfg.get("generation", {}) or {}
+    chunk_tiles    = tuple(int(v) for v in generation_cfg.get("chunk_tiles", [3, 3, 3]))
+    window_stride  = int(generation_cfg.get("window_stride", 32))
+    decode_stride  = int(generation_cfg.get("decode_stride", 32))
+    window_batch   = int(generation_cfg.get("window_batch", 32))
 
     # Generation eval (off-manifold diagnostics + decode-based porosity eval)
     gen_eval_every      = int(training_cfg.get("gen_eval_every", 0))
@@ -541,16 +581,20 @@ def ldm_train_loop(
         raise ValueError(f"Unknown data.latent_mode '{latent_mode}' (use 'sampled' or 'mean').")
     sample_posterior = latent_mode == "sampled"
 
-    # CFG porosity dropout (requires model.use_por_null; 0.0 = disabled)
+    # CFG dropout rates and the neighbour-timestep mixture (see noise_neighbours)
     drop_por_p = float(training_cfg.get("drop_por", 0.0))
+    drop_nb_p  = float(training_cfg.get("drop_nb", 0.0))
+    nb_t_mix   = float(training_cfg.get("nb_t_mix", 0.5))
 
     # Guidance scales for in-training sample visualisation (default 1.0 = un-guided)
     guidance_cfg = cfg.get("guidance", {})
     s_por_scale  = float(guidance_cfg.get("s_por", 1.0))
     s_nb_scale   = float(guidance_cfg.get("s_nb",  1.0))
 
-    if drop_por_p > 0:
-        _logger.info("CFG porosity dropout enabled — drop_por=%.2f", drop_por_p)
+    _logger.info(
+        "CFG dropout — drop_por=%.2f  drop_nb=%.2f  |  nb_t_mix=%.2f",
+        drop_por_p, drop_nb_p, nb_t_mix,
+    )
     if s_por_scale != 1.0 or s_nb_scale != 1.0:
         _logger.info(
             "Guided sample viz enabled — s_por=%.2f  s_nb=%.2f", s_por_scale, s_nb_scale,
@@ -597,6 +641,7 @@ def ldm_train_loop(
                 step=step, device=device, autocast_dtype=autocast_dtype,
                 max_grad_norm=max_grad_norm, scheduler=scheduler,
                 sample_posterior=sample_posterior, drop_por_p=drop_por_p,
+                drop_nb_p=drop_nb_p, nb_t_mix=nb_t_mix,
             )
             ema.update(model)
             _step_elapsed = time.perf_counter() - _step_t0
@@ -767,15 +812,15 @@ def ldm_train_loop(
                         global_por=sample_global_por,
                         latent_mean=latent_mean,
                         latent_std=latent_std,
-                        generation_stride=generation_stride,
-                        neighbour_offset=neighbour_offset,
-                        neighbour_shift=neighbour_shift,
+                        chunk_tiles=chunk_tiles,
+                        window_stride=window_stride,
+                        decode_stride=decode_stride,
+                        window_batch=window_batch,
                         s_por=s_por_scale,
                         s_nb=s_nb_scale,
                         por_log_stats=por_log_stats,
                         layup_angles=sample_layup,
                         ply_thickness_vox=sample_ply_thickness_vox,
-                        group_order=group_order,
                     )
                 except Exception as _exc:
                     _logger.warning("Sample generation failed at step %d: %s", step, _exc)

@@ -1,4 +1,4 @@
-"""Config-driven LDM training runner (ldm04 latent pipeline)."""
+"""Config-driven LDM training runner (ldm06 latent pipeline)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import yaml
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from poregen.configuration import ResolvedExperiment, resolve_experiment
-from poregen.diffusion.conditioning import resolve_group_order
 from poregen.diffusion.latents import build_latent_dataloaders
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.experiments.base import find_repo_root
@@ -134,23 +133,19 @@ def _prepare_data_and_vae(
     vae = _load_vae_decoder(cfg, train_ds.metadata, repo_root, device)
 
     # Conditioning provenance recorded by the latent store.  The porosity
-    # transform stats are needed to build cond_por at generation time; the
-    # parity group ordering must be the one training replayed (D32 §3.3).
+    # transform stats are what cond_por is built from at generation time, so a
+    # store without them cannot be sampled reproducibly.
     cond_meta = train_ds.metadata.get("conditioning") or {}
     st = cond_meta.get("por_standardisation")
-    por_log_stats = None
-    if st is not None:
-        por_log_stats = (float(st["mean"]), float(st["std"]))
-    else:
-        logger.warning(
-            "Latent store has no conditioning.por_standardisation — sample-volume "
-            "generation cannot build cond_por and will fail if enabled."
+    if st is None:
+        raise RuntimeError(
+            "Latent store has no conditioning.por_standardisation — cond_por "
+            "cannot be built at generation time.  Run scripts/build_conditioning.py."
         )
-    group_order = resolve_group_order(train_ds.metadata)
+    por_log_stats = (float(st["mean"]), float(st["std"]))
 
     return {
         "por_log_stats": por_log_stats,
-        "group_order":   group_order,
         "latents_root": latents_root,
         "train_loader": train_loader,
         "val_loader":   val_loader,
@@ -266,7 +261,6 @@ def run_ldm_experiment(
                 latent_std=data["latent_std"],
                 val_phi=data["val_phi"],
                 por_log_stats=data["por_log_stats"],
-                group_order=data["group_order"],
             )
         except Exception as exc:
             update_run_metadata(run_ctx.run_dir, {"status": "failed", "failure": str(exc)})
@@ -358,7 +352,6 @@ def resume_ldm_run(
                 latent_std=data["latent_std"],
                 val_phi=data["val_phi"],
                 por_log_stats=data["por_log_stats"],
-                group_order=data["group_order"],
             )
         except Exception as exc:
             update_run_metadata(run_dir, {"status": "failed", "failure": str(exc)})
