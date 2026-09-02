@@ -111,13 +111,13 @@ def _load_vae(vae_run_dir: str | Path, device: torch.device):
     return vae
 
 
-def _load_latent_std(repo_root: Path, override: float | None) -> float:
-    if override is not None:
-        return override
-    stats = repo_root / "data" / "split_v2" / "latents_s64" / "latent_scale_stats.json"
-    if stats.exists():
-        return float(json.loads(stats.read_text())["std"])
-    return 1.0
+def _load_latent_stats(latents_root: Path) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-channel denormalisation stats from the latent store's metadata.json."""
+    norm = json.loads((latents_root / "metadata.json").read_text())["normalization"]
+    c = len(norm["per_channel_mean"])
+    mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
+    std  = torch.tensor(norm["per_channel_std"],  dtype=torch.float32).view(c, 1, 1, 1)
+    return mean, std
 
 
 @torch.no_grad()
@@ -127,7 +127,8 @@ def run_chain(
     vae: torch.nn.Module,
     device: torch.device,
     autocast_dtype: torch.dtype,
-    latent_std: float,
+    latent_mean: torch.Tensor,
+    latent_std: torch.Tensor,
     por: float,
     n_steps: int,
     sampler_type: str,
@@ -163,7 +164,7 @@ def run_chain(
     mid = PATCH_SIZE // 2
     frames = []
     for z_cpu in intermediates:
-        z_batch = (z_cpu.unsqueeze(0) * latent_std).to(device)
+        z_batch = (z_cpu.unsqueeze(0) * latent_std + latent_mean).to(device)
         with torch.autocast(device_type=device.type, dtype=autocast_dtype):
             dec        = vae.decoder(z_batch)
             xct_logits = vae.xct_head(dec)
@@ -263,7 +264,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Visualise DDIM denoising progression per step count.")
     ap.add_argument("--checkpoint",  required=True)
     ap.add_argument("--vae-run",     required=True)
-    ap.add_argument("--latent-std",  type=float, default=None)
+    ap.add_argument("--latents-root", default="data/split_v2/latents_r07z4",
+                    help="Latent store root (metadata.json supplies per-channel norm stats)")
     args = ap.parse_args()
 
     repo = _find_repo_root()
@@ -280,7 +282,10 @@ def main() -> None:
 
     model, ldm_cfg = _load_ldm(args.checkpoint, device)
     vae = _load_vae(args.vae_run, device)
-    latent_std = _load_latent_std(repo, args.latent_std)
+    latents_root = Path(args.latents_root)
+    if not latents_root.is_absolute():
+        latents_root = (repo / latents_root).resolve()
+    latent_mean, latent_std = _load_latent_stats(latents_root)
 
     sched_cfg = ldm_cfg.get("noise_schedule", {})
     schedule = DDPMSchedule(
@@ -310,7 +315,7 @@ def main() -> None:
 
             frames = run_chain(
                 model, schedule, vae, device, autocast_dtype,
-                latent_std, por, n_steps, sampler_type, SEED,
+                latent_mean, latent_std, por, n_steps, sampler_type, SEED,
                 step_pbar=step_pbar,
             )
 

@@ -220,22 +220,20 @@ def test_drop_por_none_is_backward_compatible(
 
 # ── Config resolution smoke test ─────────────────────────────────────────────
 
-def test_ldm03_config_resolves() -> None:
-    """ldm03/base resolves and carries the expected keys."""
+def test_ldm04_config_resolves() -> None:
+    """ldm04/base resolves: unconditional first rung on the normalised latent store."""
     try:
         from poregen.configuration import resolve_experiment
     except ImportError:
         pytest.skip("poregen configuration not importable in this environment")
 
-    resolved = resolve_experiment("ldm03/base")
+    resolved = resolve_experiment("ldm04/base")
     cfg = resolved.cfg
 
-    assert cfg["model"]["use_por_null"] is True
-    assert float(cfg["training"]["drop_por"])   == pytest.approx(0.10)
-    assert float(cfg["training"]["drop_joint"]) == pytest.approx(0.05)
-    assert float(cfg["training"]["drop_nb"])    == pytest.approx(0.05)
-    assert "guidance" in cfg
-    assert float(cfg["guidance"]["s_por"]) == pytest.approx(1.0)
-    assert float(cfg["guidance"]["s_nb"])  == pytest.approx(1.0)
-    # Inherited from ldm02/base
-    assert cfg["data"].get("latent_mode") == "sampled"
+    assert cfg["model"]["use_por_cond"] is False
+    assert cfg["model"]["use_neighbor_cond"] is False
+    assert cfg["model"]["use_pos_cond"] is False
+    assert cfg["data"]["latent_mode"] == "sampled"
+    assert cfg["data"]["latents_root"] == "data/split_v2/latents_r07z4"
+    assert cfg["vae"]["checkpoint"]
+    assert int(cfg["training"]["gen_eval_every"]) > 0

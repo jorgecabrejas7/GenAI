@@ -1,0 +1,106 @@
+experiment:
+  name: ldm04
+  variant: base
+  description: >-
+    First LDM on the normalised r07z4 latent store (z=4, 16³ latents).
+    Unconditional (no phi, position, or neighbour conditioning — conditioning
+    code stays in place for later rungs).  Trains on per-channel NORMALISED
+    posterior draws z=μ+σε; every decode path denormalises with the stats from
+    the store's metadata.json.  Epsilon prediction, cosine schedule.
+    Off-manifold latent diagnostics and decode-based porosity eval run every
+    gen_eval_every steps on DDIM samples with EMA weights.
+
+loss: {}
+
+model:
+  type: unet3d
+  z_channels: 4
+  base_channels: 128
+  channel_mult: [1, 2, 4]
+  n_res_blocks: 2
+  attn_at_bottleneck: false
+  bottleneck_downsample: true
+  cond_embed_dim: 512
+  nb_avail_embed_dim: 8
+  n_attn_heads: 8
+  dropout: 0.0
+  use_neighbor_cond: false
+  use_avail_embedding: false
+  use_nb_global_cond: false
+  use_pos_cond: false
+  use_por_cond: false
+  use_por_null: false
+
+noise_schedule:
+  type: cosine
+  T: 1000
+  s: 0.008
+
+vae:
+  # Must match the checkpoint recorded in the latent store's metadata.json —
+  # validated at launch, run fails loudly on mismatch.
+  checkpoint: runs/vae/r07-run-0006-20260814-084936-archv2-conv_noattn_dualbranch-z4-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt
+
+training:
+  seed: 42
+  batch_size: 256
+  ema_decay: 0.9999
+  lr: 1.0e-4
+  weight_decay: 0.01
+  total_steps: 200000
+  max_grad_norm: 1.0
+  scheduler: cosine
+  lr_min: 1.0e-5
+  warmup_steps: 250
+  log_every: 10
+  eval_every: 500
+  val_batches: 50
+  full_val_every: 2000
+  early_stopping_patience: 15
+  save_every: 2000
+  compile: true
+  gen_eval_every: 2000
+  gen_eval_samples: 64
+  gen_eval_ddim_steps: 50
+  sample_every: 0          # decode eval replaces in-training volume viz for this rung
+
+data:
+  latents_root: data/split_v2/latents_r07z4
+  latent_mode: sampled     # z = μ + σ·ε per batch (normalised space); 'mean' uses μ
+  patch_stride: 32
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+runtime:
+  runs_root: runs/ldm
+  device:
+    gpu_id: null
+  checkpoints:
+    save_latest: true
+    save_best: true
+    best_metric: val.loss
+    best_mode: min
+  resume:
+    prune_jsonl: true
+  metadata:
+    capture_git: true
+    capture_machine: true
+    capture_environment: true
+  run_name:
+    timestamp_format: "%Y%m%d-%H%M%S"
+    run_index_width: 4
+    fields:
+      - label: z
+        path: model.z_channels
+      - label: c
+        path: model.base_channels
+      - label: bs
+        path: training.batch_size
+      - label: lr
+        path: training.lr
+        transform: sci
+  machine:
+    name: dgx_spark
+    accelerator: NVIDIA GB10 Blackwell

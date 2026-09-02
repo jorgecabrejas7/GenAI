@@ -113,6 +113,40 @@ def build_model(cfg: dict[str, Any], device: torch.device) -> torch.nn.Module:
     return build_vae(model_cfg["name"], **kwargs).to(device)
 
 
+def load_vae_from_checkpoint(
+    checkpoint: Path,
+    device: torch.device,
+) -> tuple[torch.nn.Module, dict[str, Any], str, Path]:
+    """Load a trained VAE and its resolved config from a checkpoint path.
+
+    The run directory's ``resolved_config.yaml`` is the exact config the
+    training run used, so the rebuilt architecture always matches the weights
+    (independent of later edits to ``configs/experiments/``).  Used by
+    ``scripts/build_latent_dataset.py`` and the LDM training pipeline, so the
+    two always load the decoder identically.
+
+    Returns
+    -------
+    (model, cfg, cfg_text, run_dir) — model is in eval mode.
+    """
+    checkpoint = Path(checkpoint)
+    # The checkpoint lives in the run dir, or in a checkpoints/ subdir of it.
+    run_dir = checkpoint.parent
+    if not (run_dir / "resolved_config.yaml").exists():
+        run_dir = run_dir.parent
+    cfg_path = run_dir / "resolved_config.yaml"
+    cfg_text = cfg_path.read_text()
+    cfg = yaml.safe_load(cfg_text)
+
+    model = build_model(cfg, device)
+    # restore_rng=False: loading a frozen VAE for inference must not clobber
+    # the caller's RNG state (the LDM run seeds its own generators).
+    load_checkpoint(str(checkpoint), model=model, map_location=device, restore_rng=False)
+    model.eval()
+    logger.info("Loaded VAE %s from %s", cfg["model"]["name"], checkpoint)
+    return model, cfg, cfg_text, run_dir
+
+
 def build_discriminator(
     cfg: dict[str, Any],
     device: torch.device,

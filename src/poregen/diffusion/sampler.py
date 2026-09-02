@@ -289,7 +289,8 @@ class DDIMSampler:
         global_por: torch.Tensor,
         local_por: torch.Tensor,
         autocast_dtype: torch.dtype = torch.bfloat16,
-    ) -> torch.Tensor:
+        return_x0_saturation: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, float]:
         """Run DDIM reverse process for a batch of patches.
 
         Parameters
@@ -299,10 +300,14 @@ class DDIMSampler:
         pos_frac   : (B, 3) float — normalised patch positions, already on device
         global_por : (B,) float — global porosity, already on device
         local_por  : (B,) float — local porosity, already on device
+        return_x0_saturation : if True, also return the fraction of x0-prediction
+            elements hitting the ±10 clamp inside ddim_step, averaged over all
+            denoising steps — an off-manifold diagnostic.
 
         Returns
         -------
-        (B, C, D, D, D) float32 on device
+        (B, C, D, D, D) float32 on device — or (samples, sat_frac) when
+        return_x0_saturation=True.
         """
         self.model.eval()
         schedule = self.schedule.to(self.device)
@@ -311,6 +316,8 @@ class DDIMSampler:
         D = nb_latents.shape[3]
 
         x = torch.randn(B, C, D, D, D, device=self.device)
+        sat_sum = torch.zeros((), device=self.device)
+        n_steps = 0
         for i, t_val in enumerate(self._timesteps[:-1]):
             t_prev_val = self._timesteps[i + 1]
             t      = torch.full((B,), t_val,      dtype=torch.long, device=self.device)
@@ -322,7 +329,13 @@ class DDIMSampler:
                 with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
                     eps_pred = self.model(x, t, nb_latents, nb_avail, pos_frac,
                                          global_por, local_por)
+            if return_x0_saturation:
+                x0_pred = schedule.predict_x0(x, t, eps_pred)
+                sat_sum += (x0_pred.abs() >= 10.0).float().mean()
+                n_steps += 1
             x = schedule.ddim_step(x, t, t_prev, eps_pred)
+        if return_x0_saturation:
+            return x.float(), (sat_sum / max(n_steps, 1)).item()
         return x.float()
 
 
@@ -330,7 +343,7 @@ class VolumeGenerator:
     """Generate a full synthetic 3D volume using a two-phase checkerboard schedule.
 
     Patches are classified by checkerboard parity ``(iz + iy + ix) % 2``,
-    exactly as in ``latent_dataset.py`` / ``encode_latents.py``:
+    matching the checkerboard parity convention used across the LDM pipeline:
 
     - Phase 1 (parity 0, "anchors"): every in-bounds neighbor is UNKNOWN
       (zero latent) and every out-of-bounds neighbor is OOB. Neighbors of a
@@ -362,7 +375,9 @@ class VolumeGenerator:
     patch_stride  : int — stride between patch origins; should match the
                     stride used during LDM training (default 32)
     latent_size   : int — spatial side length of the latent (default 16)
-    latent_std    : float — latent scale factor applied before decoding (default 1.0)
+    latent_mean   : float | (C,1,1,1) tensor — per-channel normalisation mean;
+                    generated latents are denormalised ``z*std + mean`` before decoding
+    latent_std    : float | (C,1,1,1) tensor — per-channel normalisation std
     voxel_size_mm : float — physical voxel size in millimetres (default 0.025 = 25 µm)
     """
 
@@ -374,7 +389,8 @@ class VolumeGenerator:
         patch_size: int = 64,
         patch_stride: int = 32,
         latent_size: int = 16,
-        latent_std: float = 1.0,
+        latent_mean: torch.Tensor | float = 0.0,
+        latent_std: torch.Tensor | float = 1.0,
         voxel_size_mm: float = 0.025,
     ) -> None:
         self.sampler       = sampler
@@ -383,6 +399,7 @@ class VolumeGenerator:
         self.patch_size    = patch_size
         self.patch_stride  = patch_stride
         self.latent_size   = latent_size
+        self.latent_mean   = latent_mean
         self.latent_std    = latent_std
         self.voxel_size_mm = voxel_size_mm
         self.z_channels    = sampler.model.cfg.z_channels
@@ -620,8 +637,8 @@ class VolumeGenerator:
                 chunk = all_items[chunk_start : chunk_start + decode_batch_size]
 
                 z_stacked = torch.stack(
-                    [(z_gen * self.latent_std) for _, z_gen in chunk], dim=0
-                ).to(self.device)   # (B, C, ls, ls, ls)
+                    [(z_gen * self.latent_std + self.latent_mean) for _, z_gen in chunk], dim=0
+                ).to(self.device)   # (B, C, ls, ls, ls) — denormalised latents
 
                 with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
                     dec         = self.vae.decoder(z_stacked)

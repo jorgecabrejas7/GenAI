@@ -1,4 +1,4 @@
-"""Config-driven LDM training runner."""
+"""Config-driven LDM training runner (ldm04 latent pipeline)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from poregen.configuration import ResolvedExperiment, resolve_experiment
-from poregen.diffusion.latent_dataset import build_latent_dataloaders
-from poregen.diffusion.sampled_latent_dataset import build_sampled_latent_dataloaders
+from poregen.diffusion.latents import build_latent_dataloaders
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.experiments.base import find_repo_root
 from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
@@ -33,27 +33,9 @@ from poregen.training import (
     seed_everything,
     select_device,
 )
-from poregen.training.ldm_engine import EMAModel, ldm_train_loop
+from poregen.training.ldm_engine import ldm_train_loop
 
 logger = logging.getLogger(__name__)
-
-
-def _build_dataloaders(cfg: dict[str, Any], latents_root: Path) -> tuple[Any, Any]:
-    """Route to the correct dataloader factory based on cfg['data']['latent_mode'].
-
-    ``latent_mode: mean``    (default) — loads pre-computed mu; reproduces ldm01 exactly.
-    ``latent_mode: sampled`` — samples z = mu + sigma*eps per batch; used by ldm02.
-    """
-    mode = cfg.get("data", {}).get("latent_mode", "mean")
-    if mode == "sampled":
-        logger.info("latent_mode=sampled — using SampledLatentPatchDataset (ldm02 path)")
-        return build_sampled_latent_dataloaders(cfg, latents_root)
-    if mode != "mean":
-        raise ValueError(
-            f"Unknown latent_mode '{mode}'. Choose 'mean' (default, ldm01) or 'sampled' (ldm02)."
-        )
-    logger.info("latent_mode=mean — using LatentPatchDataset (ldm01 path)")
-    return build_latent_dataloaders(cfg, latents_root)
 
 
 def _resolve_latents_root(cfg: dict[str, Any], repo_root: Path) -> Path:
@@ -100,6 +82,67 @@ def _build_scheduler(cfg: dict[str, Any], optimizer: torch.optim.Optimizer) -> A
     return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
 
+def _load_vae_decoder(
+    cfg: dict[str, Any],
+    metadata: dict[str, Any],
+    repo_root: Path,
+    device: torch.device,
+) -> torch.nn.Module:
+    """Load the frozen VAE named in cfg['vae']['checkpoint'].
+
+    The latent-store metadata records which checkpoint built the latents; the
+    two must match — decoding with a different VAE than the encoder that
+    produced the latents would be silently wrong.
+    """
+    from poregen.experiments.train_vae import load_vae_from_checkpoint
+
+    vae_cfg = cfg.get("vae") or {}
+    ref = vae_cfg.get("checkpoint")
+    if not ref:
+        raise ValueError("cfg['vae']['checkpoint'] is required for LDM training.")
+    ckpt = Path(ref)
+    ckpt = ckpt.resolve() if ckpt.is_absolute() else (repo_root / ckpt).resolve()
+
+    meta_ckpt = Path(metadata["vae_checkpoint"]).resolve()
+    if ckpt != meta_ckpt:
+        raise RuntimeError(
+            "VAE checkpoint mismatch:\n"
+            f"  experiment config: {ckpt}\n"
+            f"  latent store:      {meta_ckpt}\n"
+            "The latent dataset was built with a different VAE than the one "
+            "configured for decoding. Fix cfg['vae']['checkpoint'] or rebuild "
+            "the latent store."
+        )
+
+    vae, _, _, _ = load_vae_from_checkpoint(ckpt, device)
+    for p in vae.parameters():
+        p.requires_grad_(False)
+    return vae
+
+
+def _prepare_data_and_vae(
+    cfg: dict[str, Any],
+    repo_root: Path,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Build dataloaders, extract normalisation stats, and load the frozen VAE."""
+    latents_root = _resolve_latents_root(cfg, repo_root)
+    train_loader, val_loader = build_latent_dataloaders(cfg, latents_root)
+    train_ds = train_loader.dataset
+
+    vae = _load_vae_decoder(cfg, train_ds.metadata, repo_root, device)
+
+    return {
+        "latents_root": latents_root,
+        "train_loader": train_loader,
+        "val_loader":   val_loader,
+        "latent_mean":  train_ds.channel_mean,   # (C,1,1,1) CPU float32
+        "latent_std":   train_ds.channel_std,    # (C,1,1,1) CPU float32
+        "val_phi":      val_loader.dataset.df["phi"].to_numpy(dtype=np.float64),
+        "vae":          vae,
+    }
+
+
 def _initial_run_metadata(
     *,
     resolved: ResolvedExperiment,
@@ -129,58 +172,6 @@ def _initial_run_metadata(
 
 def _write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
-
-
-def _load_latent_std(latents_root: Path) -> float:
-    stats_path = latents_root / "latent_scale_stats.json"
-    if not stats_path.exists():
-        return 1.0
-    return float(json.loads(stats_path.read_text())["std"])
-
-
-def _load_vae_for_sampling(
-    vae_run_dir: Path,
-    device: torch.device,
-) -> torch.nn.Module | None:
-    """Load a frozen VAE decoder from a completed VAE run directory."""
-    from poregen.models.vae.registry import build_vae
-
-    cfg_path = vae_run_dir / "resolved_config.yaml"
-    if not cfg_path.exists():
-        logger.warning("VAE run dir has no resolved_config.yaml: %s", vae_run_dir)
-        return None
-
-    vae_cfg = yaml.safe_load(cfg_path.read_text())
-    model_cfg = dict(vae_cfg["model"])
-    vae_name = model_cfg.pop("name")
-    vae = build_vae(vae_name, **model_cfg)
-
-    ckpt_path = vae_run_dir / "best.ckpt"
-    if not ckpt_path.exists():
-        ckpt_path = vae_run_dir / "latest.ckpt"
-    if not ckpt_path.exists():
-        logger.warning("No VAE checkpoint found in %s, skipping sample visualisation.", vae_run_dir)
-        return None
-
-    raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = raw["model"]
-    # strip _orig_mod. prefix produced by torch.compile
-    if any(k.startswith("_orig_mod.") for k in state):
-        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    vae.load_state_dict(state)
-    vae.to(device).eval()
-    for p in vae.parameters():
-        p.requires_grad_(False)
-    logger.info("Loaded VAE for sampling from %s", ckpt_path)
-    return vae
-
-
-def _resolve_vae_run_dir(cfg: dict[str, Any], repo_root: Path) -> Path | None:
-    ref = cfg.get("training", {}).get("sample_vae_run")
-    if not ref:
-        return None
-    p = Path(ref)
-    return p if p.is_absolute() else (repo_root / p).resolve()
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -213,9 +204,7 @@ def run_ldm_experiment(
     autocast_dtype = get_autocast_dtype(device)
     scaler         = make_scaler(device)
 
-    latents_root = _resolve_latents_root(cfg, resolved.repo_root)
-    train_loader, val_loader = _build_dataloaders(cfg, latents_root)
-    latent_std = _load_latent_std(latents_root)
+    data = _prepare_data_and_vae(cfg, resolved.repo_root, device)
 
     save_resolved_config(run_ctx.run_dir, cfg)
 
@@ -225,16 +214,12 @@ def run_ldm_experiment(
     scheduler = _build_scheduler(cfg, optimizer)
     ema_decay = float(cfg["training"].get("ema_decay", 0.9999))
 
-    vae_run_dir = _resolve_vae_run_dir(cfg, resolved.repo_root)
-    vae = _load_vae_for_sampling(vae_run_dir, device) if vae_run_dir is not None else None
-
     logger.info("Launching %s from %s", resolved.experiment_id, resolved.experiment_path)
     logger.info("Run dir:      %s", run_ctx.run_dir)
-    logger.info("Latents root: %s", latents_root)
+    logger.info("Latents root: %s", data["latents_root"])
     logger.info("Device: %s  |  AMP dtype: %s", device, autocast_dtype)
-    logger.info("Train batches: %d  |  Val batches: %d", len(train_loader), len(val_loader))
-    if vae is not None:
-        logger.info("Sample VAE:   loaded from %s (latent_std=%.4f)", vae_run_dir, latent_std)
+    logger.info("Train batches: %d  |  Val batches: %d",
+                len(data["train_loader"]), len(data["val_loader"]))
 
     try:
         from torch.utils.tensorboard import SummaryWriter
@@ -249,7 +234,7 @@ def run_ldm_experiment(
     try:
         try:
             history = ldm_train_loop(
-                model, train_loader, val_loader,
+                model, data["train_loader"], data["val_loader"],
                 optimizer, scaler, schedule,
                 cfg=cfg,
                 run_dir=run_ctx.run_dir,
@@ -258,8 +243,10 @@ def run_ldm_experiment(
                 autocast_dtype=autocast_dtype,
                 scheduler=scheduler,
                 ema_decay=ema_decay,
-                vae=vae,
-                latent_std=latent_std,
+                vae=data["vae"],
+                latent_mean=data["latent_mean"],
+                latent_std=data["latent_std"],
+                val_phi=data["val_phi"],
             )
         except Exception as exc:
             update_run_metadata(run_ctx.run_dir, {"status": "failed", "failure": str(exc)})
@@ -290,18 +277,13 @@ def resume_ldm_run(
     autocast_dtype = get_autocast_dtype(device)
     scaler         = make_scaler(device)
 
-    latents_root = _resolve_latents_root(cfg, repo)
-    train_loader, val_loader = _build_dataloaders(cfg, latents_root)
-    latent_std = _load_latent_std(latents_root)
+    data = _prepare_data_and_vae(cfg, repo, device)
 
     model     = _build_model(cfg, device)
     schedule  = _build_schedule(cfg, device)
     optimizer = _build_optimizer(cfg, model)
     scheduler = _build_scheduler(cfg, optimizer)
     ema_decay = float(cfg["training"].get("ema_decay", 0.9999))
-
-    vae_run_dir = _resolve_vae_run_dir(cfg, repo)
-    vae = _load_vae_for_sampling(vae_run_dir, device) if vae_run_dir is not None else None
 
     ckpt_path = Path(checkpoint_name)
     if not ckpt_path.is_absolute():
@@ -318,8 +300,7 @@ def resume_ldm_run(
         raise ValueError(f"Checkpoint at step {start_step} already reached total_steps.")
 
     # Restore EMA state if present in the checkpoint
-    import torch as _torch
-    _raw_ckpt = _torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    _raw_ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     _ema_state = _raw_ckpt.get("ema", None)
     del _raw_ckpt
 
@@ -341,7 +322,7 @@ def resume_ldm_run(
             cfg_resume["training"] = dict(cfg["training"])
             cfg_resume["training"]["total_steps"] = remaining
             history = ldm_train_loop(
-                model, train_loader, val_loader,
+                model, data["train_loader"], data["val_loader"],
                 optimizer, scaler, schedule,
                 cfg=cfg_resume,
                 run_dir=run_dir,
@@ -352,8 +333,10 @@ def resume_ldm_run(
                 scheduler=scheduler,
                 ema_decay=ema_decay,
                 ema_state=_ema_state,
-                vae=vae,
-                latent_std=latent_std,
+                vae=data["vae"],
+                latent_mean=data["latent_mean"],
+                latent_std=data["latent_std"],
+                val_phi=data["val_phi"],
             )
         except Exception as exc:
             update_run_metadata(run_dir, {"status": "failed", "failure": str(exc)})

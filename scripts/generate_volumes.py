@@ -11,10 +11,12 @@ Sweeps porosity × spatial distribution.
 Usage
 -----
 python scripts/generate_volumes.py \\
-    --checkpoint runs/ldm/ldm01-run-0002-.../checkpoints/best.ckpt \\
-    --vae-run    runs/vae/r05-run-0001-... \\
-    [--ddim-steps 50] \\
-    [--latent-std 0.4571]
+    --checkpoint   runs/ldm/ldm04-run-0001-.../checkpoints/best.ckpt \\
+    [--latents-root data/split_v2/latents_r07z4] \\
+    [--ddim-steps 50]
+
+The latent store's metadata.json supplies both the per-channel
+denormalisation stats and the VAE checkpoint the latents were built with.
 
 Output tree (relative to cwd)
 ------------------------------
@@ -148,61 +150,33 @@ def _load_ldm(checkpoint: str | Path, device: torch.device) -> torch.nn.Module:
     return model, cfg
 
 
-def _load_vae(vae_run_dir: str | Path, device: torch.device) -> torch.nn.Module:
-    from poregen.models.vae import build_vae
+def _load_latent_store_meta(
+    latents_root: Path,
+    device: torch.device,
+) -> tuple[torch.nn.Module, torch.Tensor, torch.Tensor]:
+    """Load the frozen VAE and per-channel denormalisation stats from a latent store."""
+    from poregen.experiments.train_vae import load_vae_from_checkpoint
 
-    vae_run_dir = Path(vae_run_dir)
-    resolved = yaml.safe_load((vae_run_dir / "resolved_config.yaml").read_text())
-    model_cfg = dict(resolved["model"])
-    vae_name = model_cfg.pop("name")
-    vae = build_vae(vae_name, **model_cfg)
+    meta = json.loads((latents_root / "metadata.json").read_text())
+    norm = meta["normalization"]
+    c = len(norm["per_channel_mean"])
+    mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
+    std  = torch.tensor(norm["per_channel_std"],  dtype=torch.float32).view(c, 1, 1, 1)
 
-    for candidate in [
-        vae_run_dir / "checkpoints" / "best.ckpt",
-        vae_run_dir / "checkpoints" / "latest.ckpt",
-        vae_run_dir / "best.ckpt",
-        vae_run_dir / "latest.ckpt",
-    ]:
-        if candidate.exists():
-            ckpt_path = candidate
-            break
-    else:
-        raise FileNotFoundError(f"No best.ckpt or latest.ckpt found in {vae_run_dir}")
-
-    state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if isinstance(state, dict) and "model" in state:
-        state = state["model"]
-    if any(k.startswith("_orig_mod.") for k in state):
-        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-
-    vae.load_state_dict(state)
-    vae.to(device).eval().requires_grad_(False)
-    logger.info("Loaded VAE from %s", ckpt_path)
-    return vae
-
-
-def _load_latent_std(repo_root: Path, override: float | None) -> float:
-    if override is not None:
-        return override
-    stats = repo_root / "data" / "split_v2" / "latents_s64" / "latent_scale_stats.json"
-    if stats.exists():
-        val = float(json.loads(stats.read_text())["std"])
-        logger.info("latent_std=%.6f (from %s)", val, stats)
-        return val
-    logger.warning("latent_scale_stats.json not found — using latent_std=1.0")
-    return 1.0
+    vae, _, _, _ = load_vae_from_checkpoint(Path(meta["vae_checkpoint"]), device)
+    vae.requires_grad_(False)
+    return vae, mean, std
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate a sweep of synthetic XCT volumes.")
     ap.add_argument("--checkpoint",  required=True, help="Path to LDM checkpoint (.ckpt)")
-    ap.add_argument("--vae-run",     required=True, help="Path to VAE run directory")
+    ap.add_argument("--latents-root", default="data/split_v2/latents_r07z4",
+                    help="Latent store root (metadata.json supplies VAE checkpoint + norm stats)")
     ap.add_argument("--sampler",     choices=["ddim", "ddpm"], default="ddim",
                     help="Sampler to use (default: ddim)")
     ap.add_argument("--ddim-steps",  type=int, default=DEFAULT_DDIM_STEPS,
                     help="Number of DDIM steps (ignored when --sampler ddpm)")
-    ap.add_argument("--latent-std",  type=float, default=None,
-                    help="Latent scale std (read from latent_scale_stats.json if omitted)")
     ap.add_argument("--s-por", type=float, default=None,
                     help="Porosity guidance scale (default: from resolved_config.yaml guidance.s_por, else 1.0)")
     ap.add_argument("--s-nb",  type=float, default=None,
@@ -227,8 +201,10 @@ def main() -> None:
     from poregen.diffusion.sampler import DDIMSampler, DDPMSampler, VolumeGenerator
 
     ldm, ldm_cfg = _load_ldm(args.checkpoint, device)
-    vae = _load_vae(args.vae_run, device)
-    latent_std = _load_latent_std(repo, args.latent_std)
+    latents_root = Path(args.latents_root)
+    if not latents_root.is_absolute():
+        latents_root = (repo / latents_root).resolve()
+    vae, latent_mean, latent_std = _load_latent_store_meta(latents_root, device)
 
     sched_cfg = ldm_cfg.get("noise_schedule", {})
     schedule = DDPMSchedule(
@@ -258,6 +234,7 @@ def main() -> None:
         patch_size=PATCH_SIZE,
         patch_stride=PATCH_STRIDE,
         latent_size=PATCH_SIZE // 4,
+        latent_mean=latent_mean,
         latent_std=latent_std,
         voxel_size_mm=VOXEL_SIZE_MM,
     )
@@ -284,7 +261,6 @@ def main() -> None:
     run_tag = (
         f"{ts}"
         f"-{sampler_tag}"
-        f"-lstd{latent_std:.4f}"
         f"-spor{s_por:.2f}"
         f"-snb{s_nb:.2f}"
     )
@@ -293,9 +269,9 @@ def main() -> None:
 
     logger.info(
         "Generating %d volumes  shape=%s  stride_grid=%dx%dx%d  patches_per_vol=%d"
-        "  device=%s  ddim_steps=%d  latent_std=%.5f",
+        "  device=%s  ddim_steps=%d",
         len(combinations), vol_shape, gz, gy, gx, n_patches_per_vol,
-        device, args.ddim_steps, latent_std,
+        device, args.ddim_steps,
     )
 
     vol_pbar   = tqdm(total=len(combinations), unit="vol", position=0)

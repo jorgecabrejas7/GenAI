@@ -15,7 +15,7 @@ Create a detached tmux session and launch training inside it.
 
 ```bash
 tmux new-session -d -s ldm-train
-tmux send-keys -t ldm-train "cd /home/jorgecabrejas/Dev/GenAI && mamba activate poregen && python scripts/train_ldm.py ldm01/base" Enter
+tmux send-keys -t ldm-train "cd /home/jorgecabrejas/Dev/GenAI && mamba activate poregen && python scripts/train_ldm.py run ldm04/base" Enter
 ```
 
 Attach to watch the output:
@@ -57,21 +57,19 @@ tmux send-keys -t ldm-tb "cd /home/jorgecabrejas/Dev/GenAI && mamba activate por
 ## List runs
 
 ```bash
-ls runs/ldm/ldm01/
+ls runs/ldm/
 ```
 
 ---
 
-## Encode latents (if re-encoding is needed)
+## Build the latent dataset (if re-encoding is needed)
 
-Requires a trained VAE checkpoint. Replace `<best_run>` with the VAE run directory.
+Requires a trained VAE checkpoint. The store records the checkpoint and the
+train-split per-channel normalisation stats in `metadata.json`.
 
 ```bash
-python scripts/encode_latents.py \
-    --experiment r05/base \
-    --checkpoint runs/vae/r05/<best_run>/checkpoints/best.ckpt \
-    --data-root data/split_v2 \
-    --output data/split_v2/latents_s64 \
-    --stride 32 \
-    --batch-size 64
+python scripts/build_latent_dataset.py \
+    --checkpoint runs/vae/<vae_run>/best.ckpt \
+    --output data/split_v2/latents_r07z4 \
+    --batch-size 256
 ```

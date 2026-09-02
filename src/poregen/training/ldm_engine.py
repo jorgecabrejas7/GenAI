@@ -95,6 +95,25 @@ def _batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, A
 
 # ── single-step helpers ───────────────────────────────────────────────────────
 
+def _placeholder_cond(
+    B: int,
+    z: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Neighbour/position placeholders for the ldm04 latent dataset.
+
+    The new latent store carries no neighbour latents, so every sample sees
+    the parity-0 anchor state: all six neighbours UNKNOWN (zero latents) and
+    a centred position.  Models with use_neighbor_cond/use_pos_cond disabled
+    ignore these tensors entirely.
+    """
+    C, d, h, w = z.shape[1:]
+    nb_latents = torch.zeros(B, 6, C, d, h, w, device=device)
+    nb_avail   = torch.full((B, 6), NB_UNKNOWN, dtype=torch.long, device=device)
+    pos_frac   = torch.full((B, 3), 0.5, device=device)
+    return nb_latents, nb_avail, pos_frac
+
+
 def ldm_train_step(
     model: nn.Module,
     batch: dict[str, Any],
@@ -106,18 +125,16 @@ def ldm_train_step(
     autocast_dtype: torch.dtype = torch.bfloat16,
     max_grad_norm: float | None = None,
     scheduler: Any | None = None,
+    sample_posterior: bool = True,
     drop_por_p: float = 0.0,
-    drop_joint_p: float = 0.0,
-    drop_nb_p: float = 0.0,
 ) -> dict[str, float]:
-    """Single LDM training step.
+    """Single LDM training step on the ldm04 latent dataset.
 
-    CFG training dropout (ldm03+):
-    - drop_por_p   : probability of dropping porosity only
-    - drop_joint_p : probability of dropping porosity AND neighbours (unconditional base)
-    - drop_nb_p    : probability of dropping neighbours only
-
-    When all rates are 0 (ldm01/ldm02), the model is called exactly as before.
+    Batch keys: ``z`` (normalised posterior mean), ``std`` (posterior std under
+    the same affine map), ``phi`` (patch porosity).  With
+    ``sample_posterior=True`` the training target is a fresh posterior draw
+    z = μ + σ·ε (stochastic encoding).  ``drop_por_p`` is the CFG porosity
+    dropout rate (requires model.use_por_null; 0 = disabled).
 
     Returns
     -------
@@ -125,40 +142,18 @@ def ldm_train_step(
     """
     model.train()
     b = _batch_to_device(batch, device)
-    z          = b["z"]            # (B, C, D, H, W)
-    nb_latents = b["nb_latents"]   # (B, 6, C, D, H, W)
-    nb_avail   = b["nb_avail"]     # (B, 6) long
-    pos_frac   = b["pos_frac"]     # (B, 3)
-    global_por = b["global_por"].squeeze(1)  # (B,)
-    local_por  = b["local_por"].squeeze(1)   # (B,)
+    z   = b["z"]                      # (B, C, D, H, W) — normalised μ
+    phi = b["phi"].squeeze(1)         # (B,)
+
+    if sample_posterior:
+        z = z + b["std"] * torch.randn_like(z)
 
     B = z.shape[0]
+    nb_latents, nb_avail, pos_frac = _placeholder_cond(B, z, device)
 
-    # ── CFG per-sample dropout (mutually exclusive categories) ─────────────────
-    # Draw once per batch; categories are non-overlapping.  When all rates are 0
-    # the block is skipped entirely, preserving exact ldm01/ldm02 behaviour.
     drop_por_mask: torch.Tensor | None = None
-    if drop_por_p > 0.0 or drop_joint_p > 0.0 or drop_nb_p > 0.0:
-        u   = torch.rand(B, device=device)
-        p0  = drop_por_p
-        p1  = drop_por_p + drop_joint_p
-        p2  = drop_por_p + drop_joint_p + drop_nb_p
-        por_only = u < p0                       # [0, p_por)
-        joint    = (u >= p0) & (u < p1)         # [p_por, p_por+p_joint)
-        nb_only  = (u >= p1) & (u < p2)         # [p_por+p_joint, ..+p_nb)
-
-        drop_por_mask = por_only | joint         # (B,) bool — drop porosity MLP output
-        drop_nb_mask  = joint | nb_only          # (B,) bool — force all-UNKNOWN avail
-
-        # Force ALL six neighbour slots to UNKNOWN for masked samples.
-        # nb_latents do NOT need to be touched — _build_nb_spatial applies an
-        # EXISTS mask so UNKNOWN entries zero themselves out automatically.
-        if drop_nb_mask.any():
-            all_unk   = torch.full_like(nb_avail, NB_UNKNOWN)
-            nb_avail  = torch.where(
-                drop_nb_mask.unsqueeze(1).expand_as(nb_avail),
-                all_unk, nb_avail,
-            )
+    if drop_por_p > 0.0:
+        drop_por_mask = torch.rand(B, device=device) < drop_por_p
 
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
@@ -167,7 +162,7 @@ def ldm_train_step(
     optimizer.zero_grad(set_to_none=True)
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, pos_frac, global_por, local_por,
+        eps_pred = model(z_t, t, nb_latents, nb_avail, pos_frac, phi, phi,
                          drop_por_mask)
         loss     = F.mse_loss(eps_pred, noise)
 
@@ -197,24 +192,26 @@ def ldm_eval_step(
     schedule: Any,
     device: torch.device,
     autocast_dtype: torch.dtype = torch.bfloat16,
+    sample_posterior: bool = True,
 ) -> dict[str, float]:
     """Single LDM eval step (no grad)."""
     model.eval()
     b = _batch_to_device(batch, device)
-    z          = b["z"]
-    nb_latents = b["nb_latents"]
-    nb_avail   = b["nb_avail"]
-    pos_frac   = b["pos_frac"]
-    global_por = b["global_por"].squeeze(1)
-    local_por  = b["local_por"].squeeze(1)
+    z   = b["z"]
+    phi = b["phi"].squeeze(1)
+
+    if sample_posterior:
+        z = z + b["std"] * torch.randn_like(z)
 
     B = z.shape[0]
+    nb_latents, nb_avail, pos_frac = _placeholder_cond(B, z, device)
+
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
     z_t    = schedule.q_sample(z, t, noise)
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, pos_frac, global_por, local_por)
+        eps_pred = model(z_t, t, nb_latents, nb_avail, pos_frac, phi, phi)
         loss     = F.mse_loss(eps_pred, noise)
 
     return {"loss": loss.item()}
@@ -228,10 +225,12 @@ def _run_eval(
     device: torch.device,
     autocast_dtype: torch.dtype,
     desc: str = "Eval",
+    sample_posterior: bool = True,
 ) -> dict[str, float]:
     acc: dict[str, float] = {}
     for _ in tqdm(range(n_batches), desc=desc, leave=False, unit="batch"):
-        metrics = ldm_eval_step(model, next(data_iter), schedule, device, autocast_dtype)
+        metrics = ldm_eval_step(model, next(data_iter), schedule, device, autocast_dtype,
+                                sample_posterior=sample_posterior)
         _accumulate(acc, metrics)
     return _mean_acc(acc, n_batches)
 
@@ -244,12 +243,14 @@ def _run_full_eval(
     device: torch.device,
     autocast_dtype: torch.dtype,
     desc: str = "Full val",
+    sample_posterior: bool = True,
 ) -> dict[str, float]:
     """Pass through the entire validation set."""
     acc: dict[str, float] = {}
     n = 0
     for batch in tqdm(val_loader, desc=desc, leave=False, unit="batch"):
-        _accumulate(acc, ldm_eval_step(model, batch, schedule, device, autocast_dtype))
+        _accumulate(acc, ldm_eval_step(model, batch, schedule, device, autocast_dtype,
+                                       sample_posterior=sample_posterior))
         n += 1
     return _mean_acc(acc, max(n, 1))
 
@@ -291,7 +292,8 @@ def _log_sample_volume(
     ddim_steps: int = 20,
     grid: tuple[int, int, int] = (3, 3, 3),
     global_por: float = 0.02,
-    latent_std: float = 1.0,
+    latent_mean: torch.Tensor | float = 0.0,
+    latent_std: torch.Tensor | float = 1.0,
     patch_size: int = 64,
     patch_stride: int = 64,
     latent_size: int = 16,
@@ -335,6 +337,7 @@ def _log_sample_volume(
                 patch_size=patch_size,
                 patch_stride=patch_stride,
                 latent_size=latent_size,
+                latent_mean=latent_mean,
                 latent_std=latent_std,
             )
             # Convert voxel dims to physical mm for the new generate() API.
@@ -372,6 +375,7 @@ def _log_sample_volume(
                 patch_size=patch_size,
                 patch_stride=patch_stride,
                 latent_size=latent_size,
+                latent_mean=latent_mean,
                 latent_std=latent_std,
             )
             generated, grid_origins = generator._generate_latents(
@@ -427,19 +431,29 @@ def ldm_train_loop(
     ema_decay: float = 0.9999,
     ema_state: dict | None = None,
     vae: nn.Module | None = None,
-    latent_std: float = 1.0,
+    latent_mean: torch.Tensor | float = 0.0,
+    latent_std: torch.Tensor | float = 1.0,
+    val_phi: "np.ndarray | None" = None,
 ) -> list[dict[str, Any]]:
     """Step-based LDM training loop mirroring the VAE train_loop.
+
+    Trains in normalised latent space; *latent_mean*/*latent_std* are the
+    per-channel denormalisation stats from the latent store's metadata, used
+    by every decode path (generation eval, sample visualisation).
 
     Reads from cfg["training"]:
       total_steps, log_every, eval_every, val_batches, save_every,
       max_grad_norm, compile,
-      full_val_every,
+      full_val_every, early_stopping_patience,
+      gen_eval_every, gen_eval_samples, gen_eval_ddim_steps,
       sample_every, sample_ddim_steps, sample_grid, sample_global_por,
-      drop_por, drop_joint, drop_nb   (CFG training dropout; ldm03+)
+      drop_por   (CFG porosity dropout; requires model.use_por_null)
+
+    Reads from cfg["data"]:
+      latent_mode  ('sampled' — z=μ+σε per batch, default — or 'mean')
 
     Reads from cfg["guidance"]:
-      s_por, s_nb  (guidance scales for in-training sample viz; ldm03+)
+      s_por, s_nb  (guidance scales for in-training sample viz)
     """
     if device is None:
         device = next(model.parameters()).device
@@ -463,21 +477,27 @@ def ldm_train_loop(
     sample_global_por = float(training_cfg.get("sample_global_por", 0.02))
     sample_patch_stride = int(cfg.get("data", {}).get("patch_stride", 64))
 
-    # CFG training dropout rates (ldm03+; default 0.0 = no dropout, ldm01/02 behaviour)
-    drop_por_p   = float(training_cfg.get("drop_por",   0.0))
-    drop_joint_p = float(training_cfg.get("drop_joint", 0.0))
-    drop_nb_p    = float(training_cfg.get("drop_nb",    0.0))
+    # Generation eval (off-manifold diagnostics + decode-based porosity eval)
+    gen_eval_every      = int(training_cfg.get("gen_eval_every", 0))
+    gen_eval_samples    = int(training_cfg.get("gen_eval_samples", 64))
+    gen_eval_ddim_steps = int(training_cfg.get("gen_eval_ddim_steps", 50))
 
-    # Guidance scales for in-training sample visualisation (ldm03+; default 1.0 = un-guided)
+    # Latent mode: 'sampled' draws z=μ+σε per batch (stochastic encoding)
+    latent_mode = str(cfg.get("data", {}).get("latent_mode", "sampled"))
+    if latent_mode not in ("sampled", "mean"):
+        raise ValueError(f"Unknown data.latent_mode '{latent_mode}' (use 'sampled' or 'mean').")
+    sample_posterior = latent_mode == "sampled"
+
+    # CFG porosity dropout (requires model.use_por_null; 0.0 = disabled)
+    drop_por_p = float(training_cfg.get("drop_por", 0.0))
+
+    # Guidance scales for in-training sample visualisation (default 1.0 = un-guided)
     guidance_cfg = cfg.get("guidance", {})
     s_por_scale  = float(guidance_cfg.get("s_por", 1.0))
     s_nb_scale   = float(guidance_cfg.get("s_nb",  1.0))
 
-    if drop_por_p > 0 or drop_joint_p > 0 or drop_nb_p > 0:
-        _logger.info(
-            "CFG training dropout enabled — drop_por=%.2f  drop_joint=%.2f  drop_nb=%.2f",
-            drop_por_p, drop_joint_p, drop_nb_p,
-        )
+    if drop_por_p > 0:
+        _logger.info("CFG porosity dropout enabled — drop_por=%.2f", drop_por_p)
     if s_por_scale != 1.0 or s_nb_scale != 1.0:
         _logger.info(
             "Guided sample viz enabled — s_por=%.2f  s_nb=%.2f", s_por_scale, s_nb_scale,
@@ -523,7 +543,7 @@ def ldm_train_loop(
                 model, batch, optimizer, scaler, schedule,
                 step=step, device=device, autocast_dtype=autocast_dtype,
                 max_grad_norm=max_grad_norm, scheduler=scheduler,
-                drop_por_p=drop_por_p, drop_joint_p=drop_joint_p, drop_nb_p=drop_nb_p,
+                sample_posterior=sample_posterior, drop_por_p=drop_por_p,
             )
             ema.update(model)
             _step_elapsed = time.perf_counter() - _step_t0
@@ -563,6 +583,7 @@ def ldm_train_loop(
                 agg = _run_eval(
                     model, _val_iter, schedule, val_batches_clamped,
                     device, autocast_dtype, desc=f"Val step {step + 1}",
+                    sample_posterior=sample_posterior,
                 )
                 del _val_iter
                 val_record = {
@@ -597,6 +618,7 @@ def ldm_train_loop(
                 full_agg = _run_full_eval(
                     model, val_loader, schedule, device, autocast_dtype,
                     desc=f"Full val {step + 1}",
+                    sample_posterior=sample_posterior,
                 )
                 full_record = {
                     "step":    step,
@@ -633,6 +655,47 @@ def ldm_train_loop(
                     )
                     break
 
+            # ── generation eval: off-manifold + decode diagnostics ──────────
+            if gen_eval_every > 0 and (step + 1) % gen_eval_every == 0:
+                from poregen.diffusion.generation_eval import generation_eval
+
+                if vae is None or val_phi is None:
+                    raise RuntimeError(
+                        "gen_eval_every > 0 requires a loaded VAE and the val "
+                        "phi distribution (vae=..., val_phi=...)."
+                    )
+                orig_state = {k: v.clone() for k, v in model.state_dict().items()}
+                ema.apply_to(model)
+                try:
+                    gen_metrics = generation_eval(
+                        model, schedule, vae,
+                        latent_shape=tuple(train_loader.dataset.latent_shape),
+                        latent_mean=latent_mean,
+                        latent_std=latent_std,
+                        val_phi=val_phi,
+                        device=device,
+                        autocast_dtype=autocast_dtype,
+                        n_samples=gen_eval_samples,
+                        ddim_steps=gen_eval_ddim_steps,
+                        seed=step + 1,
+                    )
+                finally:
+                    model.load_state_dict(orig_state)
+                gen_record = {
+                    "step":    step,
+                    "split":   "gen",
+                    "elapsed": time.time() - t0,
+                    **gen_metrics,
+                }
+                history.append(gen_record)
+                log_file.write(json.dumps(gen_record) + "\n")
+                log_file.flush()
+                metrics_file.write(json.dumps(gen_record) + "\n")
+                metrics_file.flush()
+                if tb_writer is not None:
+                    for k, v in gen_metrics.items():
+                        tb_writer.add_scalar(f"gen/{k}", v, step)
+
             # ── sample visualisation ─────────────────────────────────────────
             if sample_every > 0 and (step + 1) % sample_every == 0:
                 try:
@@ -649,6 +712,7 @@ def ldm_train_loop(
                         ddim_steps=sample_ddim_steps,
                         grid=sample_grid,
                         global_por=sample_global_por,
+                        latent_mean=latent_mean,
                         latent_std=latent_std,
                         patch_stride=sample_patch_stride,
                         s_por=s_por_scale,
