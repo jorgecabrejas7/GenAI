@@ -115,3 +115,38 @@ def test_generate_volumes_coherent_distribution():
     # Deterministic: same porosity level → identical map.
     again = mod._build_local_por_map(gz, gy, gx, 0.03, "coherent")
     assert por_map == again
+
+
+# ── the other local-porosity map builders ────────────────────────────────────
+# Both of these still emit values OUTSIDE the sampler's training range
+# [POR_MIN, POR_MAX].  That is deliberate and is pinned here: the clamp lives
+# at the point of USE, in VolumeGenerator._window_conditioning, so there is one
+# choke point instead of one per map builder.
+
+def test_build_local_por_map_uniform_is_exact():
+    mod = _load_generate_volumes_module()
+    m = mod._build_local_por_map(2, 3, 4, target_por=0.03, distribution="uniform")
+    assert len(m) == 24
+    assert all(v == pytest.approx(0.03) for v in m.values())
+
+
+def test_build_local_por_map_center_peak_exceeds_the_training_clamp():
+    from poregen.diffusion.conditioning import POR_MAX
+
+    mod = _load_generate_volumes_module()
+    m = mod._build_local_por_map(4, 8, 8, target_por=0.05, distribution="center")
+    vals = np.array(list(m.values()))
+    assert vals.mean() == pytest.approx(0.05, rel=0.05)
+    assert vals.max() > POR_MAX               # clamped downstream, not here
+    assert vals.min() >= 0.001 and vals.max() <= 0.999
+
+
+def test_gaussian_por_grid_normalises_the_mean_not_the_peak():
+    """The in-training sample map: mean == global_por, peak left out of range."""
+    from poregen.diffusion.conditioning import POR_MAX
+    from poregen.training.ldm_engine import _gaussian_por_grid
+
+    grid = _gaussian_por_grid((3, 3, 3), global_por=0.05)
+    vals = np.array(list(grid.values()))
+    assert vals.mean() == pytest.approx(0.05, rel=1e-6)
+    assert vals.max() > POR_MAX

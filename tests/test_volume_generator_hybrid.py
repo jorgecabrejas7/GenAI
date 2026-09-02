@@ -1,0 +1,496 @@
+"""The ldm06 hybrid chunked sampler: neighbour sources, blended decode, seams.
+
+Everything here runs on a tiny synthetic denoiser and decoder, so the numbers
+are exact rather than plausible.  Geometry is scaled down: patch 8 voxels,
+latent 2 cells, downsample 4 — the same relations as production at 64/16/4.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import torch
+import torch.nn as nn
+
+from poregen.diffusion.conditioning import (
+    NB_EXISTS,
+    NB_OOB,
+    NB_UNKNOWN,
+    NEIGHBOUR_DIRS,
+    N_NEIGHBOURS,
+)
+from poregen.diffusion.noise_schedule import DDPMSchedule
+from poregen.diffusion.sampler import (
+    DDIMSampler,
+    VolumeGenerator,
+    seam_discontinuity,
+    theta_from_layup,
+    window_origins,
+    window_weight,
+)
+
+P, LAT, DS = 64, 16, 4      # production geometry: patch, latent cells, factor
+C = 2
+VOX_MM = 0.025
+
+
+class _Cfg:
+    z_channels = C
+
+
+class _SpyModel(nn.Module):
+    """Records every call and returns a fixed epsilon."""
+
+    cfg = _Cfg()
+
+    def __init__(self, eps_value: float = 0.0) -> None:
+        super().__init__()
+        self.eps_value = eps_value
+        self.calls: list[dict] = []
+
+    def forward(self, z_t, t, nb_latents, nb_avail, nb_t, cond_por, cond_depth,
+                cond_dist6, cond_orient, cond_material, drop_por=None):
+        self.calls.append({
+            "t": int(t[0]),
+            "z_t": z_t.detach().clone(),
+            "nb_latents": nb_latents.detach().clone(),
+            "nb_avail": nb_avail.detach().clone(),
+            "nb_t": nb_t.detach().clone(),
+            "cond_por": cond_por.detach().clone(),
+            "cond_depth": cond_depth.detach().clone(),
+            "cond_dist6": cond_dist6.detach().clone(),
+            "cond_material": cond_material.detach().clone(),
+            "drop_por": None if drop_por is None else drop_por.detach().clone(),
+        })
+        return torch.full_like(z_t, self.eps_value)
+
+
+class _ConstVAE(nn.Module):
+    """Decoder that emits a constant grey level and constant class logits."""
+
+    def __init__(self, grey: float = 0.4, logits=(2.0, 0.5, -1.0)) -> None:
+        super().__init__()
+        self.grey = grey
+        self.logits = logits
+
+    def decoder(self, z):
+        return z
+
+    def xct_head(self, dec):
+        b = dec.shape[0]
+        return torch.full((b, 1, P, P, P), self.grey)
+
+    def class_head(self, dec):
+        b = dec.shape[0]
+        out = torch.empty(b, 3, P, P, P)
+        for k, v in enumerate(self.logits):
+            out[:, k] = v
+        return out
+
+
+class _LatentVAE(nn.Module):
+    """Decoder that upsamples the latent, so the decode carries real structure."""
+
+    def decoder(self, z):
+        return z
+
+    def xct_head(self, dec):
+        up = torch.nn.functional.interpolate(dec[:, :1], scale_factor=DS,
+                                             mode="trilinear", align_corners=False)
+        return up * 0.05 + 0.5
+
+    def class_head(self, dec):
+        up = torch.nn.functional.interpolate(dec[:, :1], scale_factor=DS,
+                                             mode="trilinear", align_corners=False)
+        return torch.cat([torch.zeros_like(up), up, -torch.ones_like(up)], dim=1)
+
+
+def _generator(model, vae, chunk_tiles, n_steps=2, tiles=(2, 2, 2), **kw):
+    dev = torch.device("cpu")
+    sch = DDPMSchedule(T=100, device=dev)
+    sampler = DDIMSampler(model, sch, dev, n_steps=n_steps,
+                          s_por=kw.pop("s_por", 1.0), s_nb=kw.pop("s_nb", 1.0))
+    theta = theta_from_layup(tiles[0] * P, [0, 45, 90], 19.6)
+    gen = VolumeGenerator(
+        sampler, vae, dev, patch_size=P, latent_size=LAT,
+        latent_mean=0.0, latent_std=1.0, voxel_size_mm=VOX_MM,
+        por_log_stats=(-3.0, 1.0), theta_deg=theta,
+        chunk_tiles=chunk_tiles, **kw,
+    )
+    size_mm = tuple(t * P * VOX_MM for t in tiles)
+    return gen, size_mm
+
+
+# ── window helpers ───────────────────────────────────────────────────────────
+
+class TestWindowGeometry:
+
+    def test_origins_cover_the_whole_canvas(self):
+        canvas, w, s = (48, 32, 32), 16, 8
+        origins = window_origins(canvas, w, s)
+        covered = np.zeros(canvas, bool)
+        for o in origins:
+            covered[o[0]:o[0] + w, o[1]:o[1] + w, o[2]:o[2] + w] = True
+        assert covered.all()
+        assert len(origins) == 5 * 3 * 3
+
+    def test_a_canvas_that_cannot_be_tiled_is_refused(self):
+        with pytest.raises(ValueError, match="cannot be covered"):
+            window_origins((50, 48, 48), 16, 8)     # (50-16) % 8 != 0
+        with pytest.raises(ValueError, match="cannot be covered"):
+            window_origins((8, 48, 48), 16, 8)      # axis smaller than a window
+        with pytest.raises(ValueError, match="stride_cells"):
+            window_origins((48, 48, 48), 16, 20)    # stride > window
+
+    def test_fusion_weight_is_strictly_positive_and_normalisable(self):
+        w = window_weight(16)
+        assert w.shape == (16, 16, 16)
+        assert float(w.min()) > 0.0
+        canvas = (48, 32, 32)
+        acc = torch.zeros(canvas)
+        for o in window_origins(canvas, 16, 8):
+            acc[o[0]:o[0] + 16, o[1]:o[1] + 16, o[2]:o[2] + 16] += w
+        assert float(acc.min()) > 0.0        # no cell divides by zero
+
+
+# ── neighbour source logic ───────────────────────────────────────────────────
+
+class TestNeighbourPlan:
+    """`_neighbour_plan` decides where each of a window's six faces comes from."""
+
+    @staticmethod
+    def _plan(visible, origins, canvas=(64, 64, 64), ctx_lo=(0, 0, 0)):
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (1, 1, 1))
+        return gen._neighbour_plan(origins, visible, canvas, ctx_lo)
+
+    def test_a_face_leaving_the_volume_is_oob(self):
+        visible = np.ones((64, 64, 64), bool)
+        states, slices = self._plan(visible, [(0, 0, 0)])
+        for f, d in enumerate(NEIGHBOUR_DIRS):
+            leaves = any(dd < 0 for dd in d)
+            assert states[0, f] == (NB_OOB if leaves else NB_EXISTS)
+            assert (slices[0][f] is None) == leaves
+
+    def test_a_face_reaching_an_ungenerated_chunk_is_unknown(self):
+        visible = np.zeros((64, 64, 64), bool)
+        visible[:32] = True                       # only the low-z half is done
+        states, slices = self._plan(visible, [(16, 16, 16)])
+        by_dir = dict(zip(NEIGHBOUR_DIRS, states[0]))
+        assert by_dir[(1, 0, 0)] == NB_UNKNOWN    # +z reaches z=32.. which is not
+        assert by_dir[(-1, 0, 0)] == NB_EXISTS    # -z reaches z=0.. which is
+        assert by_dir[(0, 1, 0)] == NB_EXISTS
+        assert slices[0][NEIGHBOUR_DIRS.index((1, 0, 0))] is None
+
+    def test_a_block_straddling_two_visible_chunks_is_exists(self):
+        """Both sources sit at the same noise level, so a straddle is coherent."""
+        visible = np.zeros((64, 64, 64), bool)
+        visible[:40] = True
+        states, _ = self._plan(visible, [(16, 16, 16)])
+        # +z block spans z 32..48: 32..39 visible, 40..47 not -> UNKNOWN
+        assert states[0][NEIGHBOUR_DIRS.index((1, 0, 0))] == NB_UNKNOWN
+        visible[:48] = True
+        states, _ = self._plan(visible, [(16, 16, 16)])
+        assert states[0][NEIGHBOUR_DIRS.index((1, 0, 0))] == NB_EXISTS
+
+    def test_out_of_volume_beats_ungenerated(self):
+        """OOB says the specimen ENDS; UNKNOWN says 'not yet'.  Never both."""
+        visible = np.zeros((64, 64, 64), bool)
+        states, _ = self._plan(visible, [(0, 0, 0)])
+        assert states[0][NEIGHBOUR_DIRS.index((-1, 0, 0))] == NB_OOB
+
+    def test_slices_are_offset_into_the_context_canvas(self):
+        visible = np.ones((64, 64, 64), bool)
+        states, slices = self._plan(visible, [(32, 32, 32)], ctx_lo=(16, 16, 16))
+        sl = slices[0][NEIGHBOUR_DIRS.index((1, 0, 0))]
+        assert sl[0].start == 32 + LAT - 16
+        assert sl[0].stop - sl[0].start == LAT
+
+
+class TestNeighbourSourcesEndToEnd:
+
+    def test_states_seen_by_the_model_match_the_geometry(self):
+        """chunk_tiles (1,1,1) on a 2x2x2 volume: raster order, 3 faces OOB."""
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (1, 1, 1))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=8)
+        states = torch.cat([c["nb_avail"].reshape(-1) for c in model.calls])
+        n_steps = len(gen.sampler.timesteps) - 1
+        # 8 chunks x 1 window x 6 faces per timestep; every corner tile has 3
+        # faces leaving the volume, and the other 3 split EXISTS/UNKNOWN by
+        # raster order (12 of each over the grid).
+        assert int((states == NB_OOB).sum()) == 8 * 3 * n_steps
+        assert int((states == NB_EXISTS).sum()) == 12 * n_steps
+        assert int((states == NB_UNKNOWN).sum()) == 12 * n_steps
+
+    def test_one_chunk_over_the_volume_never_says_unknown(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=64)
+        states = torch.cat([c["nb_avail"].reshape(-1) for c in model.calls])
+        assert int((states == NB_UNKNOWN).sum()) == 0
+        assert int((states == NB_EXISTS).sum()) > 0
+
+    def test_nb_t_is_the_canvas_timestep_for_exists_and_zero_otherwise(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=64)
+        for call in model.calls:
+            ex = call["nb_avail"] == NB_EXISTS
+            assert bool((call["nb_t"][ex] == call["t"]).all())
+            assert bool((call["nb_t"][~ex] == 0).all())
+
+    def test_an_in_chunk_neighbour_is_the_canvas_block_itself(self):
+        """The -z face of the window at cell 16 IS the window at cell 0."""
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (3, 3, 3), tiles=(3, 3, 3))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=64)
+        first = [c for c in model.calls if c["t"] == model.calls[0]["t"]]
+        # Windows are emitted in the order window_origins produces them:
+        # z outer, then y, then x, at cell stride 8 over a 48-cell canvas.
+        origins = window_origins((48, 48, 48), LAT, 8)
+        xw = torch.cat([c["z_t"] for c in first])
+        nb = torch.cat([c["nb_latents"] for c in first])
+        idx = {o: i for i, o in enumerate(origins)}
+        j = idx[(16, 0, 0)]
+        k = idx[(0, 0, 0)]
+        f = NEIGHBOUR_DIRS.index((-1, 0, 0))
+        assert torch.allclose(nb[j, f], xw[k], atol=1e-6)
+
+    def test_a_finished_chunk_is_re_noised_afresh_at_every_timestep(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (1, 1, 1), n_steps=3)
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=8)
+        # Second chunk (tile 0,0,1): its -x face is chunk 0, already finished.
+        n_steps = len(gen.sampler.timesteps) - 1
+        chunk1 = model.calls[n_steps:2 * n_steps]
+        f = NEIGHBOUR_DIRS.index((0, 0, -1))
+        assert all(int(c["nb_avail"][0, f]) == NB_EXISTS for c in chunk1)
+        blocks = [c["nb_latents"][0, f] for c in chunk1]
+        assert float(blocks[0].abs().max()) > 0.0
+        for a, b in zip(blocks, blocks[1:]):
+            assert not torch.allclose(a, b)      # fresh noise every step
+
+    def test_oob_and_unknown_faces_arrive_zeroed(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (1, 1, 1))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=8)
+        for call in model.calls:
+            blank = call["nb_avail"] != NB_EXISTS
+            assert float(call["nb_latents"][blank].abs().max()) == 0.0
+
+
+# ── per-window conditioning ──────────────────────────────────────────────────
+
+class TestWindowConditioning:
+
+    def test_porosity_is_clamped_to_the_training_range(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.9,
+                     autocast_dtype=torch.float32, window_batch=64)
+        from poregen.diffusion.conditioning import POR_MAX, porosity_to_cond
+        expected = float(porosity_to_cond(POR_MAX, (-3.0, 1.0)))
+        assert all(float(c["cond_por"].max()) == pytest.approx(expected)
+                   for c in model.calls)
+
+    def test_dist6_is_zero_on_the_faces_where_the_volume_ends(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=64)
+        d6 = torch.cat([c["cond_dist6"] for c in model.calls])
+        # The specimen box is the volume, so the corner windows are flush.
+        assert float(d6.min()) == pytest.approx(0.0)
+        assert float(d6.max()) <= 1.0
+
+    def test_the_default_material_map_is_all_material(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     autocast_dtype=torch.float32, window_batch=64)
+        assert all(float(c["cond_material"].min()) == 1.0 for c in model.calls)
+
+    def test_a_painted_material_map_reaches_the_windows(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        cells = (2 * P // DS,) * 3
+        painted = np.zeros(cells, dtype=np.float32)
+        painted[: cells[0] // 2] = 1.0          # material in the low-z half only
+        gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                     material_map=painted, autocast_dtype=torch.float32,
+                     window_batch=64)
+        seen = torch.cat([c["cond_material"].reshape(-1) for c in model.calls])
+        assert float(seen.min()) == 0.0 and float(seen.max()) == 1.0
+
+    def test_a_material_map_of_the_wrong_shape_is_refused(self):
+        gen, size_mm = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2))
+        with pytest.raises(ValueError, match="material_map has shape"):
+            gen.generate(volume_size_mm=size_mm, material_map=np.ones((4, 4, 4)),
+                         autocast_dtype=torch.float32)
+
+
+# ── CFG ──────────────────────────────────────────────────────────────────────
+
+class TestGuidance:
+
+    def test_unguided_takes_one_pass_per_window(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
+        gen.generate(volume_size_mm=size_mm, autocast_dtype=torch.float32,
+                     window_batch=64)
+        assert all(c["drop_por"] is None for c in model.calls)
+
+    def test_guided_takes_the_three_nested_passes(self):
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2),
+                                  s_por=1.5, s_nb=2.0)
+        gen.generate(volume_size_mm=size_mm, autocast_dtype=torch.float32,
+                     window_batch=64)
+        n_steps = len(gen.sampler.timesteps) - 1
+        assert len(model.calls) == 3 * n_steps
+        uncond, por, full = model.calls[0], model.calls[1], model.calls[2]
+        assert uncond["drop_por"] is not None and bool(uncond["drop_por"].all())
+        assert por["drop_por"] is None and full["drop_por"] is None
+        # The two null arms carry no neighbour information at all.
+        assert bool((uncond["nb_avail"] == NB_UNKNOWN).all())
+        assert bool((por["nb_avail"] == NB_UNKNOWN).all())
+        assert bool((uncond["nb_t"] == 0).all())
+        assert not bool((full["nb_avail"] == NB_UNKNOWN).all())
+
+
+# ── overlapped decode ────────────────────────────────────────────────────────
+
+class TestBlendedDecode:
+
+    def test_a_constant_decoder_gives_a_constant_volume(self):
+        """Weight normalisation: every voxel divides by its own total weight."""
+        vae = _ConstVAE(grey=0.4, logits=(2.0, 0.5, -1.0))
+        gen, size_mm = _generator(_SpyModel(), vae, (2, 2, 2))
+        xct, label, stats = gen.generate(volume_size_mm=size_mm,
+                                         autocast_dtype=torch.float32,
+                                         window_batch=64)
+        assert xct.shape == (2 * P,) * 3 and xct.dtype == np.uint8
+        assert np.all(xct == round(0.4 * 255))
+        assert np.all(label == 0)                       # argmax of (2.0, .5, -1)
+
+    def test_the_argmax_follows_the_blended_logits(self):
+        vae = _ConstVAE(grey=0.4, logits=(0.0, 3.0, 1.0))
+        gen, size_mm = _generator(_SpyModel(), vae, (2, 2, 2))
+        _, label, _ = gen.generate(volume_size_mm=size_mm,
+                                   autocast_dtype=torch.float32, window_batch=64)
+        assert np.all(label == 1)
+
+    def test_class_probabilities_are_a_simplex(self):
+        vae = _ConstVAE(grey=0.4, logits=(1.0, 0.0, -2.0))
+        gen, size_mm = _generator(_SpyModel(), vae, (2, 2, 2))
+        out = gen.generate(volume_size_mm=size_mm, autocast_dtype=torch.float32,
+                           window_batch=64, return_class_probs=True)
+        assert len(out) == 4
+        probs = out[3]
+        assert probs.shape == (3, 2 * P, 2 * P, 2 * P)
+        assert np.allclose(probs.sum(axis=0), 1.0, atol=1e-5)
+
+    def test_decode_windows_overlap_by_the_requested_stride(self):
+        """stride 64 would be plain tiling; stride 32 must halve the step."""
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), decode_stride=32)
+        assert len(window_origins((32, 32, 32), LAT, gen.decode_stride // DS)) == 27
+        gen64, _ = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), decode_stride=64)
+        assert len(window_origins((32, 32, 32), LAT, gen64.decode_stride // DS)) == 8
+
+    def test_a_stride_that_is_not_a_cell_multiple_is_refused(self):
+        with pytest.raises(ValueError, match="decode_stride"):
+            _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), decode_stride=6)
+        with pytest.raises(ValueError, match="window_stride"):
+            _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), window_stride=48)
+
+
+# ── seam diagnostics ─────────────────────────────────────────────────────────
+
+class TestSeamMetrics:
+
+    def test_a_coherent_volume_has_ratio_one(self):
+        rng = np.random.default_rng(0)
+        vol = rng.standard_normal((128, 128, 128)).astype(np.float32)
+        m = seam_discontinuity(vol, 64, prefix="s")
+        assert m["s_ratio"] == pytest.approx(1.0, abs=0.05)
+
+    def test_independent_blocks_are_flagged(self):
+        rng = np.random.default_rng(1)
+        vol = rng.standard_normal((128, 128, 128)).astype(np.float32) * 0.01
+        vol[64:] += 5.0                       # a step exactly on the seam plane
+        m = seam_discontinuity(vol, 64, prefix="s")
+        assert m["s_z_ratio"] > 50.0
+
+    def test_window_and_chunk_periods_count_different_planes(self):
+        vol = np.zeros((384, 128, 128), np.float32)
+        win = seam_discontinuity(vol, 64, prefix="w")
+        chunk = seam_discontinuity(vol, (192, 64, 64), prefix="c",
+                                   interior_exclude=64)
+        assert win["w_z_planes"] == 5          # 64,128,192,256,320
+        assert chunk["c_z_planes"] == 1        # 192 only
+        assert win["w_y_planes"] == chunk["c_y_planes"] == 1
+
+    def test_the_chunk_metric_uses_the_window_interior_baseline(self):
+        """Both ratios must be judged against the same slice-to-slice noise."""
+        rng = np.random.default_rng(2)
+        vol = rng.standard_normal((384, 128, 128)).astype(np.float32)
+        win = seam_discontinuity(vol, 64, prefix="w")
+        chunk = seam_discontinuity(vol, (192, 64, 64), prefix="c",
+                                   interior_exclude=64)
+        assert win["w_z_interior_mad"] == pytest.approx(chunk["c_z_interior_mad"])
+
+    def test_generate_reports_both_periods_on_grey_and_pore_logit(self):
+        gen, size_mm = _generator(_SpyModel(), _LatentVAE(), (1, 1, 1),
+                                  tiles=(2, 2, 2))
+        _, _, stats = gen.generate(volume_size_mm=size_mm,
+                                   autocast_dtype=torch.float32, window_batch=8)
+        for key in ("seam_xct_ratio", "seam_pore_ratio",
+                    "seam_chunk_xct_ratio", "seam_chunk_pore_ratio"):
+            assert key in stats
+        assert stats["chunk_tiles"] == [1, 1, 1]
+        assert stats["window_stride"] == 32
+        assert stats["ddim_steps"] == len(gen.sampler.timesteps) - 1
+
+    def test_a_3d_volume_is_required(self):
+        with pytest.raises(ValueError, match="3-D volume"):
+            seam_discontinuity(np.zeros((4, 4)), 2)
+
+
+# ── stats and outputs ────────────────────────────────────────────────────────
+
+def test_stats_carry_the_self_audit_and_the_geometry():
+    vae = _ConstVAE(grey=0.4, logits=(0.0, 3.0, 1.0))
+    gen, size_mm = _generator(_SpyModel(), vae, (2, 2, 2))
+    _, label, stats = gen.generate(volume_size_mm=size_mm, target_porosity=0.04,
+                                   autocast_dtype=torch.float32, window_batch=64)
+    assert stats["target_porosity"] == pytest.approx(0.04)
+    assert stats["conditioned_porosity"] == pytest.approx(0.04)
+    assert stats["actual_label_porosity"] == pytest.approx(float((label == 1).mean()))
+    assert stats["actual_label_air"] == pytest.approx(float((label == 2).mean()))
+    assert stats["volume_shape"] == [2 * P] * 3
+
+
+def test_a_volume_smaller_than_one_tile_is_refused():
+    gen, _ = _generator(_SpyModel(), _ConstVAE(), (1, 1, 1))
+    with pytest.raises(ValueError, match="at least one"):
+        gen.generate(volume_size_mm=(0.5, 0.5, 0.5), autocast_dtype=torch.float32)
+
+
+def test_a_vae_without_a_class_head_is_refused():
+    class _MaskVAE(nn.Module):
+        def decoder(self, z):
+            return z
+
+        def xct_head(self, dec):
+            return torch.zeros(dec.shape[0], 1, P, P, P)
+
+    gen, size_mm = _generator(_SpyModel(), _MaskVAE(), (2, 2, 2))
+    with pytest.raises(TypeError, match="class_head"):
+        gen.generate(volume_size_mm=size_mm, autocast_dtype=torch.float32,
+                     window_batch=64)
