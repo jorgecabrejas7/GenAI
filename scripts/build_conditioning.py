@@ -123,8 +123,9 @@ def foreground_extents() -> dict[str, dict]:
 
     T-C (``t_c_air_boundary.py::load_volume_geometry``) takes the T-A
     per-slice foreground fraction and thresholds it at half its maximum.  The
-    SAME extent is used here for both ``cond_depth`` and ``cond_dist`` so that
-    ``cond_depth`` 0/1 and ``cond_dist`` 0 describe the same two faces.
+    The SAME extent is used for ``cond_depth`` and for all six ``cond_dist6``
+    faces, so ``cond_depth`` 0/1 and ``cond_dist6_z{m,p}`` 0 describe the same
+    two planes.
     """
     profiles = np.load(TA_PROFILES, allow_pickle=True)["profiles"].item()
     out: dict[str, dict] = {}
