@@ -28,6 +28,13 @@ to `[0, 1]` (XCT). Zarr handles open once per dataset instance;
 `build_patch_dataloaders(cfg, data_root)` builds all three splits — train uses
 `shuffle=True, drop_last=True`, test uses `shuffle=False`.
 
+How every root was produced, and how to rebuild each one, is in
+[dataset_provenance.md](dataset_provenance.md). Each data root also carries a
+short `BUILD.md` pointing there. **`volumes.zarr` is a symlink in both v2 and
+v3** — `split_v3 -> split_v2 -> split_v1` — and `data/split_v1/volumes.zarr` is
+the only real store, so any cleanup of a derived root must leave that link
+alone.
+
 ### split_v3 — the current dataset
 
 `data/split_v3` is built by `scripts/build_split_v3.py` and replaces `split_v2`

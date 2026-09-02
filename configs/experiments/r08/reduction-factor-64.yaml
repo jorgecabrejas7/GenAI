@@ -1,0 +1,15 @@
+experiment:
+  name: r08
+  variant: reduction-factor-64
+  description: >-
+    R08 latent-compression rung: total voxel reduction 64x (z_channels=1 at
+    f=4 spatial downsampling). Same protocol as r08/base — 3-class head on
+    split_v3, early stopping patience 12 on val.total. The rung number is the
+    TOTAL VOXEL reduction: 64^3 input voxels against z_channels * 16^3 latent
+    values, so z=1 gives 64x. See r08/base.
+
+extends: r08/base
+
+overrides:
+  model:
+    z_channels: 1
