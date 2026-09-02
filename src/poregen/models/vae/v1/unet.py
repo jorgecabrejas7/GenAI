@@ -74,7 +74,7 @@ class UNetVAE3D(nn.Module):
             → UpBlock  → concat skip[0] → (B, 32, 32,32,32)
             → UpBlock  →                  (B, 32, 64,64,64)
 
-        Heads: 1×1 conv → xct_logits, mask_logits
+        Heads: 1×1 conv → xct_out, mask_logits
     """
 
     def __init__(self, cfg: VAEConfig) -> None:
@@ -158,7 +158,7 @@ class UNetVAE3D(nn.Module):
                 h = block(h)
 
         return VAEOutput(
-            xct_logits=self.xct_head(h),
+            xct_out=self.xct_head(h),
             mask_logits=self.mask_head(h),
             mu=mu,
             logvar=logvar,

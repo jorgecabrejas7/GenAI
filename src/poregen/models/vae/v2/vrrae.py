@@ -61,7 +61,7 @@ this variant, kept only for cross-variant config compatibility)::
       → up_v2_mirror → (B, 128,  8,  8,  8)
       → up_v2_mirror → (B,  64, 16, 16, 16)
       → up_v2_mirror → (B,  32, 32, 32, 32)
-      → up_v2_mirror(final=True) → xct_logits (B, 1, 64, 64, 64);  mask_logits = None
+      → up_v2_mirror(final=True) → xct_out (B, 1, 64, 64, 64);  mask_logits = None
 """
 
 from __future__ import annotations
@@ -188,10 +188,10 @@ class ConvVAE3DVRRAEV2(nn.Module):
         # and basis shrink together.
         y = z @ basis.transpose(0, 1)
         dec_in = self.dec_b(y).view(z.shape[0], ch_last, ls, ls, ls)
-        xct_logits = self.decoder(dec_in)
+        xct_out = self.decoder(dec_in)
 
         return VAEOutput(
-            xct_logits=xct_logits,
+            xct_out=xct_out,
             mask_logits=None,
             mu=mu,
             logvar=logvar,

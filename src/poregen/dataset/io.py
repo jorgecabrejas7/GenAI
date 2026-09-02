@@ -233,12 +233,21 @@ def save_volume_zarr(
     out_root: str | Path,
     volume_id: str,
     chunk_size: tuple[int, int, int] = (64, 64, 64),
+    sample_mask: np.ndarray | None = None,
 ) -> None:
     """Write *xct* and *mask* into ``<out_root>/volumes.zarr/<volume_id>/``.
 
     Chunks are aligned to the default patch size (64³) so each patch read
     hits exactly one chunk per array.  No compression is applied — on fast
     NVMe the decompression overhead exceeds the I/O savings.
+
+    When *sample_mask* is given it is written as a third array beside
+    ``xct``/``mask``.  volumes.zarr is the natural home: it is where the
+    per-volume mask arrays already live, and the material map builder
+    (scripts/build_material_maps.py) reads it back per volume.  Unlike
+    xct/mask it IS compressed (default codec): the mask is mostly-constant
+    regions, so it compresses ~100x, and it is only read by offline builders
+    where decompression cost is irrelevant.
     """
     store_path = Path(out_root) / "volumes.zarr"
 
@@ -253,6 +262,8 @@ def save_volume_zarr(
             compressors=None,
             overwrite=True,
         )
+    if sample_mask is not None:
+        save_sample_mask_zarr(sample_mask, out_root, volume_id, chunk_size=chunk_size)
 
     logger.info(
         "Saved %s  xct=%s  mask=%s  chunks=%s  compression=none",
@@ -261,3 +272,26 @@ def save_volume_zarr(
         mask.shape,
         chunk_size,
     )
+
+
+def save_sample_mask_zarr(
+    sample_mask: np.ndarray,
+    out_root: str | Path,
+    volume_id: str,
+    chunk_size: tuple[int, int, int] = (64, 64, 64),
+) -> None:
+    """Persist the onlypores ``sample_mask`` as ``<volume_id>/sample_mask``.
+
+    Additive: only the ``sample_mask`` array is (over)written; ``xct`` and
+    ``mask`` are never touched.  Compressed — see ``save_volume_zarr``.
+    """
+    store_path = Path(out_root) / "volumes.zarr"
+    root = zarr.open_group(str(store_path), mode="a")
+    grp = root.require_group(volume_id)
+    grp.create_array(
+        "sample_mask",
+        data=sample_mask.astype(np.uint8, copy=False),
+        chunks=chunk_size,
+        overwrite=True,
+    )
+    logger.info("Saved %s/sample_mask  shape=%s (compressed)", volume_id, sample_mask.shape)

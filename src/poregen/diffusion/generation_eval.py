@@ -12,6 +12,12 @@ Two eval blocks, computed on latents freshly sampled with DDIM + EMA weights:
    through the frozen VAE decoder; decoded-mask porosities are compared to the
    real val-split porosity distribution (mean/std, Wasserstein-1) and the
    fraction of degenerate masks is reported.
+
+Conditioning is drawn from real validation rows (cond_por / cond_depth /
+cond_dist / cond_orient exactly as the model saw them in training), with every
+neighbour set to UNKNOWN — the state of the first parity group at generation
+time.  Because each sample carries a known requested porosity, the eval also
+reports ``por_cond_mae``, the direct conditional-adherence metric.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ def generation_eval(
     schedule,
     vae: torch.nn.Module,
     *,
-    latent_shape: tuple[int, int, int, int],
+    val_dataset,
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
     val_phi: np.ndarray,
@@ -52,28 +58,40 @@ def generation_eval(
     """Sample n_samples latents with DDIM, run both diagnostic blocks.
 
     *model* must already carry the weights to evaluate (e.g. EMA weights
-    swapped in by the caller).  Porosity conditioning values are drawn from
-    the real val phi distribution — a no-op for unconditional models.
+    swapped in by the caller).  Conditioning is taken verbatim from random
+    validation rows of *val_dataset*, so it is always in-distribution.
 
     Returns a flat metric dict (keys become ``gen/<key>`` in TensorBoard).
     """
     model.eval()
-    C, d, h, w = latent_shape
+    C, d, h, w = tuple(val_dataset.latent_shape)
     sampler = DDIMSampler(model, schedule, device, n_steps=ddim_steps)
 
     rng = np.random.default_rng(seed)
-    phi_draw = rng.choice(val_phi, size=n_samples).astype(np.float32)
+    row_idx = rng.integers(0, len(val_dataset), size=n_samples)
+    items = [val_dataset[int(i)] for i in row_idx]
+    phi_draw = np.asarray(
+        [float(val_dataset.df["phi"].iloc[int(i)]) for i in row_idx], dtype=np.float64
+    )
+
+    def _stack(key: str) -> torch.Tensor:
+        return torch.stack([torch.as_tensor(it[key]).float().reshape(()) for it in items])
 
     chunks: list[torch.Tensor] = []
     sat_fracs: list[float] = []
     for i in range(0, n_samples, batch_size):
         b = min(batch_size, n_samples - i)
+        sl = slice(i, i + b)
         nb_latents = torch.zeros(b, 6, C, d, h, w, device=device)
         nb_avail   = torch.full((b, 6), NB_UNKNOWN, dtype=torch.long, device=device)
-        pos_frac   = torch.full((b, 3), 0.5, device=device)
-        por        = torch.from_numpy(phi_draw[i : i + b]).to(device)
+        cond_por   = _stack("cond_por")[sl].to(device)
+        cond_depth = _stack("cond_depth")[sl].to(device)
+        cond_dist  = _stack("cond_dist")[sl].to(device)
+        cond_orient = torch.stack(
+            [torch.as_tensor(it["cond_orient"]).float() for it in items[sl]]
+        ).to(device)
         z, sat = sampler.sample_batch(
-            nb_latents, nb_avail, pos_frac, por, por,
+            nb_latents, nb_avail, cond_por, cond_depth, cond_dist, cond_orient,
             autocast_dtype=autocast_dtype, return_x0_saturation=True,
         )
         chunks.append(z)
@@ -111,6 +129,8 @@ def generation_eval(
         porosities.append(por)
     por_all = torch.cat(porosities).cpu().numpy()
 
+    # Conditional adherence: each sample carries a known requested porosity.
+    metrics["por_cond_mae"]    = float(np.abs(por_all - phi_draw).mean())
     metrics["por_mean"]        = float(por_all.mean())
     metrics["por_std"]         = float(por_all.std())
     metrics["real_por_mean"]   = float(val_phi.mean())
@@ -122,10 +142,10 @@ def generation_eval(
 
     logger.info(
         "generation_eval: n=%d  std_ratio_avg=%.3f  mean_abs_max=%.3f  "
-        "x0_sat=%.4f  por=%.4f±%.4f (real %.4f±%.4f)  W1=%.5f  degen=%.3f",
+        "x0_sat=%.4f  por=%.4f±%.4f (real %.4f±%.4f)  W1=%.5f  cond_mae=%.5f  degen=%.3f",
         n_samples, metrics["std_ratio_avg"], metrics["mean_abs_max"],
         metrics["x0_clamp_sat_frac"], metrics["por_mean"], metrics["por_std"],
         metrics["real_por_mean"], metrics["real_por_std"],
-        metrics["por_w1"], metrics["degenerate_frac"],
+        metrics["por_w1"], metrics["por_cond_mae"], metrics["degenerate_frac"],
     )
     return metrics

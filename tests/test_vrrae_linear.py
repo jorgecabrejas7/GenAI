@@ -33,7 +33,7 @@ def test_forward_shapes_and_no_mask_logits():
     xct = torch.randn(_BATCH, 1, 32, 32, 32)
     out = model(xct, torch.zeros(_BATCH, 1, 32, 32, 32))
     assert isinstance(out, VAEOutput)
-    assert out.xct_logits.shape == (_BATCH, 1, 32, 32, 32)
+    assert out.xct_out.shape == (_BATCH, 1, 32, 32, 32)
     assert out.mask_logits is None
     assert out.mu.shape == (_BATCH, _KW["vrrae_rank"])
     assert out.logvar.shape == (_BATCH, _KW["vrrae_rank"])
@@ -53,7 +53,7 @@ def test_gradients_reach_encoder_and_decoder():
     model.train()
     xct = torch.randn(_BATCH, 1, 32, 32, 32)
     out = model(xct)
-    loss = out.xct_logits.pow(2).mean() + out.mu.pow(2).mean()
+    loss = out.xct_out.pow(2).mean() + out.mu.pow(2).mean()
     loss.backward()
 
     enc_grad = next(model.encoder.parameters()).grad

@@ -35,7 +35,7 @@ class ConvVAE3DNoAttnV2(nn.Module):
           → 1×1     → mu / logvar  (B, 16, 16, 16, 16)
           → up_v2   → (B,  64, 32, 32, 32)
           → up_v2   → (B,  32, 64, 64, 64)
-          → 1×1 heads → xct_logits, mask_logits  (B, 1, 64, 64, 64) each
+          → 1×1 heads → xct_out, mask_logits  (B, 1, 64, 64, 64) each
     """
 
     def __init__(self, cfg: VAEConfig) -> None:
@@ -79,7 +79,7 @@ class ConvVAE3DNoAttnV2(nn.Module):
 
         dec = self.decoder(z)
         return VAEOutput(
-            xct_logits=self.xct_head(dec),
+            xct_out=self.xct_head(dec),
             mask_logits=self.mask_head(dec) if self.mask_head is not None else None,
             mu=mu,
             logvar=logvar,

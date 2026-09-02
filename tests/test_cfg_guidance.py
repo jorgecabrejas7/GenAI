@@ -51,15 +51,16 @@ def model_no_null(mini_cfg_no_null: UNet3DConfig) -> UNet3DDenoiser:
 
 
 def _make_batch(B: int = 2, z_ch: int = 2, D: int = 4):
-    """Return a small synthetic batch of tensors."""
-    z_t   = torch.randn(B, z_ch, D, D, D)
-    t     = torch.zeros(B, dtype=torch.long)
-    nb_l  = torch.randn(B, 6, z_ch, D, D, D)
-    nb_a  = torch.ones(B, 6, dtype=torch.long)   # all EXISTS
-    pos   = torch.rand(B, 3)
-    g_por = torch.rand(B)
-    l_por = torch.rand(B)
-    return z_t, t, nb_l, nb_a, pos, g_por, l_por
+    """Return a small synthetic batch following the D32 §5 contract."""
+    z_t    = torch.randn(B, z_ch, D, D, D)
+    t      = torch.zeros(B, dtype=torch.long)
+    nb_l   = torch.randn(B, 6, z_ch, D, D, D)
+    nb_a   = torch.ones(B, 6, dtype=torch.long)   # all EXISTS
+    por    = torch.randn(B)
+    depth  = torch.rand(B)
+    dist   = torch.rand(B)
+    orient = torch.randn(B, 2, D, D, D)
+    return z_t, t, nb_l, nb_a, por, depth, dist, orient
 
 
 # ── Sanity check 1: null_por receives gradient ────────────────────────────────
@@ -93,11 +94,11 @@ def test_null_por_in_graph_and_receives_gradient(model_with_null: UNet3DDenoiser
     assert hasattr(model_with_null, "null_por"), "null_por parameter missing"
     assert model_with_null.null_por.requires_grad, "null_por.requires_grad should be True"
 
-    z_t, t, nb_l, nb_a, pos, g_por, l_por = _make_batch()
+    z_t, t, nb_l, nb_a, por, depth, dist, orient = _make_batch()
     # Drop porosity for ALL samples — guarantees null_por is in the compute graph.
     drop_all = torch.ones(z_t.shape[0], dtype=torch.bool)
 
-    out  = model_with_null(z_t, t, nb_l, nb_a, pos, g_por, l_por, drop_por=drop_all)
+    out  = model_with_null(z_t, t, nb_l, nb_a, por, depth, dist, orient, drop_por=drop_all)
     loss = out.sum()
     loss.backward()
 
@@ -120,11 +121,12 @@ def test_unknown_avail_zeros_neighbour_contributions(model_with_null: UNet3DDeno
     model_with_null.eval()
     B, z_ch, D = 2, 2, 4
 
-    z_t   = torch.randn(B, z_ch, D, D, D)
-    t     = torch.zeros(B, dtype=torch.long)
-    pos   = torch.rand(B, 3)
-    g_por = torch.rand(B)
-    l_por = torch.rand(B)
+    z_t    = torch.randn(B, z_ch, D, D, D)
+    t      = torch.zeros(B, dtype=torch.long)
+    por    = torch.randn(B)
+    depth  = torch.rand(B)
+    dist   = torch.rand(B)
+    orient = torch.randn(B, 2, D, D, D)
 
     # Two different non-zero neighbour tensors
     nb_l_a = torch.randn(B, 6, z_ch, D, D, D)
@@ -132,8 +134,8 @@ def test_unknown_avail_zeros_neighbour_contributions(model_with_null: UNet3DDeno
     nb_a_all_unk = torch.full((B, 6), NB_UNKNOWN, dtype=torch.long)
 
     with torch.no_grad():
-        out_a = model_with_null(z_t, t, nb_l_a, nb_a_all_unk, pos, g_por, l_por)
-        out_b = model_with_null(z_t, t, nb_l_b, nb_a_all_unk, pos, g_por, l_por)
+        out_a = model_with_null(z_t, t, nb_l_a, nb_a_all_unk, por, depth, dist, orient)
+        out_b = model_with_null(z_t, t, nb_l_b, nb_a_all_unk, por, depth, dist, orient)
 
     assert torch.allclose(out_a, out_b, atol=1e-6), (
         "Outputs differ when nb_avail=UNKNOWN but nb_latents differ — "
@@ -156,10 +158,11 @@ def test_guided_at_scale_1_equals_full_conditional(model_with_null: UNet3DDenois
 
     # Shared inputs
     nb_l  = torch.randn(B, 6, z_ch, D, D, D)
-    nb_a  = torch.ones(B, 6, dtype=torch.long)   # real EXISTS neighbours
-    pos   = torch.rand(B, 3)
-    g_por = torch.rand(B)
-    l_por = torch.rand(B)
+    nb_a   = torch.ones(B, 6, dtype=torch.long)   # real EXISTS neighbours
+    por    = torch.randn(B)
+    depth  = torch.rand(B)
+    dist   = torch.rand(B)
+    orient = torch.randn(B, 2, D, D, D)
 
     # To compare deterministically: use a fixed z_t as starting point, run one
     # denoising step with both samplers and compare intermediate eps predictions.
@@ -168,7 +171,7 @@ def test_guided_at_scale_1_equals_full_conditional(model_with_null: UNet3DDenois
 
     # Reference: direct model call (full conditional, no drop)
     with torch.no_grad():
-        eps_reference = model_with_null(z_t, t_full, nb_l, nb_a, pos, g_por, l_por, None)
+        eps_reference = model_with_null(z_t, t_full, nb_l, nb_a, por, depth, dist, orient, None)
 
     # Guided sampler at s_por=s_nb=1.0 — should produce the same eps
     sampler_guided = DDIMSampler(model_with_null, schedule, torch.device("cpu"),
@@ -186,7 +189,7 @@ def test_guided_at_scale_1_equals_full_conditional(model_with_null: UNet3DDenois
     sampler_always_guided.guided = True
     with torch.no_grad():
         eps_3pass = sampler_always_guided._guided_eps(
-            z_t, t_full, nb_l, nb_a, pos, g_por, l_por,
+            z_t, t_full, nb_l, nb_a, por, depth, dist, orient,
             autocast_dtype=torch.float32,
         )
 
@@ -206,13 +209,13 @@ def test_drop_por_none_is_backward_compatible(
 ) -> None:
     """forward(..., drop_por=None) is identical to forward(...) for both
     use_por_null=False (ldm01/02) and use_por_null=True (ldm03) models."""
-    z_t, t, nb_l, nb_a, pos, g_por, l_por = _make_batch()
+    z_t, t, nb_l, nb_a, por, depth, dist, orient = _make_batch()
 
     for model in (model_no_null, model_with_null):
         model.eval()
         with torch.no_grad():
-            out_no_arg  = model(z_t, t, nb_l, nb_a, pos, g_por, l_por)
-            out_none    = model(z_t, t, nb_l, nb_a, pos, g_por, l_por, drop_por=None)
+            out_no_arg  = model(z_t, t, nb_l, nb_a, por, depth, dist, orient)
+            out_none    = model(z_t, t, nb_l, nb_a, por, depth, dist, orient, drop_por=None)
         assert torch.allclose(out_no_arg, out_none, atol=1e-7), (
             f"drop_por=None changes output for {model.cfg.use_por_null=}"
         )
@@ -220,19 +223,29 @@ def test_drop_por_none_is_backward_compatible(
 
 # ── Config resolution smoke test ─────────────────────────────────────────────
 
-def test_ldm04_config_resolves() -> None:
-    """ldm04/base resolves: unconditional first rung on the normalised latent store."""
+def test_ldm05_config_resolves() -> None:
+    """ldm05/base resolves: the fully conditional rung (D32)."""
     try:
         from poregen.configuration import resolve_experiment
     except ImportError:
         pytest.skip("poregen configuration not importable in this environment")
 
-    resolved = resolve_experiment("ldm04/base")
+    resolved = resolve_experiment("ldm05/base")
     cfg = resolved.cfg
 
-    assert cfg["model"]["use_por_cond"] is False
-    assert cfg["model"]["use_neighbor_cond"] is False
-    assert cfg["model"]["use_pos_cond"] is False
+    assert cfg["model"]["use_por_cond"] is True
+    assert cfg["model"]["use_neighbor_cond"] is True
+    assert cfg["model"]["use_pos_cond"] is True
+    assert cfg["model"]["use_orient_cond"] is True
+    assert cfg["model"]["use_por_null"] is True
+    # Three distinct strides (D32 §3.1).  sample_stride stays 32 as a
+    # training-data multiplier; the generation grid and the neighbour relation
+    # are 64 so that patches tile and neighbours share no voxel with the target.
+    assert cfg["data"]["sample_stride"] == 32
+    assert cfg["data"]["generation_stride"] == 64
+    assert cfg["data"]["neighbour_offset"] == 64
+    assert cfg["data"]["neighbour_shift"] is False
+    assert cfg["data"].get("allow_neighbour_overlap", False) is False
     assert cfg["data"]["latent_mode"] == "sampled"
     assert cfg["data"]["latents_root"] == "data/split_v2/latents_r07z4"
     assert cfg["vae"]["checkpoint"]

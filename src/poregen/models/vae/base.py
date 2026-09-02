@@ -87,8 +87,12 @@ class VAEOutput:
 
     All spatial tensors keep the same batch dimension as the input.
 
-    - **xct_logits**: raw decoder output for XCT in z-score space (unbounded).
-      The decoder predicts z-scored values directly — no activation needed.
+    - **xct_out**: the decoder's XCT grey level, ALREADY on the ``xct / 255``
+      scale in [0, 1].  It is NOT a logit: ``compute_total_loss`` regresses it
+      directly against the normalised target (L1/MSE/Charbonnier), so the only
+      valid post-processing is a clamp — see :func:`decode_xct`.  Applying a
+      sigmoid squashes it into [0.5, 0.731] and destroys contrast; the old
+      field name ``xct_out`` invited exactly that mistake.
     - **mask_logits**: raw decoder output for the pore mask; use with
       ``BCEWithLogitsLoss``.  ``None`` for XCT-only decoder variants (e.g.
       ``v2.vrrae``) that have no ``mask_head`` — all other variants still
@@ -103,8 +107,37 @@ class VAEOutput:
     - **z**: sampled latent (after reparameterization).
     """
 
-    xct_logits: torch.Tensor                                     # (B, 1, D, H, W)
+    xct_out: torch.Tensor                                        # (B, 1, D, H, W), grey level in [0, 1]
     mask_logits: torch.Tensor | None = field(default=None, kw_only=True)  # (B, 1, D, H, W) or None
     mu: torch.Tensor                            # (B, z_channels, d, h, w) or (B, rank) — required
     logvar: torch.Tensor                        # same shape as mu — required
     z: torch.Tensor                             # same shape as mu — required
+
+
+def decode_xct(xct_out: torch.Tensor) -> torch.Tensor:
+    """Decoder XCT output → grey level in [0, 1].
+
+    The XCT head is trained by direct regression against ``xct / 255``
+    (:func:`poregen.losses.total.compute_total_loss`), so its output already IS
+    the grey level.  Clamping to the valid range is the whole conversion.
+
+    Never apply a sigmoid here.  Doing so maps [0, 1] → [0.5, 0.731], which
+    compresses every generated volume into the top third of the intensity
+    range.  Use this helper at every decode site so the behaviour cannot drift
+    apart again.
+    """
+    return xct_out.clamp(0.0, 1.0)
+
+
+def decode_xct_u8(xct_out: torch.Tensor) -> torch.Tensor:
+    """Decoder XCT output → uint8 on the raw-scan scale (what the data was)."""
+    return (decode_xct(xct_out) * 255.0).round().to(torch.uint8)
+
+
+def decode_mask(mask_logits: torch.Tensor) -> torch.Tensor:
+    """Decoder mask output → pore probability in [0, 1].
+
+    The mask head IS a logit (trained with BCE-with-logits), so unlike
+    :func:`decode_xct` this one genuinely needs the sigmoid.
+    """
+    return torch.sigmoid(mask_logits)

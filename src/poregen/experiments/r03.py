@@ -479,7 +479,7 @@ def evaluate_auxiliary_decoder(
         output     = model(xct, mask)
         aux_logits = aux_decoder(output.mu)
 
-        xct_recon_original = sigmoid_xct(output.xct_logits)
+        xct_recon_original = sigmoid_xct(output.xct_out)
         xct_recon_aux      = sigmoid_xct(aux_logits)
 
         loss_original     = samplewise_charbonnier(xct_recon_original, xct).cpu()

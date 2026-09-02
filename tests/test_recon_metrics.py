@@ -9,9 +9,9 @@ from poregen.training.engine import _run_eval, train_loop
 
 
 class _DummyVAE(torch.nn.Module):
-    def __init__(self, xct_logits: torch.Tensor, mask_logits: torch.Tensor) -> None:
+    def __init__(self, xct_out: torch.Tensor, mask_logits: torch.Tensor) -> None:
         super().__init__()
-        self._xct_logits = xct_logits
+        self._xct_logits = xct_out
         self._mask_logits = mask_logits
 
     def forward(self, xct: torch.Tensor, mask: torch.Tensor) -> VAEOutput:
@@ -19,7 +19,7 @@ class _DummyVAE(torch.nn.Module):
         mu = torch.zeros(batch_size, 2, 1, 1, 1, dtype=xct.dtype, device=xct.device)
         logvar = torch.zeros_like(mu)
         return VAEOutput(
-            xct_logits=self._xct_logits.to(xct.device),
+            xct_out=self._xct_logits.to(xct.device),
             mask_logits=self._mask_logits.to(mask.device),
             mu=mu,
             logvar=logvar,
@@ -35,7 +35,7 @@ class _MuFromInputVAE(torch.nn.Module):
         logvar = torch.zeros_like(mu)
         zeros = torch.zeros_like(xct)
         return VAEOutput(
-            xct_logits=zeros,
+            xct_out=zeros,
             mask_logits=zeros,
             mu=mu,
             logvar=logvar,
@@ -50,12 +50,12 @@ class _TinyTrainVAE(torch.nn.Module):
 
     def forward(self, xct: torch.Tensor, mask: torch.Tensor) -> VAEOutput:
         batch_size = xct.shape[0]
-        xct_logits = xct * 0.0 + self.bias
+        xct_out = xct * 0.0 + self.bias
         mask_logits = mask * 0.0
         mu = torch.zeros(batch_size, 2, 1, 1, 1, dtype=xct.dtype, device=xct.device)
         logvar = torch.zeros_like(mu)
         return VAEOutput(
-            xct_logits=xct_logits,
+            xct_out=xct_out,
             mask_logits=mask_logits,
             mu=mu,
             logvar=logvar,
@@ -80,13 +80,13 @@ def test_run_eval_logs_sharpness_on_post_sigmoid_xct():
         dtype=torch.float32,
     )
     mask = torch.zeros_like(xct)
-    xct_logits = torch.tensor(
+    xct_out = torch.tensor(
         [[[[[-4.0, 4.0], [4.0, -4.0]], [[4.0, -4.0], [-4.0, 4.0]]]]],
         dtype=torch.float32,
     )
-    mask_logits = torch.zeros_like(xct_logits)
+    mask_logits = torch.zeros_like(xct_out)
 
-    model = _DummyVAE(xct_logits=xct_logits, mask_logits=mask_logits)
+    model = _DummyVAE(xct_out=xct_out, mask_logits=mask_logits)
     batch = {
         "xct": xct,
         "mask": mask,
@@ -117,13 +117,13 @@ def test_run_eval_logs_sharpness_on_post_sigmoid_xct():
         autocast_dtype=torch.bfloat16,
     )
 
-    expected_recon = sharpness_proxy(torch.sigmoid(xct_logits)).item()
+    expected_recon = sharpness_proxy(torch.sigmoid(xct_out)).item()
     expected_gt = sharpness_proxy(xct).item()
 
     assert metrics["sharpness_recon"] == expected_recon
     assert metrics["sharpness_gt"] == expected_gt
     assert metrics["sharpness_recon_over_gt"] == expected_recon / expected_gt
-    assert metrics["sharpness_recon"] != sharpness_proxy(xct_logits).item()
+    assert metrics["sharpness_recon"] != sharpness_proxy(xct_out).item()
 
 
 def test_auxiliary_decoder_restores_r03_patch_shape():
@@ -201,7 +201,7 @@ def test_train_loop_skips_image_logging_until_first_validation(tmp_path):
     scaler = torch.amp.GradScaler(enabled=False)
 
     def loss_fn(output, batch_dev, step):
-        total = output.xct_logits.mean()
+        total = output.xct_out.mean()
         return {
             "total": total,
             "xct_loss": total.detach() * 0.0,
@@ -262,7 +262,7 @@ def test_train_loop_runs_montecarlo_on_fixed_cadence(monkeypatch, tmp_path):
     scaler = torch.amp.GradScaler(enabled=False)
 
     def loss_fn(output, batch_dev, step):
-        total = output.xct_logits.mean()
+        total = output.xct_out.mean()
         return {
             "total": total,
             "xct_loss": total.detach() * 0.0,
@@ -319,7 +319,7 @@ def test_train_loop_runs_final_full_eval_for_val_and_test(tmp_path):
     scaler = torch.amp.GradScaler(enabled=False)
 
     def loss_fn(output, batch_dev, step):
-        total = output.xct_logits.mean()
+        total = output.xct_out.mean()
         return {
             "total": total,
             "xct_loss": total.detach() * 0.0,

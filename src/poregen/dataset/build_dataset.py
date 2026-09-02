@@ -245,6 +245,7 @@ def main(argv: list[str] | None = None) -> None:
                 out_root,
                 vi.volume_id,
                 chunk_size=args.chunk_size,
+                sample_mask=sample_mask,  # ldm06: persist the material boundary
             )
 
         if not stats_computed:

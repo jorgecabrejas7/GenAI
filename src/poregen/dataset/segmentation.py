@@ -8,6 +8,8 @@ Public API
 ----------
 onlypores(xct, ...)
     Main entry point: returns (pore_mask, sample_mask, binary).
+compute_sample_mask(xct)
+    Material (specimen) mask only — the cheap half of ``onlypores``.
 """
 
 from __future__ import annotations
@@ -146,6 +148,55 @@ def clean_pores(onlypores_mask: np.ndarray, min_size: int = 8) -> np.ndarray:
     return cleaned
 
 
+# ── Content bounding box ──────────────────────────────────────────────────────
+
+def content_bbox(xct: np.ndarray, margin: int = 2) -> tuple[int, int, int, int, int, int] | None:
+    """Inclusive non-zero-content bounds ``(min_z, max_z, min_y, max_y, min_x, max_x)``.
+
+    Adds *margin* voxels on every side (clamped to the volume).  Returns
+    ``None`` when the volume has no non-zero voxel.
+    """
+    min_z = next((i for i in range(xct.shape[0]) if np.any(xct[i] > 0)), -1)
+    if min_z == -1:
+        return None
+    max_z = next((i for i in range(xct.shape[0] - 1, -1, -1) if np.any(xct[i] > 0)), min_z)
+
+    proj = np.zeros(xct.shape[1:], dtype=bool)
+    for i in tqdm(range(min_z, max_z + 1), desc="Projecting slices", leave=False):
+        proj |= xct[i] > 0
+    y_inds, x_inds = np.nonzero(proj)
+    min_y, max_y = int(y_inds.min()), int(y_inds.max())
+    min_x, max_x = int(x_inds.min()), int(x_inds.max())
+
+    min_z = max(0, min_z - margin);  max_z = min(xct.shape[0] - 1, max_z + margin)
+    min_y = max(0, min_y - margin);  max_y = min(xct.shape[1] - 1, max_y + margin)
+    min_x = max(0, min_x - margin);  max_x = min(xct.shape[2] - 1, max_x + margin)
+    return min_z, max_z, min_y, max_y, min_x, max_x
+
+
+def compute_sample_mask(xct: np.ndarray) -> np.ndarray | None:
+    """Material (specimen) mask only — the cheap half of ``onlypores``.
+
+    Runs the same bounding-box crop and ``material_mask`` (Otsu +
+    max-projection + fill-voids) steps as ``onlypores`` but skips the Sauvola
+    pore segmentation, so a volume's ``sample_mask`` can be (re)computed from
+    already-stored XCT data at a small fraction of the full pipeline cost.
+    Internal pores are filled: the mask is True wherever the specimen's
+    material envelope is, False in exterior air.
+
+    Returns ``None`` if the volume is empty.
+    """
+    bbox = content_bbox(xct)
+    if bbox is None:
+        logger.error("Volume contains no non-zero voxels.")
+        return None
+    min_z, max_z, min_y, max_y, min_x, max_x = bbox
+    cropped = xct[min_z:max_z + 1, min_y:max_y + 1, min_x:max_x + 1]
+    sample_mask = np.zeros(xct.shape, dtype=bool)
+    sample_mask[min_z:max_z + 1, min_y:max_y + 1, min_x:max_x + 1] = material_mask(cropped)
+    return sample_mask
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def onlypores(
@@ -180,26 +231,11 @@ def onlypores(
     """
     logger.info("Starting pore detection...")
 
-    # ── bounding box (Z) ──
-    min_z = next((i for i in range(xct.shape[0]) if np.any(xct[i] > 0)), -1)
-    if min_z == -1:
+    bbox = content_bbox(xct)
+    if bbox is None:
         logger.error("Volume contains no non-zero voxels.")
         return None, None, None
-    max_z = next((i for i in range(xct.shape[0] - 1, -1, -1) if np.any(xct[i] > 0)), min_z)
-
-    # ── bounding box (Y, X via projection) ──
-    proj = np.zeros(xct.shape[1:], dtype=bool)
-    for i in tqdm(range(min_z, max_z + 1), desc="Projecting slices", leave=False):
-        proj |= xct[i] > 0
-    y_inds, x_inds = np.nonzero(proj)
-    min_y, max_y = int(y_inds.min()), int(y_inds.max())
-    min_x, max_x = int(x_inds.min()), int(x_inds.max())
-
-    # ── add margin ──
-    margin = 2
-    min_z = max(0, min_z - margin);  max_z = min(xct.shape[0] - 1, max_z + margin)
-    min_y = max(0, min_y - margin);  max_y = min(xct.shape[1] - 1, max_y + margin)
-    min_x = max(0, min_x - margin);  max_x = min(xct.shape[2] - 1, max_x + margin)
+    min_z, max_z, min_y, max_y, min_x, max_x = bbox
     logger.info("Cropped region: Z[%d:%d] Y[%d:%d] X[%d:%d]", min_z, max_z, min_y, max_y, min_x, max_x)
 
     cropped = xct[min_z:max_z + 1, min_y:max_y + 1, min_x:max_x + 1]

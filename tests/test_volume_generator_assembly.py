@@ -1,14 +1,15 @@
-"""Tests for VolumeGenerator cosine-taper overlap-add assembly.
+"""Tests for VolumeGenerator direct-tiling assembly.
 
-Verifies the blending strategy:
-  1. Interior voxels (index ≥ 1 on every axis) receive uniform output when
-     every decoded patch is uniform — partition-of-unity property.
-  2. The three zero-weight boundary planes (index 0 on each axis) produce 0
-     (accepted epsilon-guard artifact).
-  3. Output shape matches the snapped volume size.
-  4. Non-cubic (anisotropic) volumes are handled correctly.
-  5. The shared weight accumulator approximates 1.0 in the interior for
-     50%-overlap tiling (partition of unity).
+``generation_stride == patch_size``, so every decoded patch owns its own block
+of the output.  There is no overlap, therefore no cosine-taper window, no
+weight buffer and no zero-weight boundary planes.  Verifies:
+
+  1. Uniform decoded patches give a uniform volume — including index 0, which
+     the old Hann window forced to 0.
+  2. Output shape matches the snapped volume size.
+  3. Non-cubic (anisotropic) volumes are handled correctly.
+  4. Each patch writes exactly its own block: patch content is not mixed.
+  5. generate() reports the seam diagnostic in its stats.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from poregen.diffusion.sampler import VolumeGenerator
 
 class _FakeModelCfg:
     z_channels = 2
+    use_por_cond = False
+    use_orient_cond = False
 
 
 class _FakeModel:
@@ -40,9 +43,10 @@ class _FakeSampler:
         self,
         nb_latents: torch.Tensor,
         nb_avail: torch.Tensor,
-        pos_frac: torch.Tensor,
-        global_por: torch.Tensor,
-        local_por: torch.Tensor,
+        cond_por: torch.Tensor,
+        cond_depth: torch.Tensor,
+        cond_dist: torch.Tensor,
+        cond_orient: torch.Tensor | None = None,
         autocast_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
         B = nb_latents.shape[0]
@@ -50,35 +54,55 @@ class _FakeSampler:
         return torch.zeros(B, C, D, D, D)
 
 
-class _FakeVAE:
-    """Decodes latents to constant 0.5 patches (all logits = 0 → sigmoid = 0.5)."""
+class _PerPatchSampler:
+    """Gives every patch a latent filled with its own depth-derived value."""
 
-    class _ConstantHead:
+    def __init__(self) -> None:
+        self.model = _FakeModel()
+
+    def sample_batch(self, nb_latents, nb_avail, cond_por, cond_depth,
+                     cond_dist, cond_orient=None, autocast_dtype=torch.bfloat16):
+        B = nb_latents.shape[0]
+        C, D = nb_latents.shape[2], nb_latents.shape[3]
+        out = torch.zeros(B, C, D, D, D)
+        for i in range(B):
+            out[i] = float(cond_depth[i])
+        return out
+
+
+class _FakeVAE:
+    """Decodes latents to constant patches (logit = the latent's mean)."""
+
+    class _MeanHead:
+        def __init__(self, patch_size: int) -> None:
+            self.P = patch_size
+
         def __call__(self, dec: torch.Tensor) -> torch.Tensor:
-            B, _, P, _, _ = dec.shape
-            return torch.zeros(B, 1, P, P, P)   # sigmoid(0) = 0.5
+            B = dec.shape[0]
+            per_sample = dec.mean(dim=(1, 2, 3, 4)).view(B, 1, 1, 1, 1)
+            return per_sample.expand(B, 1, self.P, self.P, self.P)
 
     def __init__(self, patch_size: int = 64) -> None:
         self._P = patch_size
-        self.xct_head  = self._ConstantHead()
-        self.mask_head = self._ConstantHead()
+        self.xct_head  = self._MeanHead(patch_size)
+        self.mask_head = self._MeanHead(patch_size)
 
     def eval(self) -> "_FakeVAE":
         return self
 
     def decoder(self, z: torch.Tensor) -> torch.Tensor:
-        B = z.shape[0]
-        P = self._P
-        return torch.zeros(B, 4, P, P, P)
+        return z
 
 
-def _make_generator(patch_size: int, patch_stride: int, voxel_size_mm: float = 0.025) -> VolumeGenerator:
+def _make_generator(patch_size: int, sampler=None,
+                    voxel_size_mm: float = 0.025) -> VolumeGenerator:
     return VolumeGenerator(
-        sampler=_FakeSampler(),
+        sampler=sampler if sampler is not None else _FakeSampler(),
         vae=_FakeVAE(patch_size=patch_size),
         device=torch.device("cpu"),
         patch_size=patch_size,
-        patch_stride=patch_stride,
+        generation_stride=patch_size,
+        neighbour_offset=patch_size,
         latent_size=4,
         latent_std=1.0,
         voxel_size_mm=voxel_size_mm,
@@ -98,122 +122,99 @@ def _expected_vol_shape(
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-def test_assembly_interior_uniform_stride32() -> None:
-    """Interior voxels are 127 (0.5 → uint8) for uniform-input patches; stride=32."""
+def test_assembly_is_uniform_everywhere() -> None:
+    """Uniform patches give a uniform volume, boundary planes included."""
     P   = 64
-    gen = _make_generator(patch_size=P, patch_stride=32)
-    volume_size_mm = (3.2, 3.2, 3.2)   # 128 vox per axis
+    gen = _make_generator(patch_size=P)
+    volume_size_mm = (3.2, 3.2, 3.2)   # 128 vox per axis → 2 patches per axis
 
-    xct_out, mask_out = gen.generate(volume_size_mm=volume_size_mm)
+    xct_out, mask_out, _ = gen.generate(volume_size_mm=volume_size_mm)
 
     expected_shape = _expected_vol_shape(volume_size_mm, P)
     assert xct_out.shape  == expected_shape
     assert mask_out.shape == expected_shape
 
-    # Interior: all axes index ≥ 1 — partition of unity holds here.
-    # sigmoid(0) = 0.5 → 0.5*255 = 127.5, cast to uint8 = 127.
-    interior_xct = xct_out[1:, 1:, 1:]
-    assert (interior_xct == 127).all(), (
-        f"Interior should be 127; unique values: {np.unique(interior_xct)}"
-    )
-
-    # Boundary faces (index 0 on each axis) are 0 due to zero-weight epsilon guard.
-    assert (xct_out[0, :, :] == 0).all(), "z=0 face should be 0 (zero-weight boundary)"
-    assert (xct_out[:, 0, :] == 0).all(), "y=0 face should be 0 (zero-weight boundary)"
-    assert (xct_out[:, :, 0] == 0).all(), "x=0 face should be 0 (zero-weight boundary)"
-
-    # mask: sigmoid(0)=0.5, 0.5 > 0.5 is False → all zero
-    assert (mask_out == 0).all(), f"mask should be all-zero; unique: {np.unique(mask_out)}"
+    # The XCT head regresses xct/255 directly (no activation), so a head that
+    # outputs 0 decodes to grey level 0 — not sigmoid(0)*255 = 127.  No window means
+    # index 0 on each axis is no longer a zero-weight artifact.
+    assert (xct_out == 0).all(), f"unique values: {np.unique(xct_out)}"
+    # mask: logit 0 is not > 0 → all zero
+    assert (mask_out == 0).all(), f"unique: {np.unique(mask_out)}"
 
 
 def test_assembly_output_shape_snapping() -> None:
     """Volume shape is snapped to the nearest patch_size multiple downward."""
     P   = 64
-    gen = _make_generator(patch_size=P, patch_stride=32)
+    gen = _make_generator(patch_size=P)
 
     # 3.21 mm / 0.025 = 128.4 vox → round → 128; 128//64*64 = 128 → no snap
-    xct, _ = gen.generate(volume_size_mm=(3.21, 3.2, 3.2))
+    xct, _, _ = gen.generate(volume_size_mm=(3.21, 3.2, 3.2))
     assert xct.shape[0] == 128
 
     # 3.3 mm / 0.025 = 132 vox; 132//64*64 = 128 → snaps from 132 to 128
-    xct2, _ = gen.generate(volume_size_mm=(3.3, 3.2, 3.2))
+    xct2, _, _ = gen.generate(volume_size_mm=(3.3, 3.2, 3.2))
     assert xct2.shape[0] == 128
 
 
 def test_assembly_anisotropic_volume() -> None:
     """generate() works for non-cubic volumes with different grid sizes per axis."""
     P   = 64
-    gen = _make_generator(patch_size=P, patch_stride=32)
+    gen = _make_generator(patch_size=P)
 
     # z: 3.2 mm → 128 vox, y: 6.4 mm → 256 vox, x: 3.2 mm → 128 vox
-    xct_out, mask_out = gen.generate(volume_size_mm=(3.2, 6.4, 3.2))
+    xct_out, mask_out, _ = gen.generate(volume_size_mm=(3.2, 6.4, 3.2))
     assert xct_out.shape  == (128, 256, 128)
     assert mask_out.shape == (128, 256, 128)
-
-    # Interior uniform
-    assert (xct_out[1:, 1:, 1:] == 127).all(), (
-        f"Interior should be 127; unique: {np.unique(xct_out[1:,1:,1:])}"
-    )
+    assert (xct_out == 0).all()
 
 
-def test_assembly_partition_of_unity_interior() -> None:
-    """Accumulated weight_vol equals 1.0 in the two-patch overlap zones.
+def test_each_patch_writes_exactly_its_own_block() -> None:
+    """No averaging: a patch's decoded value appears verbatim in its block.
 
-    With P=64, stride=32, and 3 patches (origins 0, 32, 64) in a 128-vox axis:
-    - 1D partition of unity holds where two patches overlap: indices [32, 95].
-    - Outside that band (indices 0..31 and 96..127) only one patch covers the
-      voxel, so the weight is just that patch's window value (< 1).
-    - The 3D PoU region is the Cartesian product: [32:96, 32:96, 32:96].
+    Patches differ by cond_depth, which _PerPatchSampler bakes into the latent
+    and _FakeVAE passes through as the decoded logit.  Every voxel of a block
+    must carry that patch's value and nothing of its neighbours'.
     """
-    P      = 64
-    stride = P // 2   # 32 — standard 50% overlap
+    from scipy.special import expit
 
-    w1d = (0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(P) / P))).astype(np.float32)
-    w3d = w1d[:, None, None] * w1d[None, :, None] * w1d[None, None, :]
+    P   = 64
+    gen = _make_generator(patch_size=P, sampler=_PerPatchSampler())
+    xct, _, _ = gen.generate(volume_size_mm=(4.8, 1.6, 1.6))   # 192 x 64 x 64
+    assert xct.shape == (192, 64, 64)
 
-    vol_size = 128   # 3 patches along each axis at stride 32 → origins [0, 32, 64]
-
-    weight_vol = np.zeros((vol_size, vol_size, vol_size), dtype=np.float32)
-
-    zs = list(range(0, vol_size - P + 1, stride))
-    ys = list(range(0, vol_size - P + 1, stride))
-    xs = list(range(0, vol_size - P + 1, stride))
-    for z0 in zs:
-        for y0 in ys:
-            for x0 in xs:
-                sl = (slice(z0, z0 + P), slice(y0, y0 + P), slice(x0, x0 + P))
-                weight_vol[sl] += w3d
-
-    # The 1D PoU band is [stride, vol_size - stride) = [32, 96) for this config.
-    # The 3D PoU region is the Cartesian product of the 1D bands.
-    overlap_region = weight_vol[stride:vol_size - stride,
-                                stride:vol_size - stride,
-                                stride:vol_size - stride]
-    assert np.allclose(overlap_region, 1.0, atol=1e-5), (
-        f"weight_vol in overlap region should be ≈1.0; "
-        f"range [{overlap_region.min():.6f}, {overlap_region.max():.6f}]"
-    )
-
-    # Zero-weight boundary faces (w1d[0] = 0)
-    assert (weight_vol[0, :, :] == 0.0).all(), "z=0 face should have zero weight"
-    assert (weight_vol[:, 0, :] == 0.0).all(), "y=0 face should have zero weight"
-    assert (weight_vol[:, :, 0] == 0.0).all(), "x=0 face should have zero weight"
+    for iz in range(3):
+        z0 = iz * P
+        depth = (z0 + P / 2.0) / 192.0            # matches _patch_position
+        expected = int(round(float(np.clip(depth, 0.0, 1.0)) * 255.0))
+        block = xct[z0:z0 + P]
+        assert np.unique(block).size == 1, "a block must be uniform, not blended"
+        assert abs(int(block.flat[0]) - expected) <= 1
 
 
-def test_assembly_stride_equals_patch_size() -> None:
-    """Non-overlapping tiling (stride=P): interior is 127, block-boundary planes are 0."""
-    P  = 64
-    gen = _make_generator(patch_size=P, patch_stride=P)
+def test_generate_reports_the_seam_diagnostic() -> None:
+    """The assembly-quality metric reaches the stats dict generate() returns."""
+    P   = 64
+    gen = _make_generator(patch_size=P, sampler=_PerPatchSampler())
+    _, _, stats = gen.generate(volume_size_mm=(4.8, 1.6, 1.6))
 
-    volume_size_mm = (3.2, 3.2, 3.2)   # 128 vox → 2 patches per axis
-    xct_out, mask_out = gen.generate(volume_size_mm=volume_size_mm)
+    for key in ("seam_xct_ratio", "seam_xct_mad", "seam_xct_interior_mad",
+                "seam_xct_planes", "seam_mask_ratio"):
+        assert key in stats
+    for axis in ("z", "y", "x"):
+        assert f"seam_xct_{axis}_ratio" in stats
+    assert stats["seam_xct_z_planes"] == 2       # 3 blocks in z → 2 seams
+    assert stats["seam_xct_y_planes"] == 0
+    # Constant blocks with a step between them: interior is flat, seam is not,
+    # so the ratio is infinite/NaN rather than a small number.
+    assert stats["seam_xct_z_mad"] > 0.0
+    assert stats["seam_xct_z_interior_mad"] == pytest.approx(0.0, abs=1e-6)
 
-    assert xct_out.shape == (128, 128, 128)
 
-    # With stride==P, w1d[0]=0 so every patch's min-face plane has zero weight.
-    # Boundary planes at z=0,64; y=0,64; x=0,64 will be 0.
-    # Interior (avoiding those planes) should be 127.
-    interior = xct_out[1:64, 1:64, 1:64]
-    assert (interior == 127).all(), (
-        f"Interior block should be 127; unique: {np.unique(interior)}"
-    )
+def test_stats_still_carry_the_porosity_self_audit() -> None:
+    P   = 64
+    gen = _make_generator(patch_size=P)
+    _, mask, stats = gen.generate(volume_size_mm=(1.6, 1.6, 1.6),
+                                  target_porosity=0.05)
+    assert stats["actual_mask_porosity"] == pytest.approx(float((mask > 0).mean()))
+    assert stats["target_porosity"] == pytest.approx(0.05)
+    assert stats["conditioned_porosity"] == pytest.approx(0.05)

@@ -104,10 +104,10 @@ class ConvVAE3DVRRAELinearV2(nn.Module):
         ls = self.cfg.latent_spatial
         y = self.expand(z)                 # (B, vrrae_dim)
         dec_in = self.dec_b(y).view(z.shape[0], ch_last, ls, ls, ls)
-        xct_logits = self.decoder(dec_in)
+        xct_out = self.decoder(dec_in)
 
         return VAEOutput(
-            xct_logits=xct_logits,
+            xct_out=xct_out,
             mask_logits=None,
             mu=mu,
             logvar=logvar,

@@ -76,7 +76,7 @@ class ConvVAE3DNoAttn(nn.Module):
 
         dec = self.decoder(z)
         return VAEOutput(
-            xct_logits=self.xct_head(dec),
+            xct_out=self.xct_head(dec),
             mask_logits=self.mask_head(dec),
             mu=mu,
             logvar=logvar,

@@ -1,4 +1,8 @@
-"""Tests for poregen.diffusion.latents.LatentDataset (ldm04 latent store)."""
+"""Tests for poregen.diffusion.latents.LatentDataset (latent store load side).
+
+The ldm05 conditioning surface (orientation, neighbours, scalars) is covered in
+tests/test_ldm05_conditioning.py; this file covers the store plumbing.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,6 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-import zarr
 
 from poregen.diffusion.latents import LatentDataset
 
@@ -24,25 +27,52 @@ def store_root(tmp_path_factory):
     root = tmp_path_factory.mktemp("latents_r07z4")
     rng = np.random.default_rng(0)
 
+    orient = root / "orientation_field.json"
+    orient.write_text(json.dumps({
+        "voxel_size_um": 25.0,
+        "volumes": {
+            f"vol_{v}": {
+                "shape": [N * 64 + 64, 512, 512],
+                "orientation_usable": True,
+                "confidence": "high",
+                "theta_deg": [45.0] * (N * 64 + 64),
+            } for v in range(3)
+        },
+    }))
+
     (root / "metadata.json").write_text(json.dumps({
         "latent_shape": [C, S, S, S],
+        "patch_size": 64,
+        "voxel_size_um": 25.0,
         "dtype": "float16",
-        "arrays": ["mu", "std"],
+        "storage": {
+            "format": "memmap",
+            "file": "latents.bin",
+            "dtype": "float16",
+            "pack_scheme": "mu_then_std",
+        },
         "normalization": {
             "computed_over": "train",
             "per_channel_mean": MEAN,
             "per_channel_std": STD,
+        },
+        "conditioning": {
+            "orientation_field": str(orient),
+            "por_standardisation": {"mean": -4.0, "std": 1.0},
         },
     }))
 
     for split in ("train", "val"):
         split_dir = root / split
         split_dir.mkdir()
-        group = zarr.open_group(str(split_dir / "latents.zarr"), mode="w")
         mu = rng.normal(size=(N, C, S, S, S)).astype(np.float16)
         std = rng.uniform(0.1, 1.0, size=(N, C, S, S, S)).astype(np.float16)
-        group.create_array("mu", shape=mu.shape, chunks=(1, C, S, S, S), dtype="float16")[:] = mu
-        group.create_array("std", shape=std.shape, chunks=(1, C, S, S, S), dtype="float16")[:] = std
+        packed = np.concatenate([mu, std], axis=1)  # (N, 2C, S, S, S) mu_then_std
+        out = np.memmap(str(split_dir / "latents.bin"), dtype=np.float16,
+                        mode="w+", shape=packed.shape)
+        out[:] = packed
+        out.flush()
+        del out
 
         pd.DataFrame({
             "source_row": np.arange(100, 100 + N, dtype=np.int64),
@@ -57,6 +87,13 @@ def store_root(tmp_path_factory):
             "porosity": rng.uniform(0, 0.1, N).astype(np.float32),
             "phi": rng.uniform(0, 0.1, N).astype(np.float32),
         }).to_parquet(str(split_dir / "index.parquet"), index=False)
+
+        pd.DataFrame({
+            "source_row": np.arange(100, 100 + N, dtype=np.int64),
+            "cond_depth": np.linspace(0, 1, N, dtype=np.float32),
+            "cond_dist": np.linspace(0, 1, N, dtype=np.float32),
+            "cond_por_raw": np.full(N, -4.0, dtype=np.float32),
+        }).to_parquet(str(split_dir / "cond.parquet"), index=False)
 
     return root
 

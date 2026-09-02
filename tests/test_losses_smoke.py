@@ -9,7 +9,7 @@ from poregen.losses.total import compute_total_loss
 
 def _make_fake_output(batch_size=2, patch=64, z_ch=8, lat_s=16):
     return VAEOutput(
-        xct_logits=torch.randn(batch_size, 1, patch, patch, patch),
+        xct_out=torch.randn(batch_size, 1, patch, patch, patch),
         mask_logits=torch.randn(batch_size, 1, patch, patch, patch),
         mu=torch.randn(batch_size, z_ch, lat_s, lat_s, lat_s),
         logvar=torch.randn(batch_size, z_ch, lat_s, lat_s, lat_s) - 1.0,

@@ -70,7 +70,7 @@ def compute_total_loss(
 
     # ── XCT reconstruction ────────────────────────────────────────────
     recon_fn = get_recon_loss(c["xct_loss_type"])
-    xct_loss = recon_fn(output.xct_logits, batch["xct"])
+    xct_loss = recon_fn(output.xct_out, batch["xct"])
 
     # ── Mask — class-balanced BCE + Dice/Tversky (skipped when the model
     #    variant has no mask head, e.g. v2.vrrae) ───────────────────────
@@ -99,7 +99,7 @@ def compute_total_loss(
             focal_alpha=c.get("focal_alpha", 0.25),
             sigmoid=mask_sigmoid,
         )
-    mask_total = mask_dict.get("mask_total", torch.zeros((), device=output.xct_logits.device))
+    mask_total = mask_dict.get("mask_total", torch.zeros((), device=output.xct_out.device))
 
     # ── KL — flat (B, C) latent (VRRAE) vs spatial (B, C, d, h, w) ─────
     kl_fn = kl_divergence_flat if output.mu.ndim == 2 else kl_divergence

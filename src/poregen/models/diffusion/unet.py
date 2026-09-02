@@ -5,16 +5,25 @@ Architecture
 Input tensor assembly (concatenated along channel dim before input_proj):
 
     z_t              (B, z_ch,      D, H, W) — noisy latent at step t
-    nb_latents_flat  (B, 6×z_ch,   D, H, W) — 6 neighbor latents (zero if unavail)
+    cond_orient      (B, 2,         D, H, W) — (cos2θ, sin2θ) ply orientation profile
+    nb_latents_flat  (B, 6×z_ch,   D, H, W) — 6 neighbor latents, already shifted
+                                              into the target frame (zero if unavail)
     nb_avail_spatial (B, 6×avail_d, D, H, W) — learned availability embeddings
-    Total input channels = z_ch + 6×z_ch + 6×avail_d  (160 with defaults)
+    Total input channels = z_ch + 2 + 6×z_ch + 6×avail_d  (78 for z_ch=4)
 
-Conditioning vector (scalar → AdaGN injected into every ResBlock):
+Conditioning vector (scalar → AdaGN/FiLM injected into every ResBlock):
 
-    t_emb   = SinusoidalPositionEmbedding(256)(t)  → MLP → (B, cond_dim)
-    pos_emb = MLP(pos_frac [3])                    → (B, cond_dim)
-    por_emb = MLP(cat(global_por, local_por) [2])  → (B, cond_dim)
-    cond    = t_emb + pos_emb + por_emb            (element-wise sum)
+    t_emb     = SinusoidalPositionEmbedding(256)(t) → MLP → (B, cond_dim)
+    por_emb   = MLP(cond_por   [1])                        → (B, cond_dim)
+    depth_emb = MLP(cond_depth [1])                        → (B, cond_dim)
+    dist_emb  = MLP(cond_dist  [1])                        → (B, cond_dim)
+    cond      = t_emb + por_emb + depth_emb + dist_emb     (element-wise sum)
+
+Conditioning signals follow the D32 batch contract (§5): ``cond_por`` is
+``log(phi + 1e-3)`` standardised with the store's stats, ``cond_depth`` is the
+relative depth t ∈ [0,1], ``cond_dist`` is ``min(d,64)/64``.  There is NO
+global-porosity condition — the per-patch porosity field carries volume-level
+control (D32 §1, "Deliberately excluded").
 
 U-Net structure (N = len(channel_mult)):
 
@@ -53,7 +62,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from poregen.diffusion.conditioning import NB_EXISTS
+from poregen.diffusion.conditioning import _N_NEIGHBORS, NB_EXISTS
 from poregen.models.diffusion.blocks import (
     Downsample3D,
     ResBlock3D,
@@ -65,7 +74,7 @@ from poregen.models.diffusion.blocks import (
 
 logger = logging.getLogger(__name__)
 
-_N_NEIGHBORS = 6
+_ORIENT_CHANNELS = 2   # (cos2θ, sin2θ)
 
 
 @dataclass
@@ -86,8 +95,9 @@ class UNet3DConfig:
     use_neighbor_cond: bool = True
     use_avail_embedding: bool = True
     use_nb_global_cond: bool = True   # pool neighbour latents → add to AdaGN cond vector
-    use_pos_cond: bool = True
-    use_por_cond: bool = True
+    use_orient_cond: bool = True      # (cos2θ, sin2θ) profile as input channels
+    use_pos_cond: bool = True         # cond_depth + cond_dist scalars (FiLM)
+    use_por_cond: bool = True         # cond_por scalar (FiLM)
     use_por_null: bool = False        # CFG: learn a null porosity embedding (ldm03+)
 
     @property
@@ -97,6 +107,8 @@ class UNet3DConfig:
     @property
     def in_channels(self) -> int:
         ch = self.z_channels
+        if self.use_orient_cond:
+            ch += _ORIENT_CHANNELS
         if self.use_neighbor_cond:
             ch += _N_NEIGHBORS * self.z_channels
             if self.use_avail_embedding:
@@ -120,6 +132,7 @@ class UNet3DConfig:
             use_neighbor_cond     = bool(m.get("use_neighbor_cond",   True)),
             use_avail_embedding   = bool(m.get("use_avail_embedding", True)),
             use_nb_global_cond    = bool(m.get("use_nb_global_cond",  True)),
+            use_orient_cond       = bool(m.get("use_orient_cond",     True)),
             use_pos_cond          = bool(m.get("use_pos_cond",        True)),
             use_por_cond          = bool(m.get("use_por_cond",        True)),
             use_por_null          = bool(m.get("use_por_null",        False)),
@@ -175,9 +188,13 @@ class UNet3DDenoiser(nn.Module):
         self.t_sin = SinusoidalPositionEmbedding(256)
         self.t_mlp = _make_mlp(256, C)
         if cfg.use_pos_cond:
-            self.pos_mlp = _make_mlp(3, C)
+            # D32 §1 signals 2 and 3 — relative depth and distance to surface.
+            # One MLP each, both gated by the same flag (pre-registered
+            # ablation 3 turns the positional pair on/off together).
+            self.depth_mlp = _make_mlp(1, C)
+            self.dist_mlp  = _make_mlp(1, C)
         if cfg.use_por_cond:
-            self.por_mlp = _make_mlp(2, C)
+            self.por_mlp = _make_mlp(1, C)
             if cfg.use_por_null:
                 # Learned null porosity embedding for CFG — replaces por_mlp output
                 # when drop_por=True, so 0 (a real porosity) is never used as the null.
@@ -260,20 +277,29 @@ class UNet3DDenoiser(nn.Module):
     def _build_cond(
         self,
         t: torch.Tensor,
-        pos_frac: torch.Tensor,
-        global_por: torch.Tensor,
-        local_por: torch.Tensor,
+        cond_por: torch.Tensor,
+        cond_depth: torch.Tensor,
+        cond_dist: torch.Tensor,
         nb_latents: torch.Tensor,
         nb_avail: torch.Tensor,
         drop_por: "torch.Tensor | None" = None,
     ) -> torch.Tensor:
+        if drop_por is not None and not (self.cfg.use_por_cond and self.cfg.use_por_null):
+            raise ValueError(
+                "drop_por was passed but this model was built with "
+                f"use_por_cond={self.cfg.use_por_cond}, "
+                f"use_por_null={self.cfg.use_por_null} — it has no learned null "
+                "porosity token, so porosity CFG (drop_por / s_por != 1) cannot "
+                "work. Use a checkpoint trained with use_por_null=True, or run "
+                "un-guided (s_por=1, no drop_por)."
+            )
         cond = self.t_mlp(self.t_sin(t))
         if self.cfg.use_pos_cond:
-            cond = cond + self.pos_mlp(pos_frac.float())
+            cond = cond + self.depth_mlp(cond_depth.float().view(-1, 1))
+            cond = cond + self.dist_mlp(cond_dist.float().view(-1, 1))
         if self.cfg.use_por_cond:
-            por     = torch.stack([global_por, local_por], dim=1).float()
-            por_emb = self.por_mlp(por)
-            if drop_por is not None and self.cfg.use_por_null:
+            por_emb = self.por_mlp(cond_por.float().view(-1, 1))
+            if drop_por is not None:
                 # CFG: replace por_mlp output with learned null for dropped samples.
                 # null_por is (C,); broadcast to (B, C) for torch.where.
                 null = self.null_por.to(por_emb.dtype).unsqueeze(0).expand_as(por_emb)
@@ -322,39 +348,49 @@ class UNet3DDenoiser(nn.Module):
         t: torch.Tensor,
         nb_latents: torch.Tensor,
         nb_avail: torch.Tensor,
-        pos_frac: torch.Tensor,
-        global_por: torch.Tensor,
-        local_por: torch.Tensor,
+        cond_por: torch.Tensor,
+        cond_depth: torch.Tensor,
+        cond_dist: torch.Tensor,
+        cond_orient: "torch.Tensor | None" = None,
         drop_por: "torch.Tensor | None" = None,
     ) -> torch.Tensor:
         """Predict noise ε in z_t.
 
         Parameters
         ----------
-        z_t        : (B, z_ch, D, H, W)
-        t          : (B,) long
-        nb_latents : (B, 6, z_ch, D, H, W)
-        nb_avail   : (B, 6) long — 0=OOB, 1=EXISTS, 2=UNKNOWN
-        pos_frac   : (B, 3) float
-        global_por : (B,) float
-        local_por  : (B,) float
-        drop_por   : (B,) bool or None — per-sample porosity dropout for CFG training.
-                     When True for a sample, por_mlp output is replaced with null_por
-                     (requires use_por_null=True in config).  None = no dropout.
+        z_t         : (B, z_ch, D, H, W)
+        t           : (B,) long
+        nb_latents  : (B, 6, z_ch, D, H, W) — ALREADY shifted into the target frame
+        nb_avail    : (B, 6) long — 0=OOB, 1=EXISTS, 2=UNKNOWN
+        cond_por    : (B,) float — log(phi+1e-3), standardised
+        cond_depth  : (B,) float — relative depth t in [0,1]
+        cond_dist   : (B,) float — min(d,64)/64 in [0,1]
+        cond_orient : (B, 2, D, H, W) float — (cos2θ, sin2θ) profile.  Required
+                      when use_orient_cond=True, ignored otherwise.
+        drop_por    : (B,) bool or None — per-sample porosity dropout for CFG training.
+                      When True for a sample, por_mlp output is replaced with null_por
+                      (requires use_por_null=True in config).  None = no dropout.
 
         Returns
         -------
         eps_pred : (B, z_ch, D, H, W)
         """
         B, _, D, H, W = z_t.shape
-        cond = self._build_cond(t, pos_frac, global_por, local_por, nb_latents, nb_avail,
-                                drop_por)
+        cond = self._build_cond(t, cond_por, cond_depth, cond_dist,
+                                nb_latents, nb_avail, drop_por)
 
+        parts = [z_t]
+        if self.cfg.use_orient_cond:
+            if cond_orient is None:
+                raise ValueError(
+                    "cond_orient is required when use_orient_cond=True — the "
+                    "orientation profile is a concatenated input channel, not "
+                    "an optional extra."
+                )
+            parts.append(cond_orient.to(z_t.dtype))
         if self.cfg.use_neighbor_cond:
-            nb = self._build_nb_spatial(nb_latents, nb_avail, (D, H, W))
-            x  = torch.cat([z_t, nb], dim=1)
-        else:
-            x = z_t
+            parts.append(self._build_nb_spatial(nb_latents, nb_avail, (D, H, W)))
+        x = torch.cat(parts, dim=1) if len(parts) > 1 else z_t
         x = self.input_proj(x)
 
         # ── Encoder ──────────────────────────────────────────────────────────

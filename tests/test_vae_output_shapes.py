@@ -27,7 +27,7 @@ class TestVAEOutputShapes:
         xct = torch.randn(BATCH, 1, PATCH, PATCH, PATCH)
         mask = torch.randn(BATCH, 1, PATCH, PATCH, PATCH)
         out = model(xct, mask)
-        assert out.xct_logits.shape == (BATCH, 1, PATCH, PATCH, PATCH)
+        assert out.xct_out.shape == (BATCH, 1, PATCH, PATCH, PATCH)
 
     def test_mask_logits_shape(self, model):
         xct = torch.randn(BATCH, 1, PATCH, PATCH, PATCH)

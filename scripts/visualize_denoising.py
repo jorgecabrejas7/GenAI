@@ -44,6 +44,9 @@ SEED             = 42
 FPS              = 15
 PATCH_SIZE       = 64
 LATENT_SIZE      = 16
+# Nominal layup (D32 §4) used to write the orientation conditioning.
+LAYUP_ANGLES_DEG = [45, -45, 90, 0, 45, -45, 0, 90, -45, 45]
+PLY_THICKNESS_VOX = 19.6
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -130,6 +133,7 @@ def run_chain(
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
     por: float,
+    por_log_stats: tuple[float, float],
     n_steps: int,
     sampler_type: str,
     seed: int,
@@ -142,7 +146,8 @@ def run_chain(
     mask_slices      : mask predicted directly from the LDM latent via vae.mask_head
     mask_reenc_slices: mask from re-encoding the generated XCT back through the full VAE
     """
-    from poregen.diffusion.sampler import DDIMSampler, DDPMSampler
+    from poregen.models.vae.base import decode_xct
+from poregen.diffusion.sampler import DDIMSampler, DDPMSampler
 
     if sampler_type == "ddpm":
         sampler = DDPMSampler(model, schedule, device)
@@ -150,13 +155,22 @@ def run_chain(
         sampler = DDIMSampler(model, schedule, device, n_steps=n_steps)
 
     C = model.cfg.z_channels
+    from poregen.diffusion.orientation import orientation_tensor
+    from poregen.diffusion.sampler import porosity_to_cond, theta_from_layup
+
+    cond_por = float(porosity_to_cond(por, por_log_stats))
+
     nb_latents = torch.zeros(6, C, LATENT_SIZE, LATENT_SIZE, LATENT_SIZE)
     nb_avail   = torch.zeros(6, dtype=torch.long)
-    pos_frac   = torch.full((3,), 0.5)
+    # Mid-thickness patch of the nominal layup (D32 §4): depth 0.5, far from
+    # any outer surface, orientation written straight from the ply sequence.
+    orient = torch.from_numpy(orientation_tensor(
+        theta_from_layup(PATCH_SIZE, LAYUP_ANGLES_DEG, PLY_THICKNESS_VOX), LATENT_SIZE
+    ))
 
     torch.manual_seed(seed)
     _, intermediates = sampler.sample_patch(
-        nb_latents, nb_avail, pos_frac, por, por,
+        nb_latents, nb_avail, cond_por, 0.5, 1.0, orient,
         autocast_dtype=autocast_dtype,
         return_intermediates=True,
     )
@@ -167,10 +181,10 @@ def run_chain(
         z_batch = (z_cpu.unsqueeze(0) * latent_std + latent_mean).to(device)
         with torch.autocast(device_type=device.type, dtype=autocast_dtype):
             dec        = vae.decoder(z_batch)
-            xct_logits = vae.xct_head(dec)
+            xct_out = vae.xct_head(dec)
             msk_logits = vae.mask_head(dec)
 
-        xct  = torch.sigmoid(xct_logits).squeeze().float().cpu().numpy()
+        xct  = decode_xct(xct_out).squeeze().float().cpu().numpy()
         mask = torch.sigmoid(msk_logits).squeeze().float().cpu().numpy()
 
         # Re-encode the generated XCT through the full VAE to get a refined mask.
@@ -287,6 +301,17 @@ def main() -> None:
         latents_root = (repo / latents_root).resolve()
     latent_mean, latent_std = _load_latent_stats(latents_root)
 
+    # Raw phi levels must be mapped through the store's porosity transform
+    # (D32 §1) before they can be used as cond_por.
+    _store_meta = json.loads((latents_root / "metadata.json").read_text())
+    _st = (_store_meta.get("conditioning") or {}).get("por_standardisation")
+    if _st is None:
+        raise RuntimeError(
+            f"{latents_root}/metadata.json has no conditioning.por_standardisation — "
+            "cannot build cond_por for the requested porosity levels."
+        )
+    por_log_stats = (float(_st["mean"]), float(_st["std"]))
+
     sched_cfg = ldm_cfg.get("noise_schedule", {})
     schedule = DDPMSchedule(
         T=int(sched_cfg.get("T", 1000)),
@@ -315,7 +340,7 @@ def main() -> None:
 
             frames = run_chain(
                 model, schedule, vae, device, autocast_dtype,
-                latent_mean, latent_std, por, n_steps, sampler_type, SEED,
+                latent_mean, latent_std, por, por_log_stats, n_steps, sampler_type, SEED,
                 step_pbar=step_pbar,
             )
 

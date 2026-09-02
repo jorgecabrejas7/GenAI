@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from poregen.models.vae.base import VAEOutput
+from poregen.models.vae.base import VAEOutput, decode_xct
 from poregen.models.discriminator import (
     extract_multiplane_slices,
     lsgan_gen_loss,
@@ -209,7 +209,7 @@ def train_step(
 
     if discriminator is not None and disc_optimizer is not None and disc_weight > 0.0:
         # Cast from AMP dtype (fp16/bf16) to float32 — D runs in float32
-        _fake_slices = extract_multiplane_slices(output.xct_logits).float()   # (3B,1,64,64)
+        _fake_slices = extract_multiplane_slices(output.xct_out).float()   # (3B,1,64,64)
         _real_slices = extract_multiplane_slices(xct).float()                  # (3B,1,64,64)
 
         # Generator wants D(fake) → 1; gradients flow through D back to the VAE
@@ -396,10 +396,11 @@ def _run_eval(
         )
         _accumulate(loss_acc, losses)
 
-        # Compute sigmoid ONCE — passed to all metrics to avoid redundant sigmoid
-        # calls inside each metric function (each would otherwise create a full
-        # (B,1,64,64,64) tensor = ~64 MB per call at batch_size=128, fp16).
-        xct_sigmoid = torch.sigmoid(output.xct_logits)
+        # The XCT head regresses xct/255 directly — decode_xct clamps, it does
+        # NOT activate.  (Until 2026-09-01 this line applied a sigmoid by
+        # analogy with the mask head, which put a ~0.135 artefact floor under
+        # val/mae and crushed sharpness_recon_over_gt by the sigmoid slope.)
+        xct_recon = decode_xct(output.xct_out)
 
         if output.mask_logits is not None:
             mask_sigmoid = torch.sigmoid(output.mask_logits)
@@ -422,9 +423,9 @@ def _run_eval(
         else:
             mask_sigmoid = None
 
-        # Reconstruction metrics — use pre-activated xct_sigmoid, no double sigmoid
-        mae_acc.append(F.l1_loss(xct_sigmoid, xct_dev))
-        sharp_recon_acc.append(sharpness_proxy(xct_sigmoid))
+        # Reconstruction metrics — on the decoded grey level, same scale as the target
+        mae_acc.append(F.l1_loss(xct_recon, xct_dev))
+        sharp_recon_acc.append(sharpness_proxy(xct_recon))
         sharp_gt_acc.append(sharpness_proxy(xct_dev))
 
         # Latent metrics
@@ -435,7 +436,7 @@ def _run_eval(
         # Explicitly release large GPU tensors — Python refcounting usually
         # handles this, but being explicit prevents accidental retention and
         # ensures the allocator can reuse the memory for the next batch.
-        del output, mask_sigmoid, xct_sigmoid, mask_dev, xct_dev
+        del output, mask_sigmoid, xct_recon, mask_dev, xct_dev
 
     # ── deferred .item() — single sync per metric after the loop ──────────────
     sharp_recon_mean = float(torch.stack(sharp_recon_acc).mean().item())
@@ -1142,7 +1143,7 @@ def _save_patch_samples(
 
             xct_gts.append(xct.cpu().float().numpy())
             mask_gts.append(mask.cpu().float().numpy())
-            xct_recons.append(output.xct_logits.clamp(0.0, 1.0).cpu().float().numpy()[:n_take])
+            xct_recons.append(decode_xct(output.xct_out).cpu().float().numpy()[:n_take])
             if output.mask_logits is not None:
                 mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
 
@@ -1189,7 +1190,7 @@ def _log_recon_images(
 ) -> None:
     """Log central slices along all 3 axes to TensorBoard."""
     with torch.no_grad():
-        xct_recon  = output.xct_logits.clamp(0.0, 1.0)
+        xct_recon  = decode_xct(output.xct_out)
         xct_gt  = batch["xct"].to(device, non_blocking=True)
 
         pairs = [("xct", xct_gt, xct_recon)]
@@ -1250,7 +1251,7 @@ def run_montecarlo_eval(
                 output = model(xct, mask)
             if has_mask is None:
                 has_mask = output.mask_logits is not None
-            xct_samples.append(output.xct_logits.clamp(0.0, 1.0).float())
+            xct_samples.append(decode_xct(output.xct_out).float())
             if has_mask:
                 mask_samples.append(torch.sigmoid(output.mask_logits).float())
 

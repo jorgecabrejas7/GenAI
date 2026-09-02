@@ -23,7 +23,7 @@ class _Model(torch.nn.Module):
     def forward(self, xct, mask):
         mu = torch.zeros(xct.shape[0], 2, 1, 1, 1, device=xct.device)
         return VAEOutput(
-            xct_logits=xct * 0.0 + self.bias,
+            xct_out=xct * 0.0 + self.bias,
             mask_logits=None,
             mu=mu,
             logvar=mu,
@@ -38,7 +38,7 @@ def test_train_loop_stops_after_validation_patience(tmp_path):
     scaler = torch.amp.GradScaler(enabled=False)
 
     def loss_fn(output, batch, step):
-        total = output.xct_logits.mean()
+        total = output.xct_out.mean()
         return {
             "total": total,
             "xct_loss": total.detach() * 0.0,
