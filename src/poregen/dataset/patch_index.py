@@ -87,6 +87,37 @@ def query_integral_volume(
 # Vectorised patch-index builder for one volume
 # ---------------------------------------------------------------------------
 
+def patch_fractions(
+    binary: np.ndarray,
+    coords: np.ndarray,
+    patch_size: int,
+) -> np.ndarray:
+    """Fraction of *binary* that is True inside each patch, in O(1) per patch.
+
+    *coords* is an ``(N, 3)`` integer array of ``(z0, y0, x0)`` origins.  One
+    integral volume serves every patch, so the voxels are read once no matter
+    how many patches overlap.  Used for pore porosity and, in split_v3, for the
+    air fraction (``sample_mask == 0``).
+    """
+    sat = compute_integral_volume(binary)
+    ca = np.asarray(coords, dtype=np.int64)
+    z0s, y0s, x0s = ca[:, 0], ca[:, 1], ca[:, 2]
+    z1s, y1s, x1s = z0s + patch_size, y0s + patch_size, x0s + patch_size
+
+    sums = (
+        sat[z1s, y1s, x1s]
+        - sat[z0s, y1s, x1s]
+        - sat[z1s, y0s, x1s]
+        - sat[z1s, y1s, x0s]
+        + sat[z0s, y0s, x1s]
+        + sat[z0s, y1s, x0s]
+        + sat[z1s, y0s, x0s]
+        - sat[z0s, y0s, x0s]
+    )
+    del sat
+    return (sums / patch_size ** 3).astype(np.float32)
+
+
 def build_patch_index_for_volume(
     mask: np.ndarray,
     volume_id: str,
@@ -111,36 +142,17 @@ def build_patch_index_for_volume(
         )
         return pd.DataFrame()
 
-    sat = compute_integral_volume(mask)
-    vol = patch_size ** 3
-
-    # Vectorised porosity query
-    ca = np.asarray(coords, dtype=np.int64)          # (N, 3)
-    z0s, y0s, x0s = ca[:, 0], ca[:, 1], ca[:, 2]
-    z1s = z0s + patch_size
-    y1s = y0s + patch_size
-    x1s = x0s + patch_size
-
-    pore_sums = (
-        sat[z1s, y1s, x1s]
-        - sat[z0s, y1s, x1s]
-        - sat[z1s, y0s, x1s]
-        - sat[z1s, y1s, x0s]
-        + sat[z0s, y0s, x1s]
-        + sat[z0s, y1s, x0s]
-        + sat[z1s, y0s, x0s]
-        - sat[z0s, y0s, x0s]
-    )
-    porosities = (pore_sums / vol).astype(np.float32)
+    ca = np.asarray(coords, dtype=np.int64)
+    porosities = patch_fractions(mask, ca, patch_size)
 
     df = pd.DataFrame(
         {
             "volume_id": volume_id,
             "source_group": source_group,
             "split": split,
-            "z0": z0s,
-            "y0": y0s,
-            "x0": x0s,
+            "z0": ca[:, 0],
+            "y0": ca[:, 1],
+            "x0": ca[:, 2],
             "ps": patch_size,
             "stride": stride,
             "porosity": porosities,

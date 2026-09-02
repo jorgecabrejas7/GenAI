@@ -15,6 +15,18 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
+# Three-class voxel label, shared by both backends and by
+# scripts/extract_patches_memmap.py.  Air takes precedence over pore.
+LABEL_MATERIAL, LABEL_PORE, LABEL_AIR = 0, 1, 2
+
+
+def build_label(mask: np.ndarray, sample_mask: np.ndarray) -> np.ndarray:
+    """0 material, 1 pore, 2 air (outside the specimen, or a drilled hole)."""
+    label = np.zeros(mask.shape, dtype=np.uint8)
+    label[mask != 0] = LABEL_PORE
+    label[sample_mask == 0] = LABEL_AIR
+    return label
+
 
 def zarr_worker_init_fn(worker_id: int) -> None:
     """DataLoader ``worker_init_fn`` that makes each worker open its own Zarr handles.
@@ -51,6 +63,12 @@ class PatchDataset(Dataset):
     Notes
     -----
     XCT patches are normalised as ``xct / 255.0`` → float32 in ``[0, 1]``.
+
+    The voxel label is 3-class — 0 material, 1 pore, 2 air (``sample_mask ==
+    0``, so the exterior and the drilled registration holes).  It is built here
+    from the two zarr arrays with the same precedence the memmap extractor
+    uses.  ``mask`` is the binary pore channel ``label == 1``, which is what
+    the VAE losses consume.
 
     The Zarr root store is opened **once** in :meth:`__init__` and reused for
     all subsequent group lookups, avoiding the O(n_volumes) re-open overhead
@@ -111,15 +129,15 @@ class PatchDataset(Dataset):
         ps = int(row["ps"])
         z0, y0, x0 = int(row["z0"]), int(row["y0"]), int(row["x0"])
 
-        xct  = grp["xct"] [z0 : z0 + ps, y0 : y0 + ps, x0 : x0 + ps]
-        mask = grp["mask"][z0 : z0 + ps, y0 : y0 + ps, x0 : x0 + ps]
-
-        xct_t  = self._normalise_xct(xct)
-        mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0)
+        sl = np.s_[z0 : z0 + ps, y0 : y0 + ps, x0 : x0 + ps]
+        xct   = grp["xct"][sl]
+        label = build_label(np.asarray(grp["mask"][sl]),
+                            np.asarray(grp["sample_mask"][sl]))
 
         return {
-            "xct":          xct_t,                                          # (1, ps, ps, ps) float32 [0, 1]
-            "mask":         mask_t,                                         # (1, ps, ps, ps) float32 {0, 1}
+            "xct":          self._normalise_xct(xct),                       # (1, ps, ps, ps) float32 [0, 1]
+            "label":        torch.from_numpy(label.astype(np.int64)),       # (ps, ps, ps) int64 {0, 1, 2}
+            "mask":         torch.from_numpy((label == LABEL_PORE).astype(np.float32)).unsqueeze(0),
             "volume_id":    vid,
             "coords":       np.array([z0, y0, x0], dtype=np.int32),        # int32 array — faster collation
             "porosity":     float(row["porosity"]),
@@ -135,8 +153,12 @@ class MemmapPatchDataset(Dataset):
     """Random-access patch loader backed by pre-extracted numpy memmaps.
 
     Replaces :class:`PatchDataset` when ``patches_xct.bin``,
-    ``patches_mask.bin``, and ``patches_meta.json`` exist in *data_root*.
+    ``patches_label.bin``, and ``patches_meta.json`` exist in *data_root*.
     Build these files with ``scripts/extract_patches_memmap.py``.
+
+    ``patches_label.bin`` stores the 3-class voxel label (0 material, 1 pore,
+    2 air).  The binary pore mask the VAE losses use is derived as
+    ``label == 1``; there is no separate mask file.
 
     The memmap layout is a flat ``(N, ps, ps, ps) uint8`` array where row ``i``
     corresponds to row ``i`` in ``patch_index.parquet``.  This 1-to-1 alignment
@@ -191,10 +213,10 @@ class MemmapPatchDataset(Dataset):
         self.df              = df_split.reset_index(drop=True)
         self._global_indices = df_split.index.to_numpy(dtype=np.int64)  # parquet → memmap row
 
-        self._mmap_xct  = np.memmap(str(data_root / "patches_xct.bin"),
-                                    dtype=np.uint8, mode="r", shape=shape)
-        self._mmap_mask = np.memmap(str(data_root / "patches_mask.bin"),
-                                    dtype=np.uint8, mode="r", shape=shape)
+        self._mmap_xct   = np.memmap(str(data_root / "patches_xct.bin"),
+                                     dtype=np.uint8, mode="r", shape=shape)
+        self._mmap_label = np.memmap(str(data_root / "patches_label.bin"),
+                                     dtype=np.uint8, mode="r", shape=shape)
         self._ps = ps
 
         logger.info(
@@ -212,15 +234,13 @@ class MemmapPatchDataset(Dataset):
         global_idx = int(self._global_indices[idx])
 
         # Read the pre-extracted patch: 256 KB sequential memmap read.
-        xct_raw  = self._mmap_xct [global_idx]   # (ps, ps, ps) uint8 view
-        mask_raw = self._mmap_mask[global_idx]    # (ps, ps, ps) uint8 view
-
-        xct_t  = torch.from_numpy(np.asarray(xct_raw,  dtype=np.float32)).mul_(1.0 / 255.0).unsqueeze(0)
-        mask_t = torch.from_numpy(np.asarray(mask_raw, dtype=np.float32)).unsqueeze(0)
+        xct_raw   = self._mmap_xct  [global_idx]   # (ps, ps, ps) uint8 view
+        label_raw = np.asarray(self._mmap_label[global_idx])
 
         return {
-            "xct":          xct_t,                                                        # (1, ps, ps, ps) float32 [0, 1]
-            "mask":         mask_t,                                                       # (1, ps, ps, ps) float32 {0, 1}
+            "xct":          torch.from_numpy(np.asarray(xct_raw, dtype=np.float32)).mul_(1.0 / 255.0).unsqueeze(0),
+            "label":        torch.from_numpy(label_raw.astype(np.int64)),                 # (ps, ps, ps) int64 {0, 1, 2}
+            "mask":         torch.from_numpy((label_raw == LABEL_PORE).astype(np.float32)).unsqueeze(0),
             "volume_id":    row["volume_id"],
             "coords":       np.array([int(row["z0"]), int(row["y0"]), int(row["x0"])],
                                      dtype=np.int32),
@@ -237,7 +257,7 @@ def reconstruct_volume(
     volume_id: str,
     data_root: str | Path,
     *,
-    array: Literal["xct", "mask"] = "xct",
+    array: Literal["xct", "label"] = "xct",
     overlap: Literal["mean", "overwrite"] = "mean",
 ) -> np.ndarray:
     """Reconstruct a full volume from its pre-extracted patches.
@@ -254,7 +274,7 @@ def reconstruct_volume(
         The volume identifier as it appears in ``patch_index.parquet``.
     data_root : str | Path
         Split root directory (contains ``patches_xct.bin``, etc.).
-    array : "xct" | "mask"
+    array : "xct" | "label"
         Which channel to reconstruct.
     overlap : "mean" | "overwrite"
         How to handle overlapping patches.
@@ -268,7 +288,10 @@ def reconstruct_volume(
     Returns
     -------
     np.ndarray, dtype uint8, shape (D, H, W)
-        Reconstructed volume.  Scale: XCT is raw uint8 [0, 255]; mask is {0, 1}.
+        Reconstructed volume.  Scale: XCT is raw uint8 [0, 255]; label is
+        {0, 1, 2}.  ``overlap="mean"`` is meaningless for a class index — use
+        ``overlap="overwrite"`` for the label, which is lossless because every
+        patch covering a voxel carries the same class there.
 
     Notes
     -----

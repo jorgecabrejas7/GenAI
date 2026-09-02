@@ -6,12 +6,25 @@ Zarr volumes and writes them to two flat numpy memmaps.
 
 Layout
 ------
-    <data-root>/patches_xct.bin     (N, ps, ps, ps)  uint8
-    <data-root>/patches_mask.bin    (N, ps, ps, ps)   uint8
+    <data-root>/patches_xct.bin     (N, ps, ps, ps)  uint8   grey level 0-255
+    <data-root>/patches_label.bin   (N, ps, ps, ps)  uint8   0/1/2
     <data-root>/patches_meta.json   metadata
 
 Row i in both memmaps corresponds to row i in patch_index.parquet.
 That 1-to-1 alignment is the sole invariant relied on by MemmapPatchDataset.
+
+The label
+---------
+Three classes, in this precedence:
+
+    2  air       ``sample_mask == 0`` — outside the specimen, or inside one of
+                 the three drilled registration through-holes
+    1  pore      ``mask != 0`` inside the specimen
+    0  material
+
+Air wins over pore, so a voxel can never be both.  In practice they do not
+overlap: ``fill_voids`` leaves the holes empty in ``mask`` as well.  The binary
+pore mask the VAE losses use is ``label == 1``.
 
 Reconstruction with stride < patch_size
 ----------------------------------------
@@ -26,15 +39,13 @@ Overlapping patches (stride=32, patch_size=64 → 50% overlap per axis) can be
 averaged using float32 accumulation + count buffer — see
 poregen.dataset.loader.reconstruct_volume().
 
-Storage estimate (stride=32, 2 274 623 patches, ps=64)
-    XCT uint8:  ~596 GB
-    Mask uint8: ~596 GB
-    Total:      ~1.19 TB
+Storage: ``2 x N x ps^3`` bytes.  For split_v3 that is ~0.5 TB per array; the
+script refuses to start if the filesystem cannot hold both.
 
 Usage
 -----
     python scripts/extract_patches_memmap.py \\
-        --data-root data/split_v2            \\
+        --data-root data/split_v3            \\
         [--chunk-size 256]                   \\
         [--force]                            \\
         [--verify]
@@ -54,6 +65,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import time
 from pathlib import Path
 
@@ -68,6 +80,9 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+LABEL_MATERIAL, LABEL_PORE, LABEL_AIR = 0, 1, 2
+LABEL_NAMES = {LABEL_MATERIAL: "material", LABEL_PORE: "pore", LABEL_AIR: "air"}
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +103,14 @@ def _open_partial(path: Path, shape: tuple, dtype: np.dtype) -> np.memmap:
     return np.memmap(str(path), dtype=dtype, mode="w+", shape=shape)
 
 
+def build_label_volume(mask: np.ndarray, sample_mask: np.ndarray) -> np.ndarray:
+    """Three-class voxel label: 0 material, 1 pore, 2 air. Air wins."""
+    label = np.zeros(mask.shape, dtype=np.uint8)
+    label[mask != 0] = LABEL_PORE
+    label[sample_mask == 0] = LABEL_AIR
+    return label
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -101,7 +124,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--data-root", required=True, metavar="PATH",
-                        help="Split root, e.g. data/split_v2")
+                        help="Split root, e.g. data/split_v3")
     parser.add_argument("--chunk-size", type=int, default=256, metavar="INT",
                         help="Patches written per memmap flush (memory budget: "
                              "chunk_size × ps³ × 2 arrays × 1 byte).")
@@ -115,11 +138,13 @@ def main() -> None:
     data_root = Path(args.data_root).resolve()
     zarr_root_path = data_root / "volumes.zarr"
     parquet_path   = data_root / "patch_index.parquet"
+    index_report   = data_root / "index_report.json"
 
-    for p in (zarr_root_path, parquet_path):
+    for p in (zarr_root_path, parquet_path, index_report):
         if not p.exists():
             log.error("Not found: %s", p)
             raise SystemExit(1)
+    report = json.loads(index_report.read_text())
 
     # ------------------------------------------------------------------
     # Load parquet (authoritative row order)
@@ -143,25 +168,31 @@ def main() -> None:
         N, ps, stride, n_splits,
     )
     log.info(
-        "Output size: XCT %.1f GB  Mask %.1f GB  Total %.1f GB",
+        "Output size: XCT %.1f GB  Label %.1f GB  Total %.1f GB",
         bytes_per_arr / 1e9, bytes_per_arr / 1e9, 2 * bytes_per_arr / 1e9,
     )
+
+    free = shutil.disk_usage(data_root).free
+    if free < 2 * bytes_per_arr:
+        log.error("Need %.1f GB but only %.1f GB free on %s.",
+                  2 * bytes_per_arr / 1e9, free / 1e9, data_root)
+        raise SystemExit(1)
 
     # ------------------------------------------------------------------
     # Output paths
     # ------------------------------------------------------------------
-    xct_bin      = data_root / "patches_xct.bin"
-    mask_bin     = data_root / "patches_mask.bin"
-    xct_partial  = data_root / "patches_xct.bin.partial"
-    mask_partial = data_root / "patches_mask.bin.partial"
-    meta_path    = data_root / "patches_meta.json"
-    meta_tmp     = data_root / "patches_meta.json.tmp"
+    xct_bin       = data_root / "patches_xct.bin"
+    label_bin     = data_root / "patches_label.bin"
+    xct_partial   = data_root / "patches_xct.bin.partial"
+    label_partial = data_root / "patches_label.bin.partial"
+    meta_path     = data_root / "patches_meta.json"
+    meta_tmp      = data_root / "patches_meta.json.tmp"
     progress_path = data_root / "patches_progress.json"
 
-    if xct_bin.exists() or mask_bin.exists():
+    if xct_bin.exists() or label_bin.exists():
         if args.force:
             log.info("--force: removing existing output files.")
-            for p in (xct_bin, mask_bin, meta_path, progress_path):
+            for p in (xct_bin, label_bin, meta_path, progress_path):
                 p.unlink(missing_ok=True)
         else:
             log.error(
@@ -170,7 +201,7 @@ def main() -> None:
             raise SystemExit(1)
 
     if args.force:
-        for p in (xct_partial, mask_partial):
+        for p in (xct_partial, label_partial):
             p.unlink(missing_ok=True)
         progress_path.unlink(missing_ok=True)
 
@@ -187,8 +218,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Open / create partial memmaps
     # ------------------------------------------------------------------
-    mmap_xct  = _open_partial(xct_partial,  shape, dtype)
-    mmap_mask = _open_partial(mask_partial, shape, dtype)
+    mmap_xct   = _open_partial(xct_partial,   shape, dtype)
+    mmap_label = _open_partial(label_partial, shape, dtype)
 
     zarr_root: zarr.Group = zarr.open_group(str(zarr_root_path), mode="r")
 
@@ -196,6 +227,7 @@ def main() -> None:
     # Per-volume extraction (load full volume into RAM, then slice patches)
     # ------------------------------------------------------------------
     volume_ids = df["volume_id"].unique().tolist()
+    class_counts = np.zeros(3, dtype=np.int64)
     volumes_done = 0
     t0 = time.perf_counter()
 
@@ -213,8 +245,11 @@ def main() -> None:
 
             # Load full volume into RAM (one big sequential zarr read)
             grp = zarr_root[vid]
-            xct_vol  = np.asarray(grp["xct"],  dtype=np.uint8)
-            mask_vol = np.asarray(grp["mask"], dtype=np.uint8)
+            xct_vol   = np.asarray(grp["xct"], dtype=np.uint8)
+            label_vol = build_label_volume(
+                np.asarray(grp["mask"], dtype=np.uint8),
+                np.asarray(grp["sample_mask"], dtype=np.uint8),
+            )
 
             # Slice and write patches in chunks for bounded memory
             cs = args.chunk_size
@@ -225,14 +260,16 @@ def main() -> None:
                     row = vol_df.iloc[local_i]
                     z0, y0, x0 = int(row["z0"]), int(row["y0"]), int(row["x0"])
                     gi = row_indices[local_i]
-                    mmap_xct [gi] = xct_vol [z0:z0+ps, y0:y0+ps, x0:x0+ps]
-                    mmap_mask[gi] = mask_vol[z0:z0+ps, y0:y0+ps, x0:x0+ps]
+                    patch = label_vol[z0:z0+ps, y0:y0+ps, x0:x0+ps]
+                    mmap_xct  [gi] = xct_vol[z0:z0+ps, y0:y0+ps, x0:x0+ps]
+                    mmap_label[gi] = patch
+                    class_counts += np.bincount(patch.ravel(), minlength=3)
 
                 mmap_xct.flush()
-                mmap_mask.flush()
+                mmap_label.flush()
                 pbar.update(chunk_end - chunk_start)
 
-            del xct_vol, mask_vol
+            del xct_vol, label_vol
 
             volumes_done += 1
             progress[vid] = True
@@ -240,29 +277,39 @@ def main() -> None:
                 json.dump(progress, fh)
 
     elapsed = time.perf_counter() - t0
-    del mmap_xct, mmap_mask
+    del mmap_xct, mmap_label
 
     # ------------------------------------------------------------------
     # Atomic rename: partial → final
     # ------------------------------------------------------------------
     parquet_sha = _parquet_sha256(parquet_path)
+    total_vox = int(class_counts.sum())
     meta = {
         "N": N,
         "patch_size": ps,
         "stride": stride,
-        "voxel_size_um": 25.0,
-        "dtype_xct":  "uint8",
-        "dtype_mask": "uint8",
+        "voxel_size_um": report.get("voxel_size_um", 25.0),
+        "dtype_xct":   "uint8",
+        "dtype_label": "uint8",
         "shape": [N, ps, ps, ps],
         "splits": n_splits,
+        "label_classes": {str(k): v for k, v in LABEL_NAMES.items()},
+        "label_rule": ("2 = air (sample_mask == 0, exterior or a drilled "
+                       "hole); 1 = pore (mask != 0 inside the specimen); "
+                       "0 = material. Air takes precedence over pore."),
+        "label_voxel_fraction": {
+            LABEL_NAMES[i]: (float(class_counts[i]) / total_vox
+                             if total_vox else 0.0) for i in range(3)},
+        "hole_rule": report["hole_rule"],
+        "split_rule": report["split_rule"],
         "parquet_sha256": parquet_sha,
     }
     with open(meta_tmp, "w") as fh:
         json.dump(meta, fh, indent=2)
 
-    os.rename(meta_tmp,     meta_path)    # atomic on POSIX
-    os.rename(xct_partial,  xct_bin)
-    os.rename(mask_partial, mask_bin)
+    os.rename(meta_tmp,      meta_path)    # atomic on POSIX
+    os.rename(xct_partial,   xct_bin)
+    os.rename(label_partial, label_bin)
     progress_path.unlink(missing_ok=True)
 
     total_gb = 2 * bytes_per_arr / 1e9
@@ -270,9 +317,10 @@ def main() -> None:
         f"\nExtracted {N} patches in {elapsed:.1f}s  "
         f"({total_gb:.1f} GB at {total_gb/elapsed:.1f} GB/s)"
     )
-    print(f"patches_meta.json written with parquet SHA-256 for integrity checks.")
-    print(f"Zarr source preserved. Remove after verification:")
-    print(f"  rm -rf {zarr_root_path}")
+    print("Label voxel fractions: "
+          + ", ".join(f"{k} {v:.4f}"
+                      for k, v in meta["label_voxel_fraction"].items()))
+    print("patches_meta.json written with parquet SHA-256 for integrity checks.")
 
     # ------------------------------------------------------------------
     # Optional verification
@@ -282,8 +330,8 @@ def main() -> None:
         rng = random.Random(42)
         indices = rng.sample(range(N), min(128, N))
 
-        mmap_xct_v  = np.memmap(str(xct_bin),  dtype=dtype, mode="r", shape=shape)
-        mmap_mask_v = np.memmap(str(mask_bin), dtype=dtype, mode="r", shape=shape)
+        mmap_xct_v   = np.memmap(str(xct_bin),   dtype=dtype, mode="r", shape=shape)
+        mmap_label_v = np.memmap(str(label_bin), dtype=dtype, mode="r", shape=shape)
         zarr_root_v: zarr.Group = zarr.open_group(str(zarr_root_path), mode="r")
         _grp_cache: dict = {}
 
@@ -295,18 +343,22 @@ def main() -> None:
                 _grp_cache[vid] = zarr_root_v[vid]
             grp = _grp_cache[vid]
             z0, y0, x0 = int(row["z0"]), int(row["y0"]), int(row["x0"])
+            sl = np.s_[z0:z0+ps, y0:y0+ps, x0:x0+ps]
 
-            exp_xct  = np.asarray(grp["xct"] [z0:z0+ps, y0:y0+ps, x0:x0+ps], dtype=np.uint8)
-            exp_mask = np.asarray(grp["mask"][z0:z0+ps, y0:y0+ps, x0:x0+ps], dtype=np.uint8)
+            exp_xct   = np.asarray(grp["xct"][sl], dtype=np.uint8)
+            exp_label = build_label_volume(
+                np.asarray(grp["mask"][sl], dtype=np.uint8),
+                np.asarray(grp["sample_mask"][sl], dtype=np.uint8),
+            )
 
-            if not np.array_equal(mmap_xct_v[idx],  exp_xct):
+            if not np.array_equal(mmap_xct_v[idx], exp_xct):
                 print(f"  XCT mismatch at parquet row {idx} (volume {vid})")
                 n_errors += 1
-            if not np.array_equal(mmap_mask_v[idx], exp_mask):
-                print(f"  Mask mismatch at parquet row {idx} (volume {vid})")
+            if not np.array_equal(mmap_label_v[idx], exp_label):
+                print(f"  Label mismatch at parquet row {idx} (volume {vid})")
                 n_errors += 1
 
-        del mmap_xct_v, mmap_mask_v
+        del mmap_xct_v, mmap_label_v
         if n_errors == 0:
             print(f"Verification OK: {len(indices)} patches checked, 0 errors.")
         else:

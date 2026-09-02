@@ -13,7 +13,7 @@ companion docs listed under [docs/](#docs).
 | Stage | Entry point | Output |
 |---|---|---|
 | 1. Raw TIFF → volumes + patch index | `src/poregen/dataset/build_dataset.py` (CLI `build_dataset`) | `data/<split>/volumes.zarr/`, `patch_index.parquet`, `volume_stats.json`, `splits.json` |
-| 2. Patch index → flat memmap (fast loading) | `scripts/extract_patches_memmap.py` | `data/split_v2/patches_{xct,mask}.bin` + `patches_meta.json` |
+| 2. Patch index → flat memmap (fast loading) | `scripts/extract_patches_memmap.py` | `data/split_v3/patches_{xct,label}.bin` + `patches_meta.json` |
 | 3. VAE training | `scripts/train_vae.py` → `poregen.cli.experiments:main` → `poregen.experiments.train_vae` → `poregen.training.engine.train_loop` | `runs/vae/<run>/` |
 | 4. VAE → latent store | `scripts/build_latent_dataset.py` | `data/split_v2/latents_r07z4/` (live store) |
 | 4b. Per-patch conditioning (ldm05) | `scripts/build_conditioning.py` | `data/split_v2/orientation_field.json`, per-split `cond.parquet`, `conditioning`/`assembly` blocks in the store `metadata.json` |
@@ -50,9 +50,10 @@ companion docs listed under [docs/](#docs).
 | `dataset/io.py` | Volume discovery, TIFF load, Zarr write, per-volume intensity stats (`VolumeInfo`). |
 | `dataset/segmentation.py` | Pore/material segmentation (Sauvola + Otsu, fill-voids). Package home of the root `onlypores.py`. `compute_sample_mask` re-derives just the material envelope (no Sauvola). |
 | `dataset/material.py` | ldm06 material maps: block-mean pooling of `sample_mask` to latent-resolution fraction cells, uint8 encode/decode, air fraction. |
-| `dataset/patch_index.py` | Patch coordinate generation, 3-D integral volume for O(1) patch porosity, Parquet index writer. |
-| `dataset/splits.py` | Volume-level splits: deterministic `v1` and stratified-by-porosity `v2`; writes lightweight split roots. |
-| `dataset/loader.py` | `PatchDataset` (Zarr backend), `MemmapPatchDataset` (`.bin` backend), `zarr_worker_init_fn` for fork-safe workers. |
+| `dataset/patch_index.py` | Patch coordinate generation, 3-D integral volume for O(1) patch fractions (`patch_fractions` — porosity and, in split_v3, air fraction), Parquet index writer. |
+| `dataset/splits.py` | Volume-level splits: deterministic `v1` and stratified-by-porosity `v2`; writes lightweight split roots. The `v3` split is by PANEL and lives in `scripts/build_split_v3.py`. |
+| `dataset/holes.py` | Finds the three drilled registration through-holes of a coupon from `sample_mask` (z-MINIMUM projection of the complement, border-touching components dropped, Euclidean dilation) and marks the patches that touch one. |
+| `dataset/loader.py` | `PatchDataset` (Zarr backend), `MemmapPatchDataset` (`.bin` backend), `build_label` (3-class voxel label), `zarr_worker_init_fn` for fork-safe workers. Both backends return `label` (int64 `{0,1,2}`) and the derived binary pore `mask` (`label == 1`). |
 
 ### models
 
@@ -142,7 +143,7 @@ companion docs listed under [docs/](#docs).
 
 | Path | What it does |
 |---|---|
-| `extract_patches_memmap.py` | One-time Zarr → flat `patches_{xct,mask}.bin` memmap extraction, row-aligned with `patch_index.parquet`. |
+| `extract_patches_memmap.py` | One-time Zarr → flat `patches_{xct,label}.bin` memmap extraction, row-aligned with `patch_index.parquet`. `patches_label.bin` holds the 3-class voxel label (0 material, 1 pore, 2 air = `sample_mask == 0`); air takes precedence over pore. Refuses to start when the filesystem cannot hold both arrays. |
 | `build_latent_dataset.py` | Encodes every patch with a trained VAE → raw `mu`/`std` memmap + train-split normalisation stats. Builds the live `latents_r07z4` store. |
 | `build_material_maps.py` | ldm06 (D40 §1): per-patch material maps (uint8, latent resolution) + air fractions for an EXISTING latent store, as sibling `material.bin`/`air.bin` memmaps; persists each volume's `sample_mask` into `volumes.zarr` (compressed); resumable per volume; no latents re-encoded. |
 | `build_conditioning.py` | Builds the ldm05 conditioning data: `data/split_v2/orientation_field.json` (nominal θ(z) per volume, with T-I confidence flags and a full re-verification of the boundary↔ground-truth-angle correspondence) and the per-split `cond.parquet` sidecar (`cond_depth`, `cond_dist`, `cond_por_raw`), plus the `conditioning` / `assembly` metadata blocks. |
@@ -317,9 +318,18 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 data/
 ├── split_v1/                     🕰 v1 deterministic split, Zarr only
 │   ├── volumes.zarr/  patch_index.parquet  splits.json  volume_stats.json
-├── split_v2/                     ← current dataset
+├── split_v3/                     ← current dataset (r08 VAE, ldm06)
+│   ├── volumes.zarr/             → symlink to split_v2/volumes.zarr (never a copy)
+│   ├── patch_index.parquet       ← split_v2 columns + panel_id + air_fraction,
+│   │                               hole-touching patches removed
+│   ├── splits.json               ← BY PANEL: test = Na_05 + JI_8, val = Na_08 + JI_12,
+│   │                               train = the rest (Pegaso is one panel, train-only)
+│   ├── holes/<volume_id>.npy  holes.json   ← per-volume dilated 2-D hole footprint
+│   ├── patches_xct.bin  patches_label.bin  patches_meta.json  ← memmap backend
+│   │                               (label: 0 material, 1 pore, 2 air)
+│   ├── index_report.json  build_report.md
+├── split_v2/                     🕰 previous dataset — latents and conditioning still live here
 │   ├── volumes.zarr/  patch_index.parquet  splits.json  volume_stats.json
-│   ├── patches_xct.bin  patches_mask.bin  patches_meta.json   ← memmap backend
 │   ├── orientation_field.json    ← per-volume θ(z) from the NOMINAL layup, with
 │   │                               confidence flags + provenance (build_conditioning.py)
 │   └── latents_r07z4/            ← LIVE latent store (memmap format)

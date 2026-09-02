@@ -23,10 +23,37 @@ top-level keys: `model`, `loss`, `training`, `data`.
 
 Raw TIFFs → `build_dataset` → `data/<split>/volumes.zarr/` + `patch_index.parquet`.
 `PatchDataset` loads via the Parquet index; patches are `64³` float32, normalised
-to `[0, 1]` (XCT) or `{0, 1}` (mask). Zarr handles open once per dataset instance;
+to `[0, 1]` (XCT). Zarr handles open once per dataset instance;
 `zarr_worker_init_fn` gives each DataLoader worker an isolated copy after `fork()`.
 `build_patch_dataloaders(cfg, data_root)` builds all three splits — train uses
 `shuffle=True, drop_last=True`, test uses `shuffle=False`.
+
+### split_v3 — the current dataset
+
+`data/split_v3` is built by `scripts/build_split_v3.py` and replaces `split_v2`
+for the r08 VAE and ldm06. Its `volumes.zarr` is a **symlink** to the split_v2
+store; nothing is copied and `data/split_v2` is never written. Three things
+differ:
+
+- **Drilled holes removed.** Every coupon has three ~200-voxel registration
+  through-holes. They are `False` in `sample_mask` and `0` in `mask`, so they
+  read as porosity 0 while being ~95 % air — 6 065 train patches of split_v2
+  sit inside one, and they are the only interior source of large air in the
+  dataset. `poregen.dataset.holes.detect_holes` finds them from a z-MINIMUM
+  projection of `~sample_mask` (a maximum projection merges them into the
+  exterior on the Pegaso coupons), dilates them by 32 voxels, and every patch
+  whose `(y, x)` footprint touches one is dropped.
+- **Split by panel, not by coupon.** test = every coupon of panel `Na_05` plus
+  `Juan_Ignacio_probetas_8`; val = every coupon of `Na_08` plus
+  `Juan_Ignacio_probetas_12`; train = the rest. The 24 Pegaso coupons are a
+  single panel, so they can only ever be train. `patch_index.parquet` carries
+  `panel_id` and `air_fraction` beside the split_v2 columns.
+- **Three-class voxel label.** `patches_label.bin` stores 0 material, 1 pore,
+  2 air (`sample_mask == 0`); air takes precedence over pore. There is no
+  `patches_mask.bin` any more. Both loaders return `label` (int64, no channel
+  dim, ready for cross-entropy) and the derived binary pore `mask`
+  (`label == 1`, `(1, ps, ps, ps)` float32), which is what the current VAE
+  losses consume.
 
 Latents for the LDM stack live in a memmap binary store
 (`data/split_v2/latents_r07z4/`) with sibling arrays for the material map and air
