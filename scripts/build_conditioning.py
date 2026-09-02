@@ -1,26 +1,33 @@
-"""Build the ldm05 per-patch conditioning data (D32 §1, §2, §5).
+"""Build the ldm06 per-patch conditioning sidecar.
 
-Two artefacts, both canonical dataset content under ``data/`` (not ``runs/``):
+Writes ``<store>/<split>/cond.parquet`` — row-aligned with that split's
+``index.parquet`` — holding ``cond_depth``, the six ``cond_dist6_*`` per-face
+distances and ``cond_por_raw``, plus the ``conditioning`` block in the store's
+``metadata.json``.  A sidecar (rather than new columns in ``index.parquet``)
+keeps the store's encoded files byte-identical, so a rebuild of the
+conditioning never means re-encoding 1.8 M patches.
 
-1. ``data/split_v2/orientation_field.json`` — per-volume theta(z) for every
-   z-slice in IMAGE coordinates, built from the **nominal** ply sequence
-   (``data/layup_ground_truth.json``) aligned to the scan by the rotation
-   offset / face order / sign convention fitted in T-I.  Measured per-ply
-   angles are deliberately NOT used (D32 §2).  Carries the T-I confidence and
-   hypothesis margin per volume plus a full re-verification of the
-   boundary <-> ground-truth-angle correspondence.
+The orientation field ``data/split_v2/orientation_field.json`` is REUSED as it
+is.  It is per-VOLUME (theta(z) from the nominal ply sequence aligned to the
+scan, plus each volume's foreground extent), and split_v3 changed which patches
+exist, never the volumes themselves.  The script asserts that every volume in
+the split_v3 index has a record before it uses one.  ``--rebuild-orientation``
+re-derives the field from the T-I artefacts and the expert ground truth; it is
+the provenance of that file and is only needed when its inputs change.
 
-2. ``data/split_v2/latents_r07z4/<split>/cond.parquet`` — a sidecar parquet,
-   row-aligned with that split's ``index.parquet``, holding ``cond_depth``,
-   ``cond_dist`` and ``cond_por_raw``.  A sidecar (rather than new columns in
-   ``index.parquet``) keeps the latent store's existing files byte-identical,
-   so runs already training against it are untouched.
+Six distances, not one
+----------------------
+ldm05 conditioned on a single ``cond_dist``: the distance from the patch CENTRE
+to the nearest outer specimen face over all three axes.  One number cannot say
+*which* face is near, so a patch under the top surface and a patch against a
+side wall asked the model for the same thing.  ``cond_dist6`` is the gap from
+each of the patch's own six faces to the matching face of the specimen box,
+capped at 64 voxels and normalised, ordered
+(z-, z+, y-, y+, x-, x+) by ``poregen.diffusion.conditioning.DIST6_DIRS``.
+``poregen.diffusion.conditioning.dist6_from_box_array`` is the single
+implementation; the sampler calls its scalar twin for generated volumes.
 
-The train-split standardisation statistics for ``cond_por_raw`` and
-``voxel_size_um`` are written into the store's ``metadata.json`` under a new
-``conditioning`` block (additive; nothing existing is modified).
-
-Run:  python scripts/build_conditioning.py
+Run:  python scripts/build_conditioning.py [--store data/split_v3/latents_r08z4]
 """
 
 from __future__ import annotations
@@ -34,44 +41,50 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from poregen.diffusion.conditioning import NEIGHBOUR_DIRS, PARITY_GROUP_ORDER
+from poregen.diffusion.conditioning import (
+    DIST6_DIRS,
+    DIST6_NAMES,
+    DIST_CAP,
+    NEIGHBOUR_DIRS,
+    POR_LOG_EPS,
+    dist6_from_box_array,
+)
 
 REPO = Path(__file__).resolve().parents[1]
-DATA_ROOT = REPO / "data" / "split_v2"
+DATA_ROOT = REPO / "data" / "split_v3"
+# The orientation field is a per-VOLUME artefact and lives with the dataset
+# root that first produced it; split_v3's volumes.zarr is a symlink to the same
+# store, so the field describes both roots.
+ORIENT_ROOT = REPO / "data" / "split_v2"
 GT_PATH = REPO / "data" / "layup_ground_truth.json"
 TI_DIR = REPO / "runs" / "campaigns" / "01-conditioning-design" / "T-I"
 TA_PROFILES = REPO / "runs" / "campaigns" / "01-conditioning-design" / "T-A" / "fine_profiles.npz"
 LAYUP_FIELD = TI_DIR / "layup_field.json"
-ORIENT_OUT = DATA_ROOT / "orientation_field.json"
+ORIENT_OUT = ORIENT_ROOT / "orientation_field.json"
 
 PATCH_SIZE = 64
 VOXEL_SIZE_UM = 25.0
-POR_EPS = 1e-3
-DIST_CAP = 64.0
 SPLITS = ("train", "val", "test")
 
-# The three strides of D32 section 3.1, kept separate.  neighbour_offset must
-# be >= PATCH_SIZE so that face neighbours only TOUCH the target: at 32 they
-# overlapped it by half and an opposite pair tiled it completely, which handed
-# the denoiser the answer.
+# Three strides, kept separate.  neighbour_offset must be >= PATCH_SIZE so that
+# face neighbours only TOUCH the target: at 32 they overlapped it by half and an
+# opposite pair tiled it completely, which handed the denoiser the answer.
 SAMPLE_STRIDE = 32        # spacing of the patches stored in the dataset
-GENERATION_STRIDE = 64    # spacing of the assembly grid the sampler walks
+GENERATION_STRIDE = 64    # spacing of the tiling grid the sampler decodes on
 NEIGHBOUR_OFFSET = 64     # voxel displacement of a face neighbour (touching)
 
+DIST6_COLUMNS = tuple(f"cond_dist6_{n}" for n in DIST6_NAMES)
 
-def assembly_metadata() -> dict:
-    """The ``assembly`` block written into the latent store's metadata.json.
+
+def geometry_metadata() -> dict:
+    """The ``conditioning.geometry`` block written into the store metadata.
 
     Single definition so that the store always describes the geometry the
     training code enforces — ``LatentDataset`` refuses to run against a store
     whose recorded strides disagree with the config.
     """
     return {
-        # read back by poregen.diffusion.conditioning.resolve_group_order, so
-        # data and sampler use one ordering.  Rank = 4*pz + 2*py + px.
-        "parity_group_order": [list(g) for g in PARITY_GROUP_ORDER],
         "grid_index_key": "(z0 // neighbour_offset, y0 // ..., x0 // ...)",
-        "parity_group_key": "(iz % 2, iy % 2, ix % 2) of the grid index",
         "neighbour_dirs": [list(d) for d in NEIGHBOUR_DIRS],
         "sample_stride": SAMPLE_STRIDE,
         "generation_stride": GENERATION_STRIDE,
@@ -80,18 +93,15 @@ def assembly_metadata() -> dict:
         "neighbour_shared_voxels": max(PATCH_SIZE - NEIGHBOUR_OFFSET, 0) * PATCH_SIZE ** 2,
         "neighbour_relation": (
             "face neighbours TOUCH: neighbour_offset >= patch_size, so a neighbour "
-            "shares no voxel with the target and cannot leak its content"
+            "shares no voxel with the target and cannot leak its content.  They are "
+            "fed WHOLE and UNSHIFTED, and the training step noises each one to its "
+            "own timestep (see poregen.training.ldm_engine.noise_neighbours)."
         ),
-        "neighbour_shift": False,
-        "neighbour_shift_note": (
-            "neighbours are fed WHOLE and UNSHIFTED; the shift into the target "
-            "frame only applies to overlapping neighbours and at this offset would "
-            "produce an all-zero tensor"
-        ),
-        "blending": "none — generation_stride == patch_size, so patches tile exactly",
-        "assembly_metric": (
-            "seam discontinuity: mean |slice-to-slice difference| across each "
-            "patch-to-patch plane, divided by the same quantity inside the patches"
+        "availability_states": {"OOB": 0, "EXISTS": 1, "UNKNOWN": 2},
+        "availability_rule": (
+            "the store serves EXISTS when it holds a patch at that position and OOB "
+            "when it does not.  UNKNOWN comes from the training step's neighbour "
+            "dropout (the CFG null) and from chunks the sampler has not generated."
         ),
     }
 
@@ -294,7 +304,37 @@ def build_orientation_field() -> dict:
 # 2. Per-patch scalars
 # ---------------------------------------------------------------------------
 
+def check_volume_coverage(store: Path, field: dict) -> list[str]:
+    """Every volume in the store's index must have an orientation record.
+
+    The orientation field is a split_v2-era per-volume artefact; split_v3
+    changed which patches exist, not which volumes do.  This is the assertion
+    that the reuse is legitimate.
+    """
+    vols = field["volumes"]
+    seen: set[str] = set()
+    for split in SPLITS:
+        df = pd.read_parquet(store / split / "index.parquet", columns=["volume_id"])
+        seen |= set(df["volume_id"].unique().tolist())
+    missing = sorted(v for v in seen if v not in vols)
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} volume(s) in {store} have no record in "
+            f"{ORIENT_OUT.relative_to(REPO)}: {missing[:5]}.  Rebuild the "
+            f"orientation field (--rebuild-orientation) before the sidecar."
+        )
+    no_extent = sorted(v for v in seen if not vols[v].get("extent_foreground"))
+    if no_extent:
+        raise SystemExit(
+            f"{len(no_extent)} volume(s) have no foreground extent: "
+            f"{no_extent[:5]}.  cond_depth and cond_dist6 are undefined without "
+            f"the specimen box."
+        )
+    return sorted(seen)
+
+
 def build_scalars(store: Path, field: dict) -> dict:
+    """Per-patch cond_depth / cond_dist6 / cond_por_raw for every split."""
     vols = field["volumes"]
     stats: dict[str, dict] = {}
     frames: dict[str, pd.DataFrame] = {}
@@ -303,47 +343,55 @@ def build_scalars(store: Path, field: dict) -> dict:
         df = pd.read_parquet(store / split / "index.parquet",
                              columns=["source_row", "volume_id", "z0", "y0", "x0", "phi"])
         ext = df["volume_id"].map(lambda v: vols[v]["extent_foreground"])
-        zlo = np.array([e["z"][0] for e in ext], float)
-        zhi = np.array([e["z"][1] for e in ext], float)
-        ylo = np.array([e["y"][0] for e in ext], float)
-        yhi = np.array([e["y"][1] for e in ext], float)
-        xlo = np.array([e["x"][0] for e in ext], float)
-        xhi = np.array([e["x"][1] for e in ext], float)
+        # extent_foreground is [lo, hi] INCLUSIVE slice indices; the specimen
+        # box is [lo, hi + 1) so that a patch whose face sits on the last
+        # foreground slice measures a gap of 0, not -1.
+        box_lo = np.stack([np.array([e[a][0] for e in ext], float)
+                           for a in ("z", "y", "x")], axis=1)
+        box_hi = np.stack([np.array([e[a][1] + 1 for e in ext], float)
+                           for a in ("z", "y", "x")], axis=1)
+        origins = np.stack([df["z0"].to_numpy(float),
+                            df["y0"].to_numpy(float),
+                            df["x0"].to_numpy(float)], axis=1)
 
-        zc = df["z0"].to_numpy(float) + PATCH_SIZE / 2
-        yc = df["y0"].to_numpy(float) + PATCH_SIZE / 2
-        xc = df["x0"].to_numpy(float) + PATCH_SIZE / 2
-
-        depth_raw = (zc - zlo) / np.maximum(zhi - zlo, 1e-9)
+        centre_z = origins[:, 0] + PATCH_SIZE / 2
+        span_z = np.maximum(box_hi[:, 0] - box_lo[:, 0], 1e-9)
+        depth_raw = (centre_z - box_lo[:, 0]) / span_z
         depth = np.clip(depth_raw, 0.0, 1.0)
 
-        d = np.minimum.reduce([
-            np.minimum(zc - zlo, zhi - zc),
-            np.minimum(yc - ylo, yhi - yc),
-            np.minimum(xc - xlo, xhi - xc),
-        ])
-        dist = np.clip(d, 0.0, DIST_CAP) / DIST_CAP
+        dist6 = dist6_from_box_array(origins, PATCH_SIZE, box_lo, box_hi)
+        raw_gaps = np.empty_like(dist6, dtype=np.float64)
+        raw_gaps[:, 0::2] = origins - box_lo
+        raw_gaps[:, 1::2] = box_hi - (origins + PATCH_SIZE)
 
         phi = df["phi"].to_numpy(float)
-        por_raw = np.log(phi + POR_EPS)
+        por_raw = np.log(phi + POR_LOG_EPS)
 
-        frames[split] = pd.DataFrame({
+        cols = {
             "source_row": df["source_row"].to_numpy(np.int64),
             "cond_depth": depth.astype(np.float32),
-            "cond_dist": dist.astype(np.float32),
             "cond_por_raw": por_raw.astype(np.float32),
-        })
+        }
+        for k, name in enumerate(DIST6_COLUMNS):
+            cols[name] = dist6[:, k]
+        frames[split] = pd.DataFrame(cols)
+
         stats[split] = {
             "n": int(len(df)),
             "cond_depth": {"min": float(depth.min()), "max": float(depth.max()),
                            "mean": float(depth.mean())},
-            "cond_dist": {"min": float(dist.min()), "max": float(dist.max()),
-                          "mean": float(dist.mean())},
+            "cond_dist6": {
+                name: {"min": float(dist6[:, k].min()),
+                       "max": float(dist6[:, k].max()),
+                       "mean": float(dist6[:, k].mean()),
+                       "frac_at_zero": float(np.mean(dist6[:, k] <= 0.0)),
+                       "frac_at_cap": float(np.mean(raw_gaps[:, k] >= DIST_CAP))}
+                for k, name in enumerate(DIST6_COLUMNS)
+            },
             "cond_por_raw": {"min": float(por_raw.min()), "max": float(por_raw.max()),
                              "mean": float(por_raw.mean()), "std": float(por_raw.std())},
             "frac_depth_clipped": float(np.mean((depth_raw < 0) | (depth_raw > 1))),
-            "frac_dist_clipped_low": float(np.mean(d < 0)),
-            "frac_dist_at_cap": float(np.mean(d >= DIST_CAP)),
+            "frac_dist_clipped_low": float(np.mean(raw_gaps < 0)),
         }
 
     tr = frames["train"]["cond_por_raw"].to_numpy(np.float64)
@@ -352,48 +400,59 @@ def build_scalars(store: Path, field: dict) -> dict:
     for split, f in frames.items():
         f.to_parquet(store / split / "cond.parquet", index=False)
 
-    return {
-        "por_mean": por_mean,
-        "por_std": por_std,
-        "per_split": stats,
-    }
+    return {"por_mean": por_mean, "por_std": por_std, "per_split": stats}
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--store", default=str(DATA_ROOT / "latents_r07z4"))
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--store", default=str(DATA_ROOT / "latents_r08z4"))
+    ap.add_argument("--rebuild-orientation", action="store_true",
+                    help="Re-derive data/split_v2/orientation_field.json from the "
+                         "T-I fit and the expert ground truth before building the "
+                         "sidecar.  Only needed when those inputs change.")
     args = ap.parse_args()
     store = Path(args.store)
 
-    print("[1/3] building orientation field ...", flush=True)
-    field = build_orientation_field()
-    ORIENT_OUT.parent.mkdir(parents=True, exist_ok=True)
-    with open(ORIENT_OUT, "w") as fh:
-        json.dump(field, fh, indent=1)
-    s = field["summary"]
-    print(f"      wrote {ORIENT_OUT.relative_to(REPO)}")
-    print(f"      {s['n_orientation_usable']}/{s['n_volumes']} volumes usable; "
-          f"confidence {s['confidence_counts']}; "
-          f"{s['n_margin_below_2deg']} with <2 deg hypothesis margin "
-          f"({s['n_margin_below_2deg_excluding_symmetric']} excluding symmetric layups); "
-          f"{s['n_verification_failures']} verification failures")
+    if args.rebuild_orientation or not ORIENT_OUT.exists():
+        print("[1/4] rebuilding orientation field ...", flush=True)
+        field = build_orientation_field()
+        ORIENT_OUT.parent.mkdir(parents=True, exist_ok=True)
+        with open(ORIENT_OUT, "w") as fh:
+            json.dump(field, fh, indent=1)
+        sm = field["summary"]
+        print(f"      wrote {ORIENT_OUT.relative_to(REPO)}")
+        print(f"      {sm['n_orientation_usable']}/{sm['n_volumes']} volumes usable; "
+              f"confidence {sm['confidence_counts']}; "
+              f"{sm['n_margin_below_2deg']} with <2 deg hypothesis margin "
+              f"({sm['n_margin_below_2deg_excluding_symmetric']} excluding symmetric "
+              f"layups); {sm['n_verification_failures']} verification failures")
+    else:
+        print(f"[1/4] reusing {ORIENT_OUT.relative_to(REPO)} "
+              f"(pass --rebuild-orientation to re-derive it)", flush=True)
+        field = json.load(open(ORIENT_OUT))
 
-    print("[2/3] building per-patch scalars ...", flush=True)
+    print("[2/4] checking volume coverage ...", flush=True)
+    seen = check_volume_coverage(store, field)
+    print(f"      {len(seen)} volumes in {Path(args.store).name}, all present in "
+          f"the orientation field with a foreground extent")
+
+    print("[3/4] building per-patch scalars ...", flush=True)
     sc = build_scalars(store, field)
     for split, st in sc["per_split"].items():
+        d6 = st["cond_dist6"]
         print(f"      {split:5s} n={st['n']:>9,d} "
               f"depth[{st['cond_depth']['min']:.3f},{st['cond_depth']['max']:.3f}] "
-              f"dist[{st['cond_dist']['min']:.3f},{st['cond_dist']['max']:.3f}] "
-              f"por_raw mean={st['cond_por_raw']['mean']:.3f}")
+              f"dist6 mean=" + "/".join(f"{d6[c]['mean']:.2f}" for c in DIST6_COLUMNS)
+              + f" por_raw mean={st['cond_por_raw']['mean']:.3f}")
     print(f"      train standardisation: mean={sc['por_mean']:.6f} std={sc['por_std']:.6f}")
 
-    print("[3/3] updating store metadata ...", flush=True)
+    print("[4/4] updating store metadata ...", flush=True)
     meta_path = store / "metadata.json"
     meta = json.load(open(meta_path))
+    meta.pop("assembly", None)      # ldm05 parity schedule — gone with the sampler
     meta["voxel_size_um"] = VOXEL_SIZE_UM
-    meta["assembly"] = assembly_metadata()
     meta["conditioning"] = {
-        "version": "ldm05-v1",
+        "version": "ldm06-v1",
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "builder": "scripts/build_conditioning.py",
         "sidecar_file": "cond.parquet",
@@ -401,40 +460,36 @@ def main() -> None:
         "voxel_size_um": VOXEL_SIZE_UM,
         "orientation_field": str(ORIENT_OUT.relative_to(REPO)),
         "orientation_field_sha256": sha256(ORIENT_OUT),
-        "porosity_transform": f"log(phi + {POR_EPS})",
-        "porosity_denominator": "64**3 (unchanged — full patch volume)",
+        "n_volumes": len(seen),
+        "porosity_transform": f"log(phi + {POR_LOG_EPS})",
+        "porosity_denominator": f"{PATCH_SIZE}**3 (the full patch volume)",
         "por_standardisation": {
             "computed_over": "train",
             "mean": sc["por_mean"],
             "std": sc["por_std"],
         },
         "depth_definition": (
-            "(z_centre - z_top) / (z_bot - z_top), z_top/z_bot = outer specimen "
-            "faces from the T-A foreground extent (half-max threshold), clipped to [0,1]"
+            "(z_centre - z_lo) / (z_hi - z_lo), z_lo/z_hi = outer specimen faces "
+            "from the T-A foreground extent (half-max threshold), clipped to [0,1]"
         ),
-        "dist_definition": (
-            f"min(d, {int(DIST_CAP)}) / {int(DIST_CAP)}, d = distance in voxels from "
-            "the patch centre to the nearest outer specimen surface over all three axes"
+        "dist6_definition": (
+            f"per-face gap from the patch face to the matching specimen-box face, "
+            f"min(d, {int(DIST_CAP)}) / {int(DIST_CAP)}; the box is the foreground "
+            f"extent [lo, hi+1).  0 = the specimen ends at that face of the patch"
         ),
+        "dist6_order": list(DIST6_NAMES),
+        "dist6_dirs": [list(d) for d in DIST6_DIRS],
+        "dist6_columns": list(DIST6_COLUMNS),
         "orient_definition": (
             "(cos 2t, sin 2t) over the patch's 64 depth voxels, COMPONENTS "
             "mean-pooled in groups of 4 to 16 depth planes (never renormalised), "
             "broadcast over the two in-plane latent axes -> (2,16,16,16)"
         ),
-        "neighbour_schedule": {
-            "n_neighbours": len(NEIGHBOUR_DIRS),
-            "neighbour_dirs": [list(d) for d in NEIGHBOUR_DIRS],
-            "group_ordering": [list(g) for g in PARITY_GROUP_ORDER],
-            "group_rank": "4*pz + 2*py + px, generated in ascending rank",
-            "availability_rule": (
-                "a face neighbour flips exactly one parity bit; it is EXISTS if "
-                "its group rank is lower than the target's, UNKNOWN if higher, "
-                "OOB if the store holds no patch at that position.  Equivalently "
-                "both neighbours on axis a are EXISTS iff the target's parity bit "
-                "a is 1, giving 0/2/4/6 known neighbours by group"
-            ),
-            "shift": "none — the full neighbour latent is used as face-adjacent context",
-        },
+        "material_definition": (
+            "material.bin / air.bin, written by scripts/build_latent_dataset.py; "
+            "see the `material` metadata block"
+        ),
+        "geometry": geometry_metadata(),
         "scalar_stats": sc["per_split"],
     }
     tmp = meta_path.with_suffix(".json.tmp")

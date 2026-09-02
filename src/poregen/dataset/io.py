@@ -243,11 +243,11 @@ def save_volume_zarr(
 
     When *sample_mask* is given it is written as a third array beside
     ``xct``/``mask``.  volumes.zarr is the natural home: it is where the
-    per-volume mask arrays already live, and the material map builder
-    (scripts/build_material_maps.py) reads it back per volume.  Unlike
-    xct/mask it IS compressed (default codec): the mask is mostly-constant
-    regions, so it compresses ~100x, and it is only read by offline builders
-    where decompression cost is irrelevant.
+    per-volume mask arrays already live, and every offline builder that needs
+    the specimen envelope reads it back per volume.  Unlike xct/mask it IS
+    compressed (default codec): the mask is mostly-constant regions, so it
+    compresses ~100x, and it is only read by offline builders where
+    decompression cost is irrelevant.
     """
     store_path = Path(out_root) / "volumes.zarr"
 
