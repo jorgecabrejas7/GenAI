@@ -93,6 +93,11 @@ class VAEOutput:
       valid post-processing is a clamp — see :func:`decode_xct`.  Applying a
       sigmoid squashes it into [0.5, 0.731] and destroys contrast; the old
       field name ``xct_out`` invited exactly that mistake.
+    - **class_logits**: raw decoder output for the 3-class voxel label
+      (0 material, 1 pore, 2 air), shape ``(B, 3, D, H, W)``; use with
+      ``CrossEntropyLoss``.  Populated by the ``*_cls`` variants (r08+), which
+      have no binary mask head; ``None`` everywhere else.  Decode it with
+      :func:`decode_label` (argmax) or :func:`decode_class_probs` (softmax).
     - **mask_logits**: raw decoder output for the pore mask; use with
       ``BCEWithLogitsLoss``.  ``None`` for XCT-only decoder variants (e.g.
       ``v2.vrrae``) that have no ``mask_head`` — all other variants still
@@ -109,9 +114,31 @@ class VAEOutput:
 
     xct_out: torch.Tensor                                        # (B, 1, D, H, W), grey level in [0, 1]
     mask_logits: torch.Tensor | None = field(default=None, kw_only=True)  # (B, 1, D, H, W) or None
+    class_logits: torch.Tensor | None = field(default=None, kw_only=True)  # (B, 3, D, H, W) or None
     mu: torch.Tensor                            # (B, z_channels, d, h, w) or (B, rank) — required
     logvar: torch.Tensor                        # same shape as mu — required
     z: torch.Tensor                             # same shape as mu — required
+
+
+# Voxel classes, in the order the 3-class head emits them.  Same numbering as
+# poregen.dataset.loader.build_label and patches_label.bin.
+CLASS_MATERIAL, CLASS_PORE, CLASS_AIR = 0, 1, 2
+CLASS_NAMES = ("material", "pore", "air")
+N_CLASSES = 3
+
+
+def decode_class_probs(class_logits: torch.Tensor) -> torch.Tensor:
+    """3-class head → per-voxel probabilities, ``(B, 3, D, H, W)``."""
+    return torch.softmax(class_logits, dim=1)
+
+
+def decode_label(class_logits: torch.Tensor) -> torch.Tensor:
+    """3-class head → the predicted class index, ``(B, D, H, W)`` int64.
+
+    Softmax is monotone, so the argmax of the logits IS the argmax of the
+    probabilities — the softmax is not computed here.
+    """
+    return class_logits.argmax(dim=1)
 
 
 def decode_xct(xct_out: torch.Tensor) -> torch.Tensor:

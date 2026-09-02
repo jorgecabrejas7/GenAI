@@ -9,6 +9,8 @@ implementation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 
 
@@ -147,3 +149,54 @@ def porosity_binned_mae(
             float(abs_err[sel].mean().item()) if sel.sum() > 0 else float("nan")
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Three-class voxel label (r08+)
+# ---------------------------------------------------------------------------
+
+def multiclass_metrics(
+    class_logits: torch.Tensor,
+    target: torch.Tensor,
+    class_names: Sequence[str] = ("material", "pore", "air"),
+    pore_class: int = 1,
+    air_class: int = 2,
+) -> dict[str, float]:
+    """Hard metrics for the 3-class head, read off the argmax.
+
+    Everything here is computed on the DECODED label — the argmax the sampler
+    will actually write — not on the soft probabilities, so the numbers match
+    what a generated volume delivers.
+
+    Parameters
+    ----------
+    class_logits : (B, C, D, H, W) raw class logits.
+    target : (B, D, H, W) int64 class index.
+
+    Returns
+    -------
+    dict with ``dice_<name>`` per class, and, for the pore and air classes,
+    ``porosity_mae`` / ``porosity_bias`` / ``air_mae`` / ``air_bias``
+    (per-patch predicted fraction against the true fraction).
+    """
+    pred = class_logits.argmax(dim=1)
+    out: dict[str, float] = {}
+    for c, name in enumerate(class_names):
+        p = (pred == c)
+        t = (target == c)
+        inter = (p & t).flatten(1).sum(1).float()
+        card = p.flatten(1).sum(1).float() + t.flatten(1).sum(1).float()
+        # A patch with neither prediction nor truth for this class is a
+        # perfect agreement, so its Dice is 1 rather than 0/0.
+        dice = torch.where(card > 0, 2.0 * inter / card, torch.ones_like(card))
+        out[f"dice_{name}"] = dice.mean().item()
+
+    for c, prefix in ((pore_class, "porosity"), (air_class, "air")):
+        pf = (pred == c).flatten(1).float().mean(1)
+        tf = (target == c).flatten(1).float().mean(1)
+        signed = pf - tf
+        out[f"{prefix}_mae"] = signed.abs().mean().item()
+        out[f"{prefix}_bias"] = signed.mean().item()
+        out[f"{prefix}_pred_mean"] = pf.mean().item()
+    return out
+

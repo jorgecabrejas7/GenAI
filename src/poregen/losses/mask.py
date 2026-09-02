@@ -7,6 +7,13 @@ Performance note
 ``torch.sigmoid(logits)`` (e.g. for metrics), passing it here avoids a
 redundant elementwise op on the full ``(B, 1, D, H, W)`` tensor.
 
+r08+ — three-class label
+------------------------
+``multiclass_ce_loss`` / ``multiclass_dice_loss`` / ``combined_class_loss``
+operate on the 3-class voxel label (0 material, 1 pore, 2 air) that the
+``*_cls`` decoder heads emit, and take class logits rather than a single
+binary logit.
+
 R04+ — Focal loss
 -----------------
 When ``use_focal=True`` in the config, :func:`focal_loss` replaces BCE as the
@@ -17,6 +24,8 @@ Tversky/Dice is kept alongside focal loss unchanged.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -192,3 +201,90 @@ def combined_mask_loss(
         region_key:  region,
         "mask_total": total,
     }
+
+
+# ---------------------------------------------------------------------------
+# Three-class voxel label (r08+): material / pore / air
+# ---------------------------------------------------------------------------
+
+def multiclass_ce_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    class_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Class-weighted cross-entropy over the 3-class voxel label.
+
+    Parameters
+    ----------
+    logits : (B, C, D, H, W) raw class logits.
+    target : (B, D, H, W) int64 class index.
+    class_weights : (C,) optional per-class weight, normally inverse to the
+        class frequency of the training split.  Air and pore are each a few
+        per cent of the voxels, so without it the loss is dominated by
+        material and both minority classes collapse.
+    """
+    return F.cross_entropy(logits, target, weight=class_weights)
+
+
+def multiclass_dice_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    classes: Sequence[int],
+    smooth: float = 1.0,
+    *,
+    probs: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Soft Dice per class, averaged over *classes*.
+
+    Only the classes that matter are averaged: material is the background
+    here, and its Dice is ~1 whatever the model does, so including it would
+    dilute the signal from pore and air.
+
+    Parameters
+    ----------
+    logits : (B, C, D, H, W)
+    target : (B, D, H, W) int64
+    classes : which class indices to score, e.g. ``(1, 2)`` for pore and air.
+    probs : optional pre-computed ``softmax(logits, dim=1)``.
+
+    Returns
+    -------
+    dict with ``class_dice_{i}`` per class and ``class_dice`` (their mean).
+    """
+    p = probs if probs is not None else torch.softmax(logits, dim=1)
+    out: dict[str, torch.Tensor] = {}
+    terms = []
+    for c in classes:
+        pred_flat = p[:, c].flatten(1)
+        tgt_flat = (target == c).to(p.dtype).flatten(1)
+        inter = (pred_flat * tgt_flat).sum(1)
+        card = pred_flat.sum(1) + tgt_flat.sum(1)
+        loss_c = 1.0 - ((2.0 * inter + smooth) / (card + smooth)).mean()
+        out[f"class_dice_{c}"] = loss_c
+        terms.append(loss_c)
+    out["class_dice"] = torch.stack(terms).mean()
+    return out
+
+
+def combined_class_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    ce_weight: float = 1.0,
+    dice_weight: float = 1.0,
+    class_weights: torch.Tensor | None = None,
+    dice_classes: Sequence[int] = (1, 2),
+    *,
+    probs: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Weighted cross-entropy + soft Dice over the minority classes.
+
+    Returns a component dict with ``class_ce``, ``class_dice``, the per-class
+    Dice terms, and ``class_total`` (the weighted sum that goes into the total
+    loss).
+    """
+    ce = multiclass_ce_loss(logits, target, class_weights)
+    d = multiclass_dice_loss(logits, target, dice_classes, probs=probs)
+    out: dict[str, torch.Tensor] = {"class_ce": ce, **d}
+    out["class_total"] = ce_weight * ce + dice_weight * d["class_dice"]
+    return out
+

@@ -16,13 +16,15 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from poregen.models.vae.base import VAEOutput, decode_xct
+from poregen.models.vae.base import CLASS_PORE, VAEOutput, decode_xct
 from poregen.models.discriminator import (
     extract_multiplane_slices,
     lsgan_gen_loss,
     lsgan_disc_loss,
 )
-from poregen.metrics.seg import segmentation_metrics, porosity_metrics, porosity_binned_mae
+from poregen.metrics.seg import (
+    multiclass_metrics, porosity_binned_mae, porosity_metrics, segmentation_metrics,
+)
 from poregen.metrics.recon import sharpness_proxy
 from poregen.metrics.latent import (
     active_units_from_moments,
@@ -146,6 +148,30 @@ def _log_scalars_to_tb(
 
 # ── single-step helpers ───────────────────────────────────────────────────────
 
+# ── model input contract ──────────────────────────────────────────────────────
+
+def encoder_input_keys(model: nn.Module) -> tuple[str, ...]:
+    """Batch keys this VAE's ``forward()`` consumes, in order.
+
+    Variants declare ``encoder_inputs`` when they need something other than the
+    historic ``(xct, mask)`` pair — the r08 3-class variant takes
+    ``(xct, label)``.  ``getattr`` also sees through a ``torch.compile``
+    wrapper.
+    """
+    return tuple(getattr(model, "encoder_inputs", ("xct", "mask")))
+
+
+def to_device_inputs(
+    model: nn.Module,
+    batch: dict[str, Any],
+    device: torch.device,
+) -> tuple[dict[str, Any], tuple[torch.Tensor, ...]]:
+    """Move the model's inputs to *device*; return the patched batch and args."""
+    keys = encoder_input_keys(model)
+    moved = {k: batch[k].to(device, non_blocking=True) for k in keys}
+    return {**batch, **moved}, tuple(moved[k] for k in keys)
+
+
 def train_step(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
@@ -192,14 +218,13 @@ def train_step(
         mask_head) computed after unscaling and before global clipping.
     """
     model.train()
-    xct  = batch["xct"].to(device, non_blocking=True)
-    mask = batch["mask"].to(device, non_blocking=True)
-    batch_dev = {**batch, "xct": xct, "mask": mask}
+    batch_dev, model_args = to_device_inputs(model, batch, device)
+    xct = batch_dev["xct"]
 
     optimizer.zero_grad(set_to_none=True)
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        output: VAEOutput = model(xct, mask)
+        output: VAEOutput = model(*model_args)
         losses = loss_fn(output, batch_dev, step)
 
     # ── Adversarial: generator side (float32 outside AMP) ────────────────────
@@ -343,20 +368,20 @@ def eval_step(
 ) -> tuple[dict[str, Any], VAEOutput, torch.Tensor, torch.Tensor]:
     """Single eval step (no grad, AMP for speed).
 
-    Returns the loss dict (scalars + kl_per_channel list), the VAEOutput,
-    and the device-side xct/mask tensors to avoid redundant H→D transfers
-    in the caller.
+    Returns the loss dict (scalars + kl_per_channel list), the VAEOutput, the
+    device-side XCT, and the device-side segmentation input — the binary mask
+    for a binary-head variant, the int64 class label for a 3-class one.
+    Returning them avoids redundant H→D transfers in the caller.
     """
     model.eval()
-    xct  = batch["xct"].to(device, non_blocking=True)
-    mask = batch["mask"].to(device, non_blocking=True)
-    batch_dev = {**batch, "xct": xct, "mask": mask}
+    batch_dev, model_args = to_device_inputs(model, batch, device)
 
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        output: VAEOutput = model(xct, mask)
+        output: VAEOutput = model(*model_args)
         losses = loss_fn(output, batch_dev, step)
 
-    return {k: _to_scalar(v) for k, v in losses.items()}, output, xct, mask
+    return ({k: _to_scalar(v) for k, v in losses.items()}, output,
+            batch_dev["xct"], model_args[-1])
 
 
 # ── eval-over-N-batches helper ────────────────────────────────────────────────
@@ -420,6 +445,21 @@ def _run_eval(
             pred_por_all.append(pred_por_v.detach())
             gt_por_all.append(gt_por_v.detach())
             vol_ids_all.append(list(batch["volume_id"]))
+        elif output.class_logits is not None:
+            mask_sigmoid = None
+            # mask_dev is the int64 class label for a 3-class variant.  Every
+            # number here comes off the ARGMAX — the label a generated volume
+            # actually carries — not off the soft probabilities.
+            _accumulate(seg_acc, multiclass_metrics(output.class_logits, mask_dev))
+
+            pred_lab   = output.class_logits.argmax(dim=1)
+            pred_por_v = (pred_lab == CLASS_PORE).flatten(1).float().mean(1)
+            gt_por_v   = (mask_dev == CLASS_PORE).flatten(1).float().mean(1)
+            pred_por_signed_all.append((pred_por_v - gt_por_v).detach())
+            pred_por_all.append(pred_por_v.detach())
+            gt_por_all.append(gt_por_v.detach())
+            vol_ids_all.append(list(batch["volume_id"]))
+            del pred_lab
         else:
             mask_sigmoid = None
 
@@ -1135,11 +1175,14 @@ def _save_patch_samples(
             batch  = next(data_iter)
             n_take = min(n_samples - collected, batch["xct"].shape[0])
 
-            xct  = batch["xct"] [:n_take].to(device, non_blocking=True)
+            sub = {k: v[:n_take] for k, v in batch.items()
+                   if isinstance(v, torch.Tensor)}
+            _, model_args = to_device_inputs(model, sub, device)
+            xct = model_args[0]
             mask = batch["mask"][:n_take].to(device, non_blocking=True)
 
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                output = model(xct, mask)
+                output = model(*model_args)
 
             xct_gts.append(xct.cpu().float().numpy())
             mask_gts.append(mask.cpu().float().numpy())
@@ -1238,7 +1281,10 @@ def run_montecarlo_eval(
     import numpy as np
 
     model.eval()
-    xct  = batch["xct"].to(device, non_blocking=True)
+    _, model_args = to_device_inputs(model, batch, device)
+    xct = model_args[0]
+    # Ground-truth panel for the mask images below; only read when the variant
+    # has a binary mask head (has_mask), but the loader always provides it.
     mask = batch["mask"].to(device, non_blocking=True)
 
     has_mask = None  # set from the first forward pass below
@@ -1248,7 +1294,7 @@ def run_montecarlo_eval(
     with torch.no_grad():
         for _ in range(n_samples):
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                output = model(xct, mask)
+                output = model(*model_args)
             if has_mask is None:
                 has_mask = output.mask_logits is not None
             xct_samples.append(decode_xct(output.xct_out).float())

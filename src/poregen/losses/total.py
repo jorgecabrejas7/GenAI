@@ -7,9 +7,9 @@ from typing import Any
 import torch
 
 from poregen.losses.recon import get_recon_loss
-from poregen.losses.mask import combined_mask_loss
+from poregen.losses.mask import combined_class_loss, combined_mask_loss
 from poregen.losses.kl import kl_divergence, kl_divergence_flat, beta_schedule
-from poregen.models.vae.base import VAEOutput
+from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, VAEOutput
 
 
 def compute_total_loss(
@@ -20,6 +20,8 @@ def compute_total_loss(
     *,
     pos_weight: torch.Tensor | None = None,
     mask_sigmoid: torch.Tensor | None = None,
+    class_weights: torch.Tensor | None = None,
+    class_probs: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor | float]:
     """Compute combined VAE loss.
 
@@ -27,7 +29,8 @@ def compute_total_loss(
     ----------
     output : VAEOutput
     batch : dict
-        Must contain ``"xct"`` and ``"mask"`` tensors.
+        Must contain ``"xct"``, plus ``"mask"`` for a binary-head variant or
+        ``"label"`` (int64 class index) for a 3-class-head one.
     step : int
         Current global training step (for β scheduling).
     cfg : dict
@@ -43,13 +46,23 @@ def compute_total_loss(
         Pre-computed ``torch.sigmoid(output.mask_logits)``.  When the eval
         loop already has the sigmoid (e.g. for metrics), pass it here to
         avoid computing it twice inside the loss.
+    class_weights : torch.Tensor, optional
+        ``(3,)`` per-class weight for the r08 cross-entropy, normally inverse
+        to the training-split class frequency.  **Pre-allocate it once per
+        run** and pass it every step; when ``None`` it is built from
+        ``cfg["loss"]["class_weights"]`` on every call.
+    class_probs : torch.Tensor, optional
+        Pre-computed ``softmax(output.class_logits, dim=1)``, for the same
+        reason as ``mask_sigmoid``.
 
     Returns
     -------
     dict with keys:
         total, xct_loss, kl, beta, kl_collapsed_fraction, kl_per_channel,
         and (only when ``output.mask_logits is not None``) mask_bce,
-        mask_dice (or mask_tversky).
+        mask_dice (or mask_tversky); or (only when
+        ``output.class_logits is not None``) class_ce, class_dice,
+        class_dice_<i> per scored class, and class_total.
 
     Notes
     -----
@@ -101,6 +114,29 @@ def compute_total_loss(
         )
     mask_total = mask_dict.get("mask_total", torch.zeros((), device=output.xct_out.device))
 
+    # ── Three-class voxel label (r08+): weighted CE + soft Dice over the
+    #    minority classes.  Mutually exclusive with the binary mask head —
+    #    a variant emits one or the other, never both. ───────────────────
+    class_dict: dict[str, Any] = {}
+    if output.class_logits is not None:
+        if class_weights is None and c.get("class_weights") is not None:
+            class_weights = torch.tensor(
+                [float(w) for w in c["class_weights"]],
+                dtype=output.class_logits.dtype,
+                device=output.class_logits.device,
+            )
+        class_dict = combined_class_loss(
+            output.class_logits,
+            batch["label"],
+            ce_weight=c["class_ce_weight"],
+            dice_weight=c["class_dice_weight"],
+            class_weights=class_weights,
+            dice_classes=tuple(c.get("class_dice_classes", (CLASS_PORE, CLASS_AIR))),
+            probs=class_probs,
+        )
+    class_total = class_dict.get(
+        "class_total", torch.zeros((), device=output.xct_out.device))
+
     # ── KL — flat (B, C) latent (VRRAE) vs spatial (B, C, d, h, w) ─────
     kl_fn = kl_divergence_flat if output.mu.ndim == 2 else kl_divergence
     kl, kl_collapsed_fraction, kl_per_channel = kl_fn(
@@ -112,6 +148,7 @@ def compute_total_loss(
     total = (
         c["xct_weight"] * xct_loss
         + mask_total
+        + class_total
         + beta * kl
     )
 
@@ -129,5 +166,6 @@ def compute_total_loss(
         for k, v in mask_dict.items():
             if k not in ("mask_total", "mask_bce"):
                 result[k] = v
+    result.update(class_dict)
 
     return result
