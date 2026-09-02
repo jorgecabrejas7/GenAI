@@ -19,7 +19,8 @@ pytest tests/ -k "test_vae_output"     # filter by name
 build_dataset --help                   # CLI entry point
 
 # Training
-python scripts/train_vae.py r05/base              # launch by experiment id
+python scripts/train_vae.py run r05/base          # launch by experiment id
+python scripts/train_vae.py resume runs/vae/<run_name> checkpoints/<ckpt>
 python scripts/train_ldm.py run ldm06/base        # LDM training
 python scripts/train_ldm.py resume runs/ldm/<run_name> checkpoints/<ckpt>
 experiments list                                   # list all defined experiments
