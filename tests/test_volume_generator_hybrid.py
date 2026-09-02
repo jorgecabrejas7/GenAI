@@ -1,8 +1,12 @@
 """The ldm06 hybrid chunked sampler: neighbour sources, blended decode, seams.
 
-Everything here runs on a tiny synthetic denoiser and decoder, so the numbers
-are exact rather than plausible.  Geometry is scaled down: patch 8 voxels,
-latent 2 cells, downsample 4 — the same relations as production at 64/16/4.
+Everything runs on a synthetic denoiser and decoder, so the numbers are exact
+rather than plausible: the model records what it was handed and returns a fixed
+epsilon, and the decoders emit either a constant (which makes the blend
+normalisation checkable to the last bit) or a trilinear upsample of the latent
+(which gives the seam metrics real structure to measure).  Geometry is the
+production one — patch 64, latent 16, downsample 4 — over volumes of two or
+three tiles per axis.
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ from poregen.diffusion.conditioning import (
     NB_OOB,
     NB_UNKNOWN,
     NEIGHBOUR_DIRS,
-    N_NEIGHBOURS,
 )
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.diffusion.sampler import (

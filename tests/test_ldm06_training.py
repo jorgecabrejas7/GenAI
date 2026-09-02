@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from _ldm06_store import SYN, build_store, dataset_kwargs
+from _ldm06_store import build_store, dataset_kwargs
 from poregen.diffusion.conditioning import (
     NB_EXISTS,
     NB_OOB,
