@@ -43,24 +43,32 @@ def build_patch_dataloaders(
 
     Backend selection
     -----------------
-    If ``<data_root>/patches_meta.json`` exists (produced by
-    ``scripts/extract_patches_memmap.py``), :class:`MemmapPatchDataset` is
-    used for all splits.  It reads pre-extracted patches from flat memmaps
-    with sequential I/O and no chunk amplification, and does not require a
-    ``worker_init_fn``.
+    :class:`MemmapPatchDataset` is used when the files it actually reads are
+    all present — ``patches_meta.json``, ``patches_xct.bin`` and
+    ``patches_label.bin`` (produced by
+    ``scripts/extract_patches_memmap.py``).  It reads pre-extracted patches
+    from flat memmaps with sequential I/O and no chunk amplification, and does
+    not require a ``worker_init_fn``.
 
-    Otherwise, falls back to :class:`PatchDataset` (Zarr backend).
+    Otherwise, falls back to :class:`PatchDataset` (Zarr backend), which builds
+    the same 3-class label from the store's ``mask`` and ``sample_mask``
+    arrays.  A split root built before the 3-class label — ``split_v2``, which
+    has ``patches_mask.bin`` and no ``patches_label.bin`` — therefore reads
+    through Zarr rather than failing on the missing file.
     """
     root       = Path(data_root)
     index_path = root / "patch_index.parquet"
 
-    use_memmap = (root / "patches_meta.json").exists()
+    required = ("patches_meta.json", "patches_xct.bin", "patches_label.bin")
+    missing = [f for f in required if not (root / f).exists()]
+    use_memmap = not missing
     if use_memmap:
         DatasetClass = MemmapPatchDataset
         logger.info("Patch backend: memmap (%s)", root / "patches_meta.json")
     else:
         DatasetClass = PatchDataset
-        logger.info("Patch backend: zarr (memmap not found at %s)", root / "patches_meta.json")
+        logger.info("Patch backend: zarr (%s missing from %s)",
+                    ", ".join(missing), root)
 
     train_ds = DatasetClass(index_path, root, split="train")
     val_ds   = DatasetClass(index_path, root, split="val")

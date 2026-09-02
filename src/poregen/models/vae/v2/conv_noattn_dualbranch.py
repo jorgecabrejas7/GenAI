@@ -136,6 +136,18 @@ class ConvVAE3DNoAttnDualBranchV2(nn.Module):
             total, n_enc_a, n_enc_b, n_fusion, n_bottleneck, n_decoder,
         )
 
+    def encode_moments(self, xct: torch.Tensor,
+                       mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Posterior ``(mu, logvar)`` without decoding.
+
+        The encoder input layout lives here, so a diagnostic that needs the
+        posterior but not the reconstruction does not have to re-derive it.
+        """
+        enc_in = xct if self.cfg.in_channels == 1 else torch.cat([xct, mask], dim=1)
+        h = self.fusion(torch.cat([self.encoder_a(enc_in),
+                                   self.encoder_b(enc_in)], dim=1))
+        return self.to_mu(h), self.to_logvar(h)
+
     def forward(self, xct: torch.Tensor, mask: torch.Tensor) -> VAEOutput:
         """
         Parameters

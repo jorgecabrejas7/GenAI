@@ -124,6 +124,14 @@ class ConvVAE3DNoAttnDualBranchClsV2(nn.Module):
             N_CLASSES, sum(p.numel() for p in self.parameters()),
         )
 
+    def encode_moments(self, xct: torch.Tensor,
+                       label: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Posterior ``(mu, logvar)`` without decoding."""
+        enc_in = torch.cat([xct, label_to_channels(label).to(xct.dtype)], dim=1)
+        h = self.fusion(torch.cat([self.encoder_a(enc_in),
+                                   self.encoder_b(enc_in)], dim=1))
+        return self.to_mu(h), self.to_logvar(h)
+
     def forward(self, xct: torch.Tensor, label: torch.Tensor) -> VAEOutput:
         """
         Parameters
