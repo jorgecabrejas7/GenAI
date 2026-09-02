@@ -63,8 +63,94 @@ differ:
   losses consume.
 
 Latents for the LDM stack live in a memmap binary store
-(`data/split_v2/latents_r07z4/`) with sibling arrays for the material map and air
-fraction; see `src/poregen/dataset/material.py`.
+(`data/split_v3/latents_r08z4/`) with sibling arrays for the material map and
+air fraction, all written by one pass of `scripts/build_latent_dataset.py`; see
+`src/poregen/dataset/material.py`.
+
+## LDM conditioning contract
+
+The denoiser is `UNet3DDenoiser`. Nothing in it is switchable: every signal
+below is always present. An ldm05-era switch that no config ever flipped was
+only a way for training and generation to disagree.
+
+**Concatenated at the input** (127 channels at `z_channels = 4`):
+
+| Input | Channels | Meaning |
+|---|---|---|
+| `z_t` | `C` | the noisy latent at step `t` |
+| `cond_orient` | 2 | `(cos2θ, sin2θ)` ply-orientation depth profile |
+| `cond_material` | 1 | MATERIAL fraction per latent cell (voxel label 0) |
+| `nb_latents` | `6·C` | the six whole face-adjacent neighbour latents |
+| availability | `6·8` | learned embedding of OOB / EXISTS / UNKNOWN per face |
+| `nb_t` | `6·8` | sinusoidal embedding of each neighbour's own noise level |
+
+**FiLM / AdaGN scalars**, summed with the timestep embedding: `cond_por`
+(standardised `log(φ + 1e-3)`, with a learned null token for CFG),
+`cond_depth`, `cond_dist6` through one MLP over the whole 6-vector, and the
+availability-masked pool of the neighbour latents. There is no global-porosity
+input — the per-patch porosity field carries volume-level control.
+
+### Six per-face distances
+
+`cond_dist6` is the gap from each of the patch's own six faces to the matching
+face of the specimen box, capped at 64 voxels and normalised, ordered
+`(z-, z+, y-, y+, x-, x+)` by `conditioning.DIST6_DIRS`. ldm05 used a single
+`cond_dist` — the distance from the patch CENTRE to the NEAREST outer face over
+all three axes — which cannot say *which* side the specimen ends on, so a patch
+under the top surface and a patch against a side wall asked for the same thing.
+`conditioning.dist6_from_box` is the one definition; the training builder and
+the sampler both call it.
+
+### Neighbours arrive noised
+
+The store serves the neighbours' CLEAN posterior means. The training step
+(`ldm_engine.noise_neighbours`) draws a timestep per item and per face — with
+probability `nb_t_mix` the target's own `t`, otherwise `Uniform{0..t}` — and
+`q_sample`s each neighbour to it, passing `nb_t` to the denoiser. Separately,
+with probability `drop_nb` an item loses all six at once: availability UNKNOWN,
+latents zero, `nb_t` zero. That is exactly the neighbour null arm of the nested
+CFG, so training and `DDIMSampler` share one definition of "no neighbour
+information".
+
+This is what makes joint sampling possible at all. At generation time a
+neighbour is never clean — inside a chunk it is the canvas at the current
+timestep, and in a finished chunk it is a clean latent re-noised to that same
+timestep. A denoiser trained only on clean neighbours meets an input
+distribution it has never seen on its very first sampling step, which is why
+ldm05's joint mode had to drop neighbour conditioning entirely and its `s_nb`
+guidance arm was inert.
+
+Availability has three states: **OOB** (the specimen ends at that face),
+**EXISTS**, and **UNKNOWN** (a neighbour exists but is not resolved yet). The
+store only ever emits EXISTS and OOB; UNKNOWN comes from `drop_nb` and from the
+chunks the sampler has not reached.
+
+## Volume generation
+
+One path: **hybrid chunked joint denoising** (`diffusion/sampler.py`).
+
+- The volume is cut into CHUNKS of `chunk_tiles` 64-voxel tiles, generated in
+  raster order.
+- Inside a chunk, overlapping windows at `window_stride` voxels jointly denoise
+  that chunk's latent canvas: every window predicts ε, the predictions are fused
+  by a strictly-positive cosine weight, and ONE DDIM step is taken on the
+  canvas. Fusing ε INSIDE the reverse process is not the same as blending
+  finished samples, which halves the variance in the overlap and puts it
+  off-manifold.
+- A window's six faces come from the current chunk canvas at `t`, from a
+  finished chunk re-noised to `t` with fresh noise, from OOB (the block leaves
+  the volume), or from UNKNOWN (it reaches a chunk that does not exist yet).
+  Both EXISTS sources sit at the same noise level, so a block straddling the
+  current chunk and a finished one is still coherent.
+- `chunk_tiles = (1, 1, 1)` is patch-at-a-time sequential generation; one chunk
+  covering the volume is pure joint denoising.
+
+Decoding is overlapped too: latent windows at `decode_stride` voxels, with the
+decoded grey level and the raw 3-class logits blended under a tapered window
+before the argmax. Direct stride-64 tiling left a decoder-side seam at every
+patch face. `seam_discontinuity` is reported at BOTH the window period (64) and
+the chunk period (`64 · chunk_tiles`), on the grey level and on the pore
+log-odds, against one shared interior baseline.
 
 ## VAE model & training pipeline
 
@@ -144,3 +230,9 @@ question, each with a `README.md` and a vault note; see
 - `eval_step` returns `(losses, output, xct_dev, mask_dev)` — reuse those device
   tensors in `_run_eval` rather than re-transferring.
 - The XCT head is not a logit (see the decoder output contract above).
+- A generated volume is written on the SAME scale as a real one: `volume.tif` is
+  uint8 raw-scan grey and `label.tif` is uint8 `{0, 1, 2}`. Rescaling either
+  makes generated and real volumes incomparable and cost a whole evaluation
+  campaign once.
+- `neighbour_offset >= patch_size` — face neighbours must TOUCH, never overlap.
+  There is no flag to disable the guard.

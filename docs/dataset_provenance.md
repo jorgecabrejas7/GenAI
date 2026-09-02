@@ -10,7 +10,7 @@ Roots, newest first:
 | Root | State | Used by |
 |---|---|---|
 | `data/split_v3` | **current** | r08 VAE, ldm06 |
-| `data/split_v2` | superseded for training; still holds the live latent store and conditioning | campaigns 02-08, ldm05 |
+| `data/split_v2` | superseded for training; still holds the orientation field and the ldm05 latent store | campaigns 02-08, ldm05 |
 | `data/split_v1` | owns the only real `volumes.zarr` (207 GB) | everything, through symlinks |
 
 ---
@@ -38,6 +38,23 @@ Nothing is copied and `data/split_v2` is never written. See
 python scripts/build_split_v3.py --stage all
 python scripts/extract_patches_memmap.py --data-root data/split_v3 --verify
 ```
+
+Then, once an r08 VAE exists, the LDM store on top of it:
+
+```bash
+python scripts/build_latent_dataset.py \
+    --checkpoint runs/vae/<r08 run>/best.ckpt \
+    --output data/split_v3/latents_r08z4
+python scripts/build_conditioning.py --store data/split_v3/latents_r08z4
+```
+
+`build_latent_dataset.py` writes `latents.bin`, `index.parquet`,
+`material.bin` (uint8 MATERIAL fraction per latent cell, voxel label 0) and
+`air.bin` (float32, voxel label 2) per split in ONE pass over the label memmap,
+so the four files cannot fall out of alignment. `build_conditioning.py` then
+adds `cond.parquet` (`cond_depth`, six `cond_dist6_*`, `cond_por_raw`) and the
+`conditioning` metadata block, reusing `data/split_v2/orientation_field.json`
+after checking every volume in the store has a record and a foreground extent.
 
 `--stage all` runs `holes → splits → index → weights → report`; each stage is
 idempotent and can be run alone with `--stage <name>`. No stage takes a
@@ -238,12 +255,19 @@ a3f3f2f7cc65f90f772c4f8a62d66d07d429fdb5395c98b95c762f3724eda1d1`.
 
 ### 4. Added later, not part of the build
 
-- `sample_mask` arrays inside `volumes.zarr` — `scripts/build_material_maps.py`
-  (ldm06). They live in the shared v1 store, so `split_v3` sees them too.
-- `orientation_field.json` — `scripts/build_conditioning.py`.
+- `sample_mask` arrays inside `volumes.zarr` — written by
+  `poregen.dataset.io.save_volume_zarr` during the split_v1 build, compressed
+  beside `xct`/`mask`. Offline builders read them back rather than recomputing
+  the specimen envelope. The ldm06 material map no longer comes from here: it
+  is pooled from the 3-class voxel label by `scripts/build_latent_dataset.py`.
+- `orientation_field.json` — `scripts/build_conditioning.py --rebuild-orientation`.
+  Per-VOLUME (θ(z) from the nominal layup plus each volume's foreground extent),
+  so `split_v3` reuses it unchanged.
 - `latents_r07z4/` — `scripts/build_latent_dataset.py`, encoded with
   `runs/vae/r07-run-0006-…-z4-c32-…/best.ckpt` (experiment
-  `r07/reduction-factor-16`).
+  `r07/reduction-factor-16`). 🕰 the ldm05 store; the current loader cannot read
+  it (one `cond_dist`, no material sidecar). Superseded by
+  `data/split_v3/latents_r08z4`.
 
 ---
 
@@ -269,7 +293,7 @@ Steps 2 and 3 are cheap given the zarr.
 | `splits.json` | the v2 volume assignment (seed 42) |
 | `volume_stats.json` | per-volume intensity statistics |
 | `patches_meta.json` | N, strides and the parquet checksum of the deleted memmaps |
-| `orientation_field.json` | read at sampling time; not reproducible without the conditioning build |
+| `orientation_field.json` | read at training AND sampling time by `split_v3` too; rebuilding it needs the T-I artefacts |
 | `latents_r07z4/` | campaigns 02–08 and ldm05 all resolve through it |
 
 `patches_xct.bin` and `patches_mask.bin` (596 GB each) are the only entries a

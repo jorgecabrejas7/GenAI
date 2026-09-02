@@ -20,7 +20,7 @@ build_dataset --help                   # CLI entry point
 
 # Training
 python scripts/train_vae.py r05/base              # launch by experiment id
-python scripts/train_ldm.py run ldm05/base        # LDM training
+python scripts/train_ldm.py run ldm06/base        # LDM training
 python scripts/train_ldm.py resume runs/ldm/<run_name> checkpoints/<ckpt>
 experiments list                                   # list all defined experiments
 experiments clone r05/base r06/my_variant         # create new experiment extending r05
@@ -37,7 +37,7 @@ Do not fix unless explicitly asked:
 - `tests/test_latent_metrics.py::test_active_units_counts_collapsed_channels`
 - `tests/test_recon_metrics.py` (3 failures)
 
-A clean run is therefore **232 passed, 5 failed**.
+A clean run is therefore **264 passed, 5 failed**.
 
 ## Deployment target
 

@@ -15,11 +15,10 @@ companion docs listed under [docs/](#docs).
 | 1. Raw TIFF → volumes + patch index | `src/poregen/dataset/build_dataset.py` (CLI `build_dataset`) | `data/<split>/volumes.zarr/`, `patch_index.parquet`, `volume_stats.json`, `splits.json` |
 | 2. Patch index → flat memmap (fast loading) | `scripts/extract_patches_memmap.py` | `data/split_v3/patches_{xct,label}.bin` + `patches_meta.json` |
 | 3. VAE training | `scripts/train_vae.py` → `poregen.cli.experiments:main` → `poregen.experiments.train_vae` → `poregen.training.engine.train_loop` | `runs/vae/<run>/` |
-| 4. VAE → latent store | `scripts/build_latent_dataset.py` | `data/split_v2/latents_r07z4/` (live store) |
-| 4b. Per-patch conditioning (ldm05) | `scripts/build_conditioning.py` | `data/split_v2/orientation_field.json`, per-split `cond.parquet`, `conditioning`/`assembly` blocks in the store `metadata.json` |
-| 4c. Per-patch material maps (ldm06) | `scripts/build_material_maps.py` | per-split `material.bin` + `air.bin` beside the latents, `sample_mask` arrays in `volumes.zarr`, `material` block in the store `metadata.json` |
+| 4. VAE → latent store | `scripts/build_latent_dataset.py` | `data/split_v3/latents_r08z4/` — per-split `latents.bin` + `index.parquet` + `material.bin` + `air.bin` |
+| 4b. Per-patch conditioning | `scripts/build_conditioning.py` | per-split `cond.parquet` (`cond_depth`, six `cond_dist6_*`, `cond_por_raw`) + the `conditioning` block in the store `metadata.json`; reuses `data/split_v2/orientation_field.json` |
 | 5. LDM training | `scripts/train_ldm.py` → `poregen.cli.experiments:main_ldm` → `poregen.experiments.train_ldm` → `poregen.training.ldm_engine.train_loop` | `runs/ldm/<run>/` |
-| 6. Generation | `scripts/generate_volumes.py` (uses `poregen.diffusion.sampler.VolumeGenerator`) | TIFF volume grid per porosity/layout |
+| 6. Generation | `scripts/generate_volumes.py` (uses `poregen.diffusion.sampler.VolumeGenerator`) | `volume.tif` (uint8 grey) + `label.tif` (uint8 0/1/2) per porosity × layout |
 | 7. Evaluation — VAE | `poregen.eval.runner.run_eval` (driven from the experiments CLI) | `runs/vae/<run>/eval/<timestamp>-<tier>/` |
 | 7b. Evaluation — generated volumes | `scripts/eval_generated_volumes.py` ⚠ stale | `eval_results/` |
 
@@ -49,7 +48,7 @@ companion docs listed under [docs/](#docs).
 | `dataset/build_dataset.py` | CLI: discover raw TIFFs → Zarr → masks → per-volume stats → patch index. Supports `--stats_only`. |
 | `dataset/io.py` | Volume discovery, TIFF load, Zarr write, per-volume intensity stats (`VolumeInfo`). |
 | `dataset/segmentation.py` | Pore/material segmentation (Sauvola + Otsu, fill-voids). Package home of the root `onlypores.py`. `compute_sample_mask` re-derives just the material envelope (no Sauvola). |
-| `dataset/material.py` | ldm06 material maps: block-mean pooling of `sample_mask` to latent-resolution fraction cells, uint8 encode/decode, air fraction. |
+| `dataset/material.py` | ldm06 material maps: block-mean pooling of the 3-class label to latent-resolution MATERIAL (label 0) fraction cells, batched over a patch dimension, plus uint8 encode/decode. Pores are not material, so `air != 1 - material`. |
 | `dataset/patch_index.py` | Patch coordinate generation, 3-D integral volume for O(1) patch fractions (`patch_fractions` — porosity and, in split_v3, air fraction), Parquet index writer. |
 | `dataset/splits.py` | Volume-level splits: deterministic `v1` and stratified-by-porosity `v2`; writes lightweight split roots. The `v3` split is by PANEL and lives in `scripts/build_split_v3.py`. |
 | `dataset/holes.py` | Finds the three drilled registration through-holes of a coupon from `sample_mask` (z-MINIMUM projection of the complement, border-touching components dropped, Euclidean dilation) and marks the patches that touch one. |
@@ -72,7 +71,7 @@ companion docs listed under [docs/](#docs).
 | `models/vae/v2/vrrae_linear.py` | `v2.vrrae_linear` — SVD ablation twin: same flat bottleneck, plain `Linear` heads. |
 | `models/vae/v2/vrrae_finetune.py` | Fixed-basis extraction at inference + decoder-only fine-tune hook for VRRAE. |
 | `models/discriminator.py` | 2-D multi-plane PatchGAN + LSGAN losses for adversarial XCT supervision (R04+). Runs in float32 — see `AGENTS.md`. |
-| `models/diffusion/unet.py` | `UNet3DDenoiser` / `UNet3DConfig` — the LDM denoiser. Spatial conditioning (orientation profile + whole face-adjacent neighbour latents + availability embeddings) is concatenated at the input; scalars (`cond_por`, `cond_depth`, `cond_dist`) are FiLM/AdaGN. All switchable; there is no global-porosity input. |
+| `models/diffusion/unet.py` | `UNet3DDenoiser` / `UNet3DConfig` — the LDM denoiser. Input channels: `z` + orientation (2) + material (1) + 6 whole neighbour latents + 6 availability embeddings + 6 sinusoidal `nb_t` embeddings = **127 at z=4**. FiLM/AdaGN scalars: `cond_por` (learned null token), `cond_depth`, `cond_dist6` (one MLP over the 6-vector), plus the availability-masked neighbour pool. Nothing is switchable and there is no global-porosity input. |
 | `models/diffusion/blocks.py` | GroupNorm/SiLU res-blocks, attention, sinusoidal time embedding for the denoiser. |
 
 ### losses / metrics
@@ -92,7 +91,7 @@ companion docs listed under [docs/](#docs).
 | Path | What it does |
 |---|---|
 | `training/engine.py` (~1.3k lines) | VAE `train_step` / `eval_step` / `train_loop`: AMP, discriminator, EMA, eval cadence, early stopping, TensorBoard + JSONL logging, sample export. See `docs/vae_architecture.md`. |
-| `training/ldm_engine.py` | LDM equivalent: EMA, ε-prediction step, eval loop, in-training generation eval. See `docs/ldm_training.md`. |
+| `training/ldm_engine.py` | LDM equivalent: EMA, ε-prediction step, eval loop, in-training generation eval and sample volumes. `noise_neighbours` is the neighbour-noising draw (per-neighbour `t_nb`, `nb_t_mix`, the `drop_nb` CFG null). See `docs/ldm_training.md`. |
 | `training/data.py` | `build_dataloader_kwargs`, `build_patch_dataloaders` (train/val/test from the Zarr or memmap backend). |
 | `training/checkpoint.py` | Atomic checkpoint save/load (model, optimizer, scaler, scheduler, EMA, RNG), sync + async variants. |
 | `training/device.py` | Device selection, autocast dtype, GradScaler. |
@@ -103,12 +102,12 @@ companion docs listed under [docs/](#docs).
 
 | Path | What it does |
 |---|---|
-| `diffusion/latents.py` | Load side of the latent store: `LatentDataset` + `build_latent_dataloaders`; reads `metadata.json` + per-split `latents.bin`/`index.parquet`/`cond.parquet`, applies the train-split normalisation, and returns the fixed ldm05 batch contract (scalars, `cond_orient`, unshifted touching neighbours + availability); behind `material=True` (ldm06, default off) also `cond_material`/`air_fraction`/`nb_air_fraction` and the optional all-air `air_patch_cap`. Keeps `sample_stride` (32, data multiplier) / `generation_stride` (64) / `neighbour_offset` (64) separate and enforces `neighbour_offset >= patch_size`. |
+| `diffusion/latents.py` | Load side of the latent store: `LatentDataset` + `build_latent_dataloaders`; reads `metadata.json` + per-split `latents.bin`/`index.parquet`/`cond.parquet`/`material.bin`/`air.bin`, applies the train-split normalisation, and returns the fixed ldm06 batch contract (`cond_por`/`cond_depth`/`cond_dist6`/`cond_orient`/`cond_material`, CLEAN unshifted touching neighbours + availability, `air_fraction`, provenance). Availability is only ever EXISTS or OOB — UNKNOWN comes from the training step and the sampler. Keeps `sample_stride` (32, data multiplier) / `generation_stride` (64) / `neighbour_offset` (64) separate and enforces `neighbour_offset >= patch_size`. |
 | `diffusion/noise_schedule.py` | `DDPMSchedule` — cosine schedule, ε-prediction, movable to device without being an `nn.Module`. |
-| `diffusion/sampler.py` | `DDPMSampler`, `DDIMSampler`, `VolumeGenerator` with two denoising modes — sequential (eight-group parity schedule, whole unshifted neighbours) and joint (MultiDiffusion-style: overlapping stride-32 windows, per-timestep cosine-weighted ε fusion on one latent canvas, neighbours all-UNKNOWN) — both decoded on the stride-64 tiling grid, no blending; plus `porosity_to_cond`, `theta_from_layup` and `seam_discontinuity` (the assembly-quality metric: patch-to-patch face jump vs the interior slice-to-slice baseline). |
-| `diffusion/conditioning.py` | Single source of truth for the shared conventions: neighbour direction order, availability states (OOB/EXISTS/UNKNOWN), the grid index, the eight-group parity schedule and its fixed ordering, the `neighbour_offset >= patch_size` leak guard, and the (ablation-only) neighbour→target-frame shift. Also the standalone availability embedding. |
+| `diffusion/sampler.py` | `DDIMSampler` (nested-CFG `predict_eps`, `sample_batch`) and `VolumeGenerator` — ONE generation path: hybrid chunked joint denoising. Chunks of `chunk_tiles` 64-voxel tiles in raster order; inside a chunk overlapping `window_stride` windows jointly denoise its latent canvas with cosine-weighted ε fusion; each window's six faces come from the chunk canvas at `t`, a finished chunk re-noised to `t`, OOB, or UNKNOWN. Decode is overlapped at `decode_stride` and blends grey + 3-class logits with a tapered window before the argmax. Also `window_origins`, `window_weight`, `theta_from_layup` and `seam_discontinuity` (per-axis period, so window and chunk planes are reported separately against one interior baseline). |
+| `diffusion/conditioning.py` | Single source of truth for the shared conventions: neighbour direction order, availability states (OOB/EXISTS/UNKNOWN), the grid index, the six per-face distance directions and `dist6_from_box`/`dist6_from_box_array`, the porosity transform + clamp range, and the `neighbour_offset >= patch_size` leak guard (no escape hatch). |
 | `diffusion/orientation.py` | `OrientationField` (reads `data/split_v2/orientation_field.json`) + the `(cos2θ, sin2θ)` encoding: pool the components, never the angle, and never renormalise the pooled vector. Shared by dataset and sampler. |
-| `diffusion/generation_eval.py` | In-training LDM diagnostics: off-manifold latent moments, x0-clamp fraction, decode-based porosity vs the real val split. |
+| `diffusion/generation_eval.py` | In-training LDM diagnostics: off-manifold latent moments, x0-clamp fraction, and decode-based pore/air fraction vs the real val split, sampled with real val conditioning and the CFG neighbour null (all-UNKNOWN at `nb_t` 0). |
 | `diffusion/porosity_field.py` | Coherent per-patch porosity field for inference (D32 §4): T-E marginal draw per grid cell, anisotropic Gaussian smoothing with the T-D volume-mean-removed correlation lengths, mean rescale to the global target, clamp to the training phi range [0.002, 0.107]. Loaders for the T-E sampler and T-D lengths from their `results.json`. Used by `scripts/generate_volumes.py` distribution `"coherent"`. |
 
 ### experiments / runtime
@@ -116,7 +115,7 @@ companion docs listed under [docs/](#docs).
 | Path | What it does |
 |---|---|
 | `experiments/train_vae.py` | Config-driven VAE run: build model, dataloaders, run dir, `train_loop`; `run_experiment` and `resume_run`. |
-| `experiments/train_ldm.py` | Same for the LDM. Also pulls the porosity standardisation stats and the parity group ordering out of the latent store metadata. |
+| `experiments/train_ldm.py` | Same for the LDM. Also pulls the porosity standardisation stats out of the latent store metadata and refuses to start when the store's VAE checkpoint is not the one the config names. |
 | `experiments/base.py` | `ExperimentRuntime` (`from_checkpoint` factory), `build_patch_loader`, `find_repo_root`. |
 | `experiments/r03.py` | R03 notebook import surface: auxiliary XCT decoder, its train/eval helpers, latent analyses. |
 | `analysis/__init__.py` | 💀 Empty stub — only a pointer saying R03 analysis moved to `experiments/r03.py`. |
@@ -145,9 +144,8 @@ companion docs listed under [docs/](#docs).
 | Path | What it does |
 |---|---|
 | `extract_patches_memmap.py` | One-time Zarr → flat `patches_{xct,label}.bin` memmap extraction, row-aligned with `patch_index.parquet`. `patches_label.bin` holds the 3-class voxel label (0 material, 1 pore, 2 air = `sample_mask == 0`); air takes precedence over pore. Refuses to start when the filesystem cannot hold both arrays. |
-| `build_latent_dataset.py` | Encodes every patch with a trained VAE → raw `mu`/`std` memmap + train-split normalisation stats. Builds the live `latents_r07z4` store. |
-| `build_material_maps.py` | ldm06 (D40 §1): per-patch material maps (uint8, latent resolution) + air fractions for an EXISTING latent store, as sibling `material.bin`/`air.bin` memmaps; persists each volume's `sample_mask` into `volumes.zarr` (compressed); resumable per volume; no latents re-encoded. |
-| `build_conditioning.py` | Builds the ldm05 conditioning data: `data/split_v2/orientation_field.json` (nominal θ(z) per volume, with T-I confidence flags and a full re-verification of the boundary↔ground-truth-angle correspondence) and the per-split `cond.parquet` sidecar (`cond_depth`, `cond_dist`, `cond_por_raw`), plus the `conditioning` / `assembly` metadata blocks. |
+| `build_latent_dataset.py` | Encodes every patch with a trained VAE (encoder inputs read off the model's `encoder_inputs`) → raw `mu`/`std` memmap + train-split normalisation stats, AND `material.bin`/`air.bin` pooled from the same label tensor in the same pass. Builds the `latents_r08z4` store. |
+| `build_conditioning.py` | Builds the per-split `cond.parquet` sidecar (`cond_depth`, six `cond_dist6_*`, `cond_por_raw`) and the `conditioning` metadata block, reusing `data/split_v2/orientation_field.json` after asserting every store volume has a record and a foreground extent. `--rebuild-orientation` re-derives that field from the T-I fit + expert ground truth — the provenance of the artefact. |
 
 **Training entry points**
 
@@ -159,14 +157,14 @@ companion docs listed under [docs/](#docs).
 
 | Path | What it does |
 |---|---|
-| `generate_volumes.py` | Sweeps porosity × spatial layout, generates anisotropic volumes with stride-32 tiling, writes `volume.tif` / `mask.tif`. |
-| `visualize_denoising.py` | MP4 of a DDIM chain for one patch, decoding every intermediate latent. |
+| `generate_volumes.py` | Sweeps porosity × spatial layout with the hybrid chunked sampler (`--chunk-tiles`, `--window-stride`, `--decode-stride`, `--ddim-steps`, `--s-por`, `--s-nb`), writes `volume.tif` (uint8 grey) + `label.tif` (uint8 0/1/2) + `generation_stats.json`. Both arrays are NATIVE scale — nothing rescales them. |
+| `visualize_denoising.py` | MP4 of a DDIM chain for one interior patch, decoding every intermediate latent to grey / p(pore) / argmax label. |
 
 **Diagnostics / profiling**
 
 | Path | What it does |
 |---|---|
-| `diag_ldm_samples.py` | Standard LDM convergence health-check: samples with REAL val conditioning split by EXISTS-neighbour bucket (0/2/4/6), {raw, ema} × DDIM-50 latent moments + decoded porosity per bucket, conditioning-alive probe (FULL vs neutralised inputs on the total-noise MAD scale), trend verdict (CONVERGING/STALLED/REGRESSING) appended to `<run_dir>/convergence_check.jsonl`. Handles unconditional runs (single bucket). `--ddim200` adds the 200-step variants. |
+| `diag_ldm_samples.py` | Standard LDM convergence health-check: samples with REAL val conditioning split by EXISTS-neighbour bucket (0..6, weighted by the OBSERVED frequency in the scanned rows), {raw, ema} × DDIM-50 latent moments + decoded pore/air fraction per bucket, conditioning-alive probe (porosity / orientation / material / neighbours-UNKNOWN vs the total-noise MAD scale), φ kill-switch, and a trend verdict (CONVERGING/STALLED/REGRESSING) appended to `<run_dir>/convergence_check.jsonl`. `--ddim200` adds the 200-step variants. |
 | `diag_mask_sanity.py` | Does the r07 decoder emit sane masks from noise-perturbed latents? Writes `runs/diagnostics/mask_sanity_r07z4/`. |
 | `diagnose_decode_regime.py` | Sweeps `z = mu + s·sigma·eps` to test clean-mu vs training-time-sample decoding. |
 | `debug_reconstruction.py` | 🕰 Four-hypothesis probe of early reconstruction/orientation/z-score bugs. Defaults to the legacy `src/poregen/configs/vae_default.yaml`. |
@@ -181,6 +179,13 @@ companion docs listed under [docs/](#docs).
 Every script here writes under `runs/campaigns/<NN>-<name>/` — one campaign per
 question, indexed in `runs/campaigns/INDEX.md`. `_common.py` holds the shared
 plot style, JSON writers, zarr/data paths and 1-D signal helpers.
+
+⚠ **The generation-side campaign scripts are pinned to the ldm05 sampler API**
+(`DDPMSampler`, `mode="sequential"/"joint"`, `conditioning_semantics`,
+`mask.tif`) and will NOT run against the ldm06 code. They are kept unchanged as
+the provenance of the results already published from them — rewriting them onto
+an API they never ran with would make those results untraceable. A new
+generation campaign starts from `scripts/generate_volumes.py`.
 
 Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 `02-porosity-control-v1` (`dose_response`, `cfg_sweep`, `layup_roundtrip`,
@@ -234,7 +239,7 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 
 | Path | What it does |
 |---|---|
-| `eval_generated_volumes.py` (~1.8k lines) | Stage-4 generation quality suite: porosity MAE, PSD W1, S2(r), Ripley's K, FID, memorisation. ⚠ Its memorisation step expects the **old** latent layout (`latents_s64_sampled/latents_meta.json` + one flat `latents.bin`); the live store is `data/split_v2/latents_r07z4` with `metadata.json` and per-split files. It warns and skips rather than failing. |
+| `eval_generated_volumes.py` (~1.8k lines) | Stage-4 generation quality suite: porosity MAE, PSD W1, S2(r), Ripley's K, FID, memorisation. ⚠ Its memorisation step expects the **old** latent layout (`latents_s64_sampled/latents_meta.json` + one flat `latents.bin`); the live store is `data/split_v3/latents_r08z4` with `metadata.json` and per-split files. It warns and skips rather than failing. |
 | `eval_r03.py` | 🕰 R03-specific post-training eval (full-volume recon, S2/PSD, GIFs, latent audit). Largely superseded by the `poregen.eval` package. |
 | `eval_checkpoint.py` | 🕰 Older full-volume checkpoint eval; requires a legacy flat `--config` YAML. |
 
@@ -265,11 +270,12 @@ Hierarchical YAML. Resolution order (`extends` → `components` → body → `ov
 | `r04/` | 🕰 historical | R03 + dual-branch encoder + focal mask loss + LSGAN discriminator (`disc_weight=0.01`). |
 | `r05/` | **current sweep** | R04 with `free_bits=0.1`, `disc_weight=0.05`. `reduction-factor-{2,8,16,32,64}` sweep latent compression. |
 | `r06/` | **current sweep** | XCT-only (`v2.conv_noattn_xctonly`, no mask head) compression sweep, same rungs plus `-4`. |
-| `r07/` | **supplies the live latents** | Full AE (`in_channels=2`, both decoder heads) on the dual-branch trunk. `r07/reduction-factor-16` (z=4) produced `r07-run-0006-…-z4-c32-…`, the VAE behind `latents_r07z4`. The rung name is the TOTAL VOXEL reduction, not the channel count: `reduction-factor-4` is z=16, `-16` is z=4. |
-| `r08/` | **current VAE** | The 3-class VAE for ldm06: `v2.conv_noattn_dualbranch_cls` on `data/split_v3`, encoder `cat([xct, pore, air])`, decoder emitting material/pore/air logits. Extends `r07/reduction-factor-16`, so every other hyperparameter is that run's. `loss.class_weights` comes from `data/split_v3/class_weights.json`. |
+| `r07/` | 🕰 supplied the ldm05 latents | Full AE (`in_channels=2`, both decoder heads) on the dual-branch trunk. `r07/reduction-factor-16` (z=4) produced `r07-run-0006-…-z4-c32-…`, the VAE behind `latents_r07z4`. The rung name is the TOTAL VOXEL reduction, not the channel count: `reduction-factor-4` is z=16, `-16` is z=4. |
+| `r08/` | **current VAE — supplies the live latents** | The 3-class VAE for ldm06: `v2.conv_noattn_dualbranch_cls` on `data/split_v3`, encoder `cat([xct, pore, air])`, decoder emitting material/pore/air logits. Extends `r07/reduction-factor-16`, so every other hyperparameter is that run's. `loss.class_weights` comes from `data/split_v3/class_weights.json`. |
 | `vrrae/`, `vrrae03/`, `vrrae04/` | 🕰 historical ablation | Flat SVD rank-reduction bottleneck (`vrrae03`) vs its plain-`Linear` twin (`vrrae04`). `vrrae/smoke100.yaml` is a self-labelled throwaway 100-step smoke test. |
-| `ldm05/` | **current LDM rung** | First conditional LDM (D32): orientation profile as input channels, porosity/depth/distance by FiLM, touching (offset-64) neighbours, eight-group assembly on a stride-64 tiling grid. Trained from scratch, not warm-started from ldm04. |
-| `ldm04/` | previous rung | First LDM on the normalised r07z4 store: z=4, 16³ latents, **unconditional** (neighbour/position/porosity conditioning present in code but off). ldm01–ldm03 configs were removed; only their `runs/ldm/` output remains. |
+| `ldm06/` | **current LDM rung** | The r08 3-class latent store (`data/split_v3/latents_r08z4`), six per-face distances, always-on material map, neighbours noised to their own timestep, hybrid chunked joint sampling with blended decode. 127 input channels at z=4. `aux.yaml` extends it and writes down a `loss.decoded` block with `enabled: false` — the design record for the next rung; no code reads it. |
+| `ldm05/` | 🕰 historical | First conditional LDM (D32): orientation profile as input channels, porosity/depth/one distance scalar by FiLM, touching (offset-64) neighbours, eight-group parity assembly. Kept as the provenance of the `runs/ldm/ldm05-*` results; it names model switches and a latent store the current code no longer has, so it will not launch. |
+| `ldm04/` | 🕰 historical | First LDM on the normalised r07z4 store: z=4, 16³ latents, **unconditional**. Same caveat as ldm05. ldm01–ldm03 configs were removed; only their `runs/ldm/` output remains. |
 
 Reduction factor convention across r05/r06/r07: `X = 64³ / (z_channels · 16³) = 64 / z_channels`
 at the fixed f=4 spatial downsampling.
@@ -289,14 +295,14 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 | `test_vrrae_vae.py`, `test_vrrae_linear.py`, `test_vrrae_bottleneck.py`, `test_vrrae_finetune.py` | VRRAE family: shapes, gradients, registry, fixed-basis round-trip. |
 | `test_recon_metrics.py`, `test_latent_metrics.py` | Recon metrics + eval loop wiring; latent moment merging and active units. |
 | `test_early_stopping.py`, `test_patch_sample_export.py` | `train_loop` early-stopping path; TIFF sample export. |
-| `test_latent_dataset.py` | `LatentDataset` normalisation and memmap unpacking. |
-| `test_material_maps.py` | ldm06 material maps: sample_mask pooling, uint8 store round-trip through `build_material_maps.py`, `LatentDataset` material flag/shapes, neighbour air fractions, all-air patch cap. |
-| `test_ldm05_conditioning.py` | ldm05 conditioning data side: orientation encoding/pooling rules, the touching-neighbour geometry and its leak guards, the eight-group availability schedule, scalar ranges, and the batch contract (synthetic store + the built artefacts). |
-| `test_cfg_guidance.py`, `test_conditioning_map_audit.py` | CFG implementation; porosity/conditioning map behaviour at train vs generation time (pins current behaviour). |
-| `test_volume_generator_assembly.py`, `test_volume_generator_schedule.py` | Direct-tiling assembly (no blending); the eight-group schedule, the touching-neighbour guards and the seam diagnostic on the generation side. |
-| `test_volume_generator_joint.py` | Joint (MultiDiffusion) mode: window/canvas math, weight normalisation, ε-fusion on predictions (not samples), all-UNKNOWN neighbours, mode dispatch. |
+| `_ldm06_store.py` | Not a test — the miniature ldm06 latent store several test modules build on (patch 16, latent 4³, every patch a crop of one known field). |
+| `test_material_maps.py` | The material-map arithmetic the encoding pass performs: batched block-mean pooling, uint8 round-trip, `material + pore + air = 1`, and `compute_sample_mask`. |
+| `test_ldm06_conditioning.py` | The conditioning data side: orientation encoding/pooling rules, the touching-neighbour leak guard, `cond_dist6` (shared helper AND `build_conditioning.build_scalars` on a synthetic extent), and the `LatentDataset` batch contract. |
+| `test_ldm06_training.py` | The 127-channel input accounting, one test per conditioning input proving it reaches the output, `noise_neighbours` (t_nb draw, mix rate, `drop_nb` null) and the train/eval step wiring. |
+| `test_volume_generator_hybrid.py` | The hybrid sampler: `_neighbour_plan` source logic per face, the in-chunk / finished-chunk / OOB / UNKNOWN cases end to end, per-window conditioning, nested CFG passes, blended decode weight normalisation, and seams at the window vs chunk period. |
+| `test_cfg_guidance.py` | The nested CFG decomposition: telescoping at s=1, both null arms carrying no neighbour information, and the `ldm06/base` config resolution. |
 | `test_blended_reconstruction.py` | Tukey-window blended reconstruction. |
-| `test_porosity_field.py` | Coherent porosity field: mean-to-target, clamp range, per-seed determinism, x-vs-z anisotropy, marginal spread, and the `"coherent"` branch of `_build_local_por_map` in `generate_volumes.py`. Uses the real T-E/T-D artefacts. |
+| `test_porosity_field.py` | Coherent porosity field: mean-to-target, clamp range, per-seed determinism, x-vs-z anisotropy, marginal spread, and every branch of `_build_local_por_map` in `generate_volumes.py` plus `_gaussian_por_grid` (both deliberately leave peaks outside the sampler's clamp). Uses the real T-E/T-D artefacts. |
 
 ---
 
@@ -330,19 +336,24 @@ data/
 │   ├── patches_xct.bin  patches_label.bin  patches_meta.json  ← memmap backend
 │   │                               (label: 0 material, 1 pore, 2 air)
 │   ├── index_report.json  build_report.md
-├── split_v2/                     🕰 previous dataset — latents and conditioning still live here
+│   └── latents_r08z4/            ← LIVE latent store (memmap format, ldm06)
+│       ├── metadata.json         latent shape, VAE provenance, per-channel train stats,
+│       │                         voxel_size_um, `material` + `conditioning` blocks
+│       │                         (`conditioning.geometry` carries the strides
+│       │                          LatentDataset validates the run config against)
+│       └── {train,val,test}/latents.bin (float16, mu_then_std) + index.parquet
+│                                 + cond.parquet (cond_depth / cond_dist6_{zm,zp,ym,yp,
+│                                   xm,xp} / cond_por_raw)
+│                                 + material.bin (uint8 16³ MATERIAL fractions, label 0)
+│                                 + air.bin (float32 air fraction, label 2)
+│                                 — every file row-aligned with index.parquet
+├── split_v2/                     🕰 previous dataset — the orientation field still lives here
 │   ├── volumes.zarr/  patch_index.parquet  splits.json  volume_stats.json
 │   ├── orientation_field.json    ← per-volume θ(z) from the NOMINAL layup, with
-│   │                               confidence flags + provenance (build_conditioning.py)
-│   └── latents_r07z4/            ← LIVE latent store (memmap format)
-│       ├── metadata.json         latent shape, VAE provenance, per-channel train stats,
-│       │                         voxel_size_um, `conditioning` + `assembly` blocks
-│       └── {train,val,test}/latents.bin (float16, mu_then_std) + index.parquet
-│                                 + cond.parquet (cond_depth / cond_dist / cond_por_raw,
-│                                   row-aligned with index.parquet)
-│                                 + material.bin (uint8 16³ material fractions) + air.bin
-│                                   (float32 air fraction) — ldm06, row-aligned sibling files
-│   (volumes.zarr also gains a compressed `sample_mask` array per volume — ldm06)
+│   │                               confidence flags + provenance (build_conditioning.py).
+│   │                               Per-VOLUME, so split_v3 reuses it unchanged.
+│   └── latents_r07z4/            🕰 the ldm05 store; the current code cannot read it
+│                                 (one cond_dist, no material sidecar)
 └── real_test_volumes/            held-out volumes for generation evaluation
 ```
 `raw_data/` holds the source TIFFs. `data/` and `raw_data/` are git-ignored.
@@ -362,8 +373,7 @@ runs/
 ├── diagnostics/                  monitoring output and data-build logs — NOT analyses
 │   ├── mask_sanity_r07z4/        scripts/diag_mask_sanity.py (D33 decoder gate)
 │   ├── ldm_samples/              scripts/diag_ldm_samples.py, per run/step sample grids
-│   ├── build_latent_dataset_full.log
-│   └── material_migration.log
+│   └── build_latent_dataset_full.log
 └── campaigns/                    analysis output — ONE CAMPAIGN PER QUESTION
     ├── INDEX.md                  the campaign list + the convention. Read this first.
     ├── AUDIT.md                  read-only audit (2026-09-02) that produced this tree
