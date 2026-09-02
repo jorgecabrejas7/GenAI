@@ -6,7 +6,7 @@ Input tensor assembly (concatenated along channel dim before input_proj):
 
     z_t              (B, z_ch,       D, H, W) — noisy latent at step t
     cond_orient      (B, 2,          D, H, W) — (cos2θ, sin2θ) ply orientation profile
-    cond_material    (B, 1,          D, H, W) — material fraction per latent cell
+    cond_material    (B, 1,          D, H, W) — specimen envelope fraction per cell
     nb_latents_flat  (B, 6×z_ch,     D, H, W) — the 6 face-adjacent neighbour latents,
                                                 each noised to its OWN timestep
                                                 (zero where not EXISTS)
@@ -93,7 +93,7 @@ from poregen.models.diffusion.blocks import (
 logger = logging.getLogger(__name__)
 
 _ORIENT_CHANNELS = 2     # (cos2θ, sin2θ)
-_MATERIAL_CHANNELS = 1   # material fraction per latent cell
+_MATERIAL_CHANNELS = 1   # specimen envelope fraction per latent cell
 
 
 @dataclass
@@ -382,7 +382,8 @@ class UNet3DDenoiser(nn.Module):
         cond_dist6    : (B, 6) float — per-face distance to the specimen box,
                         ordered (z-, z+, y-, y+, x-, x+), each min(d,64)/64
         cond_orient   : (B, 2, D, H, W) float — (cos2θ, sin2θ) profile
-        cond_material : (B, 1, D, H, W) float — material fraction per cell
+        cond_material : (B, 1, D, H, W) float — specimen envelope fraction per
+                        cell (1 inside the specimen, 0 outside; pores included)
         drop_por      : (B,) bool or None — per-sample porosity dropout for CFG.
                         When True for a sample, por_mlp output is replaced with
                         null_por.  None = no dropout.

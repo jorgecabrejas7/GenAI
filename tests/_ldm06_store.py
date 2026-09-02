@@ -44,9 +44,13 @@ def build_store(root: Path) -> tuple[Path, np.ndarray, int, int]:
     gsize = tuple(s // ds_factor for s in vol_shape)          # 20³ latent cells
     rng = np.random.default_rng(7)
     field = rng.standard_normal((C, *gsize)).astype(np.float32)
-    # Material fraction field on the same latent grid, so a patch's material
-    # map is also a crop of one coherent volume.
-    mat_field = rng.uniform(0.0, 1.0, size=gsize).astype(np.float32)
+    # Specimen-envelope field on the same latent grid, so a patch's material
+    # map is also a crop of one coherent volume: 1 in the interior, a taper at
+    # the low-z surface, 0 outside it — the shape a real envelope has.
+    mat_field = np.ones(gsize, dtype=np.float32)
+    mat_field[0] = 0.0
+    mat_field[1] = 0.25
+    mat_field[2] = 0.75
 
     coords = list(itertools.product(range(0, vol - patch + 1, stride), repeat=3))
     rows = []
@@ -59,7 +63,8 @@ def build_store(root: Path) -> tuple[Path, np.ndarray, int, int]:
         data[i, C:] = 0.25
         cells = mat_field[cz:cz + L, cy:cy + L, cx:cx + L]
         material[i] = np.rint(cells * 255.0).astype(np.uint8)
-        air[i] = np.float32(0.5 * (1.0 - cells.mean()))
+        # The store's own invariant: air is 1 - the envelope mean, exactly.
+        air[i] = np.float32(1.0 - cells.mean(dtype=np.float64))
         rows.append({"source_row": i, "volume_id": "vol_a", "z0": z0, "y0": y0,
                      "x0": x0, "phi": 0.01 + 0.0001 * i})
     df = pd.DataFrame(rows)

@@ -35,13 +35,13 @@ overrides:
       warmup_steps: 20000
 
       terms:
-        # 1. Air outside material.  cond_material says where there is solid to
-        #    build in; the decoded label says where the model put air.  Air
-        #    inside a material cell is the failure ldm06 exists to remove, and
-        #    it is the one thing the epsilon loss cannot see, because two
-        #    latents that differ only in their air placement can have the same
-        #    epsilon residual.
-        #    Penalise p(air) weighted by the cell's material fraction.
+        # 1. Air outside the envelope.  cond_material says where the specimen
+        #    is; the decoded label says where the model put air.  Air inside
+        #    the envelope is the failure ldm06 exists to remove, and it is the
+        #    one thing the epsilon loss cannot see, because two latents that
+        #    differ only in their air placement can have the same epsilon
+        #    residual.
+        #    Penalise p(air) weighted by the cell's envelope fraction.
         air_outside_material:
           weight: 1.0
 

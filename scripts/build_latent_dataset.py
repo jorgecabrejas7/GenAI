@@ -13,9 +13,15 @@ come from the SAME label memmap in the same pass — one read, one alignment, no
 second script to fall out of step with the store.
 
 * ``material.bin`` — uint8 ``(N, L, L, L)``; ``value/255`` is the fraction of
-  the ``f³``-voxel cell labelled MATERIAL (label 0).  Pores are not material.
+  the ``f³``-voxel cell inside the specimen ENVELOPE (``label != 2``, so pores
+  count as specimen).  The map says where the specimen IS; it is 1 throughout
+  the interior and fractional only where the outer surface or a drilled hole
+  cuts a cell.  Pooling ``label == 0`` instead would hand the denoiser the pore
+  mask at 100 µm resolution, which it would learn to upsample instead of
+  generating pores.
 * ``air.bin`` — float32 ``(N,)``; the fraction of the patch labelled air
-  (label 2), i.e. outside the specimen envelope.
+  (label 2), i.e. outside the envelope.  Equal to ``1 - material.mean()`` by
+  construction — it is computed from the same pooled cells.
 
 Latents are stored RAW (un-normalised).  Per-channel normalisation stats are
 computed over the train split only and stored in ``metadata.json``; the LDM
@@ -46,7 +52,7 @@ data/split_v3/latents_r08z4/
 │   ├── latents.bin          — float16 C-contiguous memmap, shape
 │   │                          (N, 2C, 16, 16, 16); channels 0..C-1 = mu,
 │   │                          C..2C-1 = std ("mu_then_std" packing)
-│   ├── material.bin         — uint8 (N, 16, 16, 16) material fraction per cell
+│   ├── material.bin         — uint8 (N, 16, 16, 16) envelope fraction per cell
 │   ├── air.bin              — float32 (N,) air fraction per patch
 │   └── index.parquet        — source_row (row in patch_index.parquet), volume_id,
 │                              source_group, split, z0, y0, x0, ps, stride,
@@ -174,9 +180,13 @@ def main() -> None:
     device = torch.device(args.device)
     checkpoint = _resolve_checkpoint(args.checkpoint, repo)
 
-    from poregen.dataset.material import encode_material_u8, pool_material_fractions
+    from poregen.dataset.material import (
+        air_fraction,
+        encode_material_u8,
+        pool_material_fractions,
+    )
     from poregen.experiments.train_vae import load_vae_from_checkpoint, resolve_data_root
-    from poregen.models.vae.base import CLASS_AIR, CLASS_MATERIAL, CLASS_PORE
+    from poregen.models.vae.base import CLASS_AIR, CLASS_PORE
     from poregen.training.engine import encoder_input_keys
 
     model, cfg, cfg_text, run_dir = load_vae_from_checkpoint(checkpoint, device)
@@ -298,11 +308,10 @@ def main() -> None:
                 b = mu.shape[0]
                 latents[i : i + b, :z_channels] = mu.cpu().numpy().astype(np.float16)
                 latents[i : i + b, z_channels:] = std.cpu().numpy().astype(np.float16)
-                material[i : i + b] = encode_material_u8(
-                    pool_material_fractions(label_np == CLASS_MATERIAL, pool_factor)
-                )
-                air[i : i + b] = (label_np == CLASS_AIR).mean(axis=(1, 2, 3),
-                                                              dtype=np.float32)
+                # The specimen ENVELOPE: pores are inside it, only air is out.
+                cells = pool_material_fractions(label_np != CLASS_AIR, pool_factor)
+                material[i : i + b] = encode_material_u8(cells)
+                air[i : i + b] = air_fraction(cells)
                 phi_all[i : i + b] = (label_np == CLASS_PORE).mean(axis=(1, 2, 3),
                                                                    dtype=np.float32)
                 i += b
@@ -315,7 +324,7 @@ def main() -> None:
         del latents, material, air
         rate = n / max(time.time() - t0, 1e-9)
         logger.info(
-            "[%s] encoded %d patches (%.0f patches/s)  mean material=%.4f  mean air=%.4f",
+            "[%s] encoded %d patches (%.0f patches/s)  mean envelope=%.4f  mean air=%.4f",
             split, n, rate, mean_mat, mean_air,
         )
 
@@ -359,12 +368,18 @@ def main() -> None:
             "material_dtype": "uint8",
             "material_shape": [latent_size] * 3,
             "material_encoding": (
-                f"value/255 = fraction of the {pool_factor}^3-voxel cell labelled "
-                f"MATERIAL (voxel label 0).  Pores and exterior air are NOT "
-                f"material, so material + pore + air = 1 per cell."
+                f"value/255 = fraction of the {pool_factor}^3-voxel cell inside the "
+                f"specimen ENVELOPE (voxel label != 2, so pores count as specimen).  "
+                f"1 throughout the interior, fractional only where the outer surface "
+                f"or a drilled hole cuts a cell.  It says WHERE THE SPECIMEN IS, not "
+                f"how much of it is solid: pooling label == 0 would be the pore mask "
+                f"at {pool_factor}^3 resolution."
             ),
             "air_dtype": "float32",
-            "air_definition": "fraction of the patch labelled air (voxel label 2)",
+            "air_definition": (
+                "fraction of the patch labelled air (voxel label 2) == "
+                "1 - material.mean(), computed from the same pooled cells"
+            ),
             "phi_definition": "fraction of the patch labelled pore (voxel label 1)",
         },
         "voxel_size_um": VOXEL_SIZE_UM,

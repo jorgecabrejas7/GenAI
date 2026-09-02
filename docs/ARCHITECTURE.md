@@ -79,7 +79,7 @@ only a way for training and generation to disagree.
 |---|---|---|
 | `z_t` | `C` | the noisy latent at step `t` |
 | `cond_orient` | 2 | `(cos2θ, sin2θ)` ply-orientation depth profile |
-| `cond_material` | 1 | MATERIAL fraction per latent cell (voxel label 0) |
+| `cond_material` | 1 | specimen-envelope fraction per latent cell (`label != 2`) |
 | `nb_latents` | `6·C` | the six whole face-adjacent neighbour latents |
 | availability | `6·8` | learned embedding of OOB / EXISTS / UNKNOWN per face |
 | `nb_t` | `6·8` | sinusoidal embedding of each neighbour's own noise level |

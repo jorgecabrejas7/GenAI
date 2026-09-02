@@ -315,6 +315,32 @@ class TestLatentDatasetContract:
         got = ds[5]["cond_material"][0].numpy()
         assert np.allclose(got, raw[5].astype(np.float32) / 255.0)
 
+    def test_air_is_one_minus_the_material_mean(self, synthetic_store):
+        """The map is the specimen ENVELOPE, so the two agree by construction.
+
+        If cond_material ever went back to the solid fraction this identity
+        would break, because pores would pull the mean down without being air.
+        """
+        ds = _ds(synthetic_store)
+        for i in (0, len(ds) // 3, len(ds) - 1):
+            b = ds[i]
+            assert float(b["air_fraction"]) == pytest.approx(
+                1.0 - float(b["cond_material"].mean()), abs=2e-3)
+
+    def test_the_material_map_is_saturated_inside_the_specimen(self, synthetic_store):
+        """A patch clear of the surface must carry NO structure in the map.
+
+        That is what makes it safe to feed: it cannot be a pore mask, because
+        it is constant wherever the pores are.
+        """
+        ds = _ds(synthetic_store)
+        interior = [i for i in range(len(ds))
+                    if int(ds[i]["coords"][0]) >= 3 * SYN["PATCH"]]
+        assert interior
+        m = ds[interior[0]]["cond_material"]
+        assert float(m.min()) == pytest.approx(1.0)
+        assert float(ds[interior[0]]["air_fraction"]) == pytest.approx(0.0, abs=2e-3)
+
     def test_availability_is_only_exists_or_oob(self, synthetic_store):
         """The store never emits UNKNOWN — that state comes from training and
         the sampler, and conflating the two hides which one produced it."""

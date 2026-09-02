@@ -12,10 +12,13 @@ experiment:
         three axes), so a patch under the top surface and a patch against a
         side wall asked for the same thing.  cond_dist6 gives one distance per
         face, so "which side does the specimen end on" is answerable.
-    (2) cond_material (material fraction per latent cell, voxel label 0) is
-        part of the contract, not a flag.  Exterior air and the drilled
-        registration holes become something the model is TOLD about instead of
-        an unexplained dark region it has to invent.
+    (2) cond_material (specimen-ENVELOPE fraction per latent cell, label != 2
+        so pores count as specimen) is part of the contract, not a flag.
+        Exterior air and the drilled registration holes become something the
+        model is TOLD about instead of an unexplained dark region it has to
+        invent.  It is the envelope and not the solid fraction on purpose:
+        pooling label == 0 would be the pore mask at 100 micron cells, and the
+        model would learn to upsample it instead of generating pores.
     (3) Neighbours arrive noised.  Training draws a per-neighbour t_nb — with
         probability nb_t_mix the target's own t, otherwise Uniform{0..t} — and
         passes nb_t to the denoiser.  ldm05 only ever showed clean neighbours,

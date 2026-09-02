@@ -48,7 +48,7 @@ companion docs listed under [docs/](#docs).
 | `dataset/build_dataset.py` | CLI: discover raw TIFFs → Zarr → masks → per-volume stats → patch index. Supports `--stats_only`. |
 | `dataset/io.py` | Volume discovery, TIFF load, Zarr write, per-volume intensity stats (`VolumeInfo`). |
 | `dataset/segmentation.py` | Pore/material segmentation (Sauvola + Otsu, fill-voids). Package home of the root `onlypores.py`. `compute_sample_mask` re-derives just the material envelope (no Sauvola). |
-| `dataset/material.py` | ldm06 material maps: block-mean pooling of the 3-class label to latent-resolution MATERIAL (label 0) fraction cells, batched over a patch dimension, plus uint8 encode/decode. Pores are not material, so `air != 1 - material`. |
+| `dataset/material.py` | ldm06 material maps: block-mean pooling of the specimen ENVELOPE (`label != 2`, pores included) to latent-resolution fraction cells, batched over a patch dimension, plus uint8 encode/decode and `air_fraction` (`1 - material.mean()`, exact). Pooling `label == 0` instead would be the pore mask at 100 µm — an input the model would upsample instead of generating pores. |
 | `dataset/patch_index.py` | Patch coordinate generation, 3-D integral volume for O(1) patch fractions (`patch_fractions` — porosity and, in split_v3, air fraction), Parquet index writer. |
 | `dataset/splits.py` | Volume-level splits: deterministic `v1` and stratified-by-porosity `v2`; writes lightweight split roots. The `v3` split is by PANEL and lives in `scripts/build_split_v3.py`. |
 | `dataset/holes.py` | Finds the three drilled registration through-holes of a coupon from `sample_mask` (z-MINIMUM projection of the complement, border-touching components dropped, Euclidean dilation) and marks the patches that touch one. |
@@ -344,7 +344,7 @@ data/
 │       └── {train,val,test}/latents.bin (float16, mu_then_std) + index.parquet
 │                                 + cond.parquet (cond_depth / cond_dist6_{zm,zp,ym,yp,
 │                                   xm,xp} / cond_por_raw)
-│                                 + material.bin (uint8 16³ MATERIAL fractions, label 0)
+│                                 + material.bin (uint8 16³ envelope fractions, label != 2)
 │                                 + air.bin (float32 air fraction, label 2)
 │                                 — every file row-aligned with index.parquet
 ├── split_v2/                     🕰 previous dataset — the orientation field still lives here

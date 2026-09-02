@@ -1,9 +1,15 @@
 """The ldm06 material map: pooling, uint8 storage, and the specimen envelope.
 
-The map itself is written by ``scripts/build_latent_dataset.py`` in the same
-pass that encodes the latents, from the split_v3 voxel label; what is unit
-tested here is the arithmetic that pass performs.  ``LatentDataset`` serving of
+The map is written by ``scripts/build_latent_dataset.py`` in the same pass that
+encodes the latents, from the split_v3 voxel label; what is unit tested here is
+the arithmetic that pass performs.  ``LatentDataset`` serving of
 ``cond_material`` is covered in ``test_ldm06_conditioning.py``.
+
+The definition under test is ``label != 2`` — the specimen ENVELOPE, pores
+included — not ``label == 0``.  The envelope is 1 throughout the interior and
+carries information only at the outer surface and the drilled holes; the solid
+fraction would be ``1 - pore fraction`` at 4³-voxel cells, i.e. the pore mask
+at 100 µm handed to the denoiser as an input for it to upsample.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import numpy as np
 import pytest
 
 from poregen.dataset.material import (
+    air_fraction,
     decode_material_u8,
     encode_material_u8,
     pool_material_fractions,
@@ -60,27 +67,87 @@ class TestPooling:
             pool_material_fractions(np.ones((4, 4, 4), bool), 0)
 
 
-class TestLabelDerivedFractions:
-    """material, pore and air are three disjoint classes of the same label."""
+def _envelope(label: np.ndarray) -> np.ndarray:
+    """What the builder pools: the specimen envelope, pores included."""
+    return pool_material_fractions(label != CLASS_AIR, FACTOR)
 
-    def test_the_three_fractions_sum_to_one(self):
+
+class TestEnvelopeDefinition:
+
+    def test_the_map_is_one_wherever_the_specimen_is(self):
+        """A patch entirely inside the specimen is featureless — by design."""
         rng = np.random.default_rng(5)
-        label = rng.integers(0, 3, size=(PATCH, PATCH, PATCH))
-        mat = pool_material_fractions(label == CLASS_MATERIAL, FACTOR).mean()
-        pore = pool_material_fractions(label == CLASS_PORE, FACTOR).mean()
-        air = pool_material_fractions(label == CLASS_AIR, FACTOR).mean()
-        assert float(mat + pore + air) == pytest.approx(1.0, abs=1e-6)
+        label = np.where(rng.random((PATCH, PATCH, PATCH)) < 0.2,
+                         CLASS_PORE, CLASS_MATERIAL)
+        assert np.all(_envelope(label) == 1.0)
 
-    def test_air_is_not_one_minus_material(self):
-        """Pores are not material, so the ldm05 identity no longer holds."""
+    def test_pores_do_not_show_up_in_the_map(self):
+        """The whole point: cond_material must not be a pore mask.
+
+        Two patches with the SAME envelope and very different porosity must
+        produce byte-identical maps, or the model can read the pore field off
+        an input instead of generating it.
+        """
+        solid = np.full((PATCH, PATCH, PATCH), CLASS_MATERIAL)
+        porous = solid.copy()
+        porous[::2, ::2, ::2] = CLASS_PORE
+        assert float((porous == CLASS_PORE).mean()) > 0.1
+        np.testing.assert_array_equal(_envelope(solid), _envelope(porous))
+        np.testing.assert_array_equal(encode_material_u8(_envelope(solid)),
+                                      encode_material_u8(_envelope(porous)))
+
+    def test_the_solid_fraction_would_have_leaked_the_pores(self):
+        """Pinned as the reason for the definition, not as behaviour."""
+        solid = np.full((PATCH, PATCH, PATCH), CLASS_MATERIAL)
+        porous = solid.copy()
+        porous[::2, ::2, ::2] = CLASS_PORE
+        leaky_solid = pool_material_fractions(solid == CLASS_MATERIAL, FACTOR)
+        leaky_porous = pool_material_fractions(porous == CLASS_MATERIAL, FACTOR)
+        assert not np.array_equal(leaky_solid, leaky_porous)
+
+    def test_only_air_drops_the_map_below_one(self):
         label = np.full((PATCH, PATCH, PATCH), CLASS_MATERIAL)
-        label[:4] = CLASS_PORE
-        label[4:8] = CLASS_AIR
-        mat = float(pool_material_fractions(label == CLASS_MATERIAL, FACTOR).mean())
-        air = float((label == CLASS_AIR).mean())
-        assert air == pytest.approx(0.25)
-        assert mat == pytest.approx(0.5)
-        assert air != pytest.approx(1.0 - mat)
+        label[:4] = CLASS_PORE          # inside the specimen
+        label[4:8] = CLASS_AIR          # outside it
+        cells = _envelope(label)
+        assert float(cells[0].mean()) == pytest.approx(1.0)   # the pore plane
+        assert float(cells[1].mean()) == pytest.approx(0.0)   # the air plane
+        assert float(cells[2:].mean()) == pytest.approx(1.0)
+
+    def test_a_partly_cut_cell_is_fractional(self):
+        """The surface is the only place the map carries a gradient."""
+        label = np.full((PATCH, PATCH, PATCH), CLASS_MATERIAL)
+        label[:2] = CLASS_AIR           # half of the first 4-voxel block
+        cells = _envelope(label)
+        assert float(cells[0].mean()) == pytest.approx(0.5)
+        assert float(cells[1:].mean()) == pytest.approx(1.0)
+
+
+class TestAirFraction:
+
+    def test_air_is_exactly_one_minus_the_envelope_mean(self):
+        rng = np.random.default_rng(7)
+        label = rng.integers(0, 3, size=(PATCH, PATCH, PATCH))
+        cells = _envelope(label)
+        air = float(air_fraction(cells))
+        assert air == pytest.approx(1.0 - float(cells.mean(dtype=np.float64)),
+                                    abs=1e-12)
+        assert air == pytest.approx(float((label == CLASS_AIR).mean()), abs=1e-12)
+
+    def test_it_is_batched_like_the_pooling(self):
+        rng = np.random.default_rng(8)
+        batch = rng.integers(0, 3, size=(5, PATCH, PATCH, PATCH))
+        cells = _envelope(batch)
+        air = air_fraction(cells)
+        assert air.shape == (5,) and air.dtype == np.float32
+        np.testing.assert_allclose(
+            air, (batch == CLASS_AIR).mean(axis=(1, 2, 3)), atol=1e-7)
+
+    def test_the_extremes(self):
+        full = np.full((PATCH, PATCH, PATCH), CLASS_MATERIAL)
+        empty = np.full((PATCH, PATCH, PATCH), CLASS_AIR)
+        assert float(air_fraction(_envelope(full))) == pytest.approx(0.0)
+        assert float(air_fraction(_envelope(empty))) == pytest.approx(1.0)
 
 
 class TestEncoding:

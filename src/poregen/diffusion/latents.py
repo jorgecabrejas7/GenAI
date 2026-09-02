@@ -15,9 +15,10 @@ conditioning sidecar produced by ``scripts/build_conditioning.py``::
         ├── index.parquet        — source_row, volume_id, z0, y0, x0, phi, …
         ├── cond.parquet         — cond_depth, cond_dist6_*, cond_por_raw,
         │                          row-aligned with index.parquet
-        ├── material.bin         — uint8 (N, d, h, w); value/255 = MATERIAL
-        │                          fraction (label == 0) of each latent cell
-        └── air.bin              — float32 (N,); air fraction (label == 2)
+        ├── material.bin         — uint8 (N, d, h, w); value/255 = the specimen
+        │                          ENVELOPE fraction (label != 2) of each cell
+        └── air.bin              — float32 (N,); air fraction (label == 2),
+                                   equal to 1 - material.mean()
 
 Row i of ``index.parquet``, ``cond.parquet``, ``material.bin``, ``air.bin``
 and ``latents.bin`` all align.
@@ -407,7 +408,7 @@ class LatentDataset(Dataset):
         cond_depth     ()                          float32    relative depth
         cond_dist6     (6,)                        float32    per-face distance
         cond_orient    (2, 16, 16, 16)             float32    (cos2θ, sin2θ)
-        cond_material  (1, 16, 16, 16)             float32    material fraction
+        cond_material  (1, 16, 16, 16)             float32    envelope fraction
         nb_latents     (6, C, 16, 16, 16)          float32    CLEAN neighbours
         nb_avail       (6,)                        int64      EXISTS / OOB
         air_fraction   ()                          float32    air voxels / patch
@@ -420,8 +421,11 @@ class LatentDataset(Dataset):
 
         ``cond_dist6`` is ordered by
         :data:`~poregen.diffusion.conditioning.DIST6_DIRS` — (z-, z+, y-, y+,
-        x-, x+) — and ``cond_material`` is the MATERIAL fraction per latent
-        cell (voxel label 0), so pores and exterior air both read as 0 there.
+        x-, x+) — and ``cond_material`` is the specimen ENVELOPE fraction per
+        latent cell (``label != 2``, so pores count as specimen).  It is 1
+        throughout the interior and drops only at the outer surface and the
+        drilled holes; it deliberately says nothing about where the pores are,
+        which the model has to generate.
         ``nb_latents`` are the neighbours' clean posterior means; nothing in
         this dataset noises them.
         """

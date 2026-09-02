@@ -49,7 +49,7 @@ python scripts/build_conditioning.py --store data/split_v3/latents_r08z4
 ```
 
 `build_latent_dataset.py` writes `latents.bin`, `index.parquet`,
-`material.bin` (uint8 MATERIAL fraction per latent cell, voxel label 0) and
+`material.bin` (uint8 specimen-ENVELOPE fraction per latent cell, `label != 2`) and
 `air.bin` (float32, voxel label 2) per split in ONE pass over the label memmap,
 so the four files cannot fall out of alignment. `build_conditioning.py` then
 adds `cond.parquet` (`cond_depth`, six `cond_dist6_*`, `cond_por_raw`) and the

@@ -732,7 +732,7 @@ class VolumeGenerator:
         box_lo: tuple[int, int, int],
         box_hi: tuple[int, int, int],
     ) -> np.ndarray:
-        """All-material inside the specimen box, all-air outside it."""
+        """Inside the specimen box the envelope is 1; outside it is 0 (air)."""
         ds = self.downsample
         m = np.zeros(canvas_cells, dtype=np.float32)
         sl = tuple(
@@ -906,10 +906,11 @@ class VolumeGenerator:
                             snapped DOWN to a whole number of 64-voxel tiles
         target_porosity   : uniform per-tile VVF fallback (None → 0.05)
         local_por_map     : dict (iz, iy, ix) → requested φ, on the TILE grid
-        material_map      : (Z, Y, X) material fraction per LATENT CELL over the
-                            whole volume.  None → all-material inside the
-                            specimen box.  Paint it to ask for exterior air,
-                            drilled holes or a non-box specimen shape.
+        material_map      : (Z, Y, X) specimen-envelope fraction per LATENT CELL
+                            over the whole volume.  None → 1 inside the
+                            specimen box, 0 outside.  Paint it to ask for
+                            exterior air, drilled holes or a non-box specimen
+                            shape.  It does NOT say where the pores go.
         specimen_box      : ((z, y, x) lo inclusive, (z, y, x) hi exclusive) in
                             voxels.  None → the whole generated volume, i.e.
                             "this volume IS the specimen".  Drives cond_depth
