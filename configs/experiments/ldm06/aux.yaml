@@ -1,0 +1,64 @@
+experiment:
+  name: ldm06
+  variant: aux
+  description: >-
+    ldm06/base plus a DECODED auxiliary loss — the design record for the next
+    rung, switched OFF.  Nothing in the code reads `loss.decoded` yet; this file
+    exists so the block is specified, reviewed and versioned before anyone
+    writes it, and so `experiments clone ldm06/aux ldm07/...` starts from an
+    agreed shape rather than a fresh guess.
+
+    Why it is a separate variant and not a default: the epsilon loss trains in
+    latent space and never opens the decoder.  A decoded loss puts the frozen
+    VAE in the training graph, which costs a decode per step and couples the
+    LDM's gradients to a decoder that is not being trained.  That is a real
+    experiment with a real cost, so it gets its own rung and its own baseline
+    to be compared against — ldm06/base, same seed, same budget.
+
+extends: ldm06/base
+
+overrides:
+  loss:
+    # NOT IMPLEMENTED.  compute-time reads nothing under this key.
+    decoded:
+      enabled: false
+
+      # Only at low t.  x̂₀ from a high-t step is a blur: the decoded volume has
+      # no pore structure to score, so every term below would measure the
+      # schedule rather than the model.  Below t_max the x̂₀ estimate is sharp
+      # enough that its decode is a real microstructure.
+      t_max: 200
+
+      # Weight on the whole decoded block, ramped in so the epsilon objective
+      # is not disturbed while it is still finding the manifold.
+      weight: 0.1
+      warmup_steps: 20000
+
+      terms:
+        # 1. Air outside the envelope.  cond_material says where the specimen
+        #    is; the decoded label says where the model put air.  Air inside
+        #    the envelope is the failure ldm06 exists to remove, and it is the
+        #    one thing the epsilon loss cannot see, because two latents that
+        #    differ only in their air placement can have the same epsilon
+        #    residual.
+        #    Penalise p(air) weighted by the cell's envelope fraction.
+        air_outside_material:
+          weight: 1.0
+
+        # 2. Mask-vs-real Dice.  Soft Dice between the decoded pore
+        #    probability and the pore mask of the ORIGINAL patch the latent
+        #    came from (the store keeps source_row, so the label is fetchable).
+        #    Pore and air only — material is the background and its Dice sits
+        #    near 1 whatever the model does.
+        dice_vs_real:
+          weight: 1.0
+          classes: [1, 2]
+
+        # 3. Grey/mask agreement.  The XCT head and the class head are decoded
+        #    from ONE latent, so they cannot legitimately disagree: a voxel the
+        #    class head calls pore must be dark in the grey head.  Penalise the
+        #    correlation between p(pore) and the grey level inside the specimen.
+        #    This is the generated-volume defect the void-mask audit measured
+        #    (dark-but-unmasked regions) expressed as a training signal.
+        grey_mask_agreement:
+          weight: 0.5

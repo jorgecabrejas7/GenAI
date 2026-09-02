@@ -1,28 +1,31 @@
 """Standard convergence health-check for LDM runs (read-only on the checkpoint).
 
 Loads latest.ckpt from a running LDM experiment, samples latents with real val
-conditioning drawn via LatentDataset (real neighbours with their real
-availability states, real orientation profile, real scalars), and reports the
-core off-manifold metrics SPLIT BY neighbour context — the number of EXISTS
-neighbours (bucket 0 / 2 / 4 / 6 of the eight-group parity schedule).  The
-all-UNKNOWN-only sampling of the previous version measured the model in its
-rarest, hardest situation (1 patch in 8) and mis-reported convergence.
+conditioning drawn via LatentDataset (real neighbours, real orientation and
+material maps, real scalars), and reports the core off-manifold metrics SPLIT
+BY neighbour context — how many of the six faces have a stored neighbour
+(bucket 0..6).  Sampling only the all-UNKNOWN case measures the model in its
+rarest, hardest situation and mis-reports convergence.
+
+Bucket weights are the OBSERVED frequencies in the scanned val rows, not a
+fixed table: with ldm06 a patch's context is a property of where it sits in the
+specimen, so the population is whatever the data says it is.
+
+Neighbours are handed over CLEAN at ``nb_t = 0``.  That is an in-distribution
+state (the training draw ``t_nb ~ Uniform{0..t}`` includes 0) and it is the
+same for every checkpoint, so the trend line compares like with like.
 
 Per invocation:
   * one table per weight set (raw, EMA), DDIM-50, per-bucket + weighted overall
-    (bucket weights 1/3/3/1 — the schedule's group frequencies)
   * conditioning-alive check: FULL vs porosity-neutralised vs orientation-zeroed
-    with one fixed initial noise; a different-seed FULL run gives the
-    total-noise MAD scale
+    vs material-zeroed vs neighbours-UNKNOWN, with one fixed initial noise; a
+    different-seed FULL run gives the total-noise MAD scale
   * kill-switch check: ask phi=0.005 vs 0.05 with the same seed and rows
-    (richest bucket, raw + EMA) and compare the delivered mask porosity
+    (richest bucket, raw + EMA) and compare the delivered pore fraction
   * a summary appended to <run_dir>/convergence_check.jsonl; with >= 2 entries
     a verdict line vs the previous check: CONVERGING / STALLED / REGRESSING
     (ema overall std_ratio, +/-5% band) plus per-bucket deltas
   * PNG slice grids, each row labelled with its context bucket
-
-Unconditional runs (ldm04) are detected from the config and collapse to a
-single "uncond" bucket with no alive check.
 
 Usage:
     python scripts/diag_ldm_samples.py --run-dir <run_dir> [--n 8] [--ddim200]
@@ -46,15 +49,11 @@ import numpy as np
 import torch
 import yaml
 
-from poregen.diffusion.conditioning import (
-    NB_EXISTS,
-    NEIGHBOUR_DIRS,
-    neighbour_states,
-)
+from poregen.diffusion.conditioning import NB_UNKNOWN, N_NEIGHBOURS, porosity_to_cond
 from poregen.diffusion.latents import LatentDataset
 from poregen.diffusion.noise_schedule import DDPMSchedule
-from poregen.models.vae.base import decode_xct
-from poregen.diffusion.sampler import DDIMSampler, porosity_to_cond
+from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, decode_label, decode_xct
+from poregen.diffusion.sampler import DDIMSampler
 from poregen.experiments.base import find_repo_root
 from poregen.experiments.train_vae import load_vae_from_checkpoint
 from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
@@ -73,8 +72,9 @@ VERDICT_BAND_PCT = 5.0
 _DEGENERATE_LO = 1e-4
 _DEGENERATE_HI = 0.5
 
-# Eight-group schedule frequency of each EXISTS-count bucket (0/2/2/2/4/4/4/6).
-BUCKET_WEIGHTS = {"0": 1.0, "2": 3.0, "4": 3.0, "6": 1.0, "uncond": 1.0}
+# Conditioning tensors stacked for a bucket, in the order the model takes them
+# after (nb_latents, nb_avail, nb_t).
+_COND_KEYS = ("cond_por", "cond_depth", "cond_dist6", "cond_orient", "cond_material")
 
 
 def _strip_compile_prefix(state: dict) -> dict:
@@ -86,46 +86,46 @@ def _strip_compile_prefix(state: dict) -> dict:
 # ── context buckets ──────────────────────────────────────────────────────────
 
 def _exists_count(ds: LatentDataset, idx: int) -> int:
-    """EXISTS-neighbour count of a val row (no latent reads)."""
-    gi = ds.grid_index(idx)
-    origin = np.array([ds._z0[idx], ds._y0[idx], ds._x0[idx]], np.int64)
-    coords = origin[None, :] + ds._nb_dir_offsets
-    rows = ds._lookup(int(ds._vol_index[idx]), coords)
-    stored = {
-        (gi[0] + d[0], gi[1] + d[1], gi[2] + d[2])
-        for i, d in enumerate(NEIGHBOUR_DIRS) if rows[i] >= 0
-    }
-    return neighbour_states(gi, lambda g: g in stored, ds.group_order).count(NB_EXISTS)
+    """How many of the six faces have a stored neighbour (no latent reads)."""
+    return int((ds.neighbour_rows(idx) >= 0).sum())
 
 
 def collect_bucket_rows(
     ds: LatentDataset, n_per_bucket: int, rng: np.random.Generator
-) -> dict[str, list[int]]:
-    """Val rows per EXISTS bucket {0, 2, 4, 6}.  Odd counts (boundary OOB
-    cases) are skipped — they are not schedule states."""
-    want = {0, 2, 4, 6}
-    buckets: dict[int, list[int]] = {b: [] for b in want}
+) -> tuple[dict[str, list[int]], dict[str, float]]:
+    """Val rows per EXISTS bucket, plus each bucket's observed frequency.
+
+    The frequency is measured over every row the scan touched, not only the
+    rows kept, so it is the population weight even when a bucket fills early.
+    """
+    buckets: dict[int, list[int]] = {b: [] for b in range(N_NEIGHBOURS + 1)}
+    seen = np.zeros(N_NEIGHBOURS + 1, dtype=np.int64)
     for scanned, i in enumerate(rng.permutation(len(ds))):
-        if scanned >= SCAN_CAP or all(len(v) >= n_per_bucket for v in buckets.values()):
+        if scanned >= SCAN_CAP:
             break
         c = _exists_count(ds, int(i))
-        if c in want and len(buckets[c]) < n_per_bucket:
+        seen[c] += 1
+        if len(buckets[c]) < n_per_bucket:
             buckets[c].append(int(i))
-    return {str(b): rows for b, rows in sorted(buckets.items()) if rows}
+    total = max(int(seen.sum()), 1)
+    rows = {str(b): r for b, r in sorted(buckets.items()) if r}
+    freq = {str(b): float(seen[b]) / total for b in range(N_NEIGHBOURS + 1)
+            if str(b) in rows}
+    return rows, freq
 
 
-def build_bucket_cond(
-    ds: LatentDataset, rows: list[int], device: torch.device, use_orient: bool
-) -> dict:
-    """Stack the real conditioning of *rows* onto the device (D32 §5 contract)."""
+def build_bucket_cond(ds: LatentDataset, rows: list[int], device: torch.device) -> dict:
+    """Stack the real conditioning of *rows* onto the device (ldm06 contract).
+
+    ``nb_t`` is zero: the neighbours are handed over as the clean posterior
+    means the store holds, which is the ``t_nb = 0`` end of the training draw.
+    """
     items = [ds[r] for r in rows]
     out = {
         k: torch.stack([it[k] for it in items]).to(device)
-        for k in ("cond_por", "cond_depth", "cond_dist", "nb_latents", "nb_avail", "z")
+        for k in (*_COND_KEYS, "nb_latents", "nb_avail", "z")
     }
-    out["cond_orient"] = (
-        torch.stack([it["cond_orient"] for it in items]).to(device) if use_orient else None
-    )
+    out["nb_t"] = torch.zeros_like(out["nb_avail"])
     out["phi"] = np.array([float(it["phi"]) for it in items], dtype=np.float64)
     return out
 
@@ -134,15 +134,15 @@ def build_bucket_cond(
 
 @torch.no_grad()
 def decode_latents(vae: torch.nn.Module, z_raw: torch.Tensor, device: torch.device):
-    """Decode raw (denormalised) latents. Returns (xct [0,1], mask {0,1})."""
+    """Decode raw (denormalised) latents. Returns (xct [0,1], label {0,1,2})."""
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                         enabled=device.type == "cuda"):
         dec = vae.decoder(z_raw)
         xct_out = vae.xct_head(dec)
-        mask_logits = vae.mask_head(dec)
+        class_logits = vae.class_head(dec)
     xct = decode_xct(xct_out.float()).squeeze(1)      # (B, D, H, W) grey level
-    mask = (mask_logits.float() > 0.0).squeeze(1)        # (B, D, H, W) bool
-    return xct, mask
+    label = decode_label(class_logits.float())        # (B, D, H, W) int64
+    return xct, label
 
 
 @torch.no_grad()
@@ -152,14 +152,14 @@ def sample_bucket(
     """Sample one bucket batch in normalised space. Returns (z, x0_sat_frac)."""
     torch.manual_seed(seed)
     return sampler.sample_batch(
-        cond["nb_latents"], cond["nb_avail"],
-        cond["cond_por"], cond["cond_depth"], cond["cond_dist"], cond["cond_orient"],
+        cond["nb_latents"], cond["nb_avail"], cond["nb_t"],
+        *(cond[k] for k in _COND_KEYS),
         autocast_dtype=torch.bfloat16, return_x0_saturation=True,
     )
 
 
 def bucket_metrics(z: torch.Tensor, sat: float, por: torch.Tensor,
-                   phi: np.ndarray) -> dict:
+                   air: torch.Tensor, phi: np.ndarray) -> dict:
     ch_std = z.std(dim=(0, 2, 3, 4))
     return {
         "n": int(z.shape[0]),
@@ -170,15 +170,18 @@ def bucket_metrics(z: torch.Tensor, sat: float, por: torch.Tensor,
         "por_mean": float(por.mean()),
         "por_std": float(por.std()) if z.shape[0] > 1 else 0.0,
         "por_mae": float(np.abs(por.cpu().numpy() - phi).mean()),
+        "air_mean": float(air.mean()),
         "degen": float(((por < _DEGENERATE_LO) | (por > _DEGENERATE_HI)).float().mean()),
     }
 
 
-def weighted_overall(buckets: dict[str, dict]) -> dict:
-    """Bucket metrics weighted by the schedule's group frequencies."""
-    w = np.array([BUCKET_WEIGHTS[b] for b in buckets])
+def weighted_overall(buckets: dict[str, dict], freq: dict[str, float]) -> dict:
+    """Bucket metrics weighted by each bucket's observed frequency in the split."""
+    w = np.array([freq.get(b, 0.0) for b in buckets], dtype=np.float64)
+    if w.sum() <= 0:
+        w = np.ones(len(buckets))
     w = w / w.sum()
-    keys = ("std_ratio", "x0_sat", "por_mean", "por_std", "por_mae", "degen")
+    keys = ("std_ratio", "x0_sat", "por_mean", "por_std", "por_mae", "air_mean", "degen")
     return {k: float(sum(wi * m[k] for wi, m in zip(w, buckets.values()))) for k in keys}
 
 
@@ -186,31 +189,32 @@ def weighted_overall(buckets: dict[str, dict]) -> dict:
 
 def save_grid(entries: list[tuple[str, np.ndarray, np.ndarray]],
               title: str, path: Path) -> None:
-    """One row per (label, xct_slice, mask_slice), columns [xct, mask]."""
+    """One row per (name, xct_slice, label_slice), columns [xct, label]."""
     n = len(entries)
     fig, axes = plt.subplots(n, 2, figsize=(5, 2.4 * n))
     if n == 1:
         axes = axes[None, :]
-    for i, (label, xct2d, mask2d) in enumerate(entries):
+    for i, (name, xct2d, label2d) in enumerate(entries):
         axes[i, 0].imshow(xct2d, cmap="gray", vmin=0, vmax=1)
-        axes[i, 0].set_ylabel(label, fontsize=8)
-        axes[i, 1].imshow(mask2d, cmap="gray", vmin=0, vmax=1)
+        axes[i, 0].set_ylabel(name, fontsize=8)
+        # 0 material, 1 pore, 2 air — a 3-level map, not a probability.
+        axes[i, 1].imshow(label2d, cmap="viridis", vmin=0, vmax=2)
         for ax in axes[i]:
             ax.set_xticks([])
             ax.set_yticks([])
     axes[0, 0].set_title("xct", fontsize=9)
-    axes[0, 1].set_title("mask", fontsize=9)
+    axes[0, 1].set_title("label (0 mat / 1 pore / 2 air)", fontsize=9)
     fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
-def grid_entries(xct: torch.Tensor, mask: torch.Tensor, bucket: str,
+def grid_entries(xct: torch.Tensor, label: torch.Tensor, bucket: str,
                  limit: int = GRID_PER_BUCKET) -> list[tuple[str, np.ndarray, np.ndarray]]:
     zc = xct.shape[1] // 2
     return [
-        (f"b{bucket}#{i}", xct[i, zc].cpu().numpy(), mask[i, zc].float().cpu().numpy())
+        (f"b{bucket}#{i}", xct[i, zc].cpu().numpy(), label[i, zc].float().cpu().numpy())
         for i in range(min(int(xct.shape[0]), limit))
     ]
 
@@ -219,25 +223,33 @@ def grid_entries(xct: torch.Tensor, mask: torch.Tensor, bucket: str,
 
 @torch.no_grad()
 def conditioning_alive_check(
-    sampler: DDIMSampler, ds: LatentDataset, cond: dict, ucfg: UNet3DConfig
+    sampler: DDIMSampler, ds: LatentDataset, cond: dict
 ) -> dict:
     """FULL vs input-neutralised sampling with one shared initial noise.
 
     The FULL_SEED2 run (same conditioning, different noise) provides the MAD a
     complete change of the stochastic input produces — the total-noise scale
-    every neutralisation is expressed against.
+    every neutralisation is expressed against.  Each neutralisation is a state
+    the model has actually been trained on, so a near-zero response means the
+    signal is dead, not that the input is out of distribution.
     """
-    variants: dict[str, dict] = {"FULL": cond}
-    if ucfg.use_por_cond:
-        neutral = float(ds._cond_por.mean())
-        variants["POR_NEUTRAL"] = {
-            **cond, "cond_por": torch.full_like(cond["cond_por"], neutral)
-        }
-    if ucfg.use_orient_cond:
-        variants["ORIENT_ZERO"] = {
-            **cond, "cond_orient": torch.zeros_like(cond["cond_orient"])
-        }
-    variants["FULL_SEED2"] = cond
+    variants: dict[str, dict] = {
+        "FULL": cond,
+        "POR_NEUTRAL": {**cond,
+                        "cond_por": torch.full_like(cond["cond_por"],
+                                                    float(ds._cond_por.mean()))},
+        "ORIENT_ZERO": {**cond,
+                        "cond_orient": torch.zeros_like(cond["cond_orient"])},
+        # All-material is the sampler's own default map, so this measures how
+        # much of the output the painted map is responsible for.
+        "MATERIAL_ONE": {**cond,
+                         "cond_material": torch.ones_like(cond["cond_material"])},
+        # The CFG neighbour null: no neighbour information at all.
+        "NB_UNKNOWN": {**cond,
+                       "nb_avail": torch.full_like(cond["nb_avail"], NB_UNKNOWN),
+                       "nb_t": torch.zeros_like(cond["nb_t"])},
+        "FULL_SEED2": cond,
+    }
 
     z_by_name: dict[str, torch.Tensor] = {}
     for name, v in variants.items():
@@ -247,9 +259,7 @@ def conditioning_alive_check(
     z_full = z_by_name["FULL"]
     noise_mad = float((z_by_name["FULL_SEED2"] - z_full).abs().mean())
     out: dict = {"noise_mad": noise_mad}
-    for name in ("POR_NEUTRAL", "ORIENT_ZERO"):
-        if name not in z_by_name:
-            continue
+    for name in ("POR_NEUTRAL", "ORIENT_ZERO", "MATERIAL_ONE", "NB_UNKNOWN"):
         mad = float((z_by_name[name] - z_full).abs().mean())
         out[name.lower()] = {
             "mad": mad,
@@ -266,15 +276,15 @@ def killswitch_check(
     device: torch.device, mean_dev: torch.Tensor, std_dev: torch.Tensor,
 ) -> dict:
     """Ask phi=lo vs phi=hi with the same seed and conditioning rows; compare
-    the delivered mask porosity of the decoded samples."""
+    the delivered pore fraction of the decoded labels."""
     por_log_stats = (ds.por_mean, ds.por_std)
     delivered = []
     for phi in KILLSWITCH_ASKS:
         c = float(porosity_to_cond(phi, por_log_stats))
         ks_cond = {**cond, "cond_por": torch.full_like(cond["cond_por"], c)}
         z, _ = sample_bucket(sampler, ks_cond, SEED)
-        _, mask = decode_latents(vae, z * std_dev + mean_dev, device)
-        delivered.append(mask.float().mean(dim=(1, 2, 3)).cpu().numpy())
+        _, label = decode_latents(vae, z * std_dev + mean_dev, device)
+        delivered.append((label == CLASS_PORE).float().mean(dim=(1, 2, 3)).cpu().numpy())
     lo, hi = delivered
     return {
         "por_lo": float(lo.mean()),
@@ -373,7 +383,6 @@ def main() -> None:
 
     # ── model + schedule ────────────────────────────────────────────────────
     ucfg = UNet3DConfig.from_cfg(cfg)
-    conditional = ucfg.use_neighbor_cond
     model = UNet3DDenoiser(ucfg).to(device)
     schedule = DDPMSchedule(
         T=int(cfg["noise_schedule"].get("T", 1000)),
@@ -385,8 +394,7 @@ def main() -> None:
     latents_root = Path(cfg["data"]["latents_root"])
     if not latents_root.is_absolute():
         latents_root = repo / latents_root
-    val_ds = LatentDataset(latents_root, "val", normalize=True,
-                           neighbours=conditional)
+    val_ds = LatentDataset(latents_root, "val", normalize=True)
     mean_dev = val_ds.channel_mean.to(device)
     std_dev = val_ds.channel_std.to(device)
 
@@ -397,25 +405,19 @@ def main() -> None:
 
     # ── context buckets from real val rows ──────────────────────────────────
     rng = np.random.default_rng(0)
-    if conditional:
-        bucket_rows = collect_bucket_rows(val_ds, args.n, rng)
-    else:
-        bucket_rows = {"uncond": rng.choice(len(val_ds), size=args.n, replace=False)
-                       .astype(int).tolist()}
-    conds = {
-        b: build_bucket_cond(val_ds, rows, device, ucfg.use_orient_cond)
-        for b, rows in bucket_rows.items()
-    }
-    logger.info("Context buckets (n): %s",
-                {b: len(r) for b, r in bucket_rows.items()})
+    bucket_rows, bucket_freq = collect_bucket_rows(val_ds, args.n, rng)
+    conds = {b: build_bucket_cond(val_ds, rows, device)
+             for b, rows in bucket_rows.items()}
+    logger.info("Context buckets (n, observed frequency): %s",
+                {b: (len(r), round(bucket_freq[b], 4)) for b, r in bucket_rows.items()})
 
     # ── real reference grid ─────────────────────────────────────────────────
     real_entries: list[tuple[str, np.ndarray, np.ndarray]] = []
     real_por_all: list[torch.Tensor] = []
     for b, cond in conds.items():
-        xct, mask = decode_latents(vae, cond["z"] * std_dev + mean_dev, device)
-        real_por_all.append(mask.float().mean(dim=(1, 2, 3)))
-        real_entries.extend(grid_entries(xct, mask, b))
+        xct, label = decode_latents(vae, cond["z"] * std_dev + mean_dev, device)
+        real_por_all.append((label == CLASS_PORE).float().mean(dim=(1, 2, 3)))
+        real_entries.extend(grid_entries(xct, label, b))
     real_por = torch.cat(real_por_all)
     save_grid(real_entries, f"REAL decoded latents (val)  step={step}",
               out_dir / "real_reference.png")
@@ -433,33 +435,31 @@ def main() -> None:
             entries: list[tuple[str, np.ndarray, np.ndarray]] = []
             for bi, (b, cond) in enumerate(conds.items()):
                 z, sat = sample_bucket(samplers[n_steps], cond, SEED + bi)
-                xct, mask = decode_latents(vae, z * std_dev + mean_dev, device)
-                por = mask.float().mean(dim=(1, 2, 3))
-                per_bucket[b] = bucket_metrics(z, sat, por, cond["phi"])
-                entries.extend(grid_entries(xct, mask, b))
+                xct, label = decode_latents(vae, z * std_dev + mean_dev, device)
+                por = (label == CLASS_PORE).float().mean(dim=(1, 2, 3))
+                air = (label == CLASS_AIR).float().mean(dim=(1, 2, 3))
+                per_bucket[b] = bucket_metrics(z, sat, por, air, cond["phi"])
+                entries.extend(grid_entries(xct, label, b))
             variant_results[vname] = {
                 "buckets": per_bucket,
-                "overall": weighted_overall(per_bucket),
+                "overall": weighted_overall(per_bucket, bucket_freq),
             }
             save_grid(entries, f"{vname}  step={step}", out_dir / f"{vname}.png")
             logger.info("%s done", vname)
 
     # ── conditioning-alive check (raw weights, richest bucket) ──────────────
-    alive = None
-    if conditional and (ucfg.use_por_cond or ucfg.use_orient_cond):
-        model.load_state_dict(raw_state)
-        richest = list(conds)[-1]
-        alive_rows = bucket_rows[richest][:ALIVE_N]
-        alive_cond = build_bucket_cond(val_ds, alive_rows, device, ucfg.use_orient_cond)
-        alive = conditioning_alive_check(samplers[50], val_ds, alive_cond, ucfg)
-        alive["bucket"] = richest
+    model.load_state_dict(raw_state)
+    richest = list(conds)[-1]
+    alive_rows = bucket_rows[richest][:ALIVE_N]
+    alive_cond = build_bucket_cond(val_ds, alive_rows, device)
+    alive = conditioning_alive_check(samplers[50], val_ds, alive_cond)
+    alive["bucket"] = richest
 
     # ── kill-switch (raw + EMA, richest bucket) ─────────────────────────────
     killswitch = None
-    if conditional and ucfg.use_por_cond and not args.no_killswitch:
-        richest = list(conds)[-1]
+    if not args.no_killswitch:
         ks_rows = bucket_rows[richest][:KILLSWITCH_N]
-        ks_cond = build_bucket_cond(val_ds, ks_rows, device, ucfg.use_orient_cond)
+        ks_cond = build_bucket_cond(val_ds, ks_rows, device)
         killswitch = {"asked_lo": KILLSWITCH_ASKS[0], "asked_hi": KILLSWITCH_ASKS[1],
                       "bucket": richest, "n": len(ks_rows)}
         for wname, state in (("raw", raw_state), ("ema", ema_state)):
@@ -472,7 +472,8 @@ def main() -> None:
           f"n/bucket={args.n}  real por={real_por.mean().item():.4f}"
           f"±{real_por.std().item():.4f} ===")
     hdr = (f"{'bucket':<8} {'n':>3} {'std_ratio':>9} {'per-ch std':>26} "
-           f"{'x0_sat':>7} {'por_mean':>9} {'por_std':>8} {'por_mae':>8} {'degen':>6}")
+           f"{'x0_sat':>7} {'por_mean':>9} {'por_std':>8} {'por_mae':>8} "
+           f"{'air':>7} {'degen':>6}")
     for vname, res in variant_results.items():
         print(f"\n-- {vname} --")
         print(hdr)
@@ -480,24 +481,21 @@ def main() -> None:
             print(f"{b:<8} {m['n']:>3} {m['std_ratio']:>9.3f} "
                   f"{','.join(str(v) for v in m['ch_std']):>26} "
                   f"{m['x0_sat']:>7.4f} {m['por_mean']:>9.4f} {m['por_std']:>8.4f} "
-                  f"{m['por_mae']:>8.4f} {m['degen']:>6.2f}")
+                  f"{m['por_mae']:>8.4f} {m['air_mean']:>7.4f} {m['degen']:>6.2f}")
         o = res["overall"]
-        suffix = "   (weights 1/3/3/1)" if conditional else ""
         print(f"{'overall':<8} {'-':>3} {o['std_ratio']:>9.3f} {'-':>26} "
               f"{o['x0_sat']:>7.4f} {o['por_mean']:>9.4f} {o['por_std']:>8.4f} "
-              f"{o['por_mae']:>8.4f} {o['degen']:>6.2f}{suffix}")
+              f"{o['por_mae']:>8.4f} {o['air_mean']:>7.4f} {o['degen']:>6.2f}"
+              f"   (weights = observed bucket frequency)")
 
     if alive is not None:
         print(f"\n-- conditioning-alive check (raw weights, DDIM-50, n={ALIVE_N}, "
               f"bucket {alive['bucket']}, seed {SEED}) --")
         print(f"total-noise scale (FULL vs different seed): MAD {alive['noise_mad']:.4f}")
-        if "por_neutral" in alive:
-            a = alive["por_neutral"]
-            print(f"porosity input changes the output by {a['pct_of_noise']:.1f}% "
-                  f"of the total-noise scale (MAD {a['mad']:.4f})")
-        if "orient_zero" in alive:
-            a = alive["orient_zero"]
-            print(f"orientation input changes the output by {a['pct_of_noise']:.1f}% "
+        for key, what in (("por_neutral", "porosity"), ("orient_zero", "orientation"),
+                          ("material_one", "material map"), ("nb_unknown", "neighbours")):
+            a = alive[key]
+            print(f"{what:<14} input changes the output by {a['pct_of_noise']:5.1f}% "
                   f"of the total-noise scale (MAD {a['mad']:.4f})")
 
     if killswitch is not None:
@@ -517,6 +515,7 @@ def main() -> None:
         "step": step,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_per_bucket": {b: len(r) for b, r in bucket_rows.items()},
+        "bucket_frequency": bucket_freq,
         "variants": {v: variant_results[v]
                      for v in ("raw_ddim50", "ema_ddim50")},
         "alive": alive,

@@ -1,21 +1,26 @@
 """Visualise DDIM denoising progression for a single patch.
 
-For each (porosity, n_steps) combination, runs an independent DDIM chain from a fixed
-seed, decodes every intermediate latent through the VAE, and writes an MP4 showing the
-middle z/y/x slices of XCT and mask evolving from noise to final output.
+For each (porosity, n_steps) combination, runs an independent DDIM chain from a
+fixed seed, decodes every intermediate latent through the 3-class VAE, and
+writes an MP4 showing the middle z/y/x slices of the XCT, the pore probability
+and the argmax label evolving from noise to final output.
+
+The patch is conditioned as a mid-thickness interior one: depth 0.5, all six
+face distances saturated (no surface within 64 voxels), an all-material map and
+no neighbours (all UNKNOWN at nb_t 0 — the CFG neighbour null).
 
 Usage
 -----
 python scripts/visualize_denoising.py \\
     --checkpoint runs/ldm/.../checkpoints/best.ckpt \\
-    --vae-run    runs/vae/r05-run-... \\
-    [--latent-std 0.4571]
+    --vae-run    runs/vae/r08-run-... \\
+    [--latents-root data/split_v3/latents_r08z4]
 
 Output
 ------
 <checkpoint_stem>_denoising/
   por_0.005/
-    steps_020.mp4  steps_050.mp4  steps_100.mp4  steps_200.mp4  steps_500.mp4
+    steps_0020_ddim.mp4  steps_0050_ddim.mp4  ...
   por_0.01/
     ...
 """
@@ -25,7 +30,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from itertools import product
 from pathlib import Path
 
 import imageio
@@ -135,69 +139,65 @@ def run_chain(
     por: float,
     por_log_stats: tuple[float, float],
     n_steps: int,
-    sampler_type: str,
     seed: int,
     step_pbar=None,
 ) -> list[tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]]:
-    """Run one DDIM or DDPM chain and decode every intermediate latent.
+    """Run one DDIM chain and decode every intermediate latent.
 
-    Returns a list of (xct_slices, mask_slices, mask_reenc_slices) per denoising step.
-    Each *_slices is [z_slice, y_slice, x_slice] as float32 numpy arrays.
-    mask_slices      : mask predicted directly from the LDM latent via vae.mask_head
-    mask_reenc_slices: mask from re-encoding the generated XCT back through the full VAE
+    Returns a list of (xct_slices, pore_slices, label_slices) per denoising
+    step.  Each *_slices is [z_slice, y_slice, x_slice] as float32 arrays.
     """
-    from poregen.models.vae.base import decode_xct
-from poregen.diffusion.sampler import DDIMSampler, DDPMSampler
-
-    if sampler_type == "ddpm":
-        sampler = DDPMSampler(model, schedule, device)
-    else:
-        sampler = DDIMSampler(model, schedule, device, n_steps=n_steps)
-
-    C = model.cfg.z_channels
+    from poregen.diffusion.conditioning import (
+        NB_UNKNOWN, N_DIST6, N_NEIGHBOURS, porosity_to_cond,
+    )
     from poregen.diffusion.orientation import orientation_tensor
-    from poregen.diffusion.sampler import porosity_to_cond, theta_from_layup
+    from poregen.diffusion.sampler import DDIMSampler, theta_from_layup
+    from poregen.models.vae.base import decode_class_probs, decode_label, decode_xct
 
-    cond_por = float(porosity_to_cond(por, por_log_stats))
+    sampler = DDIMSampler(model, schedule, device, n_steps=n_steps)
+    C = model.cfg.z_channels
+    L = LATENT_SIZE
 
-    nb_latents = torch.zeros(6, C, LATENT_SIZE, LATENT_SIZE, LATENT_SIZE)
-    nb_avail   = torch.zeros(6, dtype=torch.long)
-    # Mid-thickness patch of the nominal layup (D32 §4): depth 0.5, far from
-    # any outer surface, orientation written straight from the ply sequence.
-    orient = torch.from_numpy(orientation_tensor(
-        theta_from_layup(PATCH_SIZE, LAYUP_ANGLES_DEG, PLY_THICKNESS_VOX), LATENT_SIZE
-    ))
+    cond_por = torch.tensor([float(porosity_to_cond(por, por_log_stats))],
+                            dtype=torch.float32, device=device)
+    nb_latents = torch.zeros(1, N_NEIGHBOURS, C, L, L, L, device=device)
+    nb_avail = torch.full((1, N_NEIGHBOURS), NB_UNKNOWN, dtype=torch.long, device=device)
+    nb_t = torch.zeros((1, N_NEIGHBOURS), dtype=torch.long, device=device)
+    # Mid-thickness interior patch: depth 0.5, every face more than 64 voxels
+    # from a surface, all material, orientation straight from the ply sequence.
+    cond_depth = torch.tensor([0.5], dtype=torch.float32, device=device)
+    cond_dist6 = torch.ones(1, N_DIST6, dtype=torch.float32, device=device)
+    cond_material = torch.ones(1, 1, L, L, L, dtype=torch.float32, device=device)
+    cond_orient = torch.from_numpy(orientation_tensor(
+        theta_from_layup(PATCH_SIZE, LAYUP_ANGLES_DEG, PLY_THICKNESS_VOX), L
+    )).unsqueeze(0).to(device)
 
     torch.manual_seed(seed)
-    _, intermediates = sampler.sample_patch(
-        nb_latents, nb_avail, cond_por, 0.5, 1.0, orient,
-        autocast_dtype=autocast_dtype,
-        return_intermediates=True,
+    _, intermediates = sampler.sample_batch(
+        nb_latents, nb_avail, nb_t, cond_por, cond_depth, cond_dist6,
+        cond_orient, cond_material,
+        autocast_dtype=autocast_dtype, return_intermediates=True,
     )
 
     mid = PATCH_SIZE // 2
     frames = []
     for z_cpu in intermediates:
-        z_batch = (z_cpu.unsqueeze(0) * latent_std + latent_mean).to(device)
+        z_batch = (z_cpu * latent_std + latent_mean).to(device)
         with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-            dec        = vae.decoder(z_batch)
+            dec = vae.decoder(z_batch)
             xct_out = vae.xct_head(dec)
-            msk_logits = vae.mask_head(dec)
+            class_logits = vae.class_head(dec)
 
-        xct  = decode_xct(xct_out).squeeze().float().cpu().numpy()
-        mask = torch.sigmoid(msk_logits).squeeze().float().cpu().numpy()
+        xct = decode_xct(xct_out.float()).squeeze().cpu().numpy()
+        probs = decode_class_probs(class_logits.float())[0].cpu().numpy()
+        pore = probs[1]
+        label = decode_label(class_logits.float()).squeeze().float().cpu().numpy() / 2.0
 
-        # Re-encode the generated XCT through the full VAE to get a refined mask.
-        # mask argument is unused by the encoder (XCT-only design), so zeros is fine.
-        xct_t = torch.from_numpy(xct).unsqueeze(0).unsqueeze(0).to(device)
-        with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-            vae_out = vae(xct_t, torch.zeros_like(xct_t))
-        mask_reenc = torch.sigmoid(vae_out.mask_logits).squeeze().float().cpu().numpy()
-
-        xct_slices        = [xct[mid],        xct[:, mid],        xct[:, :, mid]]
-        mask_slices       = [mask[mid],       mask[:, mid],       mask[:, :, mid]]
-        mask_reenc_slices = [mask_reenc[mid], mask_reenc[:, mid], mask_reenc[:, :, mid]]
-        frames.append((xct_slices, mask_slices, mask_reenc_slices))
+        frames.append((
+            [xct[mid], xct[:, mid], xct[:, :, mid]],
+            [pore[mid], pore[:, mid], pore[:, :, mid]],
+            [label[mid], label[:, mid], label[:, :, mid]],
+        ))
 
         if step_pbar is not None:
             step_pbar.update(1)
@@ -206,17 +206,16 @@ from poregen.diffusion.sampler import DDIMSampler, DDPMSampler
 
 
 def write_video(
-    frames: list[tuple[list[np.ndarray], list[np.ndarray]]],
+    frames: list[tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]],
     out_path: Path,
     por: float,
     n_steps: int,
-    sampler_type: str = "ddim",
 ) -> None:
     """Render frames to an MP4 video with a 3×3 panel layout.
 
-    Row 0 : XCT (gray)
-    Row 1 : Mask from LDM latent           (magma)
-    Row 2 : Mask re-encoded from XCT→VAE  (magma)
+    Row 0 : XCT grey level        (gray)
+    Row 1 : pore probability      (magma)
+    Row 2 : argmax label / 2      (magma; 0 material, 0.5 pore, 1 air)
     """
     fig, axes = plt.subplots(3, 3, figsize=(10, 9), constrained_layout=False)
     fig.patch.set_facecolor("black")
@@ -224,7 +223,7 @@ def write_video(
                         wspace=0.06, hspace=0.10)
 
     col_titles = ["z = 32", "y = 32", "x = 32"]
-    row_labels  = ["XCT", "Mask\n(LDM)", "Mask\n(reenc)"]
+    row_labels  = ["XCT", "p(pore)", "label\n/2"]
     cmaps       = [["gray"] * 3, ["magma"] * 3, ["magma"] * 3]
 
     im_handles = []
@@ -248,7 +247,7 @@ def write_video(
     # Shared colorbar for both mask rows
     cbar_ax = fig.add_axes([0.90, 0.03, 0.022, 0.56])
     cbar = fig.colorbar(im_handles[1][0], cax=cbar_ax)
-    cbar.set_label("pore probability", color="white", fontsize=8, labelpad=6)
+    cbar.set_label("pore probability / label", color="white", fontsize=8, labelpad=6)
     cbar.ax.yaxis.set_tick_params(color="white", labelsize=7)
     plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
     cbar.outline.set_edgecolor("white")
@@ -257,13 +256,13 @@ def write_video(
     writer = imageio.get_writer(str(out_path), fps=FPS, quality=8, format="FFMPEG")
 
     try:
-        for step_idx, (xct_slices, mask_slices, mask_reenc_slices) in enumerate(frames):
+        for step_idx, (xct_slices, pore_slices, label_slices) in enumerate(frames):
             for col in range(3):
                 im_handles[0][col].set_data(xct_slices[col])
-                im_handles[1][col].set_data(mask_slices[col])
-                im_handles[2][col].set_data(mask_reenc_slices[col])
+                im_handles[1][col].set_data(pore_slices[col])
+                im_handles[2][col].set_data(label_slices[col])
             fig.suptitle(
-                f"por = {por:.3f}   {sampler_type.upper()}   step {step_idx + 1} / {n_steps}",
+                f"por = {por:.3f}   DDIM   step {step_idx + 1} / {n_steps}",
                 color="white", fontsize=11,
             )
             fig.canvas.draw()
@@ -278,7 +277,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Visualise DDIM denoising progression per step count.")
     ap.add_argument("--checkpoint",  required=True)
     ap.add_argument("--vae-run",     required=True)
-    ap.add_argument("--latents-root", default="data/split_v2/latents_r07z4",
+    ap.add_argument("--latents-root", default="data/split_v3/latents_r08z4",
                     help="Latent store root (metadata.json supplies per-channel norm stats)")
     args = ap.parse_args()
 
@@ -302,7 +301,7 @@ def main() -> None:
     latent_mean, latent_std = _load_latent_stats(latents_root)
 
     # Raw phi levels must be mapped through the store's porosity transform
-    # (D32 §1) before they can be used as cond_por.
+    # before they can be used as cond_por.
     _store_meta = json.loads((latents_root / "metadata.json").read_text())
     _st = (_store_meta.get("conditioning") or {}).get("por_standardisation")
     if _st is None:
@@ -321,33 +320,25 @@ def main() -> None:
 
     out_root = Path(f"{Path(args.checkpoint).stem}_denoising")
 
-    # (por, n_steps, sampler_type)
-    combinations = (
-        [(por, n, "ddim") for por in POROSITY_LEVELS for n in DDIM_STEP_COUNTS]
-        + [(por, schedule.T, "ddpm") for por in POROSITY_LEVELS]
-    )
+    combinations = [(por, n) for por in POROSITY_LEVELS for n in DDIM_STEP_COUNTS]
 
     run_pbar  = tqdm(total=len(combinations), unit="run",  position=0)
     step_pbar = tqdm(unit="step", position=1, leave=False)
 
     with run_pbar, step_pbar:
-        for por, n_steps, sampler_type in combinations:
-            run_pbar.set_description(
-                f"por={por:.3f}  {sampler_type.upper()}  steps={n_steps:4d}"
-            )
+        for por, n_steps in combinations:
+            run_pbar.set_description(f"por={por:.3f}  DDIM  steps={n_steps:4d}")
             step_pbar.reset(total=n_steps)
             step_pbar.set_description("denoising")
 
             frames = run_chain(
                 model, schedule, vae, device, autocast_dtype,
-                latent_mean, latent_std, por, por_log_stats, n_steps, sampler_type, SEED,
+                latent_mean, latent_std, por, por_log_stats, n_steps, SEED,
                 step_pbar=step_pbar,
             )
 
-            out_path = (
-                out_root / f"por_{por}" / f"steps_{n_steps:04d}_{sampler_type}.mp4"
-            )
-            write_video(frames, out_path, por, n_steps, sampler_type)
+            out_path = out_root / f"por_{por}" / f"steps_{n_steps:04d}_ddim.mp4"
+            write_video(frames, out_path, por, n_steps)
 
             run_pbar.update(1)
 

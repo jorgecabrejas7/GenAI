@@ -1,7 +1,7 @@
 """Generate a grid of synthetic XCT volumes across porosity and spatial distribution.
 
-Generates anisotropic volumes at 25 µm/voxel with stride-64 tiling (patches touch)
-(matching the LDM training stride).  Physical volume:
+Generates anisotropic volumes at 25 µm/voxel with the ldm06 hybrid chunked
+sampler.  Physical volume:
   z:  3.2 mm  (128 vox)
   y: 80.0 mm  (3200 vox)
   x: 32.0 mm  (1280 vox)
@@ -11,22 +11,27 @@ Sweeps porosity × spatial distribution.
 Usage
 -----
 python scripts/generate_volumes.py \\
-    --checkpoint   runs/ldm/ldm04-run-0001-.../checkpoints/best.ckpt \\
-    [--latents-root data/split_v2/latents_r07z4] \\
-    [--ddim-steps 50]
+    --checkpoint   runs/ldm/ldm06-run-0001-.../checkpoints/best.ckpt \\
+    [--latents-root data/split_v3/latents_r08z4] \\
+    [--ddim-steps 50] [--chunk-tiles 3 3 3]
 
 The latent store's metadata.json supplies both the per-channel
 denormalisation stats and the VAE checkpoint the latents were built with.
 
 Output tree (relative to cwd)
 ------------------------------
-<checkpoint_stem>/
+inference/<ldm_run>/<run_tag>/
   por_0.005/
-    center/   volume.tif  mask.tif
-    edges/    volume.tif  mask.tif
-    uniform/  volume.tif  mask.tif
+    center/   volume.tif  label.tif  generation_stats.json
+    edges/    ...
+    uniform/  ...
   por_0.01/
     ...
+
+``volume.tif`` is uint8 on the RAW-SCAN grey scale and ``label.tif`` is uint8
+{0 material, 1 pore, 2 air} — both native, so a generated volume is measured
+with exactly the tools a real one is.  Rescaling either of them cost a whole
+evaluation campaign once already.
 """
 
 from __future__ import annotations
@@ -49,15 +54,10 @@ logger = logging.getLogger(__name__)
 
 # ── sweep parameters ──────────────────────────────────────────────────────────
 # Physical volume size (z, y, x) in mm and voxel pitch.
-# D32 §3.1 — three distinct strides.  GENERATION_STRIDE is the assembly grid,
-# NEIGHBOUR_OFFSET is the spatial relation the model was trained on (must match
-# data.neighbour_offset in the run's resolved_config.yaml).  The dataset's
-# sample_stride plays no part here.
 VOLUME_SIZE_MM     = (3.2, 80.0, 32.0)   # z, y, x in mm
 VOXEL_SIZE_MM      = 0.025               # 25 µm / voxel
-PATCH_SIZE         = 64
-GENERATION_STRIDE  = PATCH_SIZE          # 64 — patches tile, nothing is blended
-NEIGHBOUR_OFFSET   = PATCH_SIZE          # 64 — face neighbours touch, no shared voxels
+PATCH_SIZE         = 64                  # one tile; also the neighbour offset
+TILE_SIZE          = PATCH_SIZE          # the porosity field's grid unit
 # Requested layup (D32 §4): θ(z) is written directly, never estimated.
 LAYUP_ANGLES_DEG   = [45, -45, 90, 0, 45, -45, 0, 90, -45, 45]
 PLY_THICKNESS_VOX  = 19.6
@@ -70,8 +70,11 @@ DEFAULT_DDIM_STEPS = 200
 #   VAE decode:    ~40 MB/patch  (marginal slope B=32→64)
 # Fixed overhead: ~10.3 GB (models + OS + latent dict + 3 accumulators)
 # Budget: 128 × 0.75 = 96 GB → (96 - 10.3) GB / 42 MB ≈ 2040 → round to 2048
-GEN_BATCH_SIZE     = 32
+WINDOW_BATCH       = 32
 DECODE_BATCH_SIZE  = 64
+DEFAULT_CHUNK_TILES = (3, 3, 3)
+DEFAULT_WINDOW_STRIDE = 32
+DEFAULT_DECODE_STRIDE = 32
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -120,7 +123,7 @@ def _build_local_por_map(
             target=target_por,
             sampler=load_sampler(repo_root / DEFAULT_TE_RESULTS),
             corr_lengths_voxels=load_corr_lengths_voxels(repo_root / DEFAULT_TD_RESULTS),
-            stride_voxels=GENERATION_STRIDE,
+            stride_voxels=TILE_SIZE,
             # The script has no global seed; derive one from the porosity
             # level so each sweep cell is deterministic across runs.
             seed=int(round(target_por * 1e6)),
@@ -208,30 +211,29 @@ def _load_latent_store_meta(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate a sweep of synthetic XCT volumes.")
     ap.add_argument("--checkpoint",  required=True, help="Path to LDM checkpoint (.ckpt)")
-    ap.add_argument("--latents-root", default="data/split_v2/latents_r07z4",
+    ap.add_argument("--latents-root", default="data/split_v3/latents_r08z4",
                     help="Latent store root (metadata.json supplies VAE checkpoint + norm stats)")
-    ap.add_argument("--sampler",     choices=["ddim", "ddpm"], default="ddim",
-                    help="Sampler to use (default: ddim)")
     ap.add_argument("--ddim-steps",  type=int, default=DEFAULT_DDIM_STEPS,
-                    help="Number of DDIM steps (ignored when --sampler ddpm)")
+                    help="Number of DDIM steps")
     ap.add_argument("--s-por", type=float, default=None,
                     help="Porosity guidance scale (default: from resolved_config.yaml guidance.s_por, else 1.0)")
     ap.add_argument("--s-nb",  type=float, default=None,
                     help="Neighbour guidance scale (default: from resolved_config.yaml guidance.s_nb, else 1.0)")
-    ap.add_argument("--mode", choices=["sequential", "joint"], default=None,
-                    help="Denoising mode (default: resolved_config.yaml generation.mode, else "
-                         "sequential). 'joint' = MultiDiffusion-style overlapping-window "
-                         "denoising on one latent canvas (DDIM only).")
-    ap.add_argument("--joint-window-stride", type=int, default=None,
-                    help="Joint mode: voxels between window origins (default: config "
-                         "generation.joint_window_stride, else 32 = 50%% overlap)")
-    ap.add_argument("--joint-window-batch", type=int, default=None,
-                    help="Joint mode: windows per UNet forward per timestep (default: config "
-                         "generation.joint_window_batch, else 32)")
+    ap.add_argument("--chunk-tiles", type=int, nargs=3, default=None, metavar=("Z", "Y", "X"),
+                    help="Tiles per jointly denoised chunk (default: config "
+                         "generation.chunk_tiles, else 3 3 3).  1 1 1 = patch-at-a-time.")
+    ap.add_argument("--window-stride", type=int, default=None,
+                    help="Voxels between denoising window origins inside a chunk "
+                         "(default: config generation.window_stride, else 32)")
+    ap.add_argument("--decode-stride", type=int, default=None,
+                    help="Voxels between decode window origins (default: config "
+                         "generation.decode_stride, else 32)")
+    ap.add_argument("--window-batch", type=int, default=WINDOW_BATCH,
+                    help="Windows per UNet forward per timestep")
     ap.add_argument("--out-dir", type=str, default=None,
                     help="Resume into this existing run directory instead of creating a new "
                          "timestamped one (e.g. inference/<ldm_run>/<run_tag>). Combos whose "
-                         "volume.tif + mask.tif already exist there are skipped.")
+                         "volume.tif + label.tif already exist there are skipped.")
     args = ap.parse_args()
 
     repo = _find_repo_root()
@@ -245,13 +247,7 @@ def main() -> None:
         autocast_dtype = torch.bfloat16
 
     from poregen.diffusion.noise_schedule import DDPMSchedule
-    from poregen.diffusion.conditioning import resolve_group_order
-    from poregen.diffusion.sampler import (
-        DDIMSampler,
-        DDPMSampler,
-        VolumeGenerator,
-        theta_from_layup,
-    )
+    from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator, theta_from_layup
 
     ldm, ldm_cfg = _load_ldm(args.checkpoint, device)
     latents_root = Path(args.latents_root)
@@ -271,29 +267,28 @@ def main() -> None:
     s_por = float(args.s_por if args.s_por is not None else guidance_cfg.get("s_por", 1.0))
     s_nb  = float(args.s_nb  if args.s_nb  is not None else guidance_cfg.get("s_nb",  1.0))
 
-    # Generation mode: CLI overrides the config's generation block, which overrides defaults.
+    # Sampler geometry: CLI overrides the config's generation block, which overrides
+    # the defaults.  The training run logged its own values here, so a generation run
+    # that says nothing reproduces the geometry the run was babysat with.
     generation_cfg = ldm_cfg.get("generation", {}) or {}
-    gen_mode = args.mode if args.mode is not None else str(generation_cfg.get("mode", "sequential"))
-    joint_window_stride = int(
-        args.joint_window_stride if args.joint_window_stride is not None
-        else generation_cfg.get("joint_window_stride", 32)
+    chunk_tiles = tuple(
+        args.chunk_tiles if args.chunk_tiles is not None
+        else generation_cfg.get("chunk_tiles", DEFAULT_CHUNK_TILES)
     )
-    joint_window_batch = int(
-        args.joint_window_batch if args.joint_window_batch is not None
-        else generation_cfg.get("joint_window_batch", 32)
+    window_stride = int(
+        args.window_stride if args.window_stride is not None
+        else generation_cfg.get("window_stride", DEFAULT_WINDOW_STRIDE)
     )
-    if gen_mode == "joint" and args.sampler != "ddim":
-        ap.error("--mode joint requires --sampler ddim")
+    decode_stride = int(
+        args.decode_stride if args.decode_stride is not None
+        else generation_cfg.get("decode_stride", DEFAULT_DECODE_STRIDE)
+    )
 
-    if args.sampler == "ddpm":
-        sampler = DDPMSampler(ldm, schedule, device)
-        logger.info("Using DDPM sampler (T=%d steps)", schedule.T)
-    else:
-        sampler = DDIMSampler(ldm, schedule, device, n_steps=args.ddim_steps,
-                              s_por=s_por, s_nb=s_nb)
-        guided = s_por != 1.0 or s_nb != 1.0
-        logger.info("Using DDIM sampler (%d steps)  guided=%s  s_por=%.2f  s_nb=%.2f",
-                    args.ddim_steps, guided, s_por, s_nb)
+    sampler = DDIMSampler(ldm, schedule, device, n_steps=args.ddim_steps,
+                          s_por=s_por, s_nb=s_nb)
+    logger.info("DDIM sampler (%d steps)  guided=%s  s_por=%.2f  s_nb=%.2f",
+                args.ddim_steps, sampler.guided, s_por, s_nb)
+
     # Derive voxel dimensions (snapped to nearest patch_size multiple, downward)
     vol_shape = tuple(
         (round(d / VOXEL_SIZE_MM) // PATCH_SIZE) * PATCH_SIZE for d in VOLUME_SIZE_MM
@@ -301,45 +296,43 @@ def main() -> None:
 
     cond_meta = store_meta.get("conditioning") or {}
     _st = cond_meta.get("por_standardisation")
-    por_log_stats = None if _st is None else (float(_st["mean"]), float(_st["std"]))
-    theta_deg = None
-    if ldm.cfg.use_orient_cond:
-        theta_deg = theta_from_layup(vol_shape[0], LAYUP_ANGLES_DEG, PLY_THICKNESS_VOX)
+    if _st is None:
+        raise SystemExit(
+            f"{latents_root}/metadata.json has no conditioning.por_standardisation — "
+            "run scripts/build_conditioning.py before generating."
+        )
+    por_log_stats = (float(_st["mean"]), float(_st["std"]))
+    theta_deg = theta_from_layup(vol_shape[0], LAYUP_ANGLES_DEG, PLY_THICKNESS_VOX)
 
     generator = VolumeGenerator(
         sampler=sampler,
         vae=vae,
         device=device,
         patch_size=PATCH_SIZE,
-        generation_stride=GENERATION_STRIDE,
-        neighbour_offset=NEIGHBOUR_OFFSET,
         latent_size=PATCH_SIZE // 4,
         latent_mean=latent_mean,
         latent_std=latent_std,
         voxel_size_mm=VOXEL_SIZE_MM,
         por_log_stats=por_log_stats,
         theta_deg=theta_deg,
-        group_order=resolve_group_order(store_meta),
+        chunk_tiles=chunk_tiles,
+        window_stride=window_stride,
+        decode_stride=decode_stride,
     )
-    # Stride-grid dimensions — patches tile the volume without overlapping
-    gz = len(range(0, vol_shape[0] - PATCH_SIZE + 1, GENERATION_STRIDE))
-    gy = len(range(0, vol_shape[1] - PATCH_SIZE + 1, GENERATION_STRIDE))
-    gx = len(range(0, vol_shape[2] - PATCH_SIZE + 1, GENERATION_STRIDE))
-    n_patches_per_vol = gz * gy * gx
+    # Tile grid — the grid the requested porosity field is defined on.
+    gz, gy, gx = (v // TILE_SIZE for v in vol_shape)
+    n_chunks = 1
+    for n, c in zip((gz, gy, gx), chunk_tiles):
+        n_chunks *= -(-n // c)
 
     # Build a human-readable run folder under inference/.
-    # Format: inference/<ldm_run>/<timestamp>-<sampler>-steps<N>-lstd<F>-spor<F>-snb<F>
     import datetime
-    ldm_run_name = Path(args.checkpoint).parent.parent.name   # e.g. ldm03-run-0001-...
+    ldm_run_name = Path(args.checkpoint).parent.parent.name   # e.g. ldm06-run-0001-...
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    sampler_tag = (
-        f"ddpm-T{schedule.T}" if args.sampler == "ddpm"
-        else f"ddim{args.ddim_steps}"
-    )
     run_tag = (
         f"{ts}"
-        f"-{gen_mode}"
-        f"-{sampler_tag}"
+        f"-chunk{'x'.join(str(c) for c in chunk_tiles)}"
+        f"-ddim{args.ddim_steps}"
         f"-spor{s_por:.2f}"
         f"-snb{s_nb:.2f}"
     )
@@ -347,54 +340,46 @@ def main() -> None:
     combinations = list(product(POROSITY_LEVELS, DISTRIBUTIONS))
 
     logger.info(
-        "Generating %d volumes  shape=%s  stride_grid=%dx%dx%d  patches_per_vol=%d"
-        "  device=%s  ddim_steps=%d",
-        len(combinations), vol_shape, gz, gy, gx, n_patches_per_vol,
-        device, args.ddim_steps,
+        "Generating %d volumes  shape=%s  tiles=%dx%dx%d  chunks=%d  chunk_tiles=%s"
+        "  window_stride=%d  decode_stride=%d  device=%s  ddim_steps=%d",
+        len(combinations), vol_shape, gz, gy, gx, n_chunks, chunk_tiles,
+        window_stride, decode_stride, device, args.ddim_steps,
     )
 
-    vol_pbar   = tqdm(total=len(combinations), unit="vol", position=0)
-    patch_pbar = tqdm(unit="patch", position=1, leave=False)
+    vol_pbar  = tqdm(total=len(combinations), unit="vol", position=0)
+    step_pbar = tqdm(unit="step", position=1, leave=False)
 
-    with vol_pbar, patch_pbar:
+    with vol_pbar, step_pbar:
         for por_level, dist in combinations:
             vol_pbar.set_description(f"por={por_level:.3f} {dist}")
 
             out_dir = out_root / f"por_{por_level}" / dist
-            if (out_dir / "volume.tif").exists() and (out_dir / "mask.tif").exists():
+            if (out_dir / "volume.tif").exists() and (out_dir / "label.tif").exists():
                 logger.info("Skipping por=%.3f %s — already generated at %s", por_level, dist, out_dir)
                 vol_pbar.update(1)
                 continue
 
             local_por_map = _build_local_por_map(gz, gy, gx, por_level, dist)
 
-            # Sequential mode counts patches; joint mode counts DDIM timesteps.
-            if gen_mode == "joint":
-                patch_pbar.reset(total=args.ddim_steps)
-                patch_pbar.set_description("ddim steps")
-            else:
-                patch_pbar.reset(total=n_patches_per_vol)
-                patch_pbar.set_description("patches")
+            # One progress tick per DDIM step, over every chunk.
+            step_pbar.reset(total=n_chunks * args.ddim_steps)
+            step_pbar.set_description("ddim steps")
 
             with torch.no_grad():
-                xct_u8, mask_u8, gen_stats = generator.generate(
+                xct_u8, label_u8, gen_stats = generator.generate(
                     volume_size_mm=VOLUME_SIZE_MM,
                     target_porosity=por_level,
                     autocast_dtype=autocast_dtype,
                     local_por_map=local_por_map,
-                    patch_pbar=patch_pbar,
-                    gen_batch_size=GEN_BATCH_SIZE,
+                    progress=step_pbar,
+                    window_batch=args.window_batch,
                     decode_batch_size=DECODE_BATCH_SIZE,
-                    mode=gen_mode,
-                    joint_window_stride=joint_window_stride,
-                    joint_window_batch=joint_window_batch,
                 )
 
-            xct_f32 = xct_u8.astype(np.float32) / 255.0
-
             out_dir.mkdir(parents=True, exist_ok=True)
-            tifffile.imwrite(str(out_dir / "volume.tif"), xct_f32)
-            tifffile.imwrite(str(out_dir / "mask.tif"), mask_u8)
+            # Both arrays go out on their native scale — see the module docstring.
+            tifffile.imwrite(str(out_dir / "volume.tif"), xct_u8)
+            tifffile.imwrite(str(out_dir / "label.tif"), label_u8)
             gen_stats["distribution"] = dist
             (out_dir / "generation_stats.json").write_text(json.dumps(gen_stats, indent=2))
 

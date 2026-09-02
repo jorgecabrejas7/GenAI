@@ -1,14 +1,16 @@
-"""Shared conditioning + assembly conventions for the LDM (D32 / ldm05).
+"""Shared conditioning conventions for the LDM (ldm06).
 
 This module is the SINGLE source of truth for the conventions that the data
 side (latent store construction, ``LatentDataset``) and the model/sampler side
 (``UNet3DDenoiser``, ``VolumeGenerator``) must agree on exactly:
 
-* the neighbour direction order (``NEIGHBOUR_DIRS``),
-* the availability state codes (``NB_OOB`` / ``NB_EXISTS`` / ``NB_UNKNOWN``),
+* the neighbour direction order (:data:`NEIGHBOUR_DIRS`),
+* the availability state codes (:data:`NB_OOB` / :data:`NB_EXISTS` /
+  :data:`NB_UNKNOWN`),
 * the grid index of a patch (:func:`grid_index`),
-* the eight-group spatial parity schedule and its fixed ordering
-  (``PARITY_GROUP_ORDER``, :func:`neighbour_states`),
+* the six per-face distances to the specimen box (:data:`DIST6_DIRS`,
+  :func:`dist6_from_box`),
+* the porosity transform (:func:`porosity_to_cond`),
 * the geometry guard that keeps neighbours from leaking target content
   (:func:`validate_neighbour_geometry`).
 
@@ -17,84 +19,90 @@ than re-deriving it, otherwise training and generation silently disagree.
 
 Neighbour availability states
 -----------------------------
-0 — OOB (out of bounds): the neighbour position is outside the volume.
+0 — OOB (out of bounds): the specimen ends at that face; there is no
+    neighbour and there never will be.
 1 — EXISTS: the neighbour latent is known and has been provided.
-2 — UNKNOWN: the neighbour has not been generated yet, because its parity
-    group comes later in the fixed group ordering.
+2 — UNKNOWN: a neighbour exists physically but has not been resolved yet —
+    a chunk the sampler has not reached, or the CFG neighbour null.
+
+The data side only ever emits EXISTS and OOB.  UNKNOWN enters training
+through the ``drop_nb`` dropout of the training step (which is exactly the
+neighbour-null arm of the nested CFG) and generation through the chunks the
+sampler has not written yet.
 
 Neighbours TOUCH, they do not overlap
 -------------------------------------
 ``neighbour_offset`` must be at least ``patch_size``.  At the original
 ``neighbour_offset = 32`` with ``patch_size = 64`` a face neighbour shared
-HALF its voxels with the target, and the six neighbours between them tiled the
-target completely: the ``+z``/``-z`` pair alone covers latent z-cells 0-7 and
-8-15 over the full y/x extent.  Because opposite faces flip the SAME parity
-bit they are always both EXISTS or both UNKNOWN, so 7 of the 8 parity groups
-received the target's entire content as "conditioning".  Measured leak: the
-``+z`` neighbour reproduced the target's overlap region with MAE 0.067 against
-0.744 for a random patch (ratio 0.09) — a verbatim copy.  The model learned to
-copy rather than to generate.
+HALF its voxels with the target, and the six neighbours between them tiled
+the target completely.  Measured leak: the ``+z`` neighbour reproduced the
+target's overlap region with MAE 0.067 against 0.744 for a random patch
+(ratio 0.09) — a verbatim copy.  The model learned to copy rather than to
+generate.  At ``neighbour_offset = 64`` the neighbour is face-adjacent: zero
+shared voxels, so nothing of the target can be read off it, and the whole
+unshifted neighbour latent is the correct network input.
 
-At ``neighbour_offset = 64`` the neighbour is face-adjacent: zero shared
-voxels, so nothing of the target can be read off it.  The correct network
-input is then the FULL, UNSHIFTED neighbour latent.  Rolling it into the
-target frame (:func:`shift_into_target_frame`) only ever made sense for an
-overlapping neighbour; at offset 64 the displacement is 64/4 = 16 latent cells
-on a 16-cell axis, so the "overlap" is empty and a shifted tensor would be all
-zeros.  :func:`validate_shift` turns that silent-zero case into a hard error.
-
-Eight-group parity schedule (D32 §3.3)
---------------------------------------
-The generation grid has stride 64, so patches tile without overlapping and the
-schedule's original premise (same-group patches are independent) holds by
-construction.  The grid index is ``origin // neighbour_offset``, which makes a
-face neighbour exactly ±1 grid step on one axis for ANY patch origin — the
-stored patches are sampled every 32 voxels, i.e. eight interleaved copies of
-the stride-64 grid, and every patch's six neighbours live in its own copy.
-
-Groups are generated in the fixed order :data:`PARITY_GROUP_ORDER` (rank
-``4·pz + 2·py + px``).  A face neighbour flips exactly one parity bit, so its
-group is deterministic: EXISTS when that group precedes the target's group,
-UNKNOWN when it follows, OOB when the grid position does not exist.
-Equivalently, both neighbours on axis *a* are EXISTS iff the target's parity
-bit *a* is 1.  Context per group is therefore graded 0 / 2 / 2 / 2 / 4 / 4 /
-4 / 6 EXISTS neighbours: only 1 patch in 8 is generated blind.  A plain
-two-colour checkerboard would also be collision-free at stride 64, but it
-would generate HALF the volume with no neighbour context at all, so the
-eight-group ordering is kept.
+Six per-face distances instead of one
+-------------------------------------
+ldm05 conditioned on a single scalar ``cond_dist`` — the distance from the
+patch centre to the NEAREST outer specimen face over all three axes.  One
+number cannot say *which* face is close, so a patch against the top surface
+and a patch against a side wall were asked for the same thing, and the model
+could not learn that exterior air lies on one particular side.
+:data:`DIST6_DIRS` replaces it with one distance per face, measured from that
+face of the patch to the matching face of the specimen box, capped at
+:data:`DIST_CAP` voxels and normalised.  A value of 0 means "the specimen
+ends right here, on this side"; 1 means "at least 64 voxels of specimen that
+way".
 """
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
+import numpy as np
 
 NB_OOB     = 0
 NB_EXISTS  = 1
 NB_UNKNOWN = 2
+N_AVAIL_STATES = 3
 
 # Neighbour directions as (dz, dy, dx) grid-index offsets.  Index i of any
-# ``nb_latents`` / ``nb_avail`` tensor refers to NEIGHBOUR_DIRS[i].
+# ``nb_latents`` / ``nb_avail`` / ``nb_t`` tensor refers to NEIGHBOUR_DIRS[i].
 NEIGHBOUR_DIRS: tuple[tuple[int, int, int], ...] = (
     ( 1, 0, 0), (-1, 0, 0),
     ( 0, 1, 0), ( 0,-1, 0),
     ( 0, 0, 1), ( 0, 0,-1),
 )
 
-_N_NEIGHBORS = len(NEIGHBOUR_DIRS)
+N_NEIGHBOURS = len(NEIGHBOUR_DIRS)
 
-# Fixed ordering of the eight (iz%2, iy%2, ix%2) parity groups.  Plain
-# lexicographic order on the parity triple; group rank == 4·pz + 2·py + px.
-PARITY_GROUP_ORDER: tuple[tuple[int, int, int], ...] = (
-    (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
-    (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
+# Face order of ``cond_dist6``: (z-, z+, y-, y+, x-, x+).  This is DELIBERATELY
+# not the ``NEIGHBOUR_DIRS`` order — cond_dist6 is a geometry vector read by one
+# MLP, not a per-neighbour tensor, and low-then-high per axis is how the
+# specimen box itself is written.  Both producers (the conditioning builder and
+# the sampler) import these constants, so the two can never drift.
+DIST6_DIRS: tuple[tuple[int, int, int], ...] = (
+    (-1, 0, 0), ( 1, 0, 0),
+    ( 0,-1, 0), ( 0, 1, 0),
+    ( 0, 0,-1), ( 0, 0, 1),
 )
+DIST6_NAMES: tuple[str, ...] = ("zm", "zp", "ym", "yp", "xm", "xp")
+N_DIST6 = len(DIST6_DIRS)
+
+# Distance-to-surface cap in voxels: beyond one patch the exact distance stops
+# mattering, so every face saturates at 1.0.
+DIST_CAP = 64.0
+
+# Porosity transform: cond_por = (log(phi + POR_LOG_EPS) - mean) / std, with
+# (mean, std) measured on the train split and recorded in the store metadata.
+POR_LOG_EPS = 1e-3
+
+# Porosity conditioning is clamped to the training distribution range (EDA
+# ground truth: min 0.002, max 0.107) so generation never extrapolates.
+POR_MIN = 0.002
+POR_MAX = 0.107
 
 
 # ── geometry guard: neighbours must not share voxels with the target ──────────
-
-_LEAK_FLAG = "allow_neighbour_overlap"
-
 
 def neighbour_shared_voxels(neighbour_offset: int, patch_size: int) -> int:
     """Voxels a face neighbour shares with the target patch.
@@ -107,37 +115,23 @@ def neighbour_shared_voxels(neighbour_offset: int, patch_size: int) -> int:
     return overlap_1d * int(patch_size) * int(patch_size)
 
 
-def validate_neighbour_geometry(
-    neighbour_offset: int,
-    patch_size: int,
-    *,
-    allow_neighbour_overlap: bool = False,
-) -> None:
+def validate_neighbour_geometry(neighbour_offset: int, patch_size: int) -> None:
     """Raise unless a face neighbour shares NO voxel with the target patch.
 
     ``neighbour_offset >= patch_size`` is the invariant that makes neighbour
     conditioning honest.  Below it the neighbour carries a verbatim copy of
     part of the answer and the denoiser learns to copy — the ldm05 failure this
     guard exists to prevent (see the module docstring).
-
-    ``allow_neighbour_overlap=True`` disables the check.  It ALLOWS CONTENT
-    LEAKAGE and exists only to reproduce the leak for an ablation; it is never
-    a valid training setting.
     """
     shared = neighbour_shared_voxels(neighbour_offset, patch_size)
     if shared == 0:
-        return
-    if allow_neighbour_overlap:
         return
     raise ValueError(
         f"neighbour_offset={neighbour_offset} < patch_size={patch_size}: each face "
         f"neighbour would share {shared} voxels with the target "
         f"({patch_size - neighbour_offset} of {patch_size} planes), handing the "
-        f"denoiser part of the answer.  Opposite faces flip the same parity bit, so "
-        f"they arrive together and can tile the target completely.  Use "
-        f"neighbour_offset >= {patch_size} (touching neighbours), or set "
-        f"data.{_LEAK_FLAG}=true — which ALLOWS CONTENT LEAKAGE and is for "
-        f"ablation only."
+        f"denoiser part of the answer.  Use neighbour_offset >= {patch_size} "
+        f"(touching neighbours)."
     )
 
 
@@ -154,228 +148,82 @@ def grid_index(origin, neighbour_offset: int) -> tuple[int, int, int]:
     return (int(origin[0]) // g, int(origin[1]) // g, int(origin[2]) // g)
 
 
-# ── eight-group parity schedule ───────────────────────────────────────────────
+# ── per-face distance to the specimen box ─────────────────────────────────────
 
-def parity_group(gi: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Parity group ``(iz%2, iy%2, ix%2)`` of a grid index."""
-    return (gi[0] % 2, gi[1] % 2, gi[2] % 2)
-
-
-def validate_group_order(order) -> tuple[tuple[int, int, int], ...]:
-    """Coerce and validate a group ordering (a permutation of the 8 groups)."""
-    coerced = tuple(tuple(int(v) for v in g) for g in order)
-    if sorted(coerced) != sorted(PARITY_GROUP_ORDER):
-        raise ValueError(
-            f"Invalid parity group ordering {coerced!r} — it must be a "
-            f"permutation of the eight (iz%2, iy%2, ix%2) triples."
-        )
-    return coerced
-
-
-def resolve_group_order(metadata: dict | None = None) -> tuple[tuple[int, int, int], ...]:
-    """Group ordering recorded by the latent store, else the shared default.
-
-    The data side writes ``metadata["assembly"]["parity_group_order"]`` when
-    building the store; reading it here keeps exactly one copy of the ordering
-    in play.  When the key is absent, :data:`PARITY_GROUP_ORDER` is used — the
-    same constant the data side imports.
-    """
-    if metadata:
-        raw = (metadata.get("assembly") or {}).get("parity_group_order")
-        if raw is not None:
-            return validate_group_order(raw)
-    return PARITY_GROUP_ORDER
-
-
-def group_rank(
-    gi: tuple[int, int, int],
-    order: tuple[tuple[int, int, int], ...] = PARITY_GROUP_ORDER,
-) -> int:
-    """Position of a grid index's parity group in the generation ordering."""
-    return order.index(parity_group(gi))
-
-
-def neighbour_states(
-    gi: tuple[int, int, int],
-    in_grid,
-    order: tuple[tuple[int, int, int], ...] = PARITY_GROUP_ORDER,
-) -> list[int]:
-    """Availability state of each of the 6 face neighbours of *gi*.
+def dist6_from_box(
+    origin,
+    patch_size: int,
+    box_lo,
+    box_hi,
+    dist_cap: float = DIST_CAP,
+) -> np.ndarray:
+    """Six per-face distances of one patch to the specimen box, normalised.
 
     Parameters
     ----------
-    gi      : (iz, iy, ix) grid index of the target patch
-    in_grid : callable (iz, iy, ix) -> bool — is that grid position inside the
-              generation grid?
-    order   : parity group ordering in use
+    origin     : (z0, y0, x0) patch origin in voxels
+    patch_size : voxel side length of the patch
+    box_lo     : (z, y, x) lower corner of the specimen box, INCLUSIVE
+    box_hi     : (z, y, x) upper corner of the specimen box, EXCLUSIVE
+    dist_cap   : saturation distance in voxels
 
     Returns
     -------
-    list of 6 ints, aligned with :data:`NEIGHBOUR_DIRS`.
+    (6,) float32 in [0, 1], ordered by :data:`DIST6_DIRS`.  Entry ``2·a`` is
+    the gap between the patch's low face on axis ``a`` and the box's low face;
+    entry ``2·a + 1`` the gap at the high faces.
     """
-    rank = group_rank(gi, order)
-    states: list[int] = []
-    for d in NEIGHBOUR_DIRS:
-        ngi = (gi[0] + d[0], gi[1] + d[1], gi[2] + d[2])
-        if not in_grid(ngi):
-            states.append(NB_OOB)
-        elif group_rank(ngi, order) < rank:
-            states.append(NB_EXISTS)
-        else:
-            states.append(NB_UNKNOWN)
-    return states
+    o = np.asarray(origin, dtype=np.float64)
+    lo = np.asarray(box_lo, dtype=np.float64)
+    hi = np.asarray(box_hi, dtype=np.float64)
+    p = float(patch_size)
+    gaps = np.empty(N_DIST6, dtype=np.float64)
+    gaps[0::2] = o - lo                 # low faces: z-, y-, x-
+    gaps[1::2] = hi - (o + p)           # high faces: z+, y+, x+
+    return (np.clip(gaps, 0.0, dist_cap) / dist_cap).astype(np.float32)
 
 
-# ── neighbour → target frame shift (overlapping neighbours only) ──────────────
-
-def latent_shift_cells(neighbour_offset: int, patch_size: int, latent_size: int) -> int:
-    """Neighbour displacement expressed in latent cells.
-
-    ``neighbour_offset`` is in voxels (64 for touching neighbours); the VAE
-    downsamples by ``patch_size // latent_size`` (4), so the neighbour is
-    displaced by 16 latent cells — the full latent extent.
-    """
-    if patch_size % latent_size != 0:
-        raise ValueError(
-            f"patch_size={patch_size} is not a multiple of latent_size={latent_size}."
-        )
-    ds = patch_size // latent_size
-    if neighbour_offset % ds != 0:
-        raise ValueError(
-            f"neighbour_offset={neighbour_offset} voxels is not a multiple of the "
-            f"VAE downsampling factor {ds} — it cannot be expressed in latent cells."
-        )
-    return neighbour_offset // ds
-
-
-def validate_shift(shift: int, latent_size: int) -> None:
-    """Raise unless a neighbour shift actually moves content into the frame.
-
-    Shifting is only meaningful for an OVERLAPPING neighbour.  When
-    ``|shift| >= latent_size`` the shared region is empty, so the shifted
-    tensor would be all zeros — a silent no-signal input that looks like a
-    working conditioning path.  That is exactly the class of bug this guard
-    exists to make loud.
-    """
-    if int(shift) < 0:
-        raise ValueError(f"Neighbour shift must be non-negative, got {shift}.")
-    if int(shift) >= int(latent_size):
-        raise ValueError(
-            f"Neighbour shift of {shift} latent cells is >= the latent size "
-            f"{latent_size}: the neighbour and the target share no cells, so the "
-            f"shifted tensor would be all zeros.  Touching neighbours must be fed "
-            f"UNSHIFTED (set neighbour_shift=false); shifting is only valid when "
-            f"neighbour_offset < patch_size."
-        )
-
-
-def _axis_slices(d: int, length: int, shift: int) -> tuple[slice, slice] | None:
-    """(target-frame slice, neighbour-frame slice) of the overlap on one axis."""
-    if d == 0:
-        return slice(0, length), slice(0, length)
-    if shift >= length:
-        return None                      # patches do not overlap on this axis
-    if d > 0:
-        return slice(shift, length), slice(0, length - shift)
-    return slice(0, length - shift), slice(shift, length)
-
-
-def overlap_slices(
-    direction: tuple[int, int, int],
-    length: int,
-    shift: int,
-) -> tuple[tuple[slice, slice, slice], tuple[tuple[slice, slice, slice]]] | None:
-    """Slices of the region shared by a patch and the patch at *direction*.
-
-    Returns ``(dst, src)``, each a 3-tuple of slices: ``dst`` indexes the
-    target patch's own array, ``src`` indexes the neighbour's array, and the
-    two select the SAME physical region.  Returns ``None`` when the two
-    patches do not overlap at all.
-    """
-    dst: list[slice] = []
-    src: list[slice] = []
-    for d in direction:
-        pair = _axis_slices(d, length, shift)
-        if pair is None:
-            return None
-        dst.append(pair[0])
-        src.append(pair[1])
-    return (dst[0], dst[1], dst[2]), (src[0], src[1], src[2])
-
-
-def shift_into_target_frame(
-    nb: torch.Tensor,
-    direction: tuple[int, int, int],
-    shift: int,
-) -> torch.Tensor:
-    """Roll a neighbour latent into the target patch's coordinate frame.
-
-    ONLY valid for an overlapping neighbour (``neighbour_offset < patch_size``).
-    The neighbour at grid offset *direction* has its origin displaced by
-    ``direction * shift`` latent cells from the target's origin, so its cell
-    ``j`` describes the physical location that the target calls
-    ``j + direction*shift``.  This moves the overlapping part to that index and
-    zero-fills the rest, so a convolution sees both patches in one frame
-    (D32 §3.2).
-
-    For touching neighbours the shared region is empty; the function raises
-    rather than returning an all-zero tensor (see :func:`validate_shift`).
+def dist6_from_box_array(
+    origins: np.ndarray,
+    patch_size: int,
+    box_lo: np.ndarray,
+    box_hi: np.ndarray,
+    dist_cap: float = DIST_CAP,
+) -> np.ndarray:
+    """Vectorised :func:`dist6_from_box` over many patches.
 
     Parameters
     ----------
-    nb        : (..., L, L, L) neighbour latent
-    direction : (dz, dy, dx) grid offset of the neighbour
-    shift     : displacement in latent cells (``latent_shift_cells``)
+    origins : (N, 3) patch origins in voxels
+    box_lo  : (N, 3) inclusive lower corners
+    box_hi  : (N, 3) exclusive upper corners
 
     Returns
     -------
-    Tensor of the same shape, zero outside the shared region.
+    (N, 6) float32, same face ordering as :func:`dist6_from_box`.
     """
-    length = nb.shape[-1]
-    if nb.shape[-3] != length or nb.shape[-2] != length:
-        raise ValueError(f"shift_into_target_frame expects a cubic latent, got {tuple(nb.shape)}.")
-    validate_shift(shift, length)
-    out = torch.zeros_like(nb)
-    sl = overlap_slices(direction, length, shift)
-    if sl is None:
-        return out
-    dst, src = sl
-    out[..., dst[0], dst[1], dst[2]] = nb[..., src[0], src[1], src[2]]
-    return out
+    o = np.asarray(origins, dtype=np.float64)
+    lo = np.asarray(box_lo, dtype=np.float64)
+    hi = np.asarray(box_hi, dtype=np.float64)
+    gaps = np.empty((o.shape[0], N_DIST6), dtype=np.float64)
+    gaps[:, 0::2] = o - lo
+    gaps[:, 1::2] = hi - (o + float(patch_size))
+    return (np.clip(gaps, 0.0, dist_cap) / dist_cap).astype(np.float32)
 
 
-class NeighborAvailabilityEmbedding(nn.Module):
-    """Learned embedding for 6-connected neighbor availability states.
+# ── porosity transform ────────────────────────────────────────────────────────
 
-    Wraps :class:`torch.nn.Embedding` with per-neighbor position offsets so
-    that the embedding for "EXISTS at neighbor 0" is distinct from "EXISTS at
-    neighbor 3", giving the model spatial awareness of which direction a known
-    neighbor came from.
+def porosity_to_cond(phi, por_log_stats: tuple[float, float] | None):
+    """Map raw pore volume fraction to the model's ``cond_por`` scalar.
 
-    Parameters
-    ----------
-    embed_dim : int
-        Dimensionality of the embedding per neighbor.
+    ``por_log_stats`` is the (mean, std) of ``log(phi + POR_LOG_EPS)`` over the
+    train split, as recorded by the latent store.  Passing None is an error — a
+    wrong standardisation silently mis-conditions every patch.
     """
-
-    def __init__(self, embed_dim: int = 8) -> None:
-        super().__init__()
-        self.embed_dim = embed_dim
-        # 6 neighbors × 3 states = 18 entries; each neighbor gets its own offset
-        self.embedding = nn.Embedding(_N_NEIGHBORS * 3, embed_dim)
-
-    def forward(self, nb_avail: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        nb_avail : (B, 6) long — availability states {0, 1, 2}
-
-        Returns
-        -------
-        (B, 6 * embed_dim) — flattened per-neighbor embeddings
-        """
-        B = nb_avail.shape[0]
-        offsets   = torch.arange(_N_NEIGHBORS, device=nb_avail.device).unsqueeze(0) * 3
-        avail_idx = (nb_avail + offsets).long()           # (B, 6)
-        emb       = self.embedding(avail_idx)             # (B, 6, embed_dim)
-        return emb.view(B, _N_NEIGHBORS * self.embed_dim) # (B, 6*embed_dim)
+    if por_log_stats is None:
+        raise ValueError(
+            "por_log_stats is required to build cond_por. Pass the (mean, std) of "
+            "log(phi + 1e-3) recorded by the latent store's metadata."
+        )
+    mean, std = por_log_stats
+    return (np.log(np.asarray(phi, dtype=np.float64) + POR_LOG_EPS) - mean) / std

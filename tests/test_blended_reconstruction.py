@@ -130,7 +130,7 @@ def test_weight_coverage():
     original boundary voxels land in the flat (weight~1) region of the Tukey
     window, not in the taper (weight=0) region.
     """
-    from poregen.eval.blended import _pad_size, _tukey_window_3d
+    from poregen.eval.blended import _pad_size, tukey_window_3d
 
     D, H, W = 128, 96, 80
     patch_size, stride, alpha = 64, 48, 0.5
@@ -146,7 +146,7 @@ def test_weight_coverage():
     pad_w = _pad_size(W_pre, patch_size, stride)
     padded_shape = (pad_d, pad_h, pad_w)
 
-    W3d = _tukey_window_3d(patch_size)
+    W3d = tukey_window_3d(patch_size)
 
     coords = [
         (z, y, x)

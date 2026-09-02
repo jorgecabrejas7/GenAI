@@ -48,10 +48,23 @@ logger = logging.getLogger(__name__)
 # Public helpers (also imported by tests)
 # ---------------------------------------------------------------------------
 
-def _tukey_window_3d(patch_size: int, alpha: float = 0.5) -> np.ndarray:
-    """3-D Tukey window as the outer product of three 1-D windows."""
+def tukey_window_3d(patch_size: int, alpha: float = 0.5,
+                    floor: float = 0.0) -> np.ndarray:
+    """3-D Tukey window as the outer product of three 1-D windows.
+
+    ``floor`` lifts the 1-D taper off zero before the outer product.  The
+    default 0 reproduces the plain Tukey window, which is exactly 0 at the
+    patch edge — fine when the volume is reflection-padded so every voxel sits
+    under at least one flat-region window.  When it is not (the LDM sampler
+    blends over the generated volume itself, whose outer face is covered by a
+    single decode window), a zero weight there makes the normalisation 0/0; a
+    small floor keeps it well posed and leaves the interior blend unchanged to
+    three decimal places.
+    """
     from scipy.signal.windows import tukey as _tukey
     w = _tukey(patch_size, alpha=alpha).astype(np.float32)
+    if floor > 0.0:
+        w = np.maximum(w, np.float32(floor))
     return w[:, None, None] * w[None, :, None] * w[None, None, :]
 
 
@@ -169,7 +182,7 @@ def reconstruct_volume(
     )
 
     # ── Tukey window ─────────────────────────────────────────────────────────
-    W3d = _tukey_window_3d(patch_size)
+    W3d = tukey_window_3d(patch_size)
 
     # ── Patch coordinates ─────────────────────────────────────────────────────
     coords = [
@@ -347,7 +360,7 @@ def reconstruct_volume_from_arrays(
     )
 
     # ── Tukey window & patch coordinates ─────────────────────────────────────
-    W3d = _tukey_window_3d(patch_size)
+    W3d = tukey_window_3d(patch_size)
     coords = [
         (z, y, x)
         for z in range(0, pad_d - patch_size + 1, stride)

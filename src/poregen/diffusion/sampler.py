@@ -1,66 +1,79 @@
-"""DDPM patch sampler and full-volume generator for PoreGen LDM."""
+"""DDIM patch sampler and hybrid chunked volume generator for the PoreGen LDM.
+
+There is exactly ONE generation path (ldm06): **hybrid chunked joint
+denoising**.  It is the union of the two ldm05 modes, and it exists because
+each of them was only half right.
+
+* *Joint* (MultiDiffusion) denoising kept overlapping windows on one latent
+  canvas coherent, but the canvas had to fit in memory all at once and every
+  window ran with all-UNKNOWN neighbours, so the neighbour conditioning — and
+  with it the ``s_nb`` guidance arm — was inert.
+* *Sequential* generation walked a parity schedule with real neighbour
+  conditioning, but each patch was denoised to completion on its own, so
+  neighbouring patches only ever met at a plane and the seams showed.
+
+The hybrid keeps both: the volume is cut into CHUNKS of ``chunk_tiles``
+64-voxel tiles, chunks are generated in raster order, and inside a chunk
+overlapping windows jointly denoise that chunk's own latent canvas.  A window's
+six face neighbours are real again — they come from the current chunk's canvas
+at the current timestep, or from an already finished chunk re-noised to that
+same timestep, or they are OOB (the volume ends) or UNKNOWN (a chunk that does
+not exist yet).  Every neighbour therefore arrives at a KNOWN noise level,
+which is what ``nb_t`` carries into the denoiser.  ``chunk_tiles=(1,1,1)``
+reduces the whole thing to patch-at-a-time sequential generation; a single
+chunk covering the volume reduces it to pure joint denoising.
+
+Decoding is overlapped too: the finished latent canvas is decoded in windows at
+``decode_stride`` voxels and the decoded grey levels and class logits are
+blended with a tapered window (the fix validated on the VAE tile seams —
+see ``poregen.eval.blended``).  Direct stride-64 tiling put a decoder-side
+seam at every patch face; blending removes it.
+"""
 
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-from scipy.special import expit
 
 from poregen.diffusion.conditioning import (
+    N_NEIGHBOURS,
     NB_EXISTS,
     NB_OOB,
     NB_UNKNOWN,
     NEIGHBOUR_DIRS,
-    PARITY_GROUP_ORDER,
-    latent_shift_cells,
-    neighbour_states,
-    parity_group,
-    resolve_group_order,
-    shift_into_target_frame,
-    validate_group_order,
-    validate_neighbour_geometry,
-    validate_shift,
+    POR_MAX,
+    POR_MIN,
+    dist6_from_box,
+    porosity_to_cond,
 )
 from poregen.diffusion.orientation import orientation_tensor
+from poregen.eval.blended import tukey_window_3d
+from poregen.models.vae.base import decode_class_probs, decode_label
 
 logger = logging.getLogger(__name__)
 
-_NEIGHBOR_DIRS = list(NEIGHBOUR_DIRS)
+_AXIS_NAMES = ("z", "y", "x")
 
-# Availability states — single source of truth is conditioning.py
-_NB_OOB     = NB_OOB
-_NB_EXISTS  = NB_EXISTS
-_NB_UNKNOWN = NB_UNKNOWN
+# The decode blend window must never be exactly zero: a volume's own outer face
+# is covered by a single decode window, and a zero weight there would leave the
+# face undefined (0/0).  The floor lifts the Tukey taper off zero without
+# changing the interior blend to three decimal places.
+_DECODE_WINDOW_FLOOR = 1e-3
 
-# Porosity conditioning is clamped to the training distribution
-# range (EDA ground truth: min 0.002, max 0.107) to avoid OOD extrapolation.
-_POR_MIN = 0.002
-_POR_MAX = 0.107
-
-# Porosity transform (D32 §1): cond_por = (log(phi + eps) - mean) / std
-# Both constants must match scripts/build_conditioning.py.
-_POR_LOG_EPS = 1e-3
-_DIST_CAP = 64.0
-
-
-def porosity_to_cond(phi, por_log_stats: tuple[float, float] | None):
-    """Map raw pore volume fraction to the model's ``cond_por`` scalar.
-
-    ``por_log_stats`` is the (mean, std) of ``log(phi + 1e-3)`` over the train
-    split, as recorded by the latent store.  Passing None is an error — a
-    wrong standardisation silently mis-conditions every patch.
-    """
-    if por_log_stats is None:
-        raise ValueError(
-            "por_log_stats is required to build cond_por. Pass the (mean, std) of "
-            "log(phi + 1e-3) recorded by the latent store's metadata."
-        )
-    mean, std = por_log_stats
-    return (np.log(np.asarray(phi, dtype=np.float64) + _POR_LOG_EPS) - mean) / std
+__all__ = [
+    "DDIMSampler",
+    "VolumeGenerator",
+    "porosity_to_cond",
+    "theta_from_layup",
+    "window_origins",
+    "window_weight",
+    "seam_discontinuity",
+]
 
 
 def theta_from_layup(
@@ -70,12 +83,12 @@ def theta_from_layup(
 ) -> np.ndarray:
     """θ(z) in degrees for a requested layup — the generation-side field.
 
-    D32 §4: at generation time θ(z) is written directly from the requested
-    stacking sequence and ply thickness; nothing is estimated.  Each ply
-    occupies ``ply_thickness_vox`` voxels and the sequence repeats if the
-    volume is deeper than the stack.  The encoding into (cos2θ, sin2θ) is done
-    by :func:`poregen.diffusion.orientation.orientation_tensor`, the single
-    shared implementation used by training as well.
+    At generation time θ(z) is written directly from the requested stacking
+    sequence and ply thickness; nothing is estimated.  Each ply occupies
+    ``ply_thickness_vox`` voxels and the sequence repeats if the volume is
+    deeper than the stack.  The encoding into (cos2θ, sin2θ) is done by
+    :func:`poregen.diffusion.orientation.orientation_tensor`, the single shared
+    implementation used by training as well.
 
     Returns
     -------
@@ -89,26 +102,23 @@ def theta_from_layup(
     return angles[ply_idx].astype(np.float32)
 
 
-_AXIS_NAMES = ("z", "y", "x")
+# ── overlapping-window helpers ────────────────────────────────────────────────
 
-
-# ── joint (MultiDiffusion-style) window helpers ──────────────────────────────
-
-def joint_window_origins(
+def window_origins(
     canvas_cells: tuple[int, int, int],
-    window_cells: int,
+    win_cells: int,
     stride_cells: int,
 ) -> list[tuple[int, int, int]]:
-    """Origins (in latent cells) of the overlapping joint-denoising windows.
+    """Origins (in latent cells) of the overlapping windows over one canvas.
 
-    Windows of side ``window_cells`` are placed at ``stride_cells`` spacing on
+    Windows of side ``win_cells`` are placed at ``stride_cells`` spacing on
     each axis.  Every canvas cell must be covered, so each axis must hold a
-    whole number of strides: ``(n - window) % stride == 0`` with the last
-    window ending exactly at the canvas edge.
+    whole number of strides: ``(n - win) % stride == 0`` with the last window
+    ending exactly at the canvas edge.
     """
-    w, s = int(window_cells), int(stride_cells)
+    w, s = int(win_cells), int(stride_cells)
     if s <= 0 or s > w:
-        raise ValueError(f"stride_cells={s} must be in [1, window_cells={w}].")
+        raise ValueError(f"stride_cells={s} must be in [1, win_cells={w}].")
     axes: list[list[int]] = []
     for n in canvas_cells:
         n = int(n)
@@ -122,7 +132,7 @@ def joint_window_origins(
     return [(z, y, x) for z in axes[0] for y in axes[1] for x in axes[2]]
 
 
-def joint_window_weight(window_cells: int) -> torch.Tensor:
+def window_weight(win_cells: int) -> torch.Tensor:
     """(L, L, L) separable cosine (Hann-type) fusion weight, strictly positive.
 
     ``w1d[i] = sin²(π·(i + 0.5)/L)`` — the half-cell offset keeps every entry
@@ -134,7 +144,7 @@ def joint_window_weight(window_cells: int) -> torch.Tensor:
     seams into the fused ε field.  The cosine profile down-weights each
     window's border predictions and varies smoothly across the canvas.
     """
-    L = int(window_cells)
+    L = int(win_cells)
     i = torch.arange(L, dtype=torch.float32) + 0.5
     w1 = torch.sin(np.pi * i / L) ** 2
     return w1[:, None, None] * w1[None, :, None] * w1[None, None, :]
@@ -142,33 +152,33 @@ def joint_window_weight(window_cells: int) -> torch.Tensor:
 
 def seam_discontinuity(
     volume: np.ndarray,
-    patch_size: int,
+    period,
     prefix: str = "seam",
+    interior_exclude=None,
 ) -> dict[str, float]:
-    """Discontinuity across the shared face of adjacent generated patches.
+    """Discontinuity across the planes where two independent answers meet.
 
-    This is the primary assembly-quality metric.  Patches tile at
-    ``generation_stride == patch_size``, so there is no overlap left to
-    compare: the only place two independently-denoised patches meet is the
-    plane between them.  A visible seam shows up as an abnormally large jump
-    from the last slice of one patch to the first slice of its neighbour.
-
-    For each axis the mean absolute slice-to-slice difference is computed at
-    the SEAM planes (boundary index a multiple of ``patch_size``) and at every
-    other, INTERIOR plane.  The interior value is the natural slice-to-slice
-    variation of the material and is the baseline the seam is judged against::
+    This is the primary assembly-quality metric.  For each axis the mean
+    absolute slice-to-slice difference is computed at the SEAM planes (boundary
+    index a multiple of ``period``) and at every INTERIOR plane.  The interior
+    value is the natural slice-to-slice variation of the material and is the
+    baseline the seam is judged against::
 
         ratio = seam_mad / interior_mad
 
     ``ratio ≈ 1`` means the seam is indistinguishable from ordinary internal
-    texture change — the assembly is continuous.  ``ratio >> 1`` means the
-    patches disagree where they meet and the seam is visible.
+    texture change — the assembly is continuous.  ``ratio >> 1`` means the two
+    sides disagree where they meet and the seam is visible.
 
     Parameters
     ----------
-    volume     : (D, H, W) decoded volume, any continuous scale
-    patch_size : voxel side length of one patch — the seam spacing
-    prefix     : metric-name prefix (e.g. ``"seam_xct"``)
+    volume  : (D, H, W) decoded volume, any continuous scale
+    period  : seam spacing in voxels — an int, or one value per axis
+    prefix  : metric-name prefix (e.g. ``"seam_xct"``)
+    interior_exclude : planes that are multiples of this are excluded from the
+        interior baseline (int or per-axis).  Defaults to ``period``.  Set it
+        to the window period when measuring a coarser chunk period, so both
+        metrics are judged against the SAME baseline.
 
     Returns
     -------
@@ -184,7 +194,13 @@ def seam_discontinuity(
     vol = np.asarray(volume, dtype=np.float32)
     if vol.ndim != 3:
         raise ValueError(f"seam_discontinuity expects a 3-D volume, got {vol.shape}.")
-    P = int(patch_size)
+    periods = (int(period),) * 3 if np.isscalar(period) else tuple(int(p) for p in period)
+    if interior_exclude is None:
+        excludes = periods
+    elif np.isscalar(interior_exclude):
+        excludes = (int(interior_exclude),) * 3
+    else:
+        excludes = tuple(int(p) for p in interior_exclude)
 
     metrics: dict[str, float] = {}
     seam_sum = seam_w = int_sum = int_w = 0.0
@@ -199,15 +215,16 @@ def seam_discontinuity(
         per_plane = diff.mean(axis=others)               # (n-1,)
         plane_elems = float(diff.size) / float(n - 1)    # voxels behind each mean
         boundary = np.arange(1, n)                       # plane between k-1 and k
-        is_seam = (boundary % P) == 0
+        is_seam = (boundary % periods[axis]) == 0
+        is_int = (boundary % excludes[axis]) != 0
 
         n_seam = int(is_seam.sum())
         total_planes += n_seam
         metrics[f"{prefix}_{name}_planes"] = float(n_seam)
 
         seam_mad = float(per_plane[is_seam].mean()) if n_seam else float("nan")
-        n_int = int((~is_seam).sum())
-        int_mad = float(per_plane[~is_seam].mean()) if n_int else float("nan")
+        n_int = int(is_int.sum())
+        int_mad = float(per_plane[is_int].mean()) if n_int else float("nan")
         metrics[f"{prefix}_{name}_mad"] = seam_mad
         metrics[f"{prefix}_{name}_interior_mad"] = int_mad
         metrics[f"{prefix}_{name}_ratio"] = (
@@ -232,123 +249,6 @@ def seam_discontinuity(
     return metrics
 
 
-class DDPMSampler:
-    """Patch-level DDPM reverse diffusion sampler.
-
-    Parameters
-    ----------
-    model : UNet3DDenoiser
-    schedule : DDPMSchedule
-    device : torch.device
-    """
-
-    def __init__(self, model: torch.nn.Module, schedule: Any, device: torch.device) -> None:
-        self.model    = model
-        self.schedule = schedule
-        self.device   = device
-
-    @torch.no_grad()
-    def sample_patch(
-        self,
-        nb_latents: torch.Tensor,
-        nb_avail: torch.Tensor,
-        cond_por: float,
-        cond_depth: float,
-        cond_dist: float,
-        cond_orient: torch.Tensor | None = None,
-        autocast_dtype: torch.dtype = torch.bfloat16,
-        return_intermediates: bool = False,
-    ) -> torch.Tensor:
-        """Run the full T-step DDPM reverse process for one patch.
-
-        Parameters
-        ----------
-        nb_latents          : (6, C, D, H, W) — neighbour latents, already shifted
-                              into the target frame (zeros for unavailable)
-        nb_avail            : (6,) long — 0=OOB, 1=EXISTS, 2=UNKNOWN per neighbor
-        cond_por            : float — standardised log porosity
-        cond_depth          : float — relative depth in [0, 1]
-        cond_dist           : float — min(d, 64)/64 in [0, 1]
-        cond_orient         : (2, D, H, W) float or None
-        return_intermediates: if True, return (final, list[Tensor]) where the list contains
-                              the latent after each denoising step, on CPU float32
-
-        Returns
-        -------
-        (C, D, H, W) float32 — generated clean latent, or
-        ((C, D, H, W), list[(C, D, H, W)]) when return_intermediates=True
-        """
-        self.model.eval()
-        schedule = self.schedule.to(self.device)
-        C = nb_latents.shape[1]
-        D = nb_latents.shape[2]
-
-        # Add batch dim
-        nb_l   = nb_latents.unsqueeze(0).to(self.device)     # (1,6,C,D,D,D)
-        nb_a   = nb_avail.unsqueeze(0).to(self.device)       # (1,6)
-        por    = torch.tensor([cond_por],   dtype=torch.float32, device=self.device)
-        depth  = torch.tensor([cond_depth], dtype=torch.float32, device=self.device)
-        dist   = torch.tensor([cond_dist],  dtype=torch.float32, device=self.device)
-        orient = None if cond_orient is None else cond_orient.unsqueeze(0).to(self.device)
-
-        x = torch.randn(1, C, D, D, D, device=self.device)
-        intermediates: list[torch.Tensor] = [] if return_intermediates else None  # type: ignore[assignment]
-
-        for t_idx in reversed(range(schedule.T)):
-            t = torch.tensor([t_idx], dtype=torch.long, device=self.device)
-            with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
-                eps_pred = self.model(x, t, nb_l, nb_a, por, depth, dist, orient)
-            x = schedule.p_sample(x, t, eps_pred)
-            if return_intermediates:
-                intermediates.append(x.squeeze(0).float().cpu())
-
-        result = x.squeeze(0).float()
-        if return_intermediates:
-            return result, intermediates
-        return result
-
-    @torch.no_grad()
-    def sample_batch(
-        self,
-        nb_latents: torch.Tensor,
-        nb_avail: torch.Tensor,
-        cond_por: torch.Tensor,
-        cond_depth: torch.Tensor,
-        cond_dist: torch.Tensor,
-        cond_orient: torch.Tensor | None = None,
-        autocast_dtype: torch.dtype = torch.bfloat16,
-    ) -> torch.Tensor:
-        """Run the full T-step DDPM reverse process for a batch of patches.
-
-        Parameters
-        ----------
-        nb_latents  : (B, 6, C, D, D, D) — shifted neighbour latents, on device
-        nb_avail    : (B, 6) long — 0=OOB, 1=EXISTS, 2=UNKNOWN, on device
-        cond_por    : (B,) float — standardised log porosity, on device
-        cond_depth  : (B,) float — relative depth, on device
-        cond_dist   : (B,) float — distance to surface, on device
-        cond_orient : (B, 2, D, D, D) float or None — orientation profile
-
-        Returns
-        -------
-        (B, C, D, D, D) float32 on device
-        """
-        self.model.eval()
-        schedule = self.schedule.to(self.device)
-        B = nb_latents.shape[0]
-        C = nb_latents.shape[2]
-        D = nb_latents.shape[3]
-
-        x = torch.randn(B, C, D, D, D, device=self.device)
-        for t_idx in reversed(range(schedule.T)):
-            t = torch.full((B,), t_idx, dtype=torch.long, device=self.device)
-            with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
-                eps_pred = self.model(x, t, nb_latents, nb_avail,
-                                      cond_por, cond_depth, cond_dist, cond_orient)
-            x = schedule.p_sample(x, t, eps_pred)
-        return x.float()
-
-
 class DDIMSampler:
     """DDIM patch sampler — deterministic inference in n_steps < T steps.
 
@@ -361,16 +261,19 @@ class DDIMSampler:
     s_por    : float — porosity guidance scale; 1.0 = un-guided (default)
     s_nb     : float — neighbour guidance scale; 1.0 = un-guided (default)
 
-    When both scales are 1.0 the standard single-pass full-conditional denoiser is
-    used.  Any other combination activates the 3-pass nested CFG decomposition:
+    When both scales are 1.0 the standard single-pass full-conditional denoiser
+    is used.  Any other combination activates the 3-pass nested CFG
+    decomposition::
 
-        eps_uncond = model(z_t, t, nb, ALL_UNK, por, ..., drop_por=True)
-        eps_por    = model(z_t, t, nb, ALL_UNK, por, ..., drop_por=False)
-        eps_full   = model(z_t, t, nb, REAL,    por, ..., drop_por=False)
+        eps_uncond = model(z_t, t, nb, ALL_UNK, nb_t=0, por, …, drop_por=True)
+        eps_por    = model(z_t, t, nb, ALL_UNK, nb_t=0, por, …, drop_por=False)
+        eps_full   = model(z_t, t, nb, REAL,    nb_t,    por, …, drop_por=False)
         eps = eps_uncond + s_por*(eps_por - eps_uncond) + s_nb*(eps_full - eps_por)
 
     At s_por=s_nb=1 this telescopes to eps_full — exact un-guided equality.
-    Position and orientation are always on (never dropped) in all three passes.
+    The ALL_UNKNOWN arms use ``nb_t = 0`` because that is exactly the neighbour
+    null the training step draws (``drop_nb``).  Position, orientation and
+    material are always on in all three passes.
     """
 
     def __init__(
@@ -392,43 +295,7 @@ class DDIMSampler:
         T = schedule.T
         ts = torch.linspace(0, T - 1, n_steps + 1, dtype=torch.long)
         # Store as Python ints for torch.compile compatibility (no dynamic shapes)
-        self._timesteps: list[int] = ts.flip(0).tolist()   # [T-1, ..., 0]
-
-    def _guided_eps(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        nb_latents: torch.Tensor,
-        nb_avail: torch.Tensor,
-        cond_por: torch.Tensor,
-        cond_depth: torch.Tensor,
-        cond_dist: torch.Tensor,
-        cond_orient: torch.Tensor | None,
-        autocast_dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """3-pass nested CFG decomposition.
-
-        Position and orientation are on in all three calls.  The ALL_UNKNOWN
-        passes rely on UNet3DDenoiser._build_nb_spatial masking latents by
-        NB_EXISTS, so they are structurally independent of nb_latents values.
-        """
-        B = x.shape[0]
-        all_unk  = torch.full_like(nb_avail, _NB_UNKNOWN)
-        drop_all = torch.ones(B, dtype=torch.bool, device=self.device)
-
-        with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
-            eps_uncond = self.model(x, t, nb_latents, all_unk,  cond_por, cond_depth,
-                                    cond_dist, cond_orient, drop_all)
-            eps_por    = self.model(x, t, nb_latents, all_unk,  cond_por, cond_depth,
-                                    cond_dist, cond_orient, None)
-            eps_full   = self.model(x, t, nb_latents, nb_avail, cond_por, cond_depth,
-                                    cond_dist, cond_orient, None)
-
-        return (
-            eps_uncond
-            + self.s_por * (eps_por  - eps_uncond)
-            + self.s_nb  * (eps_full - eps_por)
-        )
+        self.timesteps: list[int] = ts.flip(0).tolist()   # [T-1, ..., 0]
 
     def predict_eps(
         self,
@@ -436,116 +303,88 @@ class DDIMSampler:
         t: torch.Tensor,
         nb_latents: torch.Tensor,
         nb_avail: torch.Tensor,
+        nb_t: torch.Tensor,
         cond_por: torch.Tensor,
         cond_depth: torch.Tensor,
-        cond_dist: torch.Tensor,
-        cond_orient: torch.Tensor | None,
+        cond_dist6: torch.Tensor,
+        cond_orient: torch.Tensor,
+        cond_material: torch.Tensor,
         autocast_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
         """One ε prediction for a batch, honouring the CFG guidance scales.
 
-        This is the single choke point every DDIM sampling loop goes through —
-        the joint (MultiDiffusion) volume path calls it directly to get raw
-        per-window predictions before fusing them on the canvas.
+        This is the single choke point every sampling loop goes through — the
+        chunked joint path calls it directly to get raw per-window predictions
+        before fusing them on the chunk canvas.
         """
-        if self.guided:
-            return self._guided_eps(x, t, nb_latents, nb_avail, cond_por,
-                                    cond_depth, cond_dist, cond_orient,
-                                    autocast_dtype)
+        if not self.guided:
+            with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
+                return self.model(x, t, nb_latents, nb_avail, nb_t, cond_por,
+                                  cond_depth, cond_dist6, cond_orient, cond_material)
+
+        B = x.shape[0]
+        all_unk  = torch.full_like(nb_avail, NB_UNKNOWN)
+        zero_t   = torch.zeros_like(nb_t)
+        drop_all = torch.ones(B, dtype=torch.bool, device=x.device)
+
         with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
-            return self.model(x, t, nb_latents, nb_avail, cond_por,
-                              cond_depth, cond_dist, cond_orient)
+            eps_uncond = self.model(x, t, nb_latents, all_unk, zero_t, cond_por,
+                                    cond_depth, cond_dist6, cond_orient,
+                                    cond_material, drop_all)
+            eps_por    = self.model(x, t, nb_latents, all_unk, zero_t, cond_por,
+                                    cond_depth, cond_dist6, cond_orient,
+                                    cond_material, None)
+            eps_full   = self.model(x, t, nb_latents, nb_avail, nb_t, cond_por,
+                                    cond_depth, cond_dist6, cond_orient,
+                                    cond_material, None)
 
-    @torch.no_grad()
-    def sample_patch(
-        self,
-        nb_latents: torch.Tensor,
-        nb_avail: torch.Tensor,
-        cond_por: float,
-        cond_depth: float,
-        cond_dist: float,
-        cond_orient: torch.Tensor | None = None,
-        autocast_dtype: torch.dtype = torch.bfloat16,
-        return_intermediates: bool = False,
-    ) -> torch.Tensor:
-        """Run DDIM reverse process for one patch.
-
-        Parameters
-        ----------
-        nb_latents          : (6, C, D, H, W) — shifted neighbour latents
-        nb_avail            : (6,) long — 0=OOB, 1=EXISTS, 2=UNKNOWN per neighbor
-        cond_por            : float — standardised log porosity
-        cond_depth          : float — relative depth in [0, 1]
-        cond_dist           : float — min(d, 64)/64 in [0, 1]
-        cond_orient         : (2, D, H, W) float or None
-        return_intermediates: if True, return (final, list[Tensor]) where the list contains
-                              the latent after each denoising step, on CPU float32
-
-        Returns
-        -------
-        (C, D, H, W) float32 — generated clean latent, or
-        ((C, D, H, W), list[(C, D, H, W)]) when return_intermediates=True
-        """
-        self.model.eval()
-        schedule = self.schedule.to(self.device)
-        C = nb_latents.shape[1]
-        D = nb_latents.shape[2]
-
-        nb_l   = nb_latents.unsqueeze(0).to(self.device)
-        nb_a   = nb_avail.unsqueeze(0).to(self.device)
-        por    = torch.tensor([cond_por],   dtype=torch.float32, device=self.device)
-        depth  = torch.tensor([cond_depth], dtype=torch.float32, device=self.device)
-        dist   = torch.tensor([cond_dist],  dtype=torch.float32, device=self.device)
-        orient = None if cond_orient is None else cond_orient.unsqueeze(0).to(self.device)
-
-        x = torch.randn(1, C, D, D, D, device=self.device)
-        intermediates: list[torch.Tensor] = [] if return_intermediates else None  # type: ignore[assignment]
-
-        for i, t_val in enumerate(self._timesteps[:-1]):
-            t_prev_val = self._timesteps[i + 1]
-            t      = torch.tensor([t_val],      dtype=torch.long, device=self.device)
-            t_prev = torch.tensor([t_prev_val], dtype=torch.long, device=self.device)
-            eps_pred = self.predict_eps(x, t, nb_l, nb_a, por, depth, dist, orient,
-                                        autocast_dtype)
-            x = schedule.ddim_step(x, t, t_prev, eps_pred)
-            if return_intermediates:
-                intermediates.append(x.squeeze(0).float().cpu())
-
-        result = x.squeeze(0).float()
-        if return_intermediates:
-            return result, intermediates
-        return result
+        return (
+            eps_uncond
+            + self.s_por * (eps_por  - eps_uncond)
+            + self.s_nb  * (eps_full - eps_por)
+        )
 
     @torch.no_grad()
     def sample_batch(
         self,
         nb_latents: torch.Tensor,
         nb_avail: torch.Tensor,
+        nb_t: torch.Tensor,
         cond_por: torch.Tensor,
         cond_depth: torch.Tensor,
-        cond_dist: torch.Tensor,
-        cond_orient: torch.Tensor | None = None,
+        cond_dist6: torch.Tensor,
+        cond_orient: torch.Tensor,
+        cond_material: torch.Tensor,
         autocast_dtype: torch.dtype = torch.bfloat16,
         return_x0_saturation: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, float]:
-        """Run DDIM reverse process for a batch of patches.
+        return_intermediates: bool = False,
+    ) -> Any:
+        """Run the DDIM reverse process for a batch of independent patches.
+
+        Neighbour conditioning is held FIXED across the reverse process here —
+        this is the patch-level sampler used by the in-training diagnostics,
+        not the volume path.  ``nb_t`` therefore describes the noise level of
+        the neighbours as handed in, and stays constant.
 
         Parameters
         ----------
-        nb_latents  : (B, 6, C, D, D, D) — shifted neighbour latents, on device
-        nb_avail    : (B, 6) long — 0=OOB, 1=EXISTS, 2=UNKNOWN, on device
-        cond_por    : (B,) float — standardised log porosity, on device
-        cond_depth  : (B,) float — relative depth, on device
-        cond_dist   : (B,) float — distance to surface, on device
-        cond_orient : (B, 2, D, D, D) float or None — orientation profile
-        return_x0_saturation : if True, also return the fraction of x0-prediction
+        nb_latents  : (B, 6, C, D, D, D) on device
+        nb_avail    : (B, 6) long — 0=OOB, 1=EXISTS, 2=UNKNOWN
+        nb_t        : (B, 6) long — per-neighbour noise level
+        cond_por    : (B,) float — standardised log porosity
+        cond_depth  : (B,) float — relative depth
+        cond_dist6  : (B, 6) float — per-face distance to the specimen box
+        cond_orient : (B, 2, D, D, D) float
+        cond_material : (B, 1, D, D, D) float
+        return_x0_saturation : also return the fraction of x0-prediction
             elements hitting the ±10 clamp inside ddim_step, averaged over all
             denoising steps — an off-manifold diagnostic.
+        return_intermediates : also return the latent after each step, on CPU.
 
         Returns
         -------
-        (B, C, D, D, D) float32 on device — or (samples, sat_frac) when
-        return_x0_saturation=True.
+        (B, C, D, D, D) float32 on device, plus the requested extras in the
+        order (samples, sat_frac, intermediates).
         """
         self.model.eval()
         schedule = self.schedule.to(self.device)
@@ -556,201 +395,158 @@ class DDIMSampler:
         x = torch.randn(B, C, D, D, D, device=self.device)
         sat_sum = torch.zeros((), device=self.device)
         n_steps = 0
-        for i, t_val in enumerate(self._timesteps[:-1]):
-            t_prev_val = self._timesteps[i + 1]
+        inter: list[torch.Tensor] = []
+        for i, t_val in enumerate(self.timesteps[:-1]):
+            t_prev_val = self.timesteps[i + 1]
             t      = torch.full((B,), t_val,      dtype=torch.long, device=self.device)
             t_prev = torch.full((B,), t_prev_val, dtype=torch.long, device=self.device)
-            eps_pred = self.predict_eps(x, t, nb_latents, nb_avail, cond_por,
-                                        cond_depth, cond_dist, cond_orient,
-                                        autocast_dtype)
+            eps_pred = self.predict_eps(
+                x, t, nb_latents, nb_avail, nb_t, cond_por, cond_depth,
+                cond_dist6, cond_orient, cond_material, autocast_dtype,
+            )
             if return_x0_saturation:
                 x0_pred = schedule.predict_x0(x, t, eps_pred)
                 sat_sum += (x0_pred.abs() >= 10.0).float().mean()
                 n_steps += 1
             x = schedule.ddim_step(x, t, t_prev, eps_pred)
+            if return_intermediates:
+                inter.append(x.float().cpu())
+
+        out: list[Any] = [x.float()]
         if return_x0_saturation:
-            return x.float(), (sat_sum / max(n_steps, 1)).item()
-        return x.float()
+            out.append((sat_sum / max(n_steps, 1)).item())
+        if return_intermediates:
+            out.append(inter)
+        return out[0] if len(out) == 1 else tuple(out)
 
 
 class VolumeGenerator:
-    """Generate a full synthetic 3D volume using the eight-group parity schedule.
+    """Generate a full synthetic volume with hybrid chunked joint denoising.
 
-    Two denoising modes share this class (``generate(mode=...)``): the default
-    SEQUENTIAL parity schedule described below, and a MultiDiffusion-style
-    JOINT mode (:meth:`_generate_latents_joint`) in which overlapping windows
-    denoise one shared latent canvas together.  Decode and assembly are
-    identical in both modes.
+    Geometry, in three layers:
 
-    Patches TILE: ``generation_stride == neighbour_offset == patch_size``, so
-    adjacent patches touch and share no voxel.  Nothing overlaps, therefore
-    nothing is blended and no neighbour can hand the denoiser a copy of the
-    target (see ``poregen.diffusion.conditioning`` for the leak this replaced).
+    ``tile``   64 voxels = ``patch_size`` = ``neighbour_offset``.  The unit the
+               model was trained on, and the unit the seam metric measures.
+    ``window`` one tile-sized denoising window, placed every ``window_stride``
+               voxels inside a chunk (default 32 = 50 % overlap).
+    ``chunk``  ``chunk_tiles`` tiles per axis (default 3×3×3 = 192³ voxels).
+               One chunk is jointly denoised at a time; chunks run in raster
+               order.  ``(1, 1, 1)`` is patch-at-a-time sequential generation.
 
-    Patches are grouped by spatial parity ``(iz mod 2, iy mod 2, ix mod 2)``
-    and generated group by group in the fixed order
-    :data:`poregen.diffusion.conditioning.PARITY_GROUP_ORDER` (D32 §3.3).  A
-    face neighbour flips exactly one parity bit, so its availability is
-    deterministic: EXISTS when its group precedes the target's group, UNKNOWN
-    when it follows, OOB when it is outside the grid.  Availability comes from
-    the shared :func:`~poregen.diffusion.conditioning.neighbour_states`, which
-    the training dataset calls too.  The eight-group ordering is kept in
-    preference to a two-colour checkerboard because it leaves only 1 patch in 8
-    without neighbour context instead of 1 in 2.
+    Neighbour conditioning inside a chunk, per window and per face:
 
-    Every EXISTS neighbour is handed to the denoiser WHOLE and unshifted: it is
-    face-adjacent context, not an overlapping view of the target.
+    * the block lies in the current chunk → take it from the chunk canvas
+      ``x_t``, EXISTS at ``nb_t = t``;
+    * the block lies in an already finished chunk → take that chunk's clean
+      latent and re-noise it to ``t`` with fresh noise (``q_sample``), EXISTS
+      at ``nb_t = t``;
+    * the block leaves the volume → OOB (the specimen ends there);
+    * the block reaches into a chunk that has not been generated → UNKNOWN.
 
-    Assembly is a direct write of each decoded patch into its own block of the
-    output.  The only place two independently-denoised patches meet is the
-    plane between them, so :func:`seam_discontinuity` is the assembly-quality
-    metric.
+    Both EXISTS sources are at the same noise level ``t``, so a block that
+    straddles the current chunk and a finished one is still coherent.
 
     Parameters
     ----------
-    sampler          : DDPMSampler or DDIMSampler
-    vae              : VAE model with .decoder, .xct_head, .mask_head attributes
-    device           : torch.device
-    patch_size       : int — voxel side length of each patch (default 64)
-    generation_stride: int — stride between patch origins on the assembly grid
-                       (default 64).  D32 §3.1: this is the ASSEMBLY grid, not
-                       the dataset sampling density (``sample_stride``, a data
-                       side parameter) and not the spatial relation between a
-                       patch and its conditioning neighbours (``neighbour_offset``).
-                       Must equal ``patch_size`` so patches tile exactly.
-    neighbour_offset : int — voxel displacement of a face neighbour, i.e. the
-                       relation the model was TRAINED on (default 64).  Must
-                       equal ``generation_stride``, otherwise the grid's face
-                       neighbours are not the neighbours the model expects.
-    neighbour_shift  : bool — roll neighbours into the target frame.  Only
-                       meaningful for overlapping neighbours; raises for
-                       touching ones instead of feeding all-zero tensors.
-    latent_size      : int — spatial side length of the latent (default 16)
-    latent_mean      : float | (C,1,1,1) tensor — per-channel normalisation mean;
-                       generated latents are denormalised ``z*std + mean`` before decoding
-    latent_std       : float | (C,1,1,1) tensor — per-channel normalisation std
-    voxel_size_mm    : float — physical voxel size in millimetres (default 0.025 = 25 µm)
-    por_log_stats    : (mean, std) of ``log(phi + 1e-3)`` on the train split, from
-                       the latent store metadata.  Required when the model uses
-                       porosity conditioning.
-    theta_deg        : (vol_d,) float array — the requested θ(z) in degrees for
-                       the whole volume (see :func:`theta_from_layup`), NaN where
-                       unknown.  Required when the model uses orientation
-                       conditioning.
-    group_order      : parity group ordering; defaults to the shared
-                       ``PARITY_GROUP_ORDER``.  Pass the latent store's metadata
-                       through :func:`resolve_group_order` to guarantee that
-                       generation replays the training schedule.
+    sampler       : DDIMSampler
+    vae           : the frozen 3-class VAE (``decoder``, ``xct_head``, ``class_head``)
+    device        : torch.device
+    patch_size    : voxel side length of one tile (default 64)
+    latent_size   : latent cells per tile (default 16)
+    latent_mean   : float | (C,1,1,1) per-channel normalisation mean; generated
+                    latents are denormalised ``z*std + mean`` before decoding
+    latent_std    : float | (C,1,1,1) per-channel normalisation std
+    voxel_size_mm : physical voxel size in millimetres (default 0.025 = 25 µm)
+    por_log_stats : (mean, std) of ``log(phi + 1e-3)`` on the train split, from
+                    the latent store metadata.  Required.
+    theta_deg     : (vol_d,) requested θ(z) in degrees for the whole volume
+                    (see :func:`theta_from_layup`), NaN where unknown.  Required.
+    chunk_tiles   : tiles per chunk per axis (default (3, 3, 3))
+    window_stride : voxels between window origins inside a chunk (default 32)
+    decode_stride : voxels between decode window origins (default 32)
     """
 
     def __init__(
         self,
-        sampler: Any,
+        sampler: DDIMSampler,
         vae: torch.nn.Module,
         device: torch.device,
         patch_size: int = 64,
-        generation_stride: int = 64,
-        neighbour_offset: int = 64,
-        neighbour_shift: bool = False,
         latent_size: int = 16,
         latent_mean: torch.Tensor | float = 0.0,
         latent_std: torch.Tensor | float = 1.0,
         voxel_size_mm: float = 0.025,
         por_log_stats: tuple[float, float] | None = None,
         theta_deg: np.ndarray | None = None,
-        group_order: tuple[tuple[int, int, int], ...] | None = None,
+        chunk_tiles: tuple[int, int, int] = (3, 3, 3),
+        window_stride: int = 32,
+        decode_stride: int = 32,
     ) -> None:
-        if neighbour_offset != generation_stride:
+        if patch_size % latent_size:
             raise ValueError(
-                f"neighbour_offset={neighbour_offset} != generation_stride="
-                f"{generation_stride}. The face neighbours of the assembly grid sit "
-                "exactly one generation_stride away, so a different neighbour_offset "
-                "would feed the denoiser a spatial relation it never saw in training."
+                f"patch_size={patch_size} is not a multiple of latent_size={latent_size}."
             )
-        if generation_stride != patch_size:
+        self.sampler       = sampler
+        self.vae           = vae
+        self.device        = device
+        self.patch_size    = int(patch_size)
+        self.latent_size   = int(latent_size)
+        self.latent_mean   = latent_mean
+        self.latent_std    = latent_std
+        self.voxel_size_mm = float(voxel_size_mm)
+        self.por_log_stats = por_log_stats
+        self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
+        self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
+        self.window_stride = int(window_stride)
+        self.decode_stride = int(decode_stride)
+        self.downsample    = self.patch_size // self.latent_size
+        self.z_channels    = sampler.model.cfg.z_channels
+
+        if any(c < 1 for c in self.chunk_tiles):
+            raise ValueError(f"chunk_tiles must all be >= 1, got {self.chunk_tiles}.")
+        for name, stride in (("window_stride", self.window_stride),
+                             ("decode_stride", self.decode_stride)):
+            if stride <= 0 or self.patch_size % stride or stride % self.downsample:
+                raise ValueError(
+                    f"{name}={stride} must be a positive divisor of "
+                    f"patch_size={self.patch_size} and a multiple of the VAE "
+                    f"downsampling factor {self.downsample}."
+                )
+
+    # ── geometry helpers ─────────────────────────────────────────────────────
+
+    def _volume_shape(self, volume_size_mm: tuple[float, float, float]) -> tuple[int, int, int]:
+        """Snap a physical size to a whole number of tiles, in voxels."""
+        P = self.patch_size
+        shape = tuple((round(d / self.voxel_size_mm) // P) * P for d in volume_size_mm)
+        for d_mm, snapped in zip(volume_size_mm, shape):
+            raw = round(d_mm / self.voxel_size_mm)
+            if raw - snapped > 1:
+                logger.warning(
+                    "Volume axis %.3f mm: snapped %d vox → %d vox (dropped %d vox)",
+                    d_mm, raw, snapped, raw - snapped,
+                )
+        if any(s < P for s in shape):
             raise ValueError(
-                f"generation_stride={generation_stride} != patch_size={patch_size}. "
-                "Generated patches must tile exactly: a smaller stride makes them "
-                "overlap, which both leaks target content into the neighbour "
-                "conditioning and needs blending that averages two independent "
-                "answers; a larger stride would leave gaps."
+                f"Volume {volume_size_mm} mm snaps to {shape} voxels — every axis "
+                f"must hold at least one {P}-voxel tile."
             )
-        validate_neighbour_geometry(neighbour_offset, patch_size)
-        self.sampler           = sampler
-        self.vae               = vae
-        self.device            = device
-        self.patch_size        = patch_size
-        self.generation_stride = generation_stride
-        self.neighbour_offset  = neighbour_offset
-        self.neighbour_shift   = bool(neighbour_shift)
-        self.latent_size       = latent_size
-        self.latent_mean       = latent_mean
-        self.latent_std        = latent_std
-        self.voxel_size_mm     = voxel_size_mm
-        self.por_log_stats     = por_log_stats
-        self.theta_deg         = None if theta_deg is None else np.asarray(theta_deg)
-        # "specimen": the generated volume is the whole specimen — true
-        #             cond_dist, OOB at the generation-grid boundary.
-        # "interior": a window into an unbounded specimen — cond_dist 1.0
-        #             everywhere, no OOB (edges become UNKNOWN).
-        # "legacy":   the original joint behaviour — true cond_dist but
-        #             all-UNKNOWN neighbours (contradictory at edges; kept
-        #             as an evaluation arm). Sequential ignores "legacy".
-        self.conditioning_semantics = "specimen"
-        self.group_order       = (
-            PARITY_GROUP_ORDER if group_order is None else validate_group_order(group_order)
-        )
-        self.z_channels        = sampler.model.cfg.z_channels
-        self.downsample        = patch_size // latent_size
-        # Touching neighbours are fed whole; a shift here would be all zeros
-        # and validate_shift makes that a hard error rather than a silent one.
-        self.latent_shift      = 0
-        if self.neighbour_shift:
-            self.latent_shift = latent_shift_cells(
-                neighbour_offset, patch_size, latent_size
-            )
-            validate_shift(self.latent_shift, latent_size)
+        return shape  # type: ignore[return-value]
 
-    def _tile_grid(
-        self, volume_shape: tuple[int, int, int]
-    ) -> tuple[list[int], list[int], list[int]]:
-        """Per-axis TILING-grid origins (stride 64), with the coverage guard.
+    def _chunk_ranges(self, n_tiles: int, per_chunk: int) -> list[tuple[int, int]]:
+        """[(tile_lo, tile_hi), …] partition of one axis into chunks."""
+        return [
+            (i, min(i + per_chunk, n_tiles))
+            for i in range(0, n_tiles, per_chunk)
+        ]
 
-        This is the assembly/decode grid for BOTH modes — the joint mode only
-        changes how the latents are denoised, never how they are decoded.
-        """
-        stride = self.generation_stride
-        P      = self.patch_size
-        vol_d, vol_h, vol_w = volume_shape
-        zs = list(range(0, vol_d - P + 1, stride))
-        ys = list(range(0, vol_h - P + 1, stride))
-        xs = list(range(0, vol_w - P + 1, stride))
-        if not zs or not ys or not xs:
-            raise ValueError(
-                f"Volume {volume_shape} too small for patch_size={P}, "
-                f"generation_stride={stride}."
-            )
-        covered = (len(zs) * stride, len(ys) * stride, len(xs) * stride)
-        if covered != tuple(volume_shape):
-            raise ValueError(
-                f"Patch grid covers {covered} of a {tuple(volume_shape)} volume. "
-                f"With generation_stride={stride} each axis must be a whole number "
-                f"of patches, otherwise the tiling leaves a gap."
-            )
-        return zs, ys, xs
+    # ── per-window conditioning ──────────────────────────────────────────────
 
-    # ── per-patch conditioning construction (D32 §4) ─────────────────────────
-
-    def _patch_orient(self, z0: int) -> torch.Tensor:
-        """(2, L, L, L) orientation profile for the patch at depth origin z0.
-
-        Encoding is delegated to
-        :func:`poregen.diffusion.orientation.orientation_tensor` — the same
-        function the dataset uses, so training and generation cannot drift.
-        """
+    def _window_orient(self, z0: int) -> torch.Tensor:
+        """(2, L, L, L) orientation profile for a window at depth origin z0."""
         if self.theta_deg is None:
             raise ValueError(
-                "The denoiser uses orientation conditioning but no theta_deg was "
+                "The denoiser conditions on ply orientation but no theta_deg was "
                 "given. Build one with theta_from_layup(depth_vox, layup, "
                 "ply_thickness_vox)."
             )
@@ -758,383 +554,336 @@ class VolumeGenerator:
         if z0 + P > len(self.theta_deg):
             raise ValueError(
                 f"theta_deg covers {len(self.theta_deg)} voxels — too few for a "
-                f"patch at z0={z0} (needs {z0}..{z0 + P - 1})."
+                f"window at z0={z0} (needs {z0}..{z0 + P - 1})."
             )
         return torch.from_numpy(
             orientation_tensor(self.theta_deg[z0 : z0 + P], self.latent_size)
         )
 
-    def _patch_position(
+    def _window_position(
         self,
         origin: tuple[int, int, int],
-        volume_shape: tuple[int, int, int],
-    ) -> tuple[float, float]:
-        """(cond_depth, cond_dist) for a patch (D32 §1, signals 2 and 3).
+        box_lo: tuple[int, int, int],
+        box_hi: tuple[int, int, int],
+    ) -> tuple[float, np.ndarray]:
+        """(cond_depth, cond_dist6) for one window against the specimen box.
 
-        The generated volume *is* the specimen, so its own bounds are the outer
-        surfaces.  ``cond_depth`` is the patch centre's fractional depth in z;
-        ``cond_dist`` is the distance from that centre to the nearest outer
-        surface over ALL THREE axes, capped at 64 voxels and divided by 64 —
-        the same definition ``scripts/build_conditioning.py`` uses at training
-        time (there the extents come from the foreground threshold).
+        ``cond_depth`` is the window centre's fractional depth in z inside the
+        box; ``cond_dist6`` is the gap from each window face to the matching box
+        face, capped at 64 voxels — the same definitions
+        ``scripts/build_conditioning.py`` applies at training time (there the
+        box comes from the volume's foreground extent).
         """
-        centres = [o + self.patch_size / 2.0 for o in origin]
-        depth = float(np.clip(centres[0] / max(volume_shape[0], 1), 0.0, 1.0))
-        if self.conditioning_semantics == "interior":
-            # The generated volume is a window into an unbounded specimen —
-            # no patch is near a surface (T-C: near-surface training patches
-            # legitimately contain unlabelled exterior air, so an honest
-            # small cond_dist ASKS for air).
-            return depth, 1.0
-        d_sur = min(
-            min(c, extent - c) for c, extent in zip(centres, volume_shape)
-        )
-        dist = float(np.clip(d_sur, 0.0, _DIST_CAP) / _DIST_CAP)
-        return depth, dist
+        centre_z = origin[0] + self.patch_size / 2.0
+        span = max(box_hi[0] - box_lo[0], 1)
+        depth = float(np.clip((centre_z - box_lo[0]) / span, 0.0, 1.0))
+        return depth, dist6_from_box(origin, self.patch_size, box_lo, box_hi)
 
+    # ── latent generation ────────────────────────────────────────────────────
+
+    @torch.no_grad()
     def _generate_latents(
         self,
         volume_shape: tuple[int, int, int],
-        target_porosity: float | None = None,
-        autocast_dtype: torch.dtype = torch.bfloat16,
-        local_por_map: dict | None = None,
-        patch_pbar=None,
-        gen_batch_size: int = 32,
-    ) -> tuple[dict[tuple[int, int, int], torch.Tensor], dict[tuple[int, int, int], tuple[int, int, int]]]:
-        """Run the eight-group parity schedule and return per-patch latents.
-
-        Parameters
-        ----------
-        volume_shape    : (D, H, W) in voxels
-        target_porosity : uniform per-patch VVF fallback (None = 0.05).  Prefer
-                          ``local_por_map`` — D32 §4 warns against painting a
-                          single volume target into every patch.
-        autocast_dtype  : AMP dtype for the denoiser
-        local_por_map   : dict (iz, iy, ix) → per-patch raw porosity phi
-        gen_batch_size  : number of patches to sample in parallel through the UNet
-
-        Returns
-        -------
-        (generated, grid_origins) — ``generated`` maps grid index → generated
-        latent tensor (on CPU), ``grid_origins`` maps grid index → voxel origin (z0, y0, x0).
-        """
-        stride = self.generation_stride
-        model_cfg = self.sampler.model.cfg
-        por    = float(np.clip(target_porosity, _POR_MIN, _POR_MAX)) if target_porosity is not None else 0.05
-
-        zs, ys, xs = self._tile_grid(volume_shape)
-
-        # Grid index → origin voxel
-        grid_origins = {(iz, iy, ix): (zs[iz], ys[iy], xs[ix])
-                        for iz in range(len(zs))
-                        for iy in range(len(ys))
-                        for ix in range(len(xs))}
-
-        # Store generated latents keyed by grid index (iz, iy, ix), held on CPU
-        generated: dict[tuple[int, int, int], torch.Tensor] = {}
-
-        # Eight-group parity schedule (D32 §3.3).  Within a group no two grid
-        # indices differ by less than 2 on any axis, so no two patches overlap
-        # and their generation really is independent.  Sorting inside a group is
-        # only for determinism.
-        groups = [
-            (g, sorted(gi for gi in grid_origins if parity_group(gi) == g))
-            for g in self.group_order
-        ]
-
-        total = len(grid_origins)
-        logger.info(
-            "VolumeGenerator: %d patches, grid %d×%d×%d, 8-group schedule %s (sizes %s)",
-            total, len(zs), len(ys), len(xs),
-            "→".join("".join(str(v) for v in g) for g, _ in groups),
-            [len(p) for _, p in groups],
-        )
-
-        zero_latent = torch.zeros(
-            self.z_channels, self.latent_size, self.latent_size,
-            self.latent_size, dtype=torch.float32,
-        )
-
-        n_done = 0
-        log_interval = max(1, total // 20)
-
-        for group_idx, (group, group_patches) in enumerate(groups):
-            for chunk_start in range(0, len(group_patches), gen_batch_size):
-                chunk_gis = group_patches[chunk_start : chunk_start + gen_batch_size]
-
-                # Build inputs for this chunk
-                chunk_nbl:   list[torch.Tensor] = []
-                chunk_nba:   list[torch.Tensor] = []
-                chunk_por:   list[float]        = []
-                chunk_depth: list[float]        = []
-                chunk_dist:  list[float]        = []
-                chunk_orient: list[torch.Tensor] = []
-
-                for gi in chunk_gis:
-                    z0, y0, x0 = grid_origins[gi]
-
-                    states = neighbour_states(gi, lambda g: g in grid_origins,
-                                              self.group_order)
-                    if self.conditioning_semantics == "interior":
-                        # unbounded specimen: the sample never ends at the
-                        # generation grid, it is merely not generated there
-                        states = [_NB_UNKNOWN if st == _NB_OOB else st
-                                  for st in states]
-                    nb_latents_list: list[torch.Tensor] = []
-                    for d, state in zip(NEIGHBOUR_DIRS, states):
-                        if state != _NB_EXISTS:
-                            nb_latents_list.append(zero_latent)
-                            continue
-                        ngi = (gi[0] + d[0], gi[1] + d[1], gi[2] + d[2])
-                        # Touching neighbour: the whole latent is face-adjacent
-                        # context, so it goes in unshifted (see conditioning.py).
-                        nb_latents_list.append(
-                            shift_into_target_frame(generated[ngi], d, self.latent_shift)
-                            if self.neighbour_shift else generated[ngi]
-                        )
-
-                    chunk_nbl.append(torch.stack(nb_latents_list, dim=0))       # (6,C,L,L,L)
-                    chunk_nba.append(torch.tensor(states, dtype=torch.long))    # (6,)
-
-                    local_por = (
-                        local_por_map[gi]
-                        if (local_por_map is not None and gi in local_por_map)
-                        else por
-                    )
-                    # Clamp every per-patch phi to the training range —
-                    # single choke point for all map builders.
-                    phi = float(np.clip(local_por, _POR_MIN, _POR_MAX))
-                    chunk_por.append(
-                        float(porosity_to_cond(phi, self.por_log_stats))
-                        if model_cfg.use_por_cond else 0.0
-                    )
-                    depth, dist = self._patch_position((z0, y0, x0), volume_shape)
-                    chunk_depth.append(depth)
-                    chunk_dist.append(dist)
-                    if model_cfg.use_orient_cond:
-                        chunk_orient.append(self._patch_orient(z0))
-
-                # Move to device and sample
-                nb_latents_t = torch.stack(chunk_nbl).to(self.device)                              # (B,6,C,L,L,L)
-                nb_avail_t   = torch.stack(chunk_nba).to(self.device)                              # (B,6)
-                por_t        = torch.tensor(chunk_por,   dtype=torch.float32, device=self.device)  # (B,)
-                depth_t      = torch.tensor(chunk_depth, dtype=torch.float32, device=self.device)  # (B,)
-                dist_t       = torch.tensor(chunk_dist,  dtype=torch.float32, device=self.device)  # (B,)
-                orient_t     = (
-                    torch.stack(chunk_orient).to(self.device) if chunk_orient else None
-                )                                                                                  # (B,2,L,L,L)
-
-                z_batch = self.sampler.sample_batch(
-                    nb_latents_t, nb_avail_t, por_t, depth_t, dist_t, orient_t,
-                    autocast_dtype=autocast_dtype,
-                )  # (B, C, L, L, L) float32 on device
-
-                prev_done = n_done
-                for i, gi in enumerate(chunk_gis):
-                    generated[gi] = z_batch[i].cpu()
-                n_done += len(chunk_gis)
-
-                if patch_pbar is not None:
-                    patch_pbar.update(len(chunk_gis))
-                elif n_done // log_interval > prev_done // log_interval:
-                    logger.info(
-                        "Generated %d / %d patches (group %d/8 = %s)",
-                        n_done, total, group_idx + 1, group,
-                    )
-
-        return generated, grid_origins
-
-    def _generate_latents_joint(
-        self,
-        volume_shape: tuple[int, int, int],
-        target_porosity: float | None = None,
-        autocast_dtype: torch.dtype = torch.bfloat16,
-        local_por_map: dict | None = None,
-        patch_pbar=None,
-        window_stride: int = 32,
-        window_batch: int = 32,
-    ) -> tuple[dict[tuple[int, int, int], torch.Tensor], dict[tuple[int, int, int], tuple[int, int, int]]]:
-        """MultiDiffusion-style JOINT denoising of the whole latent canvas.
-
-        Overlapping windows (one 64³-voxel patch position each, at
-        ``window_stride`` voxels — default 32, 50 % overlap) all denoise the
-        SAME latent canvas.  At every DDIM timestep each window's ε prediction
-        is computed (in mini-batches of ``window_batch``), the per-voxel
-        predictions are fused by a cosine-weighted average
-        (:func:`joint_window_weight` — see there for why not uniform), and ONE
-        DDIM step is taken on the canvas.  The averaging happens on the ε
-        predictions INSIDE the reverse process, never on finished samples:
-        averaging finished samples halves the variance in the overlap and puts
-        it off-manifold, which is exactly why post-hoc blending was removed
-        (D38).  ε and x̂₀ averaging are equivalent here because all windows
-        share the same timestep, so the two are related by one affine map.
-
-        Neighbour conditioning: every window runs with availability
-        all-UNKNOWN and zero neighbour latents.  The joint process replaces
-        the sequential neighbour mechanism — each window already sees its
-        neighbours' current noisy state implicitly through the overlap, so
-        feeding the explicit neighbour-latent channels as well would
-        double-count the same context (and hand the denoiser overlapping views
-        of its own target, the leak class of D38).  Consequence: the CFG
-        neighbour arm degenerates (``eps_full == eps_por``), so ``s_nb`` has
-        no effect in joint mode.
-
-        Scalar/orientation conditioning per window uses the same construction
-        as the sequential path (``_patch_position`` / ``_patch_orient``); the
-        per-window porosity is looked up in ``local_por_map`` by the TILING
-        cell that contains the window centre.
-
-        The final canvas is returned sliced into the stride-64 tiling grid, in
-        the same ``(generated, grid_origins)`` format as
-        :meth:`_generate_latents`, so decode and assembly are shared.
-        """
-        sampler = self.sampler
-        if not (hasattr(sampler, "predict_eps") and hasattr(sampler, "_timesteps")):
-            raise TypeError(
-                "Joint mode needs a DDIMSampler (predict_eps + a fixed timestep "
-                f"ladder); got {type(sampler).__name__}. The stochastic DDPM "
-                "ancestral step is not defined for a fused prediction."
-            )
-        P  = self.patch_size
-        ds = self.downsample
-        L  = self.latent_size
-        if window_stride % ds != 0:
-            raise ValueError(
-                f"joint window_stride={window_stride} voxels is not a multiple of "
-                f"the VAE downsampling factor {ds} — it has no latent-cell "
-                "representation."
-            )
-        if window_stride <= 0 or P % window_stride != 0:
-            raise ValueError(
-                f"joint window_stride={window_stride} must be a positive divisor "
-                f"of patch_size={P} so the windows cover every tiled volume "
-                "exactly."
-            )
-
-        zs, ys, xs = self._tile_grid(volume_shape)
-        model_cfg = sampler.model.cfg
-        por = float(np.clip(target_porosity, _POR_MIN, _POR_MAX)) if target_porosity is not None else 0.05
-
-        canvas_cells = tuple(v // ds for v in volume_shape)
-        s_cells = window_stride // ds
-        origins = joint_window_origins(canvas_cells, L, s_cells)
-        n_win = len(origins)
-        win_slices = [
-            (slice(oc[0], oc[0] + L), slice(oc[1], oc[1] + L), slice(oc[2], oc[2] + L))
-            for oc in origins
-        ]
-
-        logger.info(
-            "VolumeGenerator[joint]: canvas %s cells, %d windows at %d-cell "
-            "stride, %d DDIM steps, window_batch=%d",
-            canvas_cells, n_win, s_cells, len(sampler._timesteps) - 1, window_batch,
-        )
-
-        # ── per-window conditioning (same construction as the sequential path)
-        n_tiles = (len(zs), len(ys), len(xs))
-        win_por:   list[float] = []
-        win_avail: list[list[int]] = []
-        win_depth: list[float] = []
-        win_dist:  list[float] = []
-        win_orient: list[torch.Tensor] = []
-        for oc in origins:
-            ov = tuple(int(c) * ds for c in oc)          # voxel origin
-            phi = por
-            if local_por_map is not None:
-                ti = tuple(
-                    min((ov[a] + P // 2) // P, n_tiles[a] - 1) for a in range(3)
-                )
-                phi = local_por_map.get(ti, por)
-            phi = float(np.clip(phi, _POR_MIN, _POR_MAX))
-            win_por.append(
-                float(porosity_to_cond(phi, self.por_log_stats))
-                if model_cfg.use_por_cond else 0.0
-            )
-            depth, dist = self._patch_position(ov, volume_shape)
-            win_depth.append(depth)
-            win_dist.append(dist)
-            if self.conditioning_semantics in ("interior", "legacy"):
-                win_avail.append([_NB_UNKNOWN] * len(_NEIGHBOR_DIRS))
-            else:
-                # honest edges: a face beyond which the volume ends is OOB,
-                # exactly as training saw at real specimen boundaries;
-                # in-volume faces stay UNKNOWN (not yet resolved).
-                win_avail.append([
-                    _NB_OOB if not all(
-                        0 <= ov[a] + d[a] * self.patch_size
-                        <= volume_shape[a] - self.patch_size
-                        for a in range(3))
-                    else _NB_UNKNOWN
-                    for d in _NEIGHBOR_DIRS
-                ])
-            if model_cfg.use_orient_cond:
-                win_orient.append(self._patch_orient(ov[0]))
-
-        win_avail_t = torch.tensor(win_avail, dtype=torch.long,
-                                   device=self.device)          # (n_win, 6)
-        por_t   = torch.tensor(win_por,   dtype=torch.float32, device=self.device)
-        depth_t = torch.tensor(win_depth, dtype=torch.float32, device=self.device)
-        dist_t  = torch.tensor(win_dist,  dtype=torch.float32, device=self.device)
-        orient_t = torch.stack(win_orient).to(self.device) if win_orient else None
-
-        # ── fusion weights (cosine, strictly positive) ───────────────────────
-        weight = joint_window_weight(L).to(self.device)              # (L,L,L)
-        weight_sum = torch.zeros((1, 1, *canvas_cells), device=self.device)
-        for sl in win_slices:
-            weight_sum[0, 0, sl[0], sl[1], sl[2]] += weight
-
-        # ── joint reverse process on the canvas ──────────────────────────────
-        C = self.z_channels
-        B_max = min(int(window_batch), n_win)
-        nb_zero = torch.zeros(B_max, len(_NEIGHBOR_DIRS), C, L, L, L,
-                              device=self.device)
-
-
-        sampler.model.eval()
+        *,
+        target_porosity: float | None,
+        local_por_map: dict | None,
+        material_map: np.ndarray | None,
+        specimen_box: tuple[tuple[int, int, int], tuple[int, int, int]],
+        autocast_dtype: torch.dtype,
+        window_batch: int,
+        progress=None,
+    ) -> torch.Tensor:
+        """Denoise the whole latent canvas chunk by chunk.  Returns (C, Z, Y, X)."""
+        sampler  = self.sampler
         schedule = sampler.schedule.to(self.device)
-        x = torch.randn(1, C, *canvas_cells, device=self.device)
-        timesteps = sampler._timesteps
+        sampler.model.eval()
 
-        for i, t_val in enumerate(timesteps[:-1]):
-            t_prev_val = timesteps[i + 1]
-            eps_sum = torch.zeros_like(x)
-            for start in range(0, n_win, B_max):
-                idx = list(range(start, min(start + B_max, n_win)))
-                B = len(idx)
-                xw = torch.stack(
-                    [x[0, :, win_slices[j][0], win_slices[j][1], win_slices[j][2]]
-                     for j in idx]
-                )                                                    # (B,C,L,L,L)
-                t_b = torch.full((B,), t_val, dtype=torch.long, device=self.device)
-                eps = sampler.predict_eps(
-                    xw, t_b, nb_zero[:B], win_avail_t[idx],
-                    por_t[idx], depth_t[idx], dist_t[idx],
-                    None if orient_t is None else orient_t[idx],
-                    autocast_dtype,
-                ).float()
-                for k, j in enumerate(idx):
-                    sl = win_slices[j]
-                    eps_sum[0, :, sl[0], sl[1], sl[2]] += weight * eps[k]
+        ds, L, P = self.downsample, self.latent_size, self.patch_size
+        C = self.z_channels
+        canvas_cells = tuple(v // ds for v in volume_shape)
+        n_tiles = tuple(v // P for v in volume_shape)
+        s_cells = self.window_stride // ds
+        box_lo, box_hi = specimen_box
 
-            t      = torch.tensor([t_val],      dtype=torch.long, device=self.device)
-            t_prev = torch.tensor([t_prev_val], dtype=torch.long, device=self.device)
-            x = schedule.ddim_step(x, t, t_prev, eps_sum / weight_sum)
-            if patch_pbar is not None:
-                patch_pbar.update(1)
+        por_default = (
+            float(np.clip(target_porosity, POR_MIN, POR_MAX))
+            if target_porosity is not None else 0.05
+        )
+        if material_map is None:
+            material_map = self._default_material_map(canvas_cells, box_lo, box_hi)
+        material_map = np.asarray(material_map, dtype=np.float32)
+        if material_map.shape != canvas_cells:
+            raise ValueError(
+                f"material_map has shape {material_map.shape}, expected the latent "
+                f"canvas {canvas_cells} (one cell per {ds}³ voxels)."
+            )
 
-        # ── slice the coherent canvas into the stride-64 tiling grid ─────────
-        Lc = P // ds
-        generated:    dict[tuple[int, int, int], torch.Tensor] = {}
-        grid_origins: dict[tuple[int, int, int], tuple[int, int, int]] = {}
-        for iz, z0 in enumerate(zs):
-            for iy, y0 in enumerate(ys):
-                for ix, x0 in enumerate(xs):
-                    cz, cy, cx = z0 // ds, y0 // ds, x0 // ds
-                    generated[(iz, iy, ix)] = (
-                        x[0, :, cz:cz + Lc, cy:cy + Lc, cx:cx + Lc].float().cpu()
+        z_clean = torch.zeros(C, *canvas_cells, device=self.device)
+        available = np.zeros(canvas_cells, dtype=bool)   # cells of finished chunks
+
+        chunk_grid = [
+            self._chunk_ranges(n_tiles[a], self.chunk_tiles[a]) for a in range(3)
+        ]
+        chunks = [(cz, cy, cx) for cz in chunk_grid[0]
+                  for cy in chunk_grid[1] for cx in chunk_grid[2]]
+        timesteps = sampler.timesteps
+
+        logger.info(
+            "VolumeGenerator: %s voxels = %s tiles, %d chunk(s) of %s tiles, "
+            "windows every %d voxels, %d DDIM steps",
+            volume_shape, n_tiles, len(chunks), self.chunk_tiles,
+            self.window_stride, len(timesteps) - 1,
+        )
+
+        for chunk_idx, chunk in enumerate(chunks):
+            lo = tuple(chunk[a][0] * L for a in range(3))           # cell lo
+            hi = tuple(chunk[a][1] * L for a in range(3))           # cell hi
+            chunk_cells = tuple(hi[a] - lo[a] for a in range(3))
+            ctx_lo = tuple(max(lo[a] - L, 0) for a in range(3))
+            ctx_hi = tuple(min(hi[a] + L, canvas_cells[a]) for a in range(3))
+            ctx_sl = tuple(slice(ctx_lo[a], ctx_hi[a]) for a in range(3))
+            cur_sl = tuple(slice(lo[a] - ctx_lo[a], hi[a] - ctx_lo[a]) for a in range(3))
+            chunk_sl = tuple(slice(lo[a], hi[a]) for a in range(3))
+
+            # Availability as the windows of THIS chunk see it: finished chunks
+            # plus the chunk being generated.
+            visible = available.copy()
+            visible[chunk_sl] = True
+            done_mask = torch.from_numpy(available[ctx_sl].astype(np.float32)).to(self.device)
+
+            origins = window_origins(chunk_cells, L, s_cells)
+            g_origins = [tuple(lo[a] + o[a] for a in range(3)) for o in origins]
+            n_win = len(g_origins)
+
+            states, nb_slices = self._neighbour_plan(g_origins, visible, canvas_cells, ctx_lo)
+            cond = self._window_conditioning(
+                g_origins, ds, por_default, local_por_map, material_map,
+                box_lo, box_hi, n_tiles,
+            )
+            avail_t = torch.from_numpy(states).to(self.device)              # (n_win, 6)
+
+            win_sl = [
+                (slice(o[0], o[0] + L), slice(o[1], o[1] + L), slice(o[2], o[2] + L))
+                for o in origins
+            ]
+            weight = window_weight(L).to(self.device)
+            weight_sum = torch.zeros((1, 1, *chunk_cells), device=self.device)
+            for sl in win_sl:
+                weight_sum[0, 0, sl[0], sl[1], sl[2]] += weight
+
+            x = torch.randn(1, C, *chunk_cells, device=self.device)
+            B_max = max(1, min(int(window_batch), n_win))
+
+            for i, t_val in enumerate(timesteps[:-1]):
+                t_prev_val = timesteps[i + 1]
+                # Context canvas at this timestep: finished chunks re-noised to
+                # t with FRESH noise, the current chunk at its live state.
+                t_one = torch.full((1,), t_val, dtype=torch.long, device=self.device)
+                ctx = schedule.q_sample(
+                    z_clean[(slice(None), *ctx_sl)].unsqueeze(0), t_one
+                ) * done_mask
+                ctx[(0, slice(None), *cur_sl)] = x[0]
+
+                eps_sum = torch.zeros_like(x)
+                for start in range(0, n_win, B_max):
+                    idx = list(range(start, min(start + B_max, n_win)))
+                    B = len(idx)
+                    xw = torch.stack(
+                        [x[0, :, win_sl[j][0], win_sl[j][1], win_sl[j][2]] for j in idx]
                     )
-                    grid_origins[(iz, iy, ix)] = (z0, y0, x0)
-        return generated, grid_origins
+                    nb = torch.zeros(B, N_NEIGHBOURS, C, L, L, L, device=self.device)
+                    for k, j in enumerate(idx):
+                        for f in range(N_NEIGHBOURS):
+                            sl = nb_slices[j][f]
+                            if sl is not None:
+                                nb[k, f] = ctx[(0, slice(None), *sl)]
+                    av = avail_t[idx]
+                    nb_t = torch.where(
+                        av == NB_EXISTS,
+                        torch.full_like(av, t_val),
+                        torch.zeros_like(av),
+                    )
+                    t_b = torch.full((B,), t_val, dtype=torch.long, device=self.device)
+                    eps = sampler.predict_eps(
+                        xw, t_b, nb, av, nb_t,
+                        cond["por"][idx], cond["depth"][idx], cond["dist6"][idx],
+                        cond["orient"][idx], cond["material"][idx], autocast_dtype,
+                    ).float()
+                    for k, j in enumerate(idx):
+                        sl = win_sl[j]
+                        eps_sum[0, :, sl[0], sl[1], sl[2]] += weight * eps[k]
+
+                t      = torch.tensor([t_val],      dtype=torch.long, device=self.device)
+                t_prev = torch.tensor([t_prev_val], dtype=torch.long, device=self.device)
+                x = schedule.ddim_step(x, t, t_prev, eps_sum / weight_sum)
+                if progress is not None:
+                    progress.update(1)
+
+            z_clean[(slice(None), *chunk_sl)] = x[0]
+            available[chunk_sl] = True
+            logger.info("Chunk %d/%d done (tiles %s)", chunk_idx + 1, len(chunks), chunk)
+
+        return z_clean
+
+    def _default_material_map(
+        self,
+        canvas_cells: tuple[int, int, int],
+        box_lo: tuple[int, int, int],
+        box_hi: tuple[int, int, int],
+    ) -> np.ndarray:
+        """Inside the specimen box the envelope is 1; outside it is 0 (air)."""
+        ds = self.downsample
+        m = np.zeros(canvas_cells, dtype=np.float32)
+        sl = tuple(
+            slice(int(math.ceil(box_lo[a] / ds)), int(box_hi[a] // ds))
+            for a in range(3)
+        )
+        m[sl] = 1.0
+        return m
+
+    def _neighbour_plan(
+        self,
+        g_origins: list[tuple[int, int, int]],
+        visible: np.ndarray,
+        canvas_cells: tuple[int, int, int],
+        ctx_lo: tuple[int, int, int],
+    ) -> tuple[np.ndarray, list[list[tuple[slice, slice, slice] | None]]]:
+        """Availability state and context slice of every window's six faces.
+
+        The state does not change during a chunk's reverse process — only the
+        content of the context canvas does — so it is computed once.
+        """
+        L = self.latent_size
+        states = np.full((len(g_origins), N_NEIGHBOURS), NB_OOB, dtype=np.int64)
+        slices: list[list[tuple[slice, slice, slice] | None]] = []
+        for j, g in enumerate(g_origins):
+            row: list[tuple[slice, slice, slice] | None] = []
+            for f, d in enumerate(NEIGHBOUR_DIRS):
+                a = tuple(g[k] + d[k] * L for k in range(3))
+                if any(a[k] < 0 or a[k] + L > canvas_cells[k] for k in range(3)):
+                    states[j, f] = NB_OOB           # the volume ends this way
+                    row.append(None)
+                    continue
+                block = tuple(slice(a[k], a[k] + L) for k in range(3))
+                if not visible[block].all():
+                    states[j, f] = NB_UNKNOWN       # a chunk not generated yet
+                    row.append(None)
+                    continue
+                states[j, f] = NB_EXISTS
+                row.append(tuple(slice(a[k] - ctx_lo[k], a[k] - ctx_lo[k] + L)
+                                 for k in range(3)))
+            slices.append(row)
+        return states, slices
+
+    def _window_conditioning(
+        self,
+        g_origins: list[tuple[int, int, int]],
+        ds: int,
+        por_default: float,
+        local_por_map: dict | None,
+        material_map: np.ndarray,
+        box_lo: tuple[int, int, int],
+        box_hi: tuple[int, int, int],
+        n_tiles: tuple[int, int, int],
+    ) -> dict[str, torch.Tensor]:
+        """Stack every window's scalar and spatial conditioning onto the device."""
+        L, P = self.latent_size, self.patch_size
+        por, depth, dist6, orient, material = [], [], [], [], []
+        for g in g_origins:
+            ov = tuple(int(c) * ds for c in g)          # voxel origin
+            phi = por_default
+            if local_por_map is not None:
+                # The requested porosity field is defined on the TILE grid;
+                # a window takes the tile that holds its centre.
+                ti = tuple(min((ov[a] + P // 2) // P, n_tiles[a] - 1) for a in range(3))
+                phi = local_por_map.get(ti, por_default)
+            phi = float(np.clip(phi, POR_MIN, POR_MAX))
+            por.append(float(porosity_to_cond(phi, self.por_log_stats)))
+            d, d6 = self._window_position(ov, box_lo, box_hi)
+            depth.append(d)
+            dist6.append(d6)
+            orient.append(self._window_orient(ov[0]))
+            material.append(
+                torch.from_numpy(
+                    material_map[g[0]:g[0] + L, g[1]:g[1] + L, g[2]:g[2] + L].copy()
+                ).unsqueeze(0)
+            )
+        return {
+            "por":   torch.tensor(por,   dtype=torch.float32, device=self.device),
+            "depth": torch.tensor(depth, dtype=torch.float32, device=self.device),
+            "dist6": torch.from_numpy(np.stack(dist6)).to(self.device),
+            "orient": torch.stack(orient).to(self.device),
+            "material": torch.stack(material).to(self.device),
+        }
+
+    # ── overlapped decode ────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def _decode_canvas(
+        self,
+        z_clean: torch.Tensor,
+        volume_shape: tuple[int, int, int],
+        autocast_dtype: torch.dtype,
+        decode_batch_size: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Blend-decode the latent canvas.  Returns (xct [0,1], class logits).
+
+        Decode windows are one tile wide and step ``decode_stride`` voxels, and
+        the decoded grey level and the raw 3-class logits are accumulated with
+        a tapered window before any nonlinearity — the same construction
+        ``poregen.eval.blended`` validated on real volumes.  Blending the
+        LOGITS (not the argmax, not the probabilities) is what removes the
+        class seam a stride-64 tiling leaves at every patch face.
+        """
+        for attr in ("decoder", "xct_head", "class_head"):
+            if not hasattr(self.vae, attr):
+                raise TypeError(
+                    f"VolumeGenerator needs a 3-class VAE with .{attr}; got "
+                    f"{type(self.vae).__name__}.  ldm06 decodes material/pore/air "
+                    f"logits, not a binary mask."
+                )
+        ds, L, P = self.downsample, self.latent_size, self.patch_size
+        canvas_cells = tuple(z_clean.shape[1:])
+        s_cells = self.decode_stride // ds
+        origins = window_origins(canvas_cells, L, s_cells)
+
+        w3d = tukey_window_3d(P, floor=_DECODE_WINDOW_FLOOR)
+        xct_acc   = np.zeros(volume_shape, dtype=np.float32)
+        logit_acc = np.zeros((3, *volume_shape), dtype=np.float32)
+        w_acc     = np.zeros(volume_shape, dtype=np.float32)
+
+        mean = self.latent_mean
+        std  = self.latent_std
+        if isinstance(mean, torch.Tensor):
+            mean = mean.to(self.device)
+        if isinstance(std, torch.Tensor):
+            std = std.to(self.device)
+
+        self.vae.eval()
+        for start in range(0, len(origins), decode_batch_size):
+            batch = origins[start : start + decode_batch_size]
+            z = torch.stack([
+                z_clean[:, o[0]:o[0] + L, o[1]:o[1] + L, o[2]:o[2] + L] for o in batch
+            ]) * std + mean
+            with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
+                dec = self.vae.decoder(z)
+                xct_out = self.vae.xct_head(dec)
+                class_logits = self.vae.class_head(dec)
+            xct_np = xct_out.float().squeeze(1).cpu().numpy()
+            cls_np = class_logits.float().cpu().numpy()
+            for i, o in enumerate(batch):
+                ov = tuple(int(c) * ds for c in o)
+                sl = np.s_[ov[0]:ov[0] + P, ov[1]:ov[1] + P, ov[2]:ov[2] + P]
+                xct_acc[sl] += w3d * xct_np[i]
+                logit_acc[(slice(None), *sl)] += w3d[None] * cls_np[i]
+                w_acc[sl] += w3d
+
+        xct_acc /= w_acc
+        logit_acc /= w_acc[None]
+        return xct_acc, logit_acc
+
+    # ── public entry point ───────────────────────────────────────────────────
 
     def generate(
         self,
@@ -1142,204 +891,148 @@ class VolumeGenerator:
         target_porosity: float | None = None,
         autocast_dtype: torch.dtype = torch.bfloat16,
         local_por_map: dict | None = None,
-        patch_pbar=None,
-        gen_batch_size: int = 32,
+        material_map: np.ndarray | None = None,
+        specimen_box: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None,
+        progress=None,
+        window_batch: int = 32,
         decode_batch_size: int = 64,
-        mode: str = "sequential",
-        joint_window_stride: int = 32,
-        joint_window_batch: int = 32,
-    ) -> tuple[np.ndarray, np.ndarray, dict[str, float | None]]:
-        """Generate a full volume — sequential parity schedule or joint denoising.
-
-        ``mode="sequential"`` (the ablation baseline) runs the eight-group
-        parity schedule with explicit neighbour conditioning; each patch gets
-        one full DDIM pass.  ``mode="joint"`` runs the MultiDiffusion-style
-        joint reverse process on one latent canvas
-        (:meth:`_generate_latents_joint`).  Both modes decode the SAME way:
-        once, patch-by-patch on the non-overlapping stride-64 tiling grid.
+        return_class_probs: bool = False,
+    ) -> tuple:
+        """Generate one volume: chunked joint denoising, then blended decode.
 
         Parameters
         ----------
-        volume_size_mm    : (D, H, W) physical size in millimetres; each dimension
-                            is snapped down to the nearest multiple of patch_size
-        target_porosity   : uniform per-patch VVF fallback (None = 0.05)
-        autocast_dtype    : AMP dtype for the denoiser and VAE
-        local_por_map     : dict (iz, iy, ix) → per-patch raw porosity phi,
-                            keyed by the TILING grid in both modes
-        gen_batch_size    : sequential mode — patches sampled in parallel
-        decode_batch_size : latents decoded in one VAE forward pass
-        mode              : "sequential" | "joint"
-        joint_window_stride : joint mode — voxels between window origins
-                            (default 32 = 50 % overlap); must divide patch_size
-        joint_window_batch  : joint mode — windows per UNet forward per timestep
-
-        Note: ``patch_pbar`` counts patches in sequential mode but DDIM
-        timesteps in joint mode (all windows advance together).
+        volume_size_mm    : (D, H, W) physical size in millimetres; each axis is
+                            snapped DOWN to a whole number of 64-voxel tiles
+        target_porosity   : uniform per-tile VVF fallback (None → 0.05)
+        local_por_map     : dict (iz, iy, ix) → requested φ, on the TILE grid
+        material_map      : (Z, Y, X) specimen-envelope fraction per LATENT CELL
+                            over the whole volume.  None → 1 inside the
+                            specimen box, 0 outside.  Paint it to ask for
+                            exterior air, drilled holes or a non-box specimen
+                            shape.  It does NOT say where the pores go.
+        specimen_box      : ((z, y, x) lo inclusive, (z, y, x) hi exclusive) in
+                            voxels.  None → the whole generated volume, i.e.
+                            "this volume IS the specimen".  Drives cond_depth
+                            and cond_dist6.
+        progress          : optional tqdm; counts DDIM steps (chunks × steps)
+        window_batch      : windows per UNet forward per timestep
+        decode_batch_size : latent windows decoded in one VAE forward
+        return_class_probs: also return the blended per-voxel class
+                            probabilities, (3, D, H, W) float32
 
         Returns
         -------
-        (xct_uint8, mask_uint8, stats) — uint8 ndarrays of shape volume_shape,
-        plus a stats dict with the conditioning target, the assembled mask's
-        actual porosity (self-audit of every generation run) and the seam
-        discontinuity across every patch-to-patch face (D32 §3.4).
+        ``(xct_u8, label_u8, stats)``, plus ``class_probs`` when requested.
+        ``label_u8`` is the argmax of the blended class logits: 0 material,
+        1 pore, 2 air.  ``stats`` carries the conditioning target, the
+        assembled label's own porosity and air fraction, and the seam
+        discontinuity at BOTH the window (64-voxel) and chunk periods.
         """
-        P   = self.patch_size
-        vsz = self.voxel_size_mm
+        volume_shape = self._volume_shape(volume_size_mm)
+        P = self.patch_size
+        if specimen_box is None:
+            specimen_box = ((0, 0, 0), volume_shape)
+        box_lo, box_hi = tuple(specimen_box[0]), tuple(specimen_box[1])
 
-        # Snap each physical dimension to the nearest patch_size multiple (in voxels)
-        volume_shape = tuple(
-            (round(d / vsz) // P) * P for d in volume_size_mm
+        z_clean = self._generate_latents(
+            volume_shape,
+            target_porosity=target_porosity,
+            local_por_map=local_por_map,
+            material_map=material_map,
+            specimen_box=(box_lo, box_hi),
+            autocast_dtype=autocast_dtype,
+            window_batch=window_batch,
+            progress=progress,
         )
-        for d_mm, snapped_vox in zip(volume_size_mm, volume_shape):
-            raw_vox = round(d_mm / vsz)
-            if raw_vox - snapped_vox > 1:
-                logger.warning(
-                    "Volume axis %.3f mm: snapped %d vox → %d vox (dropped %d vox)",
-                    d_mm, raw_vox, snapped_vox, raw_vox - snapped_vox,
-                )
-
-        vol_d, vol_h, vol_w = volume_shape
-        stride = self.generation_stride
-
-        nz = len(range(0, vol_d - P + 1, stride))
-        ny = len(range(0, vol_h - P + 1, stride))
-        nx = len(range(0, vol_w - P + 1, stride))
-
-        patch_size_mm = P * vsz
-        logger.info(
-            "Volume %.1f×%.1f×%.1f mm  grid %d×%d×%d  patch %.2f mm",
-            *volume_size_mm, nz, ny, nx, patch_size_mm,
+        xct, class_logits = self._decode_canvas(
+            z_clean, volume_shape, autocast_dtype, decode_batch_size
         )
 
-        if mode == "sequential":
-            generated, grid_origins = self._generate_latents(
-                volume_shape=volume_shape,
-                target_porosity=target_porosity,
-                autocast_dtype=autocast_dtype,
-                local_por_map=local_por_map,
-                patch_pbar=patch_pbar,
-                gen_batch_size=gen_batch_size,
-            )
-        elif mode == "joint":
-            generated, grid_origins = self._generate_latents_joint(
-                volume_shape=volume_shape,
-                target_porosity=target_porosity,
-                autocast_dtype=autocast_dtype,
-                local_por_map=local_por_map,
-                patch_pbar=patch_pbar,
-                window_stride=joint_window_stride,
-                window_batch=joint_window_batch,
-            )
-        else:
-            raise ValueError(f"Unknown generation mode {mode!r} — use 'sequential' or 'joint'.")
+        logits_t = torch.from_numpy(class_logits).unsqueeze(0)
+        label = decode_label(logits_t)[0].numpy().astype(np.uint8)
+        # numpy mirror of models.vae.base.decode_xct_u8: the XCT head is not a
+        # logit, so the conversion is clamp-and-scale.  A sigmoid here would
+        # squash every volume into [0.5, 0.731] and destroy its contrast.
+        xct_u8 = np.round(np.clip(xct, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-        # ── Direct tiling assembly ────────────────────────────────────────────
-        # generation_stride == patch_size, so each decoded patch owns its own
-        # block of the volume: no window, no weight buffer, no averaging of two
-        # independent answers.  Logits go straight in; the sigmoid is applied
-        # once at the end.
-        xct_grey_vol  = np.zeros(volume_shape, dtype=np.float32)
-        mask_logit_vol = np.zeros(volume_shape, dtype=np.float32)
+        # ── seam diagnostics ─────────────────────────────────────────────────
+        # Measured on the decoder's own continuous output: the grey level, and
+        # the pore logit log p_pore - log(1 - p_pore) derived from the blended
+        # 3-class logits (a per-class logit on its own is not comparable across
+        # voxels; the pore-vs-rest log odds is).
+        probs = decode_class_probs(logits_t)[0].numpy()
+        p_pore = np.clip(probs[1], 1e-6, 1.0 - 1e-6)
+        pore_logit = np.log(p_pore) - np.log1p(-p_pore)
+        chunk_period = tuple(P * c for c in self.chunk_tiles)
 
-        all_items = list(generated.items())
-
-        self.vae.eval()
-        with torch.no_grad():
-            for chunk_start in range(0, len(all_items), decode_batch_size):
-                chunk = all_items[chunk_start : chunk_start + decode_batch_size]
-
-                z_stacked = torch.stack(
-                    [(z_gen * self.latent_std + self.latent_mean) for _, z_gen in chunk], dim=0
-                ).to(self.device)   # (B, C, ls, ls, ls) — denormalised latents
-
-                with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
-                    dec         = self.vae.decoder(z_stacked)
-                    xct_out  = self.vae.xct_head(dec)
-                    mask_logits = self.vae.mask_head(dec)
-
-                # squeeze(1): drop channel dim (size 1) while keeping batch dim.
-                # Store raw logits — the sigmoid is applied once, after assembly.
-                xct_patches  = xct_out.squeeze(1).float().cpu().numpy()   # (B,P,P,P) logits
-                mask_patches = mask_logits.squeeze(1).float().cpu().numpy()  # (B,P,P,P) logits
-
-                for i, (gi, _) in enumerate(chunk):
-                    z0, y0, x0 = grid_origins[gi]
-                    sl = (slice(z0, z0 + P), slice(y0, y0 + P), slice(x0, x0 + P))
-
-                    xct_grey_vol[sl]  = xct_patches[i]
-                    mask_logit_vol[sl] = mask_patches[i]
-
-        # Threshold the mask in logit space (>0 == >0.5 in probability space),
-        # then turn the XCT head output into grey levels IN PLACE — a production
-        # volume is 500 M voxels, so every extra float32 buffer costs 2 GB.
-        # The XCT head is NOT a logit: it regresses xct/255 directly, so the
-        # conversion is clamp-and-scale (numpy mirror of models.vae.base.
-        # decode_xct_u8).  A sigmoid here would squash everything into
-        # [0.5, 0.731] and destroy the contrast of every generated volume.
-        mask_out = (mask_logit_vol > 0.0).astype(np.uint8) * 255
-        np.clip(xct_grey_vol, 0.0, 1.0, out=xct_grey_vol)
-        xct_grey = np.multiply(xct_grey_vol, 255.0, out=xct_grey_vol)
-        xct_out  = np.round(xct_grey).astype(np.uint8)
-
-        # ── Seam diagnostic (D32 §3.4, replaces the overlap disagreement) ─────
-        # Patches tile, so the only patch-to-patch interface left is the plane
-        # between two blocks.  Measured on the decoder's own output — grey level
-        # for the XCT head, logits for the mask head — against the natural
-        # slice-to-slice variation inside a patch.
         seam_stats = {
-            **seam_discontinuity(xct_grey, P, prefix="seam_xct"),
-            **seam_discontinuity(mask_logit_vol, P, prefix="seam_mask"),
+            **seam_discontinuity(np.clip(xct, 0.0, 1.0), P, prefix="seam_xct"),
+            **seam_discontinuity(pore_logit, P, prefix="seam_pore"),
+            **seam_discontinuity(np.clip(xct, 0.0, 1.0), chunk_period,
+                                 prefix="seam_chunk_xct", interior_exclude=P),
+            **seam_discontinuity(pore_logit, chunk_period,
+                                 prefix="seam_chunk_pore", interior_exclude=P),
         }
         logger.info(
-            "Seam discontinuity (ratio, 1.0 = indistinguishable from interior): "
-            "xct=%.3f (z=%.3f y=%.3f x=%.3f, %d planes)  mask=%.3f",
+            "Seam ratio (1.0 = indistinguishable from interior): window "
+            "xct=%.3f pore=%.3f | chunk xct=%.3f pore=%.3f",
             seam_stats.get("seam_xct_ratio", float("nan")),
-            seam_stats.get("seam_xct_z_ratio", float("nan")),
-            seam_stats.get("seam_xct_y_ratio", float("nan")),
-            seam_stats.get("seam_xct_x_ratio", float("nan")),
-            int(seam_stats.get("seam_xct_planes", 0)),
-            seam_stats.get("seam_mask_ratio", float("nan")),
+            seam_stats.get("seam_pore_ratio", float("nan")),
+            seam_stats.get("seam_chunk_xct_ratio", float("nan")),
+            seam_stats.get("seam_chunk_pore_ratio", float("nan")),
         )
 
-        # Post-generation self-audit: actual porosity of the assembled mask
-        # vs the conditioning target.
-        actual_por = float((mask_out > 0).mean())
+        actual_por = float((label == 1).mean())
+        actual_air = float((label == 2).mean())
         clamped_por = (
-            float(np.clip(target_porosity, _POR_MIN, _POR_MAX))
+            float(np.clip(target_porosity, POR_MIN, POR_MAX))
             if target_porosity is not None else 0.05
         )
         logger.info(
-            "Assembled volume porosity: actual=%.4f  target=%s  conditioned=%.4f",
-            actual_por,
+            "Assembled volume: porosity=%.4f  air=%.4f  target=%s  conditioned=%.4f",
+            actual_por, actual_air,
             "None" if target_porosity is None else f"{target_porosity:.4f}",
             clamped_por,
         )
-        stats = {
-            "generation_mode": mode,
+        stats: dict[str, Any] = {
+            "volume_shape": list(volume_shape),
+            "chunk_tiles": list(self.chunk_tiles),
+            "window_stride": self.window_stride,
+            "decode_stride": self.decode_stride,
+            "ddim_steps": len(self.sampler.timesteps) - 1,
+            "s_por": float(self.sampler.s_por),
+            "s_nb": float(self.sampler.s_nb),
             "target_porosity": None if target_porosity is None else float(target_porosity),
             "conditioned_porosity": clamped_por,
-            "actual_mask_porosity": actual_por,
+            "actual_label_porosity": actual_por,
+            "actual_label_air": actual_air,
             **seam_stats,
         }
-        if mode == "joint":
-            stats["joint_window_stride"] = int(joint_window_stride)
-
-        return xct_out, mask_out, stats
+        if return_class_probs:
+            return xct_u8, label, stats, probs.astype(np.float32)
+        return xct_u8, label, stats
 
     @staticmethod
     def save_tiff(
-        xct:  np.ndarray,
-        mask: np.ndarray,
-        path_xct:  str | Path,
-        path_mask: str | Path,
+        xct: np.ndarray,
+        label: np.ndarray,
+        path_xct: str | Path,
+        path_label: str | Path,
     ) -> None:
-        """Write XCT and mask volumes to TIFF files."""
+        """Write the XCT and label volumes to TIFF files.
+
+        Both go out on their NATIVE scale: ``xct`` is uint8 on the raw-scan
+        grey scale, ``label`` is uint8 {0 material, 1 pore, 2 air}.  Anything
+        that rescales them (a /255, an expit) makes generated and real volumes
+        incomparable, which cost a whole evaluation campaign.
+        """
         import tifffile
         path_xct  = Path(path_xct)
-        path_mask = Path(path_mask)
+        path_label = Path(path_label)
         path_xct.parent.mkdir(parents=True, exist_ok=True)
-        path_mask.parent.mkdir(parents=True, exist_ok=True)
+        path_label.parent.mkdir(parents=True, exist_ok=True)
         tifffile.imwrite(str(path_xct),  xct)
-        tifffile.imwrite(str(path_mask), mask)
-        logger.info("Saved XCT  → %s", path_xct)
-        logger.info("Saved mask → %s", path_mask)
+        tifffile.imwrite(str(path_label), label)
+        logger.info("Saved XCT   → %s", path_xct)
+        logger.info("Saved label → %s", path_label)
