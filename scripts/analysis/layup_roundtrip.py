@@ -61,16 +61,18 @@ sys.path.insert(0, str(REPO / "src"))
 
 import t_i_layup_validation as ti  # noqa: E402  (the T-I math, reused, not forked)
 
-from poregen.diffusion.conditioning import resolve_group_order  # noqa: E402
-from poregen.diffusion.noise_schedule import DDPMSchedule  # noqa: E402
 from poregen.diffusion.porosity_field import (  # noqa: E402
     DEFAULT_TD_RESULTS, DEFAULT_TE_RESULTS, build_porosity_field,
     load_corr_lengths_voxels, load_sampler,
 )
-from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator, theta_from_layup  # noqa: E402
-from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser  # noqa: E402
-from poregen.training.checkpoint import load_checkpoint  # noqa: E402
-from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
+
+# The GENERATION half of this script is pinned to the ldm05 sampler API, which
+# ldm06 replaced.  Those imports are deferred into the functions that use them
+# so that importing this module still works: the T-I ESTIMATOR half
+# (measure_volume, score_recovery, ply_edges, wrap180) has no sampler
+# dependency and is imported by scripts/analysis/ply_angle_structure_tensor.py,
+# the CURRENT campaign-08 reader-floor measurement.  Calling build_generator()
+# on an ldm06 tree fails, which is correct — that path is gone.
 
 CKPT = REPO / ("runs/ldm/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04/"
                "checkpoints/ldm_step00130000.ckpt")
@@ -322,6 +324,13 @@ def wait_for_gpu(poll_s: int = 60, budget_s: int = 1800) -> None:
 
 
 def build_generator(device: torch.device):
+    from poregen.diffusion.conditioning import resolve_group_order
+    from poregen.diffusion.noise_schedule import DDPMSchedule
+    from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator
+    from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
+    from poregen.training.checkpoint import load_checkpoint
+    from poregen.experiments.train_vae import load_vae_from_checkpoint
+
     run_dir = CKPT.parent.parent
     cfg = yaml.safe_load((run_dir / "resolved_config.yaml").read_text())
     model = UNet3DDenoiser(UNet3DConfig.from_cfg(cfg)).to(device)
@@ -750,6 +759,8 @@ def main() -> None:
 
     settings = SETTINGS if args.modes is None else [
         s for s in SETTINGS if s[0] in args.modes]
+
+    from poregen.diffusion.sampler import theta_from_layup
 
     print("Waiting for the GPU (dose_response.py)", flush=True)
     wait_for_gpu()
