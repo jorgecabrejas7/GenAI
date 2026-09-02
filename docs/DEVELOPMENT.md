@@ -39,6 +39,34 @@ Do not fix unless explicitly asked:
 
 A clean run is therefore **264 passed, 5 failed**.
 
+## Testing inside a git worktree
+
+`pip install -e .` points the `poregen` package at the **main checkout's**
+`src/`. Running `pytest` inside a worktree therefore tests the main tree's code,
+not the worktree's — silently, and with a plausible-looking result. Two things
+are needed to test the branch you actually checked out:
+
+```bash
+W=.claude/worktrees/<worktree>
+ln -sfn "$PWD/runs" "$W/runs"       # tests read campaign artefacts from runs/
+ln -sfn "$PWD/data" "$W/data"       # and calibration inputs from data/
+cd "$W" && PYTHONPATH="$PWD/src" python -m pytest tests/ -q
+```
+
+Without `PYTHONPATH` you get collection errors from whichever tree happens to be
+installed. Without the two symlinks you get spurious `FileNotFoundError`s in
+`tests/test_porosity_field.py` and anything else that reads a committed
+campaign result — `/runs/` and `/data/` are git-ignored, so a worktree has
+neither. Confirm you are testing what you think with:
+
+```bash
+PYTHONPATH="$PWD/src" python -c "import poregen; print(poregen.__file__)"
+```
+
+Both symlinks point at the real directories, so a test that writes through one
+writes into the live tree. The suite writes to `tmp_path`, but check any new
+test before adding it.
+
 ## Deployment target
 
 **NVIDIA GB10 GPU (DGX Spark, 128 GB unified memory).** Code runs on that
