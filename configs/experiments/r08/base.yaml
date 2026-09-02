@@ -1,0 +1,52 @@
+experiment:
+  name: r08
+  variant: base
+  description: >-
+    R08 — the production VAE for ldm06, on data/split_v3. Same trunk and
+    hyperparameters as the r07 point that produced the current latent store
+    (r07/reduction-factor-16: z_channels 4, base 32, bs 128, lr 2e-4,
+    beta 0.05, free_bits 0.1, disc_weight 0.05, compile off, early stopping
+    patience 12 on val.total after 4500 warmup steps). Two things change:
+    the dataset is split_v3 (drilled holes removed, split by panel), and the
+    model is the 3-class variant — encoder input cat([xct, pore, air]),
+    decoder emitting material/pore/air logits instead of a binary pore mask.
+
+# r07/reduction-factor-16 is the variant that produced
+# runs/vae/r07-run-0006-...-z4-c32-..., the VAE behind
+# data/split_v2/latents_r07z4. It is z_channels 4 — "reduction-factor-4" is
+# z_channels 16, a different sweep point.
+extends: r07/reduction-factor-16
+
+overrides:
+  model:
+    name: v2.conv_noattn_dualbranch_cls
+    # XCT + pore plane + air plane. Material is implied by both being zero.
+    # Not a switch: the variant rejects any other value.
+    in_channels: 3
+    z_channels: 4
+
+  data:
+    dataset_root: split_v3
+    split_version: v2   # the parquet's own "split" column; v3 splits are baked in
+
+  loss:
+    # Three-class head: weighted cross-entropy + soft Dice over the minority
+    # classes. The binary-mask keys inherited from r07 (mask_bce_*, use_focal,
+    # use_tversky, mask_dice_weight) are inert here — compute_total_loss
+    # branches on which head the model actually emits, and this variant emits
+    # class_logits only.
+    class_ce_weight: 1.0
+    class_dice_weight: 1.0
+    # Dice is averaged over pore and air only. Material is the background: its
+    # Dice sits near 1 whatever the model does, so scoring it would dilute the
+    # signal from the two classes that matter.
+    class_dice_classes: [1, 2]
+    # w_c = 1 / (n_classes * f_c), so sum_c f_c * w_c = 1 and the weighted loss
+    # keeps the magnitude of an unweighted one. Measured on the split_v3 TRAIN
+    # split by `python scripts/build_split_v3.py --stage weights`; the source
+    # numbers and the patch count are in data/split_v3/class_weights.json.
+    # Without weights the loss is dominated by material and pore and air both
+    # collapse, so compute_total_loss refuses to run when this is unset.
+    # train frequencies material/pore/air = 0.907569 / 0.020702 / 0.071730
+    # over 1861639 patches.
+    class_weights: [0.367282, 16.101824, 4.647067]
