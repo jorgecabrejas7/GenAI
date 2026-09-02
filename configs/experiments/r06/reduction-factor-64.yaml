@@ -10,3 +10,7 @@ extends: r06/base
 overrides:
   model:
     z_channels: 1
+  training:
+    # compile off: pathological autotuned kernel (7.28 s/step vs ~1.8 normal),
+    # same shape-specific autotuner issue as the small-z dualbranch variants.
+    compile: false

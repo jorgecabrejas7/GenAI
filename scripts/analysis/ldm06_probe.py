@@ -17,7 +17,7 @@ B. Does more DDIM sampling reduce interior air?
    If the step count gives a clear monotone air reduction, one extra
    1024x1024x192 volume at 200 steps checks the effect at full scale.
 
-Outputs to runs/analysis/ldm06_probe/: results.json, findings.md, figures
+Outputs to runs/campaigns/06-ldm06-probe/ldm06_probe/: results.json, findings.md, figures
 (PDF + PNG, 300 dpi), and the generated volumes under
 volumes/<steps>_seed_<seed>/ (generate_volumes.py TIFF conventions).
 
@@ -62,10 +62,10 @@ from poregen.diffusion.porosity_field import (  # noqa: E402
 from poregen.diffusion.sampler import DDIMSampler  # noqa: E402
 from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 
-OUT_DIR = REPO / "runs" / "analysis" / "ldm06_probe"
+OUT_DIR = REPO / "runs" / "campaigns" / "06-ldm06-probe" / "ldm06_probe"
 VOL_OUT = OUT_DIR / "volumes"
-AUDIT_DIR = REPO / "runs" / "eval_v2" / "audit"
-DR_VOL_ROOT = REPO / "runs" / "eval_v2" / "volumes" / "dose_response"
+AUDIT_DIR = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "audit"
+DR_VOL_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes" / "dose_response"
 
 PATCH = 64
 GRID_192 = (3, 3, 3)
@@ -211,6 +211,24 @@ def cohens_d(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def part_a(device: torch.device) -> dict:
+    if not DR_VOL_ROOT.is_dir():
+        raise SystemExit(
+            f"Missing input: {DR_VOL_ROOT}\n"
+            "Part A re-encodes 64^3 cells from the eval-v2 dose-response "
+            "volumes, which were deleted after the decode fix.  It cannot be "
+            "reproduced.  The recorded result stands in "
+            "runs/campaigns/06-ldm06-probe/ldm06_probe/"
+            "{results.json,part_a_cells.csv} and is PROVISIONAL — it was "
+            "measured on buggy-decode volumes.\n"
+            "Do NOT repoint this at "
+            "runs/campaigns/05-eval-v3-fixed-decode/volumes/dose_response: the "
+            "cell selection comes from the v2 audit's cells.csv.gz (dark-air "
+            "fractions on the compressed grey scale) and _native_float() "
+            "inverts a sigmoid that the v3 volumes never had.  Redo the "
+            "selection on the v3 air audit first.\n"
+            "Part B is superseded — use "
+            "runs/campaigns/05-eval-v3-fixed-decode/ddim/.  Run --part b to "
+            "regenerate the probe volumes only.")
     rng = np.random.default_rng(0)
     cells = select_cells(rng)
     n_hi = int((cells.group == "high_air").sum())

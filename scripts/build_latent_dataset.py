@@ -27,17 +27,20 @@ On-disk layout produced (default output: <data_root>/latents_<exp>z<z>/)
 -----------------------
 data/split_v2/latents_r07z4/
 ├── metadata.json            — VAE checkpoint + resolved config copy & sha256,
-│                              latent shape, per-channel train-split norm stats,
-│                              creation date, per-split counts
+│                              latent shape, storage record, per-channel
+│                              train-split norm stats, creation date,
+│                              per-split counts
 ├── train/
-│   ├── latents.zarr/        — arrays "mu" and "std", each (N, C, 16, 16, 16) float16
+│   ├── latents.bin          — float16 C-contiguous memmap, shape
+│   │                          (N, 2C, 16, 16, 16); channels 0..C-1 = mu,
+│   │                          C..2C-1 = std ("mu_then_std" packing)
 │   └── index.parquet        — source_row (row in patch_index.parquet), volume_id,
 │                              source_group, split, z0, y0, x0, ps, stride,
 │                              porosity (from source index), phi (mask.mean())
 ├── val/   (same files)
 └── test/  (same files)
 
-Row i of ``index.parquet`` corresponds to row i of both zarr arrays.
+Row i of ``index.parquet`` corresponds to row i of ``latents.bin``.
 """
 
 from __future__ import annotations
@@ -55,11 +58,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-import zarr
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Scanner resolution of every volume in the dataset.  Recorded here because
+# its absence has cost time twice (D32 section 7).
+VOXEL_SIZE_UM = 25.0
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHECKPOINT = (
@@ -204,15 +210,11 @@ def main() -> None:
             pin_memory=(device.type == "cuda"),
         )
 
-        store = zarr.open_group(str(split_dir / "latents.zarr"), mode="w")
-        arr_kwargs = dict(
-            shape=(n, *latent_shape),
-            chunks=(1, *latent_shape),
-            shards=(min(2048, max(n, 1)), *latent_shape),
-            dtype="float16",
+        # mu_then_std packing: channels 0..C-1 = mu, C..2C-1 = std.
+        latents = np.memmap(
+            str(split_dir / "latents.bin"), dtype=np.float16, mode="w+",
+            shape=(n, 2 * z_channels, *latent_shape[1:]),
         )
-        mu_arr = store.create_array("mu", **arr_kwargs)
-        std_arr = store.create_array("std", **arr_kwargs)
 
         phi_all = np.empty(n, dtype=np.float32)
 
@@ -237,12 +239,14 @@ def main() -> None:
                     ch_count += mu.shape[0] * mu.shape[2] * mu.shape[3] * mu.shape[4]
 
                 b = mu.shape[0]
-                mu_arr[i : i + b] = mu.cpu().numpy().astype(np.float16)
-                std_arr[i : i + b] = std.cpu().numpy().astype(np.float16)
+                latents[i : i + b, :z_channels] = mu.cpu().numpy().astype(np.float16)
+                latents[i : i + b, z_channels:] = std.cpu().numpy().astype(np.float16)
                 phi_all[i : i + b] = phi.cpu().numpy()
                 i += b
 
         assert i == n, f"[{split}] wrote {i} rows, expected {n}"
+        latents.flush()
+        del latents
         rate = n / max(time.time() - t0, 1e-9)
         logger.info("[%s] encoded %d patches (%.0f patches/s)", split, n, rate)
 
@@ -272,9 +276,15 @@ def main() -> None:
         "vae_config": cfg,
         "latent_shape": list(latent_shape),
         "dtype": "float16",
-        "arrays": ["mu", "std"],
+        "storage": {
+            "format": "memmap",
+            "file": "latents.bin",
+            "dtype": "float16",
+            "pack_scheme": "mu_then_std",
+        },
         "source_patch_index": str(index_path),
         "patch_size": int(cfg["model"]["patch_size"]),
+        "voxel_size_um": VOXEL_SIZE_UM,
         "splits": split_counts,
         "limit": args.limit,
         "normalization": {

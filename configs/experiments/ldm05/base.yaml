@@ -1,0 +1,156 @@
+experiment:
+  name: ldm05
+  variant: base
+  description: >-
+    First CONDITIONAL LDM on the r07z4 latent store (z=4, 16³ latents),
+    implementing the D32 conditioning design.  Spatial conditioning: the
+    (cos2θ, sin2θ) ply-orientation profile is concatenated to the noisy latent
+    as 2 extra input channels, alongside the 6 face-adjacent neighbour latents
+    and their availability embeddings.  Scalar conditioning by FiLM/AdaGN:
+    cond_por = log(phi+1e-3) standardised, cond_depth = relative depth,
+    cond_dist = min(d,64)/64.  There is NO global-porosity channel — the
+    per-patch porosity field carries volume-level control (D32 §1).
+    Assembly uses the eight-group spatial parity schedule on a stride-64 grid,
+    so patches TILE: neighbours touch, share no voxel, and are fed whole and
+    unshifted.  The first attempt used neighbour_offset=32, where a neighbour
+    overlapped the target by half and one opposite pair tiled it completely —
+    the model was handed the answer and val loss fell to 0.497 by step 1000,
+    below ldm04's best ever.  See the Decisions Log.
+    Trained FROM SCRATCH, not warm-started from ldm04: warm-starting would
+    confound the conditional-vs-unconditional comparison and risks weak
+    conditioning adherence.
+
+loss: {}
+
+model:
+  type: unet3d
+  z_channels: 4
+  base_channels: 128
+  channel_mult: [1, 2, 4]
+  n_res_blocks: 2
+  attn_at_bottleneck: false
+  bottleneck_downsample: true
+  cond_embed_dim: 512
+  nb_avail_embed_dim: 8
+  n_attn_heads: 8
+  dropout: 0.0
+  # Conditioning ON.  Input channels = 4 (z) + 2 (orient) + 24 (6×4 neighbours)
+  #                                    + 48 (6×8 availability) = 78.
+  use_neighbor_cond: true
+  use_avail_embedding: true
+  use_nb_global_cond: true
+  use_orient_cond: true
+  use_pos_cond: true        # cond_depth + cond_dist
+  use_por_cond: true        # cond_por
+  use_por_null: true        # learned null token for porosity CFG
+
+noise_schedule:
+  type: cosine
+  T: 1000
+  s: 0.008
+
+vae:
+  # Must match the checkpoint recorded in the latent store's metadata.json —
+  # validated at launch, run fails loudly on mismatch.  Same VAE as ldm04/base.
+  checkpoint: runs/vae/r07-run-0006-20260814-084936-archv2-conv_noattn_dualbranch-z4-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt
+
+training:
+  seed: 42
+  batch_size: 256
+  ema_decay: 0.9999
+  lr: 1.0e-4
+  weight_decay: 0.01
+  # 130k, not 200k: ldm04 was stopped at 120k with its cosine schedule only
+  # 60% through, so the LR never decayed to lr_min.  Setting the budget to the
+  # step count we actually intend to run means the schedule completes.
+  total_steps: 130000
+  max_grad_norm: 1.0
+  scheduler: cosine
+  lr_min: 1.0e-5
+  warmup_steps: 250
+  log_every: 10
+  eval_every: 500
+  val_batches: 50
+  full_val_every: 2000
+  early_stopping_patience: 15
+  save_every: 2000
+  compile: true
+  # ldm04 gen-eval diagnostics, kept as-is; conditioning is drawn from real val
+  # rows, so gen/por_cond_mae now measures conditional adherence directly.
+  gen_eval_every: 2000
+  gen_eval_samples: 64
+  gen_eval_ddim_steps: 50
+  # Sample volumes exercise the 8-group schedule and the seam diagnostic
+  # (samples/seam_xct_ratio, samples/seam_mask_ratio — 1.0 = seam invisible).
+  # grid 3 at stride 64 → a 192³ voxel volume of 27 tiled patches.
+  sample_every: 10000
+  sample_ddim_steps: 50
+  sample_grid: [3, 3, 3]
+  sample_global_por: 0.02
+  sample_layup: [45, -45, 90, 0, 45, -45, 0, 90, -45, 45]   # layup A, 74/78 specimens
+  sample_ply_thickness_vox: 19.6                            # measured pitch (T-A)
+  drop_por: 0.1            # CFG porosity dropout, needs model.use_por_null
+
+guidance:
+  s_por: 1.0
+  s_nb: 1.0
+
+generation:
+  # Volume assembly mode (scripts/generate_volumes.py; inference only):
+  #   sequential — eight-group parity schedule, explicit neighbour conditioning
+  #   joint      — MultiDiffusion-style: overlapping stride-32 windows denoise
+  #                one latent canvas; ε predictions fused per timestep
+  #                (cosine-weighted); neighbours all-UNKNOWN; s_nb inert.
+  mode: sequential
+  joint_window_stride: 32   # voxels between window origins (50% overlap)
+  joint_window_batch: 32    # windows per UNet forward per timestep
+
+data:
+  latents_root: data/split_v2/latents_r07z4
+  latent_mode: sampled     # z = μ + σ·ε per batch (normalised space); 'mean' uses μ
+  # D32 §3.1 — three distinct parameters.
+  # sample_stride stays 32: it is only a training-data multiplier.  The store
+  # holds eight interleaved copies of the stride-64 grid and a face neighbour
+  # is two sampling steps away, so it already exists — no dataset rebuild.
+  sample_stride: 32        # dataset density: spacing of stored patches
+  generation_stride: 64    # assembly grid: patches tile, so nothing is blended
+  neighbour_offset: 64     # face neighbours TOUCH the target: zero shared voxels
+  neighbour_shift: false   # touching neighbours go in whole; a shift would be all zeros
+  # allow_neighbour_overlap: true would permit neighbour_offset < patch_size.
+  # It ALLOWS CONTENT LEAKAGE and is for ablation only — never for a real run.
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+runtime:
+  runs_root: runs/ldm
+  device:
+    gpu_id: null
+  checkpoints:
+    save_latest: true
+    save_best: true
+    best_metric: val.loss
+    best_mode: min
+  resume:
+    prune_jsonl: true
+  metadata:
+    capture_git: true
+    capture_machine: true
+    capture_environment: true
+  run_name:
+    timestamp_format: "%Y%m%d-%H%M%S"
+    run_index_width: 4
+    fields:
+      - label: z
+        path: model.z_channels
+      - label: c
+        path: model.base_channels
+      - label: bs
+        path: training.batch_size
+      - label: lr
+        path: training.lr
+        transform: sci
+  machine:
+    name: dgx_spark
+    accelerator: NVIDIA GB10 Blackwell

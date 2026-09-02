@@ -72,7 +72,7 @@ mode count and position, inter-mode valley, mode separation and peak widths,
 and the intensity distribution of pore voxels vs material voxels on both
 sides.
 
-Outputs to ``runs/analysis/air_audit_v2/``: results.json, per_volume.csv,
+Outputs to ``runs/campaigns/04-measurement-limits/air_audit_v2/``: results.json, per_volume.csv,
 per_cell.csv, findings.md, figures (PDF + PNG, 300 dpi), run.log.
 
 Usage:
@@ -98,10 +98,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import REPO, ZARR_ROOT, savefig, set_style, write_json  # noqa: E402
 
 DATA_ROOT = REPO / "data" / "split_v2"
-OUT_DIR = REPO / "runs" / "analysis" / "air_audit_v2"
-GEN_ROOT = REPO / "runs" / "eval_v2" / "volumes"
-PROBE_ROOT = REPO / "runs" / "analysis" / "ldm06_probe" / "volumes"
-OLD_AUDIT_CSV = REPO / "runs" / "eval_v2" / "audit" / "per_volume.csv"
+OUT_DIR = REPO / "runs" / "campaigns" / "04-measurement-limits" / "air_audit_v2"
+GEN_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes"
+PROBE_ROOT = REPO / "runs" / "campaigns" / "06-ldm06-probe" / "ldm06_probe" / "volumes"
+OLD_AUDIT_CSV = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "audit" / "per_volume.csv"
 
 EXPERIMENTS = ["dose_response", "cfg_sweep", "layup"]
 ARMS = ["seq", "joint_legacy", "joint_oob"]
@@ -1324,8 +1324,8 @@ def write_findings(res: dict, pv: pd.DataFrame, cmp_df: pd.DataFrame,
       "shape of the far dark tail is not recoverable there. The raw scale keeps it.")
     A("")
     A(f"Volumes audited: {len(pv)} "
-      f"({int((pv.experiment != 'ldm06_probe').sum())} under `runs/eval_v2/volumes/`, "
-      f"{int((pv.experiment == 'ldm06_probe').sum())} under `runs/analysis/ldm06_probe/volumes/`).")
+      f"({int((pv.experiment != 'ldm06_probe').sum())} under `runs/campaigns/03-eval-v2-buggy-decode/volumes/`, "
+      f"{int((pv.experiment == 'ldm06_probe').sum())} under `runs/campaigns/06-ldm06-probe/ldm06_probe/volumes/`).")
     A(f"Voxel size assumed {VOXEL_UM} um. Minimum connected component {MIN_CC} voxels. "
       f"Edge shell {EDGE_VOX} voxels.")
     A("")

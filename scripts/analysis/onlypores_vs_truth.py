@@ -29,19 +29,19 @@ Ground-truth convention
 Both sub-commands run the segmentation on the WHOLE volume before cropping to
 the region, because the material mask uses a global Otsu threshold over the
 whole volume — scoring a crop in isolation would not be the same computation
-that produced the numbers under ``runs/analysis/onlypores_generated/``.
+that produced the numbers under ``runs/campaigns/04-measurement-limits/onlypores_generated/``.
 
 Examples
 --------
     # 1. cut out a region to annotate (64 x 256 x 256 at z=64, y=64, x=64)
     python scripts/analysis/onlypores_vs_truth.py export \\
-        --volume runs/eval_v2/volumes/dose_response/joint_oob/target_0.02_seed_101 \\
+        --volume runs/campaigns/03-eval-v2-buggy-decode/volumes/dose_response/joint_oob/target_0.02_seed_101 \\
         --offset 64,64,64 --size 64,256,256 --name t0.02_centre
 
     # 2. paint pores in Fiji on region_grayscale.tif, save as truth.tif in the
     #    same folder, then:
     python scripts/analysis/onlypores_vs_truth.py score \\
-        --truth runs/analysis/onlypores_inspection/ground_truth/t0.02_centre/truth.tif
+        --truth runs/campaigns/04-measurement-limits/onlypores_inspection/ground_truth/t0.02_centre/truth.tif
 
     # 3. same truth, re-tuned onlypores knobs
     python scripts/analysis/onlypores_vs_truth.py score \\
@@ -81,7 +81,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-GT_ROOT = REPO / "runs" / "analysis" / "onlypores_inspection" / "ground_truth"
+GT_ROOT = REPO / "runs" / "campaigns" / "04-measurement-limits" / "onlypores_inspection" / "ground_truth"
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +396,7 @@ def main() -> None:
                         "or a volume id in data/split_v2/volumes.zarr")
     e.add_argument("--offset", help="z,y,x origin of the region (default 0,0,0)")
     e.add_argument("--size", help="dz,dy,dx of the region (default: whole volume)")
-    e.add_argument("--name", help="folder name under runs/analysis/onlypores_inspection/ground_truth/")
+    e.add_argument("--name", help="folder name under runs/campaigns/04-measurement-limits/onlypores_inspection/ground_truth/")
     add_common(e)
     e.set_defaults(func=cmd_export)
 

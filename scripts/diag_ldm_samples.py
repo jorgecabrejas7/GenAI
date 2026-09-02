@@ -367,7 +367,7 @@ def main() -> None:
     logger.info("Loaded %s at step %d (keys: model, ema)", ckpt_path, step)
 
     out_dir = Path(args.out) if args.out else (
-        repo / "runs" / "diag" / "ldm_samples" / run_dir.name / f"step_{step}"
+        repo / "runs" / "diagnostics" / "ldm_samples" / run_dir.name / f"step_{step}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 

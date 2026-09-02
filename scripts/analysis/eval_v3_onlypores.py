@@ -8,7 +8,7 @@ own mask head.
 
 Scale
 -----
-NO logit inversion.  ``runs/eval_v3/volumes/**/volume.tif`` is uint8 on the
+NO logit inversion.  ``runs/campaigns/05-eval-v3-fixed-decode/volumes/**/volume.tif`` is uint8 on the
 raw-scan grey scale, because the sampler no longer applies ``expit`` to the
 XCT head.  ``_eval_v3.load_u8`` verifies the dtype it finds and this script
 records the provenance string and the measured grey range / material mode of
@@ -30,7 +30,7 @@ Two controls
    number below — the 192³ figures are reported WITH that caveat, not as
    ground truth.
 
-Outputs -> ``runs/eval_v3/onlypores/``: results.json, per_volume.csv,
+Outputs -> ``runs/campaigns/05-eval-v3-fixed-decode/onlypores/``: results.json, per_volume.csv,
 per_cell.csv, real_validation.json, real_192_control.json, findings.md,
 figures (PDF + PNG, 300 dpi).
 

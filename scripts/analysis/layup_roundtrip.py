@@ -15,7 +15,7 @@ the window (one window instead of T-I's two), the ply block edges are the
 REQUESTED ply grid (k * 19.6 voxels — nothing is estimated), and the
 wavelength band uses the requested pitch.  This adapted path is validated
 first, on real volumes, against the full T-I output in
-runs/analysis/conditioning_design/T-I/layup_field.json (--validate-only runs
+runs/campaigns/01-conditioning-design/T-I/layup_field.json (--validate-only runs
 just that stage, CPU).
 
 Generation: mode=sequential at s_por=1.0 and mode=joint at s_por=1.5
@@ -32,7 +32,7 @@ Layups (ply thickness 19.6 voxels, sequence repeats to fill 192 voxels):
 Known limitation: 74/78 training volumes share layup A, so recovery on B and
 C demonstrates — it does not validate — generalisation.
 
-Outputs: runs/analysis/layup_roundtrip/{results.json, findings.md, figures}.
+Outputs: runs/campaigns/02-porosity-control-v1/layup_roundtrip/{results.json, findings.md, figures}.
 
 Usage
 -----
@@ -75,8 +75,8 @@ from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 CKPT = REPO / ("runs/ldm/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04/"
                "checkpoints/ldm_step00130000.ckpt")
 LATENTS_ROOT = REPO / "data/split_v2/latents_r07z4"
-LAYUP_FIELD = REPO / "runs/analysis/conditioning_design/T-I/layup_field.json"
-OUT_DIR = REPO / "runs/analysis/layup_roundtrip"
+LAYUP_FIELD = REPO / "runs/campaigns/01-conditioning-design/T-I/layup_field.json"
+OUT_DIR = REPO / "runs/campaigns/02-porosity-control-v1/layup_roundtrip"
 
 # Volume geometry: full T-I window in-plane, 192 voxels deep.
 VOL_SHAPE = (192, 1024, 1024)             # (D, H, W) voxels

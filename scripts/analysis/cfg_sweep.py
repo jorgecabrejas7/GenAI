@@ -1,6 +1,6 @@
 """CFG porosity-guidance-scale sweep for the completed ldm05 run (130k, RAW).
 
-The dose-response evaluation (runs/analysis/dose_response/) found two
+The dose-response evaluation (runs/campaigns/02-porosity-control-v1/dose_response/) found two
 calibration errors at s_por=1.0: sequential mode overshoots proportionally
 (slope 1.261) and joint mode carries a constant offset (slope 1.018,
 intercept +0.0064).  This sweep varies the porosity classifier-free-guidance
@@ -15,7 +15,7 @@ baseline; s_por=1.0 is plain conditional (single-pass).  Coherent
 local-porosity field as in dose_response.py.  Gate (D39):
 |delivered - requested| < 0.005.
 
-Outputs: runs/analysis/cfg_sweep/{results.json, findings.md, figures}.
+Outputs: runs/campaigns/02-porosity-control-v1/cfg_sweep/{results.json, findings.md, figures}.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 CKPT = REPO / ("runs/ldm/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04/"
                "checkpoints/ldm_step00130000.ckpt")
 LATENTS_ROOT = REPO / "data/split_v2/latents_r07z4"
-OUT_DIR = REPO / "runs/analysis/cfg_sweep"
+OUT_DIR = REPO / "runs/campaigns/02-porosity-control-v1/cfg_sweep"
 
 S_POR_GRID = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
 TARGETS = [0.02, 0.05]

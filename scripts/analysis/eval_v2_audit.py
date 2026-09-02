@@ -1,7 +1,7 @@
 """Eval v2 phase 3: void/mask audit over all saved campaign volumes.
 
 Recalibrates the grayscale void detector on REAL volumes (ground-truth masks),
-then audits every generated volume under ``runs/eval_v2/volumes/`` for
+then audits every generated volume under ``runs/campaigns/03-eval-v2-buggy-decode/volumes/`` for
 dark-air content that the generated pore mask does not label.
 
 Detector design
@@ -22,7 +22,7 @@ Detector design
 4. Sensitivity: detected/unmasked fractions are also reported at
    T_best +/- sigma (sigma = mean real material spread).
 
-Outputs to ``runs/eval_v2/audit/``: results.json, per_volume.csv, cells.csv,
+Outputs to ``runs/campaigns/03-eval-v2-buggy-decode/audit/``: results.json, per_volume.csv, cells.csv,
 findings.md, figures (PDF + PNG, 300 dpi).
 
 Usage:
@@ -51,8 +51,8 @@ from void_mask_audit import (  # noqa: E402
     REAL_VOLUMES, dice_iou, load_real_crop, material_stats,
 )
 
-OUT_DIR = REPO / "runs" / "eval_v2" / "audit"
-VOL_ROOT = REPO / "runs" / "eval_v2" / "volumes"
+OUT_DIR = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "audit"
+VOL_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes"
 EXPERIMENTS = ["dose_response", "cfg_sweep", "layup"]
 ARMS = ["seq", "joint_legacy", "joint_oob"]
 
@@ -570,7 +570,8 @@ def write_findings(res: dict, pv: pd.DataFrame, agg_arm: pd.DataFrame) -> None:
     lines = [
         "# Eval v2 — void/mask audit (phase 3)",
         "",
-        f"All 153 saved campaign volumes under `runs/eval_v2/volumes/`. "
+        f"All {len(pv)} saved campaign volumes under "
+        f"`{VOL_ROOT.relative_to(REPO)}/`. "
         f"Voxel size assumed {VOXEL_UM} um.",
         "",
         "## Detector (recalibrated, real ground truth)",

@@ -8,12 +8,12 @@ varies the porosity guidance scale s_por over {0.5, 1.0, 1.5, 2.0}
 Protocol: s_por {0.5, 1.0, 1.5, 2.0} x targets {0.02, 0.05} x 3 arms x
 seeds {101, 202, 303} = 72 volumes of 192^3, DDIM-50, RAW weights at step
 130000, coherent local-porosity field.  Every volume is saved under
-runs/eval_v2/volumes/cfg_sweep/<arm>/spor_<x>_target_<t>_seed_<s>/.
+runs/campaigns/03-eval-v2-buggy-decode/volumes/cfg_sweep/<arm>/spor_<x>_target_<t>_seed_<s>/.
 
 Per volume: mask porosity, void-corrected porosity (union with the
 calibrated dark-voxel detector), seam ratios, degenerate-block fraction.
 
-Outputs: runs/eval_v2/cfg_sweep/{results.json, findings.md, figures}.
+Outputs: runs/campaigns/03-eval-v2-buggy-decode/cfg_sweep/{results.json, findings.md, figures}.
 """
 
 from __future__ import annotations

@@ -90,7 +90,7 @@ def reconstruct_volume(
                     out = model(xct_t, mask_t)
 
                     xct_recon [z0:z0+PATCH_SIZE, y0:y0+PATCH_SIZE, x0:x0+PATCH_SIZE] = (
-                        out.xct_logits.clamp(0.0, 1.0).squeeze().cpu().numpy()
+                        out.xct_out.clamp(0.0, 1.0).squeeze().cpu().numpy()
                     )
                     mask_recon[z0:z0+PATCH_SIZE, y0:y0+PATCH_SIZE, x0:x0+PATCH_SIZE] = (
                         torch.sigmoid(out.mask_logits).squeeze().cpu().numpy()

@@ -7,13 +7,13 @@ specimen semantics with honest OOB edges, s_por 1.5).
 Protocol: targets {0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10} x 3 arms x
 seeds {101, 202, 303} = 63 volumes of 192^3 (3x3x3 patch grid), DDIM-50,
 RAW weights at step 130000, coherent local-porosity field.  Every volume is
-saved under runs/eval_v2/volumes/dose_response/<arm>/target_<t>_seed_<s>/.
+saved under runs/campaigns/03-eval-v2-buggy-decode/volumes/dose_response/<arm>/target_<t>_seed_<s>/.
 
 Analyses per arm:
   1. GLOBAL — volume mask porosity vs requested global target (OLS, per-level
      mean±std, gate |err| < 0.005), plus void-corrected global porosity
      (union of mask and calibrated dark-voxel detector, u8 threshold from
-     runs/analysis/void_mask_audit/).
+     runs/campaigns/02-porosity-control-v1/void_mask_audit/).
   2. LOCAL — per 64^3 tile cell, delivered mask porosity vs the coherent
      field's local target (27 cells/volume -> 567 points/arm); OLS + scatter.
 
@@ -198,7 +198,7 @@ def main() -> None:
         "gen_batch": GEN_BATCH,
         "gate_abs_error": GATE,
         "void_detector": {**detector, "form": "material-referenced, per-volume threshold = material_mode - k*spread (raw u8 scale)"},
-        "void_threshold_source": "runs/analysis/void_mask_audit/results.json "
+        "void_threshold_source": "runs/campaigns/02-porosity-control-v1/void_mask_audit/results.json "
                                  "(calibrated on real volumes, pooled dice)",
         "porosity_field": "coherent (T-E marginal + T-D smoothing), "
                           "seeded per (torch seed == field seed)",

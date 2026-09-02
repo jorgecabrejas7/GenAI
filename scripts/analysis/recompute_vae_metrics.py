@@ -32,7 +32,7 @@ value is also the bridge back to history: it must land on the value recorded in
 the run's own ``metrics.jsonl``.
 
 Nothing under ``runs/vae/`` is written.  All output goes to
-``runs/analysis/vae_metric_recompute/``.
+``runs/campaigns/07-vae-metric-recompute/vae_metric_recompute/``.
 
 Usage
 -----
@@ -72,7 +72,7 @@ from poregen.training.device import get_autocast_dtype, select_device  # noqa: E
 logger = logging.getLogger("recompute_vae_metrics")
 
 RUNS_DIR = REPO_ROOT / "runs" / "vae"
-OUT_DIR = REPO_ROOT / "runs" / "analysis" / "vae_metric_recompute"
+OUT_DIR = REPO_ROOT / "runs" / "campaigns" / "07-vae-metric-recompute" / "vae_metric_recompute"
 
 # Metrics carried through to the report.  The first two are the ones the bug
 # corrupted; the rest are controls that must reproduce their logged values.

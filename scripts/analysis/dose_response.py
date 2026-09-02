@@ -3,7 +3,7 @@
 Measures delivered vs requested global porosity across the training phi range
 [0.002, 0.107] for BOTH generation modes (sequential, joint), 3 seeds per
 cell, at the final checkpoint (step 130000, RAW non-EMA weights — matching
-runs/analysis/joint_vs_sequential/compare_modes.py).  Seam metrics are
+runs/campaigns/02-porosity-control-v1/joint_vs_sequential/compare_modes.py).  Seam metrics are
 recorded per volume so the sequential-vs-joint comparison gets seed
 statistics too.
 
@@ -17,7 +17,7 @@ Protocol: targets {0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10} x
 (3x3x3 patch grid), DDIM-50, joint window stride 32.  Gate (D39):
 |delivered - requested| < 0.005.
 
-Outputs: runs/analysis/dose_response/{results.json, findings.md, figures}.
+Outputs: runs/campaigns/02-porosity-control-v1/dose_response/{results.json, findings.md, figures}.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 CKPT = REPO / ("runs/ldm/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04/"
                "checkpoints/ldm_step00130000.ckpt")
 LATENTS_ROOT = REPO / "data/split_v2/latents_r07z4"
-OUT_DIR = REPO / "runs/analysis/dose_response"
+OUT_DIR = REPO / "runs/campaigns/02-porosity-control-v1/dose_response"
 
 TARGETS = [0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10]
 MODES = ["sequential", "joint"]

@@ -1,7 +1,7 @@
 """Ground-truth porosity of generated volumes, measured with ``onlypores``.
 
 The model's own mask head under-reports porosity where air is massive
-(``runs/eval_v2/audit/findings.md``: median pore capture drops to ~0.03 in
+(``runs/campaigns/03-eval-v2-buggy-decode/audit/findings.md``: median pore capture drops to ~0.03 in
 64³ cells with >15% dark air).  Every porosity-control result so far is
 mask-based, so this script measures the generated volumes with the SAME
 segmentation the real dataset was built with —
@@ -25,7 +25,7 @@ real scans.  ``pore_voxels / total_voxels`` is reported beside it, and so is
 ``sample_mask_fraction`` (how much of the box onlypores calls material at all),
 which is what exposes volumes that are largely air.
 
-Outputs → ``runs/analysis/onlypores_generated/``:
+Outputs → ``runs/campaigns/04-measurement-limits/onlypores_generated/``:
     real_validation.json, results.json, per_volume.csv, per_cell.csv,
     findings.md, run.log, figures (PDF + PNG, 300 dpi).
 
@@ -56,12 +56,12 @@ from _common import REPO, savefig, set_style, write_json  # noqa: E402
 sys.path.insert(0, str(REPO / "src"))
 from poregen.dataset.segmentation import onlypores  # noqa: E402
 
-OUT_DIR = REPO / "runs" / "analysis" / "onlypores_generated"
-VOL_ROOT = REPO / "runs" / "eval_v2" / "volumes"
-PROBE_ROOT = REPO / "runs" / "analysis" / "ldm06_probe" / "volumes"
+OUT_DIR = REPO / "runs" / "campaigns" / "04-measurement-limits" / "onlypores_generated"
+VOL_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes"
+PROBE_ROOT = REPO / "runs" / "campaigns" / "06-ldm06-probe" / "ldm06_probe" / "volumes"
 ZARR_ROOT = REPO / "data" / "split_v2" / "volumes.zarr"
 PATCH_INDEX = REPO / "data" / "split_v2" / "patch_index.parquet"
-AUDIT_CELLS = REPO / "runs" / "eval_v2" / "audit" / "cells.csv.gz"
+AUDIT_CELLS = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "audit" / "cells.csv.gz"
 
 EXPERIMENTS = ["dose_response", "cfg_sweep", "layup"]
 ARMS = ["seq", "joint_legacy", "joint_oob"]

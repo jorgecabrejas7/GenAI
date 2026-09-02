@@ -39,9 +39,8 @@ CELLS = [
     ("C_simple", "sequential", 1.0, 101),
 ]
 
-OUT_ROOT = lr.REPO / ("inference/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04"
-                      "/layup_roundtrip_volumes")
-REF = json.loads((lr.REPO / "runs/analysis/layup_roundtrip/results.json").read_text())
+OUT_ROOT = lr.REPO / "runs/campaigns/02-porosity-control-v1/layup_roundtrip/volumes"
+REF = json.loads((lr.REPO / "runs/campaigns/02-porosity-control-v1/layup_roundtrip/results.json").read_text())
 
 
 def main() -> None:

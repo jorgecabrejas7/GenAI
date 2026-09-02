@@ -10,3 +10,8 @@ extends: r07/base
 overrides:
   model:
     z_channels: 1
+  training:
+    # compile off: the autotuner picks pathological kernels for most dualbranch
+    # z shapes (z=16 in_ch=2 measured 7.8 s/step vs ~2.2 eager). Eager for the
+    # whole r07 sweep — no more step-60 restarts.
+    compile: false

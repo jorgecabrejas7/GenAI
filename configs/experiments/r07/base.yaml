@@ -14,6 +14,10 @@ overrides:
   model:
     in_channels: 2
   training:
+    # compile off for the whole r07 sweep: max-autotune's autotuner picks
+    # pathological kernels for most dualbranch shapes (z=32/4/2 measured
+    # 7.4-8.5 s/step vs ~2.2 eager; the compiled win where it worked was ~12%).
+    compile: false
     early_stopping_patience: 12
     early_stopping_metric: val.total
     early_stopping_mode: min

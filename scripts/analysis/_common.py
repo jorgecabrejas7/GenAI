@@ -1,7 +1,7 @@
 """Shared helpers for the ldm05 conditioning-design analysis suite.
 
 All scripts under ``scripts/analysis/`` write to
-``runs/analysis/conditioning_design/<test_id>/`` and share the plotting style
+``runs/campaigns/01-conditioning-design/<test_id>/`` and share the plotting style
 and JSON-serialisation helpers defined here.
 """
 
@@ -22,7 +22,7 @@ DATA_ROOT = REPO / "data" / "split_v2"
 PATCH_INDEX = DATA_ROOT / "patch_index.parquet"
 ZARR_ROOT = DATA_ROOT / "volumes.zarr"
 LATENT_INDEX_DIR = DATA_ROOT / "latents_r07z4"
-OUT_ROOT = REPO / "runs" / "analysis" / "conditioning_design"
+OUT_ROOT = REPO / "runs" / "campaigns" / "01-conditioning-design"
 
 PATCH_SIZE = 64
 STRIDE = 32

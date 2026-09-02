@@ -3,7 +3,7 @@
 set -uo pipefail
 cd /home/jorgecabrejas/Dev/GenAI
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-LOG=runs/eval_v2/phase2.log
+LOG=runs/campaigns/03-eval-v2-buggy-decode/phase2.log
 echo "=== eval_v2 phase 2 start $(date -Is) ===" >> "$LOG"
 python scripts/analysis/eval_v2_layup.py >> "$LOG" 2>&1
 RC=$?

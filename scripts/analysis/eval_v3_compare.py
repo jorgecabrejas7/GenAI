@@ -5,17 +5,17 @@ the decode fix is explicit rather than implied.  Sections are emitted for
 whichever inputs exist, which lets the runner call this once after the cheap
 sets and again after the layup set lands.
 
-OLD sources (read-only; ``runs/eval_v2`` is the record of the buggy run):
-    runs/eval_v2/dose_response/results.json
-    runs/eval_v2/layup/results.json
-    runs/analysis/air_audit_v2/per_volume.csv
-    runs/analysis/onlypores_generated/per_volume.csv
-    runs/analysis/ldm06_probe/results.json
+OLD sources (read-only; ``runs/campaigns/03-eval-v2-buggy-decode`` is the record of the buggy run):
+    runs/campaigns/03-eval-v2-buggy-decode/dose_response/results.json
+    runs/campaigns/03-eval-v2-buggy-decode/layup/results.json
+    runs/campaigns/04-measurement-limits/air_audit_v2/per_volume.csv
+    runs/campaigns/04-measurement-limits/onlypores_generated/per_volume.csv
+    runs/campaigns/06-ldm06-probe/ldm06_probe/results.json
 
-NEW sources: the matching artefacts under runs/eval_v3/.
+NEW sources: the matching artefacts under runs/campaigns/05-eval-v3-fixed-decode/.
 
-Outputs -> ``runs/eval_v3/comparison/`` (results.json, findings.md, figure)
-and ``runs/eval_v3/README.md``.
+Outputs -> ``runs/campaigns/05-eval-v3-fixed-decode/comparison/`` (results.json, findings.md, figure)
+and ``runs/campaigns/05-eval-v3-fixed-decode/README.md``.
 
 Usage:
     python scripts/analysis/eval_v3_compare.py
@@ -386,9 +386,10 @@ def main() -> None:
 
     # ---------------- findings ----------------
     L = ["# OLD vs NEW — the decode fix, number by number", "",
-         "OLD = `runs/eval_v2` + `runs/analysis/{air_audit_v2, "
-         "onlypores_generated, ldm06_probe}` (sampler applied a spurious "
-         "`expit` to the VAE XCT head). NEW = `runs/eval_v3` (clamp-and-scale, "
+         "OLD = `runs/campaigns/03-eval-v2-buggy-decode` + "
+         "`runs/campaigns/04-measurement-limits/{air_audit_v2, onlypores_generated}` + "
+         "`runs/campaigns/06-ldm06-probe/ldm06_probe` (sampler applied a spurious "
+         "`expit` to the VAE XCT head). NEW = `runs/campaigns/05-eval-v3-fixed-decode` (clamp-and-scale, "
          "volume.tif native uint8). Same checkpoint, same seeds, same "
          "settings.", ""]
 
@@ -480,7 +481,7 @@ def main() -> None:
                      f"| {v['old_dice_mask_vs_onlypores']:.3f} → {v['new_dice_mask_vs_onlypores']:.3f} |")
         L += ["",
               "Both columns inherit the 192³ global-Otsu caveat "
-              "(`runs/eval_v3/onlypores/findings.md`).", ""]
+              "(`runs/campaigns/05-eval-v3-fixed-decode/onlypores/findings.md`).", ""]
 
     if "ddim" in res:
         d = res["ddim"]
@@ -520,11 +521,150 @@ def main() -> None:
     print("Wrote", p_json, p_md, *figs, sep="\n  ", flush=True)
 
 
+def _headline(res: dict) -> list[str]:
+    """Campaign headline numbers, derived from ``res`` — never hard-coded."""
+    cal = load_calibration()
+    fp = cal["real_false_positive_baseline"]["mean"]
+    L = []
+    dr = res.get("dose_response", {}).get("arms", {}).get("joint_oob", {})
+    if dr:
+        n = dr["new"]
+        L.append("- **Dose response** (best arm `joint_oob`, 63 volumes): global "
+                 "slope **%.3f**, R² **%.3f**; local slope %.3f, local R² "
+                 "**%.3f**; **%.0f %%** of 64³ cells inside the |Δφ| < %.3f "
+                 "gate; %d/%d requested levels pass."
+                 % (n["global_slope"], n["global_r2"], n["local_slope"],
+                    n["local_r2"], 100 * n["local_frac_within_gate"], GATE,
+                    n["n_levels_passing_gate"], len(TARGETS)))
+    air = res.get("air", {})
+    if air:
+        small = air.get("dose_response/joint_oob", {})
+        big = [v["new_unmasked_air_abs"] for k, v in air.items()
+               if k.startswith("layup/")]
+        if small:
+            L.append("- **Unmasked air** at the real-calibrated absolute "
+                     "threshold T_abs = %d (Dice %.3f on %d real volumes): "
+                     "**%.2f** for `joint_oob` at 192³, rising to **%.2f** on "
+                     "the 1024×1024×192 layup volumes — against a real "
+                     "false-positive floor of **%.4f**."
+                     % (cal["t_abs"], cal["dice"], cal["n_calibration_volumes"],
+                        small["new_unmasked_air_abs"],
+                        float(np.mean(big)) if big else float("nan"), fp))
+        caps = [v["new_mask_capture_of_detected"] for v in air.values()
+                if "new_mask_capture_of_detected" in v]
+        if caps:
+            L.append("- **Mask capture of detected air**: %.2f–%.2f — the mask "
+                     "head labels only a small part of the air the grey "
+                     "channel contains." % (min(caps), max(caps)))
+    ddim = res.get("ddim", {}).get("per_step", [])
+    if ddim:
+        first, last = ddim[0], ddim[-1]
+        best = min(ddim, key=lambda r: r["new_interior_air"])
+        L.append("- **DDIM steps**: interior air **%.3f → %.3f** from %d to %d "
+                 "steps (minimum %.3f at %d steps); monotone-reduction "
+                 "criterion %s."
+                 % (first["new_interior_air"], last["new_interior_air"],
+                    first["ddim_steps"], last["ddim_steps"],
+                    best["new_interior_air"], best["ddim_steps"],
+                    "MET" if res["ddim"].get("new_monotone") else "NOT met"))
+    lay = res.get("layup", {})
+    if lay.get("arms"):
+        best_arm = min(lay["arms"].items(),
+                       key=lambda kv: kv[1]["new_median_abs_error_deg"])
+        a, v = best_arm
+        L.append("- **Layup round trip** (seed%s %s, combined estimator): best "
+                 "arm `%s`, median |angle error| **%.1f°**, strict 4-class "
+                 "**%.1f %%**. The `pore_axes` channel alone is stronger — see "
+                 "`layup/findings.md`."
+                 % ("" if len(lay["seeds_compared"]) == 1 else "s",
+                    ", ".join(str(s) for s in lay["seeds_compared"]),
+                    a, v["new_median_abs_error_deg"],
+                    100 * v["new_strict_class_accuracy"]))
+    mr = res.get("dose_response", {}).get("mask_reproduction", {})
+    if mr:
+        L.append("- **The decode fix did not move mask porosity**: %d matched "
+                 "volumes, max |Δ| = %.4g — bit-identical to campaign 03."
+                 % (mr["n_matched"], mr["max_abs_delta"]))
+    return L
+
+
 def write_readme(res: dict) -> None:
     have = set(res["sections_present"])
     n_vol = sum(1 for _ in VOL_ROOT.rglob("volume.tif")) if VOL_ROOT.exists() else 0
     lines = [
-        "# eval v3 — porosity and air results on correctly-decoded volumes",
+        "# 05 — eval v3: porosity and air on correctly-decoded volumes",
+        "",
+        "## Question",
+        "",
+        "Every porosity and air result of the ldm05 conditioning evaluation, "
+        "re-measured on volumes decoded correctly. Campaign 03 ran the same "
+        "protocol while the sampler applied a spurious `expit` to the VAE XCT "
+        "head; this campaign establishes which of its numbers survive.",
+        "",
+        "**Status: CURRENT — this is the authoritative campaign.** Cite this "
+        "tree, not campaign 03, for anything derived from the grey scale.",
+        "",
+        "## Reproduce",
+        "",
+        "```bash",
+        "nohup bash scripts/analysis/eval_v3_run.sh > /dev/null 2>&1 &",
+        "tail -f runs/campaigns/05-eval-v3-fixed-decode/run.log"
+        "     # ends with EVAL_V3_DONE",
+        "```",
+        "",
+        "Analysis-only passes (no GPU, no regeneration):",
+        "",
+        "```bash",
+        "python scripts/analysis/eval_v3_air_audit.py",
+        "python scripts/analysis/eval_v3_onlypores.py",
+        "python scripts/analysis/eval_v3_ddim_analysis.py",
+        "python scripts/analysis/eval_v3_compare.py    # also rewrites this file",
+        "POREGEN_EVAL_ROOT=$PWD/runs/campaigns/05-eval-v3-fixed-decode \\",
+        "  python scripts/analysis/eval_v2_layup.py --aggregate-only --seeds 101",
+        "```",
+        "",
+        "## Checkpoint and settings",
+        "",
+        "- Checkpoint: `runs/ldm/ldm05-run-0001-20260827-114902-z4-c128-bs256-"
+        "lr1e-04/checkpoints/ldm_step00130000.ckpt`, **RAW (non-EMA)** weights.",
+        "- Sampler: DDIM-50 except in the step sweep; coherent local-φ field "
+        "(T-E marginal + T-D smoothing), seeded per volume; `VolumeGenerator` "
+        "patch 64³, stride 64, latent z4.",
+        f"- {n_vol} volumes: dose response 192³, DDIM probe 192³, layup "
+        "1024×1024×192. Seeds 101/202/303 (layup: 101 only).",
+        "- Voxel size 25 µm assumed — still not recorded in dataset metadata.",
+        "- Arms: see the table below.",
+        "",
+        "## Headline numbers",
+        "",
+        *(_headline(res) or ["_Not produced yet — run the analysis passes._"]),
+        "",
+        "## Caveats and limitations",
+        "",
+        "- **`onlypores` φ is biased low on 192³ boxes.** Its global-Otsu "
+        "material mask cuts pores out of the material on small crops; the "
+        "real-192³ control under-reports known-good material by ~958×. Use "
+        "onlypores here for **relative** comparison only, never as an "
+        "absolute porosity. See `onlypores/findings.md` §Control 2.",
+        "- **Layup seed 202 is not in this tree.** Only seed 101 was "
+        "regenerated. Seed 202 exists solely in "
+        "`runs/campaigns/03-eval-v2-buggy-decode/layup/results.json`; the "
+        "angle measurement there is geometric and is not affected by the "
+        "grey scale.",
+        "- **`volume.tif` here is NATIVE uint8 on the raw-scan scale** — see "
+        "the section below. Any reader must verify the dtype.",
+        "- **Layup generalisation is demonstrated, not validated**: 74/78 "
+        "training volumes share layup A.",
+        "- Three seeds per cell (one for layup) — seed spread is reported, but "
+        "distributions are not tight enough for fine per-cell ranking.",
+        "",
+        "## Vault note",
+        "",
+        "**Note pending.** `10_Research/Analyses/E3 - Limites de medida de "
+        "porosidad en volumenes generados.md` covers this tree only as the "
+        "scope of the decode fix. A dedicated note is still to be written.",
+        "",
+        "---",
         "",
         "## Why this tree exists",
         "",
@@ -538,9 +678,9 @@ def write_readme(res: dict) -> None:
         "`scripts/analysis/_eval_v2.py:save_volume` writes `volume.tif` as "
         "NATIVE uint8 (it previously wrote u8/255 as float32).",
         "",
-        "Every volume under `runs/eval_v2/volumes/` and "
-        "`runs/analysis/ldm06_probe/volumes/` was produced with the bug and is "
-        "quantised on the compressed scale. **`runs/eval_v2` is left untouched "
+        "Every volume under `runs/campaigns/03-eval-v2-buggy-decode/volumes/` and "
+        "`runs/campaigns/06-ldm06-probe/ldm06_probe/volumes/` was produced with the bug and is "
+        "quantised on the compressed scale. **`runs/campaigns/03-eval-v2-buggy-decode` is left untouched "
         "as the record of that run.** This tree regenerates what the "
         "porosity/air results rest on and redoes the analyses.",
         "",
@@ -555,7 +695,7 @@ def write_readme(res: dict) -> None:
         "## Tree",
         "",
         "```",
-        "runs/eval_v3/",
+        "runs/campaigns/05-eval-v3-fixed-decode/",
         f"├── volumes/                      {n_vol} volumes, uint8",
         "│   ├── dose_response/<arm>/target_<t>_seed_<s>/   7 targets x 3 arms x 3 seeds, 192³",
         "│   ├── ddim_probe/steps_<n>_seed_<s>/             steps {50,100,200,300} x 2 seeds, 192³",
@@ -594,7 +734,7 @@ def write_readme(res: dict) -> None:
         "",
         "```bash",
         "nohup bash scripts/analysis/eval_v3_run.sh > /dev/null 2>&1 &",
-        "tail -f runs/eval_v3/run.log     # ends with EVAL_V3_DONE",
+        "tail -f runs/campaigns/05-eval-v3-fixed-decode/run.log     # ends with EVAL_V3_DONE",
         "```",
         "",
     ]

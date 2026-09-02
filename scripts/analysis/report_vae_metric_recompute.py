@@ -1,6 +1,6 @@
 """Turn ``results.json`` from ``recompute_vae_metrics.py`` into the report.
 
-Writes, all under ``runs/analysis/vae_metric_recompute/``:
+Writes, all under ``runs/campaigns/07-vae-metric-recompute/vae_metric_recompute/``:
 
 * ``per_run_metrics.csv`` — one row per (run, metric): logged / recomputed / delta
 * ``findings.md``         — control verification, per-run tables, ranking assessment
@@ -28,7 +28,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-OUT_DIR = REPO_ROOT / "runs" / "analysis" / "vae_metric_recompute"
+OUT_DIR = REPO_ROOT / "runs" / "campaigns" / "07-vae-metric-recompute" / "vae_metric_recompute"
 
 # Validated categorical slots 1 and 2 (light mode) — see the dataviz palette.
 # Adjacent CVD dE 24.7, normal-vision dE 33.6, both >= 3:1 on the surface.

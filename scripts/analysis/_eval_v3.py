@@ -2,8 +2,8 @@
 
 Why v3 exists
 -------------
-Every volume under ``runs/eval_v2/volumes/`` and
-``runs/analysis/ldm06_probe/volumes/`` was produced while
+Every volume under ``runs/campaigns/03-eval-v2-buggy-decode/volumes/`` and
+``runs/campaigns/06-ldm06-probe/ldm06_probe/volumes/`` was produced while
 ``poregen.diffusion.sampler`` applied ``expit()`` to the VAE's XCT head before
 the u8 cast.  That head regresses ``xct / 255`` directly, so the sigmoid was
 spurious: it squashed every generated volume into grey levels [133, 187]
@@ -11,10 +11,10 @@ spurious: it squashed every generated volume into grey levels [133, 187]
 scales (``poregen.models.vae.base.decode_xct`` / ``decode_xct_u8``), and
 ``scripts/analysis/_eval_v2.py:save_volume`` writes ``volume.tif`` as NATIVE
 uint8.  v3 regenerates the volumes needed to restate the porosity/air results
-and redoes the analyses on them.  ``runs/eval_v2`` is left untouched as the
+and redoes the analyses on them.  ``runs/campaigns/03-eval-v2-buggy-decode`` is left untouched as the
 record of the buggy run.
 
-Tree (all under ``runs/eval_v3/``)::
+Tree (all under ``runs/campaigns/05-eval-v3-fixed-decode/``)::
 
     volumes/dose_response/<arm>/target_<t>_seed_<s>/   63 volumes, 192^3
     volumes/ddim_probe/steps_<n>_seed_<s>/              8 volumes, 192^3
@@ -51,7 +51,7 @@ from air_audit_v2 import (  # noqa: E402
     otsu,
 )
 
-ROOT = REPO / "runs" / "eval_v3"
+ROOT = REPO / "runs" / "campaigns" / "05-eval-v3-fixed-decode"
 VOL_ROOT = ROOT / "volumes"
 DOSE_VOL_ROOT = VOL_ROOT / "dose_response"
 DDIM_VOL_ROOT = VOL_ROOT / "ddim_probe"
@@ -59,10 +59,10 @@ LAYUP_VOL_ROOT = VOL_ROOT / "layup"
 
 # v2 artefacts read (never written) for the old-vs-new comparison and for the
 # real-volume calibration that the decode fix does not change.
-V2_ROOT = REPO / "runs" / "eval_v2"
-V2_AIR_AUDIT = REPO / "runs" / "analysis" / "air_audit_v2"
-V2_ONLYPORES = REPO / "runs" / "analysis" / "onlypores_generated"
-V2_LDM06_PROBE = REPO / "runs" / "analysis" / "ldm06_probe"
+V2_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode"
+V2_AIR_AUDIT = REPO / "runs" / "campaigns" / "04-measurement-limits" / "air_audit_v2"
+V2_ONLYPORES = REPO / "runs" / "campaigns" / "04-measurement-limits" / "onlypores_generated"
+V2_LDM06_PROBE = REPO / "runs" / "campaigns" / "06-ldm06-probe" / "ldm06_probe"
 
 ARMS = ["seq", "joint_legacy", "joint_oob"]
 ARM_SPOR = {"seq": 1.0, "joint_legacy": 1.5, "joint_oob": 1.5}

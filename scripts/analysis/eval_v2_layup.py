@@ -5,13 +5,13 @@ Phase 2 of the eval v2 campaign.  Same protocol as the phase-1 scripts
 estimator machinery as scripts/analysis/layup_roundtrip.py (imported, not
 forked).  The estimator-geometry validation (single 1024-px window, requested
 ply edges) already PASSED on real volumes in the previous campaign
-(runs/analysis/layup_roundtrip/results.json), so it is not repeated here.
+(runs/campaigns/02-porosity-control-v1/layup_roundtrip/results.json), so it is not repeated here.
 
 Protocol: 3 layups (A_training, B_permuted, C_simple) x 3 arms
 (seq, joint_legacy, joint_oob) x seeds {101, 202} = 18 volumes of
 1024x1024x192 voxels (16x16x3 patch grid), DDIM-50, RAW weights at step
 130000, target global porosity 0.03 as a coherent local field.  Every volume
-is saved AS IT COMPLETES under runs/eval_v2/volumes/layup/<arm>/
+is saved AS IT COMPLETES under runs/campaigns/03-eval-v2-buggy-decode/volumes/layup/<arm>/
 <layup>_seed_<seed>/ (volume.tif float32, mask.tif uint8, stats.json), so a
 crashed run resumes by skipping completed cells.
 
@@ -19,7 +19,7 @@ Per volume: T-I angle measurement (pore_axes + fft_slice + combined, direct
 convention), delivered mask porosity, void-corrected porosity
 (material-referenced threshold, as in phase 1), seam ratios, wall time.
 
-Outputs: runs/eval_v2/layup/{results.json, findings.md, figures pdf+png}.
+Outputs: runs/campaigns/03-eval-v2-buggy-decode/layup/{results.json, findings.md, figures pdf+png}.
 
 Usage
 -----
@@ -245,14 +245,24 @@ def build_findings(records: list[dict], agg: dict, step: int,
     L = []
     L.append("# Layup round-trip (%s) — ldm05 step %d (RAW, DDIM-%d)\n"
              % (EVAL_ROOT.name, step, DDIM_STEPS))
-    L.append("Phase 2 of the eval v2 campaign: 3 layups x 3 arms "
-             "(seq s_por=1.0, joint_legacy s_por=1.5, joint_oob s_por=1.5) "
-             "x seeds {101, 202} = 18 volumes of 1024x1024x192. Target "
+    n_layups = len({r["layup"] for r in records})
+    arms_used = [a for a in ARMS if any(r["arm"] == a for r in records)]
+    seeds_used = sorted({r["seed"] for r in records})
+    arm_desc = ", ".join("%s s_por=%s" % (a, ARMS[a][2]) for a in arms_used)
+    L.append("Phase 2 of the eval v2 campaign: %d layup%s x %d arm%s (%s) "
+             "x seed%s {%s} = %d volume%s of 1024x1024x192. Target "
              "porosity %.2f via the coherent field. Estimator: T-I combined "
              "(fft_slice + pore_axes), imported from layup_roundtrip.py; its "
              "single-window geometry PASSED validation on real volumes in "
-             "the previous campaign (runs/analysis/layup_roundtrip/). All "
-             "volumes saved under runs/eval_v2/volumes/layup/.\n" % TARGET_POR)
+             "the previous campaign "
+             "(runs/campaigns/02-porosity-control-v1/layup_roundtrip/). All "
+             "volumes saved under %s/.\n"
+             % (n_layups, "" if n_layups == 1 else "s",
+                len(arms_used), "" if len(arms_used) == 1 else "s", arm_desc,
+                "" if len(seeds_used) == 1 else "s",
+                ", ".join(str(s) for s in seeds_used),
+                len(records), "" if len(records) == 1 else "s", TARGET_POR,
+                VOL_ROOT.relative_to(lr.REPO)))
 
     L.append("## Estimator channels on generated volumes (pooled)\n")
     L.append("| estimator | direct median \\|err\\| | <=5 | <=10 | strict "
@@ -352,7 +362,7 @@ def finalize(records: list[dict], step: int, oom: list[str]) -> None:
         "target_porosity": TARGET_POR,
         "joint_window_stride": JOINT_WINDOW_STRIDE,
         "estimator": "T-I combined (fft_slice + pore_axes), imported",
-        "geometry_validation": "PASSED in runs/analysis/layup_roundtrip/ "
+        "geometry_validation": "PASSED in runs/campaigns/02-porosity-control-v1/layup_roundtrip/ "
                                "(agreement 0.5 deg, delta +3.7 deg)",
         "aggregate": agg,
         "oom_events": oom,

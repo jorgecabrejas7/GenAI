@@ -26,7 +26,7 @@ Method, per z-slice
 * The **dominant angle is the argmax of h**, not the doubled-angle first moment.
   This matters: T-G collapsed two tow directions 90 degrees apart into one
   averaged angle and wrongly called the Nacho family unidirectional (see
-  ``runs/analysis/conditioning_design/T-H/findings.md``).  Two lobes cancel in
+  ``runs/campaigns/01-conditioning-design/T-H/findings.md``).  Two lobes cancel in
   the 2-theta moment; they do not cancel in the density itself.
 * Spectral angle is converted to real-space texture angle by +90 degrees, the
   same convention as T-G and T-H.
@@ -46,7 +46,7 @@ spatial resolution for signal.  The mode amplitudes then have the residual noise
 floor subtracted in quadrature, so a window with no resolvable texture gets
 saturation 0 and comes out grey instead of a confident wrong colour.
 
-Outputs (``runs/analysis/orientation_viz/<volume_id>/``)
+Outputs (``runs/campaigns/01-conditioning-design/orientation_viz/<volume_id>/``)
 -------------------------------------------------------
 * ``orientation_rgb.tif``  -- RGB stack, local orientation colour over the XCT.
 * ``ply_map_rgb.tif``      -- RGB stack, one flat colour per slice.
@@ -78,7 +78,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import ZARR_ROOT, set_style, write_json, plt  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-OUT_ROOT = REPO / "runs" / "analysis" / "orientation_viz"
+OUT_ROOT = REPO / "runs" / "campaigns" / "01-conditioning-design" / "orientation_viz"
 
 DEFAULT_VOLUME = (
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_07_2"
@@ -95,8 +95,12 @@ N_NULL = 8               # synthetic isotropic slices, per Monte-Carlo round
 PLY_TILE = 256           # in-plane size of one ply-map page (colour is constant)
 EPS = 1e-20
 
+# Family labels follow T-I (the authoritative layup measurement).  The earlier
+# "0/90 cross-ply" reading of the Nacho family came from T-H and is WRONG --
+# T-H omitted a volume-mean subtraction.  See
+# runs/campaigns/01-conditioning-design/README.md.
 FAMILIES = {
-    "Fabricacion_Nacho_05": "Nacho -- 0/90 cross-ply, 50 volumes",
+    "Fabricacion_Nacho_05": "Nacho -- 4-class ply sequence (0/+45/90/-45), 50 volumes",
     "Airbus_Panel_Pegaso": "Pegaso -- ~45-degree steps, 24 volumes",
     "Juan_Ignacio": "Juan_Ignacio -- ~45-degree steps, 6 volumes",
 }

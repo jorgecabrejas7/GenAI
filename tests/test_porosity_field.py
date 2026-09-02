@@ -1,7 +1,7 @@
 """Tests for the coherent porosity-field builder (D32 §4).
 
 Uses the real in-repo T-E sampler and T-D correlation-length artefacts under
-``runs/analysis/conditioning_design/``.  All tests run on CPU.
+``runs/campaigns/01-conditioning-design/``.  All tests run on CPU.
 """
 
 from __future__ import annotations

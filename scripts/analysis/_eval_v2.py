@@ -9,14 +9,14 @@ Three generation arms with corrected conditioning semantics
 
 The per-arm s_por is each mode's best known operating point (dose-response +
 cfg-sweep v1).  Output goes under ``$POREGEN_EVAL_ROOT`` (default
-``runs/eval_v2``); the eval-v3 campaign points it at ``runs/eval_v3`` so the
-buggy-decode record in ``runs/eval_v2`` is never touched.  Every generated
+``runs/campaigns/03-eval-v2-buggy-decode``); the eval-v3 campaign points it at ``runs/campaigns/05-eval-v3-fixed-decode`` so the
+buggy-decode record in ``runs/campaigns/03-eval-v2-buggy-decode`` is never touched.  Every generated
 volume is saved (volume.tif uint8 grey level on the raw-scan scale, mask.tif
 uint8 0/255) with a per-volume stats.json, so a crashed run resumes by
 skipping cells whose stats.json already exists.
 
 Void-corrected porosity uses the calibrated absolute grayscale threshold from
-runs/analysis/void_mask_audit/results.json (u8 threshold 185, pooled dice
+runs/campaigns/02-porosity-control-v1/void_mask_audit/results.json (u8 threshold 185, pooled dice
 0.799 on real volumes): corrected = mean((mask > 0) | (xct_u8 < T)).
 """
 
@@ -56,8 +56,8 @@ CKPT = REPO / ("runs/ldm/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04/"
 LATENTS_ROOT = REPO / "data/split_v2/latents_r07z4"
 # Campaign output root.  One campaign = one root; POREGEN_EVAL_ROOT selects it
 # so a re-run never writes over the record of a previous one.
-EVAL_ROOT = Path(os.environ.get("POREGEN_EVAL_ROOT", str(REPO / "runs/eval_v2")))
-VOID_AUDIT_RESULTS = REPO / "runs/analysis/void_mask_audit/results.json"
+EVAL_ROOT = Path(os.environ.get("POREGEN_EVAL_ROOT", str(REPO / "runs/campaigns/03-eval-v2-buggy-decode")))
+VOID_AUDIT_RESULTS = REPO / "runs/campaigns/02-porosity-control-v1/void_mask_audit/results.json"
 
 # arm name -> (mode, conditioning_semantics, s_por operating point)
 ARMS = {

@@ -1,7 +1,7 @@
 #!/bin/bash
 # eval v3 runner — regenerate the porosity/air volumes with the fixed decode
 # path and redo the analyses on them.  Appends everything to
-# runs/eval_v3/run.log and ends with EVAL_V3_DONE (or EVAL_V3_ABORTED).
+# runs/campaigns/05-eval-v3-fixed-decode/run.log and ends with EVAL_V3_DONE (or EVAL_V3_ABORTED).
 #
 # Order: the cheap sets land first (dose response ~45 min, DDIM probe ~25 min)
 # together with a full analysis pass, then the expensive layup set (~4 h,
@@ -9,7 +9,7 @@
 #
 # Launch:
 #   nohup bash scripts/analysis/eval_v3_run.sh > /dev/null 2>&1 &
-#   tail -f runs/eval_v3/run.log
+#   tail -f runs/campaigns/05-eval-v3-fixed-decode/run.log
 #
 # Log line format:
 #   [YYYY-MM-DD HH:MM:SS] STEP nn/NN <name> START
@@ -21,7 +21,7 @@ REPO=/home/jorgecabrejas/Dev/GenAI
 cd "$REPO" || exit 1
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export POREGEN_EVAL_ROOT="$REPO/runs/eval_v3"
+export POREGEN_EVAL_ROOT="$REPO/runs/campaigns/05-eval-v3-fixed-decode"
 export TQDM_DISABLE=1
 export MPLBACKEND=Agg
 

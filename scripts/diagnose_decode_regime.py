@@ -531,10 +531,10 @@ def main() -> None:
             for s in scales:
                 z = mu + s * std * eps
                 dec = model.decoder(z)
-                xct_logits = model.xct_head(dec)
+                xct_out = model.xct_head(dec)
                 mask_logits = model.mask_head(dec)
 
-                xct_recon = xct_logits.clamp(0.0, 1.0).squeeze().cpu().numpy()
+                xct_recon = xct_out.clamp(0.0, 1.0).squeeze().cpu().numpy()
                 mask_prob = torch.sigmoid(mask_logits).squeeze().cpu().numpy()
                 mask_bin = mask_prob >= MASK_THRESHOLD
 

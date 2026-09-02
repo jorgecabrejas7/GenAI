@@ -250,6 +250,7 @@ def main() -> None:
         "N": N,
         "patch_size": ps,
         "stride": stride,
+        "voxel_size_um": 25.0,
         "dtype_xct":  "uint8",
         "dtype_mask": "uint8",
         "shape": [N, ps, ps, ps],

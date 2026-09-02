@@ -141,8 +141,8 @@ def run_stages(bs: int, n_steps: int = 4) -> None:
                     z.shape[0], ch_last, ls, ls, ls
                 ),
             )
-            xct_logits = sync_time("decoder", lambda: model.decoder(dec_in))
-            loss = xct_logits.pow(2).mean()
+            xct_out = sync_time("decoder", lambda: model.decoder(dec_in))
+            loss = xct_out.pow(2).mean()
         sync_time("backward", lambda: (loss.backward(), None)[1])
         sync_time("optimizer.step", lambda: (optimizer.step(), None)[1])
 
@@ -162,7 +162,7 @@ def run_kl_isolation(bs: int = 512, n_repeats: int = 5) -> None:
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 out = model(xct)
-                loss = out.xct_logits.pow(2).mean()
+                loss = out.xct_out.pow(2).mean()
                 if use_kl:
                     kl = 0.5 * (out.mu.pow(2) + out.logvar.exp() - out.logvar - 1.0).sum()
                     loss = loss + 0.05 * kl

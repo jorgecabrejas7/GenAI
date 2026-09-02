@@ -10,7 +10,7 @@ mean).
 Recipe (exactly as prescribed):
 
 1. Marginal — the T-E conditional sampler
-   (``runs/analysis/conditioning_design/T-E/results.json`` → ``"sampler"``):
+   (``runs/campaigns/01-conditioning-design/T-E/results.json`` → ``"sampler"``):
    pick the two nearest ``bin_centres_global_phi`` to ``G``, linearly
    interpolate ``ratio_quantiles`` between them, draw ``u ~ U(0, 1)`` per
    grid cell, read the interpolated quantile at ``u``, and set
@@ -42,8 +42,8 @@ PHI_MIN = 0.002
 PHI_MAX = 0.107
 
 # Default artefact locations, relative to the repo root.
-DEFAULT_TE_RESULTS = Path("runs/analysis/conditioning_design/T-E/results.json")
-DEFAULT_TD_RESULTS = Path("runs/analysis/conditioning_design/T-D/results.json")
+DEFAULT_TE_RESULTS = Path("runs/campaigns/01-conditioning-design/T-E/results.json")
+DEFAULT_TD_RESULTS = Path("runs/campaigns/01-conditioning-design/T-D/results.json")
 
 
 def load_sampler(path: str | Path) -> dict[str, np.ndarray]:

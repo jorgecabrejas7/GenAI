@@ -1,0 +1,2461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PoreGen — Controllable 3D synthesis of CFRP X-ray CT microstructure</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Albert+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ===========================================================================
+   FIXED 16:9 STAGE — MANDATORY BASE (viewport-base.css, verbatim)
+   Slides are authored at 1920x1080 and scaled as a whole.
+   =========================================================================== */
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--stage-bg, #000);
+}
+.deck-viewport {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: var(--stage-bg, #000);
+}
+.deck-stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    transform-origin: 0 0;
+    background: var(--slide-bg, #fff);
+}
+.slide {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    display: block;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    background: var(--slide-bg, #fff);
+}
+.slide.active,
+.slide.visible {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 1;
+}
+img,
+video,
+canvas,
+svg {
+    max-width: 100%;
+    max-height: 100%;
+}
+.deck-controls {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    z-index: 1000;
+}
+@media print {
+    html, body { width: 1920px; height: auto; overflow: visible; background: #fff; }
+    .deck-viewport { position: static; overflow: visible; background: #fff; }
+    .deck-stage { position: static; width: auto; height: auto; transform: none !important; background: none; }
+    .slide {
+        position: relative; display: block !important; visibility: visible !important;
+        opacity: 1 !important; pointer-events: auto !important;
+        width: 1920px; height: 1080px; break-after: page; page-break-after: always;
+    }
+    .slide:last-child { break-after: auto; page-break-after: auto; }
+    .deck-controls { display: none !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.2s !important;
+    }
+}
+
+/* ===========================================================================
+   PALETTE — cassette-package editorial: warm cream paper, warm-brown ink,
+   six locked primary accents. No seventh colour anywhere in the deck.
+   =========================================================================== */
+:root {
+    --paper:    #F1E6CB;
+    --paper-dk: #E5D6B0;
+    --ink:      #3A2516;
+    --red:      #E5392A;
+    --pink:     #E54489;
+    --orange:   #F09131;
+    --yellow:   #F0BC2A;
+    --green:    #3D9F47;
+    --blue:     #3F8BC4;
+    --hair:     rgba(58, 37, 22, 0.22);
+    --tint:     rgba(58, 37, 22, 0.10);
+    --stage-bg: #241A12;
+    --slide-bg: var(--paper);
+}
+
+/* ===========================================================================
+   PAPER GRAIN — 4px halftone dot pattern over every slide at 16%.
+   Sits below content (z-index 1) so embedded figures stay crisp.
+   =========================================================================== */
+.slide::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background-image: radial-gradient(circle at 1px 1px, rgba(58, 37, 22, 0.55) 1px, transparent 1.6px);
+    background-size: 4px 4px;
+    opacity: 0.16;
+}
+.slide > * { position: relative; z-index: 2; }
+
+/* ===========================================================================
+   TYPE ROLES
+   Big Shoulders Display 900 = every display moment, always negative tracking.
+   Albert Sans = body + tracked-caps micro-labels.  JetBrains Mono = data.
+   =========================================================================== */
+.disp   { font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; letter-spacing: -0.018em; }
+.body   { font-family: 'Albert Sans', sans-serif; font-weight: 400; font-size: 22px; line-height: 1.5; color: var(--ink); }
+.mono   { font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 400; font-size: 17px; letter-spacing: 0.02em; color: var(--ink); }
+.micro  { font-family: 'Albert Sans', sans-serif; font-weight: 700; font-size: 15px; line-height: 1.2;
+          letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink); }
+.micro-xl { letter-spacing: 0.32em; }
+em { font-style: normal; color: var(--red); }
+em.blue { color: var(--blue); }
+code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.9em;
+       background: var(--paper-dk); padding: 1px 5px; border: 1px solid var(--hair); }
+sub, sup { font-size: 0.72em; }
+
+/* ===========================================================================
+   FRAME + TOPBAR — the content-slide skeleton
+   =========================================================================== */
+.frame {
+    position: absolute;
+    left: 64px; right: 64px; top: 56px; bottom: 88px;
+    display: flex; flex-direction: column;
+}
+.topbar {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 40px;
+    border-bottom: 1.5px solid var(--ink);
+    padding-bottom: 16px;
+    flex: none;
+}
+.topbar h2 {
+    margin: 0;
+    font-family: 'Big Shoulders Display', sans-serif; font-weight: 900;
+    font-size: 74px; line-height: 0.9; letter-spacing: -0.018em; color: var(--ink);
+    max-width: 1320px;
+}
+.topbar .tb-right { display: flex; align-items: center; gap: 16px; flex: none; padding-bottom: 6px; }
+.tag {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px; letter-spacing: 0.04em;
+    color: var(--paper); background: var(--ink); padding: 6px 12px; text-transform: uppercase;
+}
+.tag.red { background: var(--red); } .tag.pink { background: var(--pink); }
+.tag.orange { background: var(--orange); } .tag.blue { background: var(--blue); }
+.tag.green { background: var(--green); } .tag.ink { background: var(--ink); }
+.tag.hollow { background: transparent; color: var(--ink); border: 1.5px solid var(--ink); }
+
+.stack { flex: 1 1 auto; min-height: 0; padding-top: 26px; display: flex; flex-direction: column;
+         gap: 22px; justify-content: space-between; }
+.stack.spread { justify-content: space-between; }
+.lead { font-family: 'Albert Sans', sans-serif; font-weight: 600; font-size: 27px; line-height: 1.36; color: var(--ink); }
+.lead em { font-weight: 700; }
+
+.pagenum {
+    position: absolute; right: 44px; bottom: 30px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; letter-spacing: 0.06em;
+    color: var(--ink); opacity: 0.75; z-index: 3;
+}
+
+/* ===========================================================================
+   DECORATION — petals, ribbons, starburst seal, red stamp
+   =========================================================================== */
+.petals { position: absolute; }
+.petal { position: absolute; border-radius: 50%; aspect-ratio: 1 / 1; }
+
+.ribbons { position: absolute; left: -30%; width: 160%; pointer-events: none; }
+.ribbon { position: absolute; left: 0; width: 100%; height: 74px; transform: rotate(-22deg); transform-origin: center; }
+
+.seal {
+    display: grid; place-items: center; background: var(--ink); color: var(--paper);
+    aspect-ratio: 1 / 1;
+    clip-path: polygon(50.0% 0.0%, 57.2% 13.7%, 69.1% 3.8%, 70.6% 19.2%, 85.4% 14.6%, 80.8% 29.4%, 96.2% 30.9%, 86.3% 42.8%, 100.0% 50.0%, 86.3% 57.2%, 96.2% 69.1%, 80.8% 70.6%, 85.4% 85.4%, 70.6% 80.8%, 69.1% 96.2%, 57.2% 86.3%, 50.0% 100.0%, 42.8% 86.3%, 30.9% 96.2%, 29.4% 80.8%, 14.6% 85.4%, 19.2% 70.6%, 3.8% 69.1%, 13.7% 57.2%, 0.0% 50.0%, 13.7% 42.8%, 3.8% 30.9%, 19.2% 29.4%, 14.6% 14.6%, 29.4% 19.2%, 30.9% 3.8%, 42.8% 13.7%);
+}
+.seal span { font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 34px; line-height: 0.9; text-align: center; letter-spacing: -0.01em; }
+
+.stamp {
+    display: inline-block; background: var(--red); color: var(--paper);
+    font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 26px;
+    text-transform: uppercase; letter-spacing: 0.02em; padding: 8px 18px; transform: rotate(-3deg);
+}
+.stamp.flat { transform: none; }
+.stamp.ink { background: var(--ink); } .stamp.green { background: var(--green); }
+.stamp.blue { background: var(--blue); }
+
+/* ===========================================================================
+   CARDS — catalogue product-card grammar: ink border, colour topstrip,
+   display name, Albert body, dashed rule, mono spec rows
+   =========================================================================== */
+.cards { display: grid; gap: 22px; }
+.card { border: 1.5px solid var(--ink); background: var(--paper); overflow: hidden; display: flex; flex-direction: column; }
+.card .strip { height: 24px; flex: none; }
+.card .strip.red { background: var(--red); } .card .strip.pink { background: var(--pink); }
+.card .strip.orange { background: var(--orange); } .card .strip.blue { background: var(--blue); }
+.card .strip.green { background: var(--green); } .card .strip.yellow { background: var(--yellow); }
+.card .cbody { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; min-height: 0; }
+.card h4 { margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 38px;
+           line-height: 0.94; letter-spacing: -0.012em; color: var(--ink); }
+.card p { margin: 0; font-family: 'Albert Sans', sans-serif; font-weight: 400; font-size: 20px; line-height: 1.42; color: var(--ink); }
+.card .drule { border-top: 1px dashed var(--ink); margin-top: auto; padding-top: 10px; }
+.card .spec { display: flex; justify-content: space-between; gap: 14px;
+              font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 16px; line-height: 1.5; color: var(--ink); }
+.card .spec span:first-child { opacity: 0.7; }
+
+/* ===========================================================================
+   LEDGER — 1.5px ink header rule, hairline body dividers, mono chips
+   =========================================================================== */
+.ledger { width: 100%; }
+.lrow { display: grid; align-items: center; gap: 20px; padding: 11px 0; border-bottom: 1px solid var(--hair); }
+.lrow.head { border-bottom: 1.5px solid var(--ink); padding-bottom: 12px; }
+.lrow.head > * { font-family: 'Albert Sans', sans-serif; font-weight: 700; font-size: 15px;
+                 letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink); }
+.lrow .t { font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 29px;
+           line-height: 1.1; letter-spacing: -0.005em; color: var(--ink); }
+.lrow .d { font-family: 'Albert Sans', sans-serif; font-size: 20px; line-height: 1.3; color: var(--ink); }
+.lrow .v { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 19px; color: var(--ink); }
+.lrow .v.big { font-size: 23px; }
+.chip { display: inline-block; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px;
+        letter-spacing: 0.06em; text-transform: uppercase; color: var(--paper); background: var(--ink);
+        padding: 4px 10px; white-space: nowrap; }
+.chip.red { background: var(--red); } .chip.pink { background: var(--pink); }
+.chip.orange { background: var(--orange); } .chip.blue { background: var(--blue); }
+.chip.green { background: var(--green); } .chip.yellow { background: var(--yellow); color: var(--ink); }
+
+/* ===========================================================================
+   PANELS, STATS, FIGURES
+   =========================================================================== */
+.panel { border: 1.5px solid var(--ink); padding: 20px 22px; background: var(--paper); }
+.panel.dk { background: var(--paper-dk); }
+.panel h5 { margin: 0 0 10px; font-family: 'Albert Sans', sans-serif; font-weight: 700; font-size: 15px;
+            letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink); }
+.panel p { margin: 0 0 8px; font-family: 'Albert Sans', sans-serif; font-size: 21px; line-height: 1.45; color: var(--ink); }
+.panel p:last-child { margin-bottom: 0; }
+
+.stats { display: flex; gap: 0; }
+.stat { padding: 0 40px; border-left: 1.5px solid var(--ink); }
+.stat:first-child { padding-left: 0; border-left: 0; }
+.stat .n { font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 108px;
+           line-height: 0.86; letter-spacing: -0.025em; color: var(--red); }
+.stat .n small { font-size: 36px; color: var(--ink); margin-left: 4px; }
+.stat.blue .n { color: var(--blue); } .stat.ink .n { color: var(--ink); }
+.stat .k { margin-top: 10px; font-family: 'Albert Sans', sans-serif; font-weight: 700; font-size: 15px;
+           letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink); max-width: 260px; }
+
+.fig { border: 1.5px solid var(--ink); background: #fff; padding: 12px; display: flex;
+       align-items: center; justify-content: center; overflow: hidden; }
+.fig img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.figcap { margin-top: 8px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px;
+          line-height: 1.35; color: var(--ink); opacity: 0.78; }
+
+/* Checklist — ink-bordered squares, cream multiplication glyph when checked */
+.check { display: flex; flex-direction: column; gap: 12px; }
+.check div { display: flex; align-items: center; gap: 12px;
+             font-family: 'Albert Sans', sans-serif; font-weight: 700; font-size: 18px; letter-spacing: 0.04em;
+             text-transform: uppercase; color: var(--ink); }
+.check i { width: 20px; height: 20px; border: 2px solid var(--ink); flex: none; display: grid; place-items: center;
+           font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 18px;
+           color: transparent; font-style: normal; }
+.check i.on { background: var(--ink); color: var(--paper); }
+
+/* Equalizer bar chart — segments stack from the bottom up like a VU meter */
+.eq { display: flex; gap: 16px; align-items: flex-end; }
+.eqcol { flex: 1; display: flex; flex-direction: column-reverse; gap: 5px; }
+.eqcol b { display: block; height: 26px; background: var(--tint); border: 1px solid var(--hair); }
+.eqcol b.on { border-color: transparent; }
+.eqlab { display: flex; gap: 16px; margin-top: 10px; border-top: 1px solid var(--ink); padding-top: 8px; }
+.eqlab span { flex: 1; text-align: center; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px; color: var(--ink); }
+
+/* Caveat strip — the recurring honesty device on every result slide */
+.caveat { display: flex; align-items: center; gap: 18px; border-top: 1.5px solid var(--ink); padding-top: 14px; flex: none; }
+.caveat .stamp { flex: none; font-size: 22px; padding: 6px 14px; }
+.caveat p { margin: 0; font-family: 'Albert Sans', sans-serif; font-size: 21px; line-height: 1.38; color: var(--ink); }
+
+/* Flow arrow row for the pipeline slide */
+.flow { display: flex; align-items: stretch; gap: 0; }
+.flow .step { flex: 1; border: 1.5px solid var(--ink); padding: 16px 18px; background: var(--paper); }
+.flow .step h6 { margin: 0 0 8px; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900;
+                 font-size: 30px; line-height: 0.95; color: var(--ink); }
+.flow .step p { margin: 0; font-family: 'Albert Sans', sans-serif; font-size: 18px; line-height: 1.36; color: var(--ink); }
+.flow .arrow { flex: none; width: 34px; display: grid; place-items: center;
+               font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 32px; color: var(--red); }
+
+/* Two-column body helper — rows size to their content; the stack
+   distributes the leftover height so nothing stretches into emptiness. */
+.cols { display: grid; gap: 34px; }
+
+/* ===========================================================================
+   ANIMATION — one orchestrated load per slide, staggered reveals
+   =========================================================================== */
+.slide.active .rv { animation: rv .62s cubic-bezier(.2,.8,.2,1) both; }
+.slide.active .rv:nth-child(1) { animation-delay: .04s; }
+.slide.active .rv:nth-child(2) { animation-delay: .10s; }
+.slide.active .rv:nth-child(3) { animation-delay: .16s; }
+.slide.active .rv:nth-child(4) { animation-delay: .22s; }
+.slide.active .rv:nth-child(5) { animation-delay: .28s; }
+.slide.active .rv:nth-child(6) { animation-delay: .34s; }
+@keyframes rv { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+.slide.active .wipe { animation: wipe .7s cubic-bezier(.2,.8,.2,1) both; transform-origin: left; }
+@keyframes wipe { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* Nav hint — ambient chrome, outside the slide design system */
+.navhint {
+    position: fixed; left: 20px; bottom: 16px; z-index: 1000;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: var(--paper);
+    opacity: 0.36; letter-spacing: 0.06em;
+}
+.editbadge {
+    position: fixed; left: 16px; top: 14px; z-index: 1000; opacity: 0; transition: opacity .2s;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; letter-spacing: .06em;
+    background: var(--ink); color: var(--paper); padding: 6px 10px; cursor: pointer;
+}
+.editbadge:hover, body.editing .editbadge { opacity: 1; }
+body.editing [contenteditable="true"]:hover { outline: 1.5px dashed var(--red); outline-offset: 3px; }
+body.editing [contenteditable="true"]:focus { outline: 1.5px solid var(--red); outline-offset: 3px; }
+</style>
+</head>
+<body>
+<div class="deck-viewport">
+<div class="deck-stage" id="stage">
+
+<!-- =====================================================================
+     SLIDE 1 — COVER
+     Cassette-package cover spread: ribbons, petals, lockup, hero stat,
+     spec checklist, starburst seal.
+     ===================================================================== -->
+<section class="slide active">
+  <!-- Ribbon sweep, clipped to the lower-right quadrant so it never crosses the
+       reading column. Oversized and rotated so it bleeds off both edges. -->
+  <div style="position:absolute; left:900px; top:250px; right:0; bottom:0; overflow:hidden;">
+    <div class="ribbons" style="top: 300px; height: 460px; left:-20%; width:170%;">
+      <div class="ribbon" style="top: 0;     background: var(--red);"></div>
+      <div class="ribbon" style="top: 84px;  background: var(--pink);"></div>
+      <div class="ribbon" style="top: 168px; background: var(--orange);"></div>
+      <div class="ribbon" style="top: 252px; background: var(--yellow);"></div>
+      <div class="ribbon" style="top: 336px; background: var(--green);"></div>
+    </div>
+  </div>
+
+  <div class="petals" style="left: 1330px; top: 96px; width: 380px; height: 300px;">
+    <div class="petal" style="left: 0;    top: 40px;  width: 150px; background: var(--blue);"></div>
+    <div class="petal" style="left: 96px; top: 0;     width: 132px; background: var(--pink);"></div>
+    <div class="petal" style="left: 186px;top: 62px;  width: 168px; background: var(--orange);"></div>
+    <div class="petal" style="left: 58px; top: 130px; width: 144px; background: var(--green);"></div>
+    <div class="petal" style="left: 168px;top: 168px; width: 118px; background: var(--red);"></div>
+  </div>
+
+  <div style="position:absolute; left:64px; top:58px; display:flex; align-items:center; gap:20px;">
+    <span class="micro micro-xl">Latent diffusion · composite microstructure</span>
+    <span class="stamp flat" style="font-size:20px; padding:5px 12px;">ldm05 closed</span>
+  </div>
+
+  <h1 class="disp" style="position:absolute; left:60px; top:120px; margin:0; font-size:250px; line-height:0.84; color:var(--ink);">Pore<em>Gen</em></h1>
+
+  <div style="position:absolute; left:64px; top:452px; width:1120px;">
+    <div style="font-family:'Albert Sans',sans-serif; font-weight:600; font-size:38px; line-height:1.3; color:var(--ink);">
+      Controllable 3D synthesis of CFRP X-ray CT microstructure — request a porosity and a stacking sequence, get a volume.
+    </div>
+  </div>
+
+  <div style="position:absolute; left:64px; top:614px; right:64px; height:1.5px; background:var(--ink);"></div>
+
+  <div style="position:absolute; left:64px; top:660px; display:flex; align-items:flex-start; gap:0;">
+    <div class="stat" style="padding-left:0;">
+      <div class="n">0.0051</div>
+      <div class="k">Porosity delivered for a 0.005 request</div>
+    </div>
+    <div class="stat blue">
+      <div class="n">2.5<small>°</small></div>
+      <div class="k">Median ply error, unseen layup</div>
+    </div>
+    <div class="stat ink">
+      <div class="n">153</div>
+      <div class="k">Volumes in the final campaign</div>
+    </div>
+  </div>
+
+  <div style="position:absolute; right:64px; top:452px; width:470px; background:var(--paper); border:1.5px solid var(--ink); box-shadow:8px 8px 0 var(--ink); padding:24px 26px;">
+    <div class="check">
+      <div><i class="on">&times;</i><span style="text-transform:none; letter-spacing:0.02em;">78 XCT volumes · 25&nbsp;µm</span></div>
+      <div><i class="on">&times;</i>1 835 343 training patches</div>
+      <div><i class="on">&times;</i>Frozen VAE · 16× compression</div>
+      <div><i class="on">&times;</i>Conditional LDM · 130k steps</div>
+      <div><i>&times;</i>ldm06 — air, mask, canvas</div>
+    </div>
+  </div>
+
+  <div class="seal" style="position:absolute; right:96px; top:800px; width:140px;"><span>26</span></div>
+
+  <div style="position:absolute; left:64px; right:64px; bottom:52px; border-top:1.5px solid var(--ink); padding-top:16px; display:flex; justify-content:space-between; align-items:center;">
+    <span class="micro">Jorge Cabrejas · Group meeting · 1 September 2026</span>
+    <span class="mono">Paper 1 · target IEEE TIP · est. submission Nov 2026</span>
+  </div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 2 — THE PROBLEM
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Why build a <em>generator</em> for CFRP microstructure</h2>
+      <div class="tb-right"><span class="tag hollow">00 · Motivation</span></div>
+    </div>
+    <div class="stack">
+      <div class="lead rv">Aerospace CFRP parts are inspected by X-ray CT. Porosity is the defect that decides whether a part is accepted. The models that measure it need training data that almost nobody has.</div>
+      <div class="cards rv" style="grid-template-columns: repeat(3, 1fr); flex:1 1 auto; min-height:0;">
+        <div class="card">
+          <div class="strip red"></div>
+          <div class="cbody">
+            <h4>The data problem</h4>
+            <p>Porous specimens must be manufactured on purpose. Scanning is slow, labelling is manual, and the porosity range in any real campaign is narrow and unbalanced.</p>
+            <div class="drule">
+              <div class="spec"><span>Volumes available</span><span>78</span></div>
+              <div class="spec"><span>Volume φ range</span><span>0.002 – 0.107</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip blue"></div>
+          <div class="cbody">
+            <h4>The ask</h4>
+            <p>A generator you can drive: name a porosity level and a stacking sequence, and receive a volume with that porosity, that ply layout, and realistic pore morphology.</p>
+            <div class="drule">
+              <div class="spec"><span>Control 1</span><span>local + global φ</span></div>
+              <div class="spec"><span>Control 2</span><span>ply orientation θ(z)</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip orange"></div>
+          <div class="cbody">
+            <h4>The constraint</h4>
+            <p>A specimen scan is roughly 1024×1024×1000 voxels. Full-volume 3D diffusion does not fit in memory, so generation must be patch-based — and the patches must agree with each other.</p>
+            <div class="drule">
+              <div class="spec"><span>Patch</span><span>64³</span></div>
+              <div class="spec"><span>Assembly</span><span>tiled, no blending</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel rv" style="border-width:1.5px;">
+        <p><b>The through-line of this talk:</b> every design decision came from a measurement, and most of the interesting ones came from a measurement that showed the previous decision was wrong.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">02 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 3 — PRIOR GENERATIVE WORK ON POROUS MEDIA
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Generative models for porous media</h2>
+      <div class="tb-right"><span class="tag hollow">01 · Literature</span><span class="tag blue">4 baselines</span></div>
+    </div>
+    <div class="stack">
+      <div class="ledger rv">
+        <div class="lrow head" style="grid-template-columns: 300px 1.1fr 0.95fr 0.75fr 150px;">
+          <span>Method</span><span>Domain / latent</span><span>Conditioning</span><span>Patch consistency</span><span>Volume</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 300px 1.1fr 0.95fr 0.75fr 150px;">
+          <span class="t">SliceGAN<br><span class="mono" style="font-size:15px; opacity:.7;">Kench &amp; Cooper 2021</span></span>
+          <span class="d">3D microstructure, 7 materials · pixel GAN, 2D slice discriminator</span>
+          <span class="d">None</span><span class="d">None</span><span class="v">64³</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 300px 1.1fr 0.95fr 0.75fr 150px;">
+          <span class="t">Pores for Thought<br><span class="mono" style="font-size:15px; opacity:.7;">Gayon-Lombardo 2020</span></span>
+          <span class="d">Battery electrodes, 3 phases · DC-GAN, circular padding</span>
+          <span class="d">None — mode collapse shown quantitatively</span><span class="d">None</span><span class="v">64³</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 300px 1.1fr 0.95fr 0.75fr 150px;">
+          <span class="t">Physics-Informed GAN<br><span class="mono" style="font-size:15px; opacity:.7;">2024</span></span>
+          <span class="d">Berea sandstone · WGAN-GP + latent optimisation</span>
+          <span class="d">φ and permeability, by simulator search at inference</span><span class="d">None</span><span class="v">128³</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 300px 1.1fr 0.95fr 0.75fr 150px; background:rgba(63,139,196,.09);">
+          <span class="t">Naiff 2025<br><span class="mono" style="font-size:15px; opacity:.7;">closest prior work</span></span>
+          <span class="d">Porous rock, 4 types · <b>latent</b> EDM-LDM, 3D VAE f=4</span>
+          <span class="d">Scalar porosity only</span><span class="d">None</span><span class="v">256³</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 300px 1.1fr 0.95fr 0.75fr 150px; border-bottom:1.5px solid var(--ink);">
+          <span class="t" style="color:var(--red);">PoreGen</span>
+          <span class="d">CFRP XCT · latent DDPM, 3D KL-VAE f=4, z=4</span>
+          <span class="d">Per-patch φ field + depth-resolved ply orientation + neighbours</span>
+          <span class="d">Trained neighbour conditioning + joint denoising</span><span class="v">arbitrary</span>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr;">
+        <div class="panel dk">
+          <h5>What Naiff establishes</h5>
+          <p>A KL-regularised VAE plus diffusion produces high-fidelity binary porous media, and scalar porosity conditioning implicitly carries permeability, TPCF and pore-size distribution. This is the domain precedent for choosing KL over VQ.</p>
+        </div>
+        <div class="panel dk">
+          <h5>What it leaves open</h5>
+          <p>No spatial control inside the volume, no assembly beyond one 256³ cube, no cross-patch consistency mechanism, no fibre-reinforced composite — where the microstructure has a <b>direction</b> that rock does not.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">03 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 4 — 3D LDM PRECEDENT FROM MEDICAL IMAGING
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Where the 3D recipe comes from: medical imaging</h2>
+      <div class="tb-right"><span class="tag hollow">01 · Literature</span></div>
+    </div>
+    <div class="stack">
+      <div class="cards rv" style="grid-template-columns: repeat(4, 1fr); flex:1 1 auto; min-height:0;">
+        <div class="card">
+          <div class="strip pink"></div>
+          <div class="cbody">
+            <h4>Rombach 2022</h4>
+            <p>The LDM framework itself: compress with a KL autoencoder trained with perceptual + adversarial losses, then diffuse in the latent. Also the source of the unit-variance latent rescaling.</p>
+            <div class="drule"><div class="spec"><span>Taken</span><span>whole recipe</span></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip blue"></div>
+          <div class="cbody">
+            <h4>Pinaya 2022</h4>
+            <p>First 3D brain-MRI LDM. VQ first stage, diffusion over 2D slices of the latent volume, conditioned on age and sex. Argues VQ suits near-binary data.</p>
+            <div class="drule"><div class="spec"><span>Rejected</span><span>VQ latents</span></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip orange"></div>
+          <div class="cbody">
+            <h4>3D MedDiffusion<br>He 2024</h4>
+            <p>Patch-based 3D LDM with a VAE at f=4 on 64³ patches — the direct architectural precedent for PoreGen's patch size and compression factor.</p>
+            <div class="drule"><div class="spec"><span>Taken</span><span>f=4 on 64³</span></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip green"></div>
+          <div class="cbody">
+            <h4>Med-DDPM · Wang 2026</h4>
+            <p>Med-DDPM concatenates a segmentation mask in pixel space. Wang conditions on scalar bone metrics and extends volumes with a shifting slab. Both assemble by passive blending.</p>
+            <div class="drule"><div class="spec"><span>Rejected</span><span>passive blending</span></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel rv">
+        <h5>The gap all five share</h5>
+        <p>Every one of them either generates a single fixed-size volume, or assembles larger ones by <b>blending decoded patches</b>. None conditions a patch on what its neighbours already contain. That gap is where PoreGen's method sits — and, as slide 23 shows, it is also where the hardest bug of the project was hiding.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">04 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 5 — TWO AXES: TILING AND ORDER
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Two axes the method builds on</h2>
+      <div class="tb-right"><span class="tag hollow">01 · Literature</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr; flex:1 1 auto; min-height:0;">
+        <div style="display:flex; flex-direction:column; gap:16px; min-height:0;">
+          <div style="display:flex; align-items:center; gap:14px;">
+            <span class="stamp flat blue">Axis 1</span>
+            <span class="disp" style="font-size:44px; color:var(--ink);">Tiled diffusion &amp; seams</span>
+          </div>
+          <div class="ledger">
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">MultiDiffusion</span><span class="d">Overlapping windows, noise predictions <b>averaged</b> in the overlap. No retraining.</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">Mixture of Diffusers</span><span class="d">Same fusion generalised to K independent regions for compositional control.</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">SyncDiffusion</span><span class="d">Beyond averaging: LPIPS gradient between tiles' predicted clean images.</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">Tiled Diffusion</span><span class="d">Cyclic latent rotation for seamless tileability of textures.</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">InfiniteDiffusion</span><span class="d">Lazy unbounded canvas, seed-consistent random access.</span>
+            </div>
+          </div>
+          <div class="panel dk" style="margin-top:auto;">
+            <p><b>All five are training-free.</b> PoreGen instead <b>trains</b> the neighbour conditioning — and then, at the end, adds MultiDiffusion-style prediction fusion at inference anyway, because the trained conditioning alone did not close the seams.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px; min-height:0;">
+          <div style="display:flex; align-items:center; gap:14px;">
+            <span class="stamp flat green">Axis 2</span>
+            <span class="disp" style="font-size:44px; color:var(--ink);">Generation order</span>
+          </div>
+          <div class="ledger">
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">MAR · Li 2024</span><span class="d">Masked autoregressive generation with a per-token diffusion loss; random order at training.</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">MDM learned order</span><span class="d">Proves masked diffusion decomposes into a weighted sum of AR likelihoods over <b>all</b> orders.</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 260px 1fr;">
+              <span class="t">VQ-Diffusion</span><span class="d">Mask-and-replace discrete diffusion, bidirectional, to kill AR error accumulation.</span>
+            </div>
+          </div>
+          <div class="panel">
+            <h5>Why this matters for PoreGen</h5>
+            <p>If masked diffusion is implicitly a learned-order autoregressive model, then a <b>fixed</b> deterministic order — checkerboard parity — is a principled special case, not an ad-hoc simplification. That is the licence for D23: train only the two neighbour states that inference will actually meet.</p>
+          </div>
+          <div class="panel dk" style="margin-top:auto;">
+            <p>The lesson learned the hard way: an order is only "independent within a phase" <b>relative to a patch spacing</b>. Order and spacing must be reasoned about together.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">05 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 6 — LATENT DESIGN IN THE LITERATURE
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Latent design: what the literature argues</h2>
+      <div class="tb-right"><span class="tag hollow">01 · Literature</span></div>
+    </div>
+    <div class="stack">
+      <div class="cards rv" style="grid-template-columns: repeat(3, 1fr);">
+        <div class="card">
+          <div class="strip red"></div>
+          <div class="cbody">
+            <h4>KL or VQ?</h4>
+            <p>MAR measures a clear gap at the same tokeniser stride: KL-16 reaches FID 3.50 against VQ-16 at 7.82 with an identical diffusion loss. Pinaya argues the opposite for near-binary MRI. Naiff — same domain as us — uses KL.</p>
+            <div class="drule"><div class="spec"><span>PoreGen · D1</span><span>KL</span></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip orange"></div>
+          <div class="cbody">
+            <h4>Collapse and blur</h4>
+            <p>Zhao 2017 explains why the ELBO's KL term makes VAEs blur. Free-bits puts a floor under each channel so it cannot satisfy KL by going silent. VRRAE later proves collapse is <b>structurally bounded</b> in an SVD bottleneck.</p>
+            <div class="drule"><div class="spec"><span>PoreGen · D3</span><span>β 0.05 + free-bits</span></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="strip blue"></div>
+          <div class="cbody">
+            <h4>Beyond per-voxel loss</h4>
+            <p>Larsen 2016 and Rombach 2022 use a discriminator to push past the per-pixel ceiling. Naiff shows reconstruction loss alone is enough for porous media. We started with Naiff's position and later moved to Larsen's.</p>
+            <div class="drule"><div class="spec"><span>PoreGen · D16</span><span>PatchGAN added</span></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1.25fr 1fr;">
+        <div class="panel">
+          <h5>The rank-reduction branch — and why it was worth reading</h5>
+          <p>RRAE replaces the KL term with a truncated SVD on the bottleneck: no divergence weight, no free-bits floor, and an adaptive variant that discovers its own rank. VRRAE adds probabilistic sampling on top and proves the collapse bound. It is the most principled alternative to the hyperparameter tuning that D3 and D20 spend their time on — which is exactly why we tried it, and why the negative result on slide 13 is worth reporting.</p>
+        </div>
+        <div class="panel dk">
+          <h5>Evaluation protocol inherited</h5>
+          <p>Gayon-Lombardo and SliceGAN set the standard for microstructure: two-point correlation S₂(r), pore-size distribution, physical transport. Naiff adds slice-FID and Wasserstein-1 on PSD. PoreGen follows this lineage and adds seam discontinuity, which none of them need.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">06 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 7 — THE MATERIAL AND THE SCANS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">The material and the scans</h2>
+      <div class="tb-right"><span class="tag hollow">02 · Data</span><span class="tag ink">78 volumes</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1.35fr 1fr;">
+        <div style="display:flex; flex-direction:column; gap:18px; min-height:0;">
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1fr 190px 190px 150px 110px;">
+              <span>Specimen family</span><span>Volumes tr/val/te</span><span>Patches</span><span>Mean φ</span><span>Share</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 1fr 190px 190px 150px 110px;">
+              <span class="t">Nacho <span class="chip red">porous by design</span></span>
+              <span class="v">39 / 5 / 6</span><span class="v">1 412 119</span><span class="v big">0.0223</span><span class="v">62%</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 1fr 190px 190px 150px 110px;">
+              <span class="t">Pegaso</span><span class="v">21 / 2 / 1</span><span class="v">716 479</span><span class="v big">0.0121</span><span class="v">31%</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 1fr 190px 190px 150px 110px;">
+              <span class="t">Juan Ignacio</span><span class="v">4 / 1 / 1</span><span class="v">146 025</span><span class="v big">0.0104</span><span class="v">6%</span>
+            </div>
+          </div>
+          <div class="panel">
+            <h5>Expert stacking sequences — ground truth, 2026-08-26</h5>
+            <p><b>Layup A</b> — [45 / −45 / 90 / 0 / 45 / −45 / 0 / 90 / −45 / 45], 10 plies, Hexcel 0.508 mm cured ply thickness. Carried by <b>74 of 78</b> volumes: all Pegaso and all Nacho.</p>
+            <p><b>Layup B</b> — [−45 / 90 / 45 / 0]s, 16 plies, IM7/M56 at 0.25 mm. Four Juan Ignacio volumes.</p>
+            <p>Voxel size 25 µm for every campaign. Splits are stratified across families.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:18px; min-height:0;">
+          <div class="panel dk">
+            <h5>Nacho's 2× porosity is a feature</h5>
+            <p>Those specimens were manufactured deliberately to induce porosity, so the project would have porous samples at all. It is a property of the dataset, not a defect in it — but it does mean porosity is <b>confounded with material family</b>, which the conditioning has to be able to separate.</p>
+          </div>
+          <div class="panel">
+            <h5>Split sizes</h5>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:4px 0;"><span style="opacity:.7">Train patches</span><span>1 835 343</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:4px 0;"><span style="opacity:.7">Val patches</span><span>230 819</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:4px 0;"><span style="opacity:.7">Test patches</span><span>232 221</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:4px 0;"><span style="opacity:.7">Patch size / stride</span><span>64³ / 32</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>74 of 78 volumes carry one stacking sequence. There is essentially no across-specimen variation in layup to learn from — the variation the model sees is <b>within</b> a specimen, ply to ply. This constrains every generalisation claim in this deck.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">07 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 8 — THE PIPELINE
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">From raw TIFF to a training patch</h2>
+      <div class="tb-right"><span class="tag hollow">02 · Data</span></div>
+    </div>
+    <div class="stack">
+      <div class="flow rv">
+        <div class="step"><h6>1 · Discover</h6><p>Raw TIFF stacks per campaign, written to Zarr with 64³ chunks and <b>no compression</b> — one patch read becomes exactly two chunks.</p></div>
+        <div class="arrow">&rsaquo;</div>
+        <div class="step"><h6>2 · Segment</h6><p><b>onlypores</b>: Sauvola local thresholding for pores, Otsu plus fill-voids for the material mask. Memory-aware, parallel or sequential.</p></div>
+        <div class="arrow">&rsaquo;</div>
+        <div class="step"><h6>3 · Index</h6><p>3D integral volume gives O(1) porosity for any patch. Coordinates at stride 32 written to a Parquet index.</p></div>
+        <div class="arrow">&rsaquo;</div>
+        <div class="step"><h6>4 · Pack</h6><p>Flat float16 memmap for the loader. Random reads went from 150 to <b>4 704 items/s</b> — 31× — and random access is all a DataLoader does.</p></div>
+      </div>
+      <div class="stats rv">
+        <div class="stat" style="padding-left:0;"><div class="n">2.30<small>M</small></div><div class="k">Patches across the three splits</div></div>
+        <div class="stat blue"><div class="n">0.60<small>TB</small></div><div class="k">Scanned in 4.5 min at 8 370 patches/s</div></div>
+        <div class="stat ink"><div class="n">64<small>³</small></div><div class="k">Zarr chunk = patch, so one read is two chunks</div></div>
+        <div class="stat"><div class="n">31<small>×</small></div><div class="k">Faster random reads after the memmap pivot</div></div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr;">
+        <div class="panel">
+          <h5>Normalisation — why not z-score (D12)</h5>
+          <p>The pore intensity component sits at <b>−2.96σ</b> under per-volume z-score, so any standard ±3σ clip deletes the pore signal entirely. Every volume saturates the uint8 ceiling in the solid matrix, so a global <code>x / 255</code> is equivalent to per-volume max-normalisation with no per-volume statistics and no clip.</p>
+        </div>
+        <div class="panel">
+          <h5>The mask is a function of the image</h5>
+          <p>Sauvola's threshold is a deterministic function of the local intensity mean and variance. The mask therefore adds no information the XCT does not already carry — which is the argument that later removes it from the encoder input (D14) and keeps it only as a supervision target.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Four patches in one volume carried φ &gt; 1.0 from a summed-area-table overflow and are dropped at load time. Voxel size is <b>not</b> recorded in the dataset metadata — it has cost time twice, and the ply pitch still cannot be reported in µm from the data alone.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">08 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 9 — EDA GROUND TRUTH
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">The four numbers that set every later decision</h2>
+      <div class="tb-right"><span class="tag hollow">02 · Data</span><span class="tag orange">EDA</span></div>
+    </div>
+    <div class="stack">
+      <div class="stats rv">
+        <div class="stat" style="padding-left:0;"><div class="n">50<small>×</small></div><div class="k">Spread in volume porosity, 0.002 to 0.107</div></div>
+        <div class="stat blue"><div class="n">1.79<small>vx</small></div><div class="k">Median pore diameter</div></div>
+        <div class="stat ink"><div class="n">687</div><div class="k">Mean pores per 64³ patch</div></div>
+        <div class="stat"><div class="n">4.73<small>×</small></div><div class="k">S₂(r=30) above φ² — clusters exceed one patch</div></div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>Consequence 1 — the primary metric</h5>
+          <p>At f=4 a 2-voxel pore maps to about half a latent cell. Individual pore <b>positions</b> are below latent resolution by construction, so Dice is capped around 0.2–0.3 for a correct model. The success criterion is therefore <b>porosity-MAE &lt; 0.005</b>, roughly a tenth of the mean φ of 0.055.</p>
+        </div>
+        <div class="panel">
+          <h5>Consequence 2 — neighbours are mandatory</h5>
+          <p>S₂(r) at r=30 sits 4.73× above φ², and the spectral peak of inter-cluster spacing is 42.7 voxels. Pore clusters are <b>larger than one patch</b>. A patch-independent model would produce plausible local density and wrong global structure.</p>
+        </div>
+        <div class="panel dk">
+          <h5>Intensity structure</h5>
+          <p>A 3-component GMM describes the histogram: pores at 37.65, an interface mode at 188.0, solid CFRP at 209.61 with 83.6% of the mass. Global mean 191.66, σ 52.02. Pore/matrix overlap coefficient is 0.045 — well separated in intensity, but the best achievable threshold Dice is only 0.22 because the pores are sub-voxel.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Exterior air is <b>not</b> labelled as porosity anywhere in this pipeline. Every analysis built on the mask alone is blind to it. That blind spot survives untouched until slide 31, where it turns out to be the largest open problem in the project.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">09 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 10 — VAE DECISIONS BEFORE THE FIRST RUN
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Decisions taken <em>before</em> the first VAE run</h2>
+      <div class="tb-right"><span class="tag hollow">03 · First stage</span><span class="tag ink">D1 – D12</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="lead rv">Each entry is a committed decision with a written justification and the paper it follows. The point of writing them down first was to make the later reversals legible.</div>
+      <div class="ledger rv">
+        <div class="lrow head" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span>ID</span><span>Decision</span><span>Why</span><span>Follows</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span class="v big" style="color:var(--red);">D1</span><span class="t">KL over VQ</span>
+          <span class="d">Continuous latents beat discrete ones downstream at the same stride; the one porous-media LDM in the literature uses KL.</span><span class="v">MAR · Naiff</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span class="v big" style="color:var(--red);">D2</span><span class="t">No skip connections</span>
+          <span class="d">Skips let the decoder bypass the bottleneck, so the latent carries a weaker message for the diffusion model. No reviewed LDM uses a UNet VAE as first stage.</span><span class="v">Rombach · He</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span class="v big" style="color:var(--red);">D3</span><span class="t">β = 0.05, warm-up, free-bits 0.25</span>
+          <span class="d">Low enough to keep fine pore detail, high enough to keep the posterior near-Gaussian for a DDPM prior. Naiff's β = 0.001 works only under EDM preconditioning.</span><span class="v">Rombach</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span class="v big" style="color:var(--red);">D5</span><span class="t">Charbonnier, no adversarial</span>
+          <span class="d">L2 hedges into blur at uncertain locations; Charbonnier keeps L1's sharpness with a gradient at zero. Adversarial deferred — Naiff shows reconstruction-only suffices.</span><span class="v">Naiff</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span class="v big" style="color:var(--red);">D6</span><span class="t">BCE + Tversky, pos_weight 17.16</span>
+          <span class="d">At 2% porosity, unweighted BCE is satisfied by predicting no pores at all. Dice measures overlap instead of per-voxel accuracy.</span><span class="v">segmentation practice</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 88px 1fr 1.25fr 190px;">
+          <span class="v big" style="color:var(--red);">D12</span><span class="t">Global /255 normalisation</span>
+          <span class="d">Per-volume z-score puts the pore mode at −2.96σ, so any ±3σ clip deletes it. Every volume saturates the uint8 ceiling, so /255 is equivalent and stateless.</span><span class="v">EDA</span>
+        </div>
+      </div>
+      <div class="panel dk rv">
+        <p><b>Two of these did not survive contact with data.</b> D8 (bottleneck self-attention) and D9 (2-channel encoder input) were superseded within a month, by D13 and D14 on the next slide. The log keeps them as one-line tombstones rather than deleting them.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">10 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 11 — R00 TO R03
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">R00 → R03: what the ablations removed</h2>
+      <div class="tb-right"><span class="tag hollow">03 · First stage</span></div>
+    </div>
+    <div class="stack">
+      <div class="ledger rv">
+        <div class="lrow head" style="grid-template-columns: 150px 1fr 1.15fr 250px;">
+          <span>Run</span><span>Change</span><span>Result</span><span>Decision</span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 150px 1fr 1.15fr 250px;">
+          <span class="t">R00 / R01</span><span class="d">Self-attention at the 16³ bottleneck, on versus off, identical hyperparameters</span>
+          <span class="d">Indistinguishable on every monitored metric at equal steps. The bottleneck is 4096 tokens, not 512 — O(n²) attention was paying for nothing.</span>
+          <span><span class="chip red">D13</span> <span class="chip">attention removed</span></span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 150px 1fr 1.15fr 250px;">
+          <span class="t">R02</span><span class="d">Clean baseline: no warm-ups, no clipping, free_bits = 0</span>
+          <span class="d">Channels 3, 0 and 5 collapsed by step 1375; 5 of 8 active at the end. And <code>train/active_channels</code> reported 8/8 throughout — the metric is broken when free_bits = 0.</span>
+          <span><span class="chip orange">free-bits restored</span></span>
+        </div>
+        <div class="lrow" style="grid-template-columns: 150px 1fr 1.15fr 250px;">
+          <span class="t">R03</span><span class="d">Encoder sees XCT only; z_channels 8 → 16; stratified splits</span>
+          <span class="d">XCT converged faster and lower than R00–R02. Mask Dice got worse — the expected cost of making the mask head an implicit segmenter.</span>
+          <span><span class="chip red">D14</span> <span class="chip red">D15</span></span>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>Why drop the mask from the encoder</h5>
+          <p>The mask is a deterministic Sauvola function of local XCT intensity and variance, so in principle it adds nothing. PCA agrees: XCT alone and XCT+mask both give k@90% = 9. It stays as a <b>supervision target</b>, not an input.</p>
+        </div>
+        <div class="panel">
+          <h5>The plateau that would not move</h5>
+          <p>XCT Charbonnier settles at ≈0.030 from step 2000 in <b>every</b> run, R00 through R03, regardless of architecture, schedule or latent width. A per-voxel loss cannot tell a sharp reconstruction from a blurry one with the same mean error.</p>
+        </div>
+        <div class="panel dk">
+          <h5>A split bug worth remembering</h5>
+          <p>R00–R02 showed val porosity-MAE below 0.001 against test at 0.021–0.031. Not overfitting — the splits were not stratified by porosity, so val and test described structurally different volumes. Fixed before R03.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>R03's error is <b>false-positive dominated</b>: the mask head hallucinates pores when it has to segment from XCT-only latent features. That is what D17's focal loss is aimed at on the next slide.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">11 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 12 — R04 / R05
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">R04 / R05: the primary metric falls</h2>
+      <div class="tb-right"><span class="tag hollow">03 · First stage</span><span class="tag green">gate passed</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1.1fr 1fr;">
+        <div style="display:flex; flex-direction:column; gap:18px;">
+          <div class="cards" style="grid-template-columns: repeat(3, 1fr);">
+            <div class="card"><div class="strip red"></div><div class="cbody">
+              <h4>D16 · Discriminator</h4>
+              <p>2D PatchGAN on random axial, coronal and sagittal slices. LSGAN, spectral norm, its own optimiser. Three orthogonal views implicitly enforce isotropy.</p>
+              <div class="drule"><div class="spec"><span>weight</span><span>0.01 → 0.05</span></div></div>
+            </div></div>
+            <div class="card"><div class="strip orange"></div><div class="cbody">
+              <h4>D17 · Focal</h4>
+              <p>Replaces BCE. At 2% porosity the gradient is dominated by easy background; (1−p)² downweights it and concentrates on the boundary voxels where the false positives live.</p>
+              <div class="drule"><div class="spec"><span>γ / α</span><span>2.0 / 0.25</span></div></div>
+            </div></div>
+            <div class="card"><div class="strip blue"></div><div class="cbody">
+              <h4>D18 · Dual branch</h4>
+              <p>Two parallel encoder stacks on the same XCT input, fused before mu/logvar. Tests whether the limit is capacity or <b>misallocated</b> capacity between two competing objectives.</p>
+              <div class="drule"><div class="spec"><span>branch cos-sim</span><span>0.066</span></div></div>
+            </div></div>
+          </div>
+          <div class="panel">
+            <h5>Read on D18</h5>
+            <p>Branch cosine similarity of <b>0.066</b> means the two branches learned near-orthogonal representations — the split was used, not ignored. Combined with D17, mask Dice reached <b>0.781</b>, far above the 0.2–0.3 ceiling the EDA predicted for a single-pathway model.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:18px;">
+          <div class="stats" style="gap:0;">
+            <div class="stat" style="padding-left:0;"><div class="n">0.00094</div><div class="k">Patch porosity MAE — the target was 0.005</div></div>
+            <div class="stat blue"><div class="n">0.781</div><div class="k">Mask Dice at R04</div></div>
+          </div>
+          <div class="panel dk">
+            <h5>Calibration</h5>
+            <p>Porosity bias −0.000184, essentially zero. Precision 0.810 above recall 0.762: focal loss moved the model out of R03's false-positive regime into a slight false-negative bias, which is the correct direction for a porosity estimate.</p>
+          </div>
+          <div class="panel">
+            <h5>What stayed broken</h5>
+            <p>Volume-level sharpness ratio <b>0.12–0.27</b>: reconstructions are 4–8× less sharp than ground truth, so the texture plateau survives a discriminator at weight 0.01 — hence D19. Pore count is under-predicted by 33–69%: the model merges adjacent sub-voxel pores while getting their total volume right.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Wasserstein-1 on the pore-size distribution is 0.48 and 2.65 on the low and mid-φ test volumes, but <b>115.4</b> on the high-φ one: a few giant merged pores. Pore volume is captured; pore <b>topology</b> is not, and it fails worst exactly where porosity matters most.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">12 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 13 — VRRAE: A DOCUMENTED NEGATIVE RESULT
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">The VRRAE branch — and why it closed</h2>
+      <div class="tb-right"><span class="tag hollow">03 · First stage</span><span class="tag red">negative result</span></div>
+    </div>
+    <div class="stack">
+      <div class="lead rv">Replace the KL bottleneck with a truncated-SVD rank-reduction layer: no β to tune, no free-bits floor, and a published proof that posterior collapse is structurally bounded rather than arbitrary.</div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>What went wrong — mechanically</h5>
+          <p>Encoder gradient norm: median <b>873</b>, maximum <b>4.2×10⁷</b>, drifting upward window over window, while the decoder stayed flat at 0.08–0.3 the whole run. Suspect: the SVD backward's 1/(sᵢ² − sⱼ²) term with near-degenerate singular values.</p>
+        </div>
+        <div class="panel">
+          <h5>Two real bugs found on the way</h5>
+          <p>The decoder was fed raw SVD coefficients instead of Y = U·α, and the vendored SVD backward was wrong. Fixing both moved reconstruction from 0.121 to 0.082. A misread of <code>mu_n_active</code> ≈ 0 as posterior collapse also sent a whole run chasing free-bits — the coefficients are simply <b>ordered by singular value</b>.</p>
+        </div>
+        <div class="panel">
+          <h5>The ablation that settled it — D26</h5>
+          <p>Same flat bottleneck, same dimensions, same everything, with the batch-SVD layer swapped for plain <code>Linear</code> heads. Linear reached <b>0.0784</b> against SVD's <b>0.1058</b> — about 26% better. The flat latent was not the limit; the batch-SVD machinery was.</p>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1.35fr 1fr;">
+        <div class="panel dk">
+          <h5>Why the design was structurally awkward for this problem</h5>
+          <p>The discoverable rank is bounded by min(batch, L), so latent width and batch size stop being independent knobs. The basis is re-estimated per batch in a high-dimensional feature space, so it rotates during training and then mismatches the finalised basis used at evaluation. And a flat latent <b>deletes the 3D spatial structure</b> that the neighbour and orientation conditioning of the entire LDM stage depends on — adopting it would have meant redesigning the denoiser from scratch.</p>
+        </div>
+        <div class="panel">
+          <h5>Cost and verdict</h5>
+          <p>Eight runs, about one week. Closed as a documented negative result; the spatial KL bottleneck stays in production.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Even after both bug fixes, VRRAE reconstruction sits about <b>3× worse</b> than the spatial baselines. The comparison is not fully like-for-like — the VRRAE variant has no mask head and no discriminator — so this refutes the bottleneck as a drop-in replacement here, not the method in general.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">13 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 14 — COMPRESSION SWEEP AND THE FROZEN LATENT
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">How hard can the latent be squeezed?</h2>
+      <div class="tb-right"><span class="tag hollow">03 · First stage</span><span class="tag ink">22 runs</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1.12fr 1fr;">
+        <div style="display:flex; flex-direction:column; gap:12px;">
+          <div class="micro">R05 sweep · val XCT loss vs reduction factor · X = 64 / z_channels</div>
+          <div class="eq" style="height:212px;">
+            <div class="eqcol"><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b></b><b></b><b></b></div>
+            <div class="eqcol"><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--yellow)"></b><b></b><b></b></div>
+            <div class="eqcol"><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--yellow)"></b><b></b><b></b></div>
+            <div class="eqcol"><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--yellow)"></b><b class="on" style="background:var(--orange)"></b><b></b></div>
+            <div class="eqcol"><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--yellow)"></b><b class="on" style="background:var(--orange)"></b><b></b></div>
+            <div class="eqcol"><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--green)"></b><b class="on" style="background:var(--yellow)"></b><b class="on" style="background:var(--orange)"></b><b class="on" style="background:var(--red)"></b></div>
+          </div>
+          <div class="eqlab">
+            <span>2×<br>.0348</span><span>4×<br>.0367</span><span>8×<br>.0368</span><span>16×<br>.0385</span><span>32×<br>.0391</span><span>64×<br>.0405</span>
+          </div>
+          <div class="panel dk">
+            <p><b>The degradation curve is remarkably flat.</b> Sixteen times the compression costs about 11% of reconstruction quality in the XCT-only sweep (0.0327 → 0.0363), and 16% across the full 2× → 64× range with the mask head. Only z = 1 degrades both metrics at once. For the diffusion stage, aggressive compression is cheap. Best porosity-MAE actually lands at 8×–32× (0.0015–0.0016) — the narrow neck regularises the mask head.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>The triplet — isolating what the mask contributes</h5>
+            <p><b>R06</b> XCT only, no mask head. <b>R05</b> XCT in, mask out. <b>R07</b> mask in <i>and</i> out. The same z axis in all three separates the mask's value as an <b>input</b> from its value as a <b>task</b>, revisiting D14 under a uniform protocol.</p>
+          </div>
+          <div class="panel">
+            <h5>Production latent · D33</h5>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Checkpoint</span><span>r07-run-0006</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Latent</span><span>z = 4 @ 16×, 16³</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Mask sanity gate</span><span>passed at 2σ</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Latent store</span><span>140 GB memmap</span></div>
+          </div>
+          <div class="panel">
+            <h5>The finding that shaped the whole LDM stage</h5>
+            <p>Samples from the pure factorised prior decode to <b>almost empty masks</b>, φ ≈ 0.0005. Porosity does not live in the latent marginals; it lives in the <b>structure</b> of the latent. So the diffusion model does not merely have to produce plausible values — it has to land on the manifold. Every diagnostic from here on is built to measure exactly that.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>R07's porosity-MAE (0.00024 at 2×) is <b>not</b> comparable with R05 or R06: with the mask as an encoder input, the mask task is near-autoencoding rather than prediction. And <code>val.total</code> cannot be compared across z at all — per-channel KL summation plus the free-bits floor makes it scale with channel count.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">14 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 15 — THE PRINCIPLE (manifesto spread)
+     ===================================================================== -->
+<section class="slide">
+  <div class="ribbons" style="top: 61%; height: 420px;">
+    <div class="ribbon" style="top: 0;    background: var(--pink);"></div>
+    <div class="ribbon" style="top: 84px; background: var(--orange);"></div>
+    <div class="ribbon" style="top: 168px;background: var(--yellow);"></div>
+    <div class="ribbon" style="top: 252px;background: var(--green);"></div>
+    <div class="ribbon" style="top: 336px;background: var(--blue);"></div>
+  </div>
+  <div style="position:absolute; left:64px; top:70px; display:flex; align-items:center; gap:20px;">
+    <span class="micro micro-xl">04 · Conditioning design</span>
+    <span class="stamp flat ink" style="font-size:20px; padding:5px 12px;">Design principle</span>
+  </div>
+  <h2 class="disp" style="position:absolute; left:60px; top:148px; margin:0; width:1560px; font-size:130px; line-height:0.88; color:var(--ink);">
+    Conditioning must be <em>compositional</em>,<br>never <em>categorical</em>.
+  </h2>
+  <div style="position:absolute; left:64px; top:556px; width:920px; background:var(--paper); border:1.5px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); padding:28px 34px;">
+    <p style="margin:0 0 14px; font-family:'Albert Sans',sans-serif; font-size:25px; line-height:1.45; color:var(--ink);">
+      A one-hot "specimen family" input can only ever reproduce the three materials in the dataset. A new stacking sequence would be an unseen class — impossible by construction.</p>
+    <p style="margin:0; font-family:'Albert Sans',sans-serif; font-size:25px; line-height:1.45; color:var(--ink);">
+      A continuous orientation field instead lets the model learn <b>local orientation + local porosity → texture + voids</b>. A novel layup then becomes a recombination of parts it has already seen.</p>
+  </div>
+  <div style="position:absolute; right:64px; top:556px; width:820px;">
+    <div class="panel" style="background:var(--paper);">
+      <h5>Stated goal</h5>
+      <p style="font-size:24px;">Generate <b>arbitrary stacking sequences</b>. Whether an unseen layup generates <i>well</i> is an open empirical question — it is out of distribution by definition. But this encoding is what makes the question askable at all.</p>
+    </div>
+    <div class="panel" style="margin-top:18px; background:var(--paper);">
+      <h5>What follows</h5>
+      <p>Nine measurements, T-A to T-I, decide which signals enter the conditioning vector and how each one is encoded. None of them was chosen by intuition.</p>
+    </div>
+  </div>
+  <div class="pagenum">15 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 16 — T-A + T-D
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">The plies are visible in the porosity itself</h2>
+      <div class="tb-right"><span class="tag hollow">04 · Conditioning</span><span class="tag orange">T-A · T-D</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns:1fr 1fr; gap:22px;">
+        <div>
+          <div class="fig" style="height:351px;"><img src="figs/ta_spectra.png" alt="Stacked porosity spectra with a peak near 19.6 voxels in z"></div>
+          <div class="figcap">T-A · stacked porosity spectra. Period 19.4–19.8 voxels in z, 19.8× the local background, clean second harmonic at 9.7.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:351px;"><img src="figs/td_autocorr.png" alt="Patch-to-patch porosity autocorrelation by axis"></div>
+          <div class="figcap">T-D · patch autocorrelation at the first voxel-disjoint separation: r = 0.42 in z, 0.77 in y, 0.76 in x.</div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>Real, and z-only</h5>
+          <p>The per-volume z peak falls inside 18–22 voxels for <b>70% of 80 volumes</b>; the same band fires in y or x for only 1.3%. Median excess: 25.2× in z against 4.5× and 4.0×. Correlation lengths run 79 voxels in z to 901 in x — 1.2 to 14 patch widths.</p>
+        </div>
+        <div class="panel">
+          <h5>Confirmed twice, independently</h5>
+          <p>Voxel-level autocorrelation has a secondary peak at lag <b>exactly 20</b>. Separately, porosity maxima coincide with ply interfaces: correlation +0.257 at zero lag with the orientation change rate, positive in 85% of volumes. The periodicity is ply-interface driven.</p>
+        </div>
+        <div class="panel dk">
+          <h5>The design consequence</h5>
+          <p>A 64-voxel patch spans <b>≈3.3 plies</b>. One angle per patch would erase the ply sequence <i>inside</i> the patch — which is exactly the structure we want to control. Orientation must be <b>depth-resolved</b>, and neighbour conditioning is justified by the r values on the right.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>The patch index cannot see any of this: stride 32 puts the Nyquist limit at 64 voxels, above the ply pitch. It took an exact 1-voxel pass over all 80 volumes to find. Narrow spectral lines also fire in y and x in 58–65% of volumes at scan-dependent periods — per-scan artefacts that vanish under median stacking.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">16 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 17 — T-C AIR
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Where the specimen ends</h2>
+      <div class="tb-right"><span class="tag hollow">04 · Conditioning</span><span class="tag orange">T-C</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 1.35fr 1fr; gap:26px; align-items:stretch; flex:1 1 auto; min-height:0;">
+        <div>
+          <div class="fig" style="height:407px;"><img src="figs/tc_predictors.png" alt="Predictors of the exterior air fraction per patch"></div>
+          <div class="figcap">T-C · which coordinate predicts a patch's exterior-air fraction. 0.60 TB scanned in 4.5 minutes at 8 370 patches/s.</div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="stats" style="gap:0;">
+            <div class="stat" style="padding-left:0;"><div class="n">36.8<small>%</small></div><div class="k">Of all patches hold more than 1% exterior air</div></div>
+          </div>
+          <div class="panel">
+            <h5>Distance to surface wins</h5>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Distance to nearest surface</span><span>R² 0.584</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Distance to z surface</span><span>R² 0.374</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Fractional z</span><span>R² 0.222</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:3px 0;"><span style="opacity:.7">Fractional x / y</span><span>R² 0.089 / 0.017</span></div>
+          </div>
+          <div class="panel dk">
+            <p>Air decays to interior background at <b>32 voxels — exactly half a patch</b> — and is flat beyond. Distance-to-surface therefore enters the conditioning vector as its own signal, while in-plane x/y position is dropped: nothing measured varies with it.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Exterior air is <b>not labelled as porosity</b>, so any mask-only analysis is blind to it — an earlier check that looked only at φ wrongly concluded border patches did not exist. The model therefore learns that air is free. This single fact is the root cause of the failure on slides 31–32, and the reason ldm06 exists.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">17 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 18 — T-E + T-F
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">How to ask for a porosity</h2>
+      <div class="tb-right"><span class="tag hollow">04 · Conditioning</span><span class="tag orange">T-E · T-F</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns:1.45fr 1fr; gap:22px;">
+        <div>
+          <div class="fig" style="height:320px; width:955px; margin:0 auto;"><img src="figs/te_conditional.png" alt="Distribution of local patch porosity given the volume porosity"></div>
+          <div class="figcap">T-E · p(local φ | global φ). Ratio p10 = 0.109, p50 = 0.839, p90 = 1.738 — a factor of 16 inside one volume.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:320px; width:577px; margin:0 auto;"><img src="figs/tf_bins.png" alt="Effective distinguishable levels for each candidate porosity transform"></div>
+          <div class="figcap">T-F · effective levels out of 256 for each candidate transform of φ.</div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr;">
+        <div class="panel">
+          <h5>Never paint the volume target uniformly</h5>
+          <p>Only <b>12.9%</b> of real patches sit within 0.001 of their own volume's mean porosity, and only 53.4% within 0.005. Painting one global number into every patch's local channel asks for a configuration the data almost never contains — and it was the source of the local/global conflation bug in the earlier conditioning code. At inference we instead sample one <b>coherent field</b> over the volume, smooth it to the T-D correlation lengths, and rescale its mean to the requested target.</p>
+        </div>
+        <div class="panel">
+          <h5>log(φ + 1e-3), not raw φ</h5>
+          <p>Raw φ resolves 74 of 256 levels and puts the median at 5% of the input range. The log transform gives <b>227</b> levels and moves the median to 42%. A quantile transform scores marginally higher at 248 — and was rejected: the log is analytic, invertible, extrapolates beyond the training range, keeps its physical meaning, and is not tied to this dataset, which matters for the planned public-data transfer.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Porosity control is confounded with material family in this dataset — Nacho at 0.0223 against Pegaso at 0.0121. The conditioning has to let the model tell them apart, or a dose-response curve will show a mixture bias that looks exactly like a conditioning bug.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">18 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 19 — ORIENTATION: TWO OPPOSITE WRONG ANSWERS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">One omitted subtraction, <em>two</em> opposite wrong answers</h2>
+      <div class="tb-right"><span class="tag hollow">04 · Conditioning</span><span class="tag red">T-G · T-H</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 1fr 1.12fr; gap:26px; align-items:start;">
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div class="cards" style="grid-template-columns:1fr;">
+            <div class="card"><div class="strip red"></div><div class="cbody" style="gap:6px;">
+              <h4>T-G said: unidirectional</h4>
+              <p>Circular dispersion 0.145 for Nacho, one angle mode, ply steps near 0°. Read as "the dataset is not one material — Nacho is unidirectional." The domain expert disagreed.</p>
+            </div></div>
+            <div class="card"><div class="strip pink"></div><div class="cbody" style="gap:6px;">
+              <h4>T-H said: 0/90 cross-ply</h4>
+              <p>52% of Nacho ply blocks show two lobes at a median 85° separation, and the two directions trade power ply by ply at −0.32 correlation, negative in 94% of volumes. A careful, internally consistent analysis. Also wrong.</p>
+            </div></div>
+          </div>
+          <div class="panel dk">
+            <p><b>Both read the ply angle off the absolute angular power density</b>, which is dominated by a volume-constant term — mounting angle, <code>_aligned</code> resampling, ring and stripe artefacts. T-G read that constant as a single fibre direction; T-H read the same constant as a fixed second lobe 90° away.</p>
+          </div>
+        </div>
+        <div>
+          <div class="fig" style="height:324px; width:878px; margin:0 auto;"><img src="figs/ti_diagnosis.png" alt="Absolute angular density versus volume-mean-subtracted density"></div>
+          <div class="figcap">T-I · the diagnosis, isolated by changing one variable on T-H's own cached data — same window, slices, band, excision and window function.</div>
+          <div class="ledger" style="margin-top:12px;">
+            <div class="lrow head" style="grid-template-columns: 1fr 150px 150px 130px;"><span>Summary used</span><span>Pegaso</span><span>Nacho</span><span>Gap</span></div>
+            <div class="lrow" style="grid-template-columns: 1fr 150px 150px 130px;"><span class="d">Absolute density (T-G / T-H)</span><span class="v">0.838</span><span class="v">0.668</span><span class="v" style="color:var(--red);">+0.170</span></div>
+            <div class="lrow" style="grid-template-columns: 1fr 150px 150px 130px; border-bottom:1.5px solid var(--ink);"><span class="d">Volume mean subtracted</span><span class="v">0.875</span><span class="v">0.844</span><span class="v" style="color:var(--green);">+0.031</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Hypotheses tested and rejected before landing on the subtraction: a different voxel size (it is 25 µm everywhere), porosity bias (the sign reverses — suppressing pores makes the estimate <b>worse</b>, so pores are signal), and the 0/90 axis excision (a full window × excision factorial moves accuracy by only 0.1–0.3 points).</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">19 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 20 — T-I VALIDATION AND THE CONDITIONING VECTOR
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Validated against expert ground truth</h2>
+      <div class="tb-right"><span class="tag hollow">04 · Conditioning</span><span class="tag green">T-I · D32</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns: 1fr 1.22fr; gap:26px; align-items:start;">
+        <div>
+          <div class="fig" style="height:290px; width:600px; margin:0 auto;"><img src="figs/ti_accuracy.png" alt="Per-ply four-class accuracy against the expert ground truth"></div>
+          <div class="figcap">T-I · 78 volumes, 804 plies. 84.7% four-class accuracy against a 49.6% null; 88.6% with a leave-one-volume-out matched filter.</div>
+          <div class="panel dk" style="margin-top:12px;">
+            <h5>The estimator — the methodological contribution</h5>
+            <p style="font-family:'JetBrains Mono',monospace; font-size:19px; line-height:1.6;">R<sub>k</sub>(θ) = ⟨h(θ)⟩<sub>ply k</sub> − ⟨h(θ)⟩<sub>volume</sub>&nbsp;&nbsp;&nbsp;θ<sub>k</sub> = argmax R<sub>k</sub>(θ)</p>
+            <p style="margin-top:6px;">Median per-ply error 4.7°, 28% of volumes read perfectly. Per family: Pegaso 84.6, Nacho 85.2, JI 79.7 — the families the earlier tests separated are now <b>indistinguishable</b>, exactly as ground truth requires. That is the validation.</p>
+          </div>
+        </div>
+        <div>
+          <div class="micro" style="margin-bottom:10px;">The ldm05 per-patch conditioning vector</div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 40px 1fr 1.05fr 210px;"><span>#</span><span>Signal</span><span>Encoding</span><span>Injected as</span></div>
+            <div class="lrow" style="grid-template-columns: 40px 1fr 1.05fr 210px;"><span class="v">1</span><span class="t">Patch porosity</span><span class="d">log(φ + 1e-3), standardised</span><span><span class="chip blue">FiLM scalar</span></span></div>
+            <div class="lrow" style="grid-template-columns: 40px 1fr 1.05fr 210px;"><span class="v">2</span><span class="t">Relative depth</span><span class="d">t ∈ [0,1] between the outer faces</span><span><span class="chip blue">FiLM scalar</span></span></div>
+            <div class="lrow" style="grid-template-columns: 40px 1fr 1.05fr 210px;"><span class="v">3</span><span class="t">Distance to surface</span><span class="d">min(d, 64) / 64</span><span><span class="chip blue">FiLM scalar</span></span></div>
+            <div class="lrow" style="grid-template-columns: 40px 1fr 1.05fr 210px;"><span class="v">4</span><span class="t">Orientation profile</span><span class="d">(cos 2θ, sin 2θ) at 64 depths → pooled to 16 planes → broadcast in-plane</span><span><span class="chip green">input channels</span></span></div>
+            <div class="lrow" style="grid-template-columns: 40px 1fr 1.05fr 210px; border-bottom:1.5px solid var(--ink);"><span class="v">5</span><span class="t">Neighbour latents</span><span class="d">6 face neighbours + availability state</span><span><span class="chip green">input channels</span></span></div>
+          </div>
+          <div class="cols" style="grid-template-columns:1fr 1fr; gap:18px; margin-top:14px;">
+            <div class="panel">
+              <h5>Three encoding rules</h5>
+              <p>Pool the <b>components</b>, never the angle — averaging θ is wrong across the 180° wrap. Do <b>not</b> renormalise the pooled vector: where a plane straddles an interface, the shrinkage <i>is</i> the interface signal. Build θ(z) from the <b>nominal</b> sequence aligned to the scan, never from measured residuals.</p>
+            </div>
+            <div class="panel">
+              <h5>Deliberately dropped</h5>
+              <p>Global volume porosity (redundant once the field sets the mean, and the source of a real bug). In-plane x/y position (nothing varies with it). The 4θ term (one nominal angle per ply makes 2θ sufficient). Measured waviness — that is material variation for the model to <b>generate</b>, not a control input.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>The 84.7% is <b>oracle-aligned relative agreement</b>, not autonomous accuracy: the global rotation offset and hypothesis selection use the nominal labels. The estimator is validated for one coarse angle per ply on this layup — not as a local orientation estimator, and not for unidirectional laminates. The original justification, "the volume mean is isotropic", is also false; the correct description is within-specimen common-mode contrast.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">20 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 21 — ldm01 / ldm02
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">ldm01 → ldm02: the denoiser, and the first diagnostic</h2>
+      <div class="tb-right"><span class="tag hollow">05 · Diffusion</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1fr 1.15fr;">
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>The denoiser, fixed across every rung</h5>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Model</span><span>UNet3DDenoiser, all-3D</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Width / mult</span><span>128 · [1, 2, 4]</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Resolution flow</span><span>16³ → 8³ → 4³ → 2³ → 16³</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Conditioning</span><span>AdaGN / FiLM + input concat</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Schedule</span><span>cosine, T = 1000, s = 0.008</span></div>
+            <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Objective / sampler</span><span>ε-prediction · DDIM η = 0</span></div>
+          </div>
+          <div class="panel dk">
+            <h5>D23 · Neighbour availability by parity</h5>
+            <p>Anchor patches see every in-bounds neighbour as UNKNOWN; non-anchors see them all as EXISTS. The model is never shown a mixed state, because inference never produces one. Training distribution equals inference distribution by construction — chosen over random neighbour dropout for exactly that reason.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>The decode-regime diagnostic — a hypothesis killed cleanly</h5>
+            <p>Generated patches produced bad masks. The obvious suspect: we feed the decoder a clean μ point estimate, off its training support. So we swept z = μ + s·σ·ε over s ∈ {0 … 1} on real reconstructions.</p>
+            <div class="ledger" style="margin-top:10px;">
+              <div class="lrow head" style="grid-template-columns: 80px 1fr 1fr 1fr;"><span>s</span><span>Porosity MAE</span><span>Dice</span><span>PSNR</span></div>
+              <div class="lrow" style="grid-template-columns: 80px 1fr 1fr 1fr;"><span class="v">0.00</span><span class="v">0.0051</span><span class="v" style="color:var(--green);">0.711</span><span class="v">26.8</span></div>
+              <div class="lrow" style="grid-template-columns: 80px 1fr 1fr 1fr;"><span class="v">0.50</span><span class="v">0.0049</span><span class="v">0.709</span><span class="v">27.6</span></div>
+              <div class="lrow" style="grid-template-columns: 80px 1fr 1fr 1fr; border-bottom:1.5px solid var(--ink);"><span class="v">1.00</span><span class="v">0.0044</span><span class="v" style="color:var(--red);">0.687</span><span class="v">27.3</span></div>
+            </div>
+            <p style="margin-top:12px;">Mask quality is <b>better</b> at clean μ, not worse. Hypothesis rejected: the decoder handles μ fine. The damage is <b>upstream</b> — the generated latent is a poor approximation of the encoder posterior. That is what sent ldm02 to train on sampled z = μ + σε.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>ε-MSE is <b>not comparable</b> across the μ and μ+σε targets: ldm02's 0.48 against ldm01's 0.20 is expected, not a regression. A per-timestep breakdown shows the gap is the irreducible σ·ε floor at low t, given the VAE's σ ≈ 0.87 — not a normalisation bug.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">21 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 22 — ldm03 AND ITS DEATH
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">ldm03: guidance designed, then a run that could not be read</h2>
+      <div class="tb-right"><span class="tag hollow">05 · Diffusion</span><span class="tag red">failure</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1.15fr 1fr;">
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>D24 · Classifier-free guidance, nested and asymmetric</h5>
+            <p style="font-family:'JetBrains Mono',monospace; font-size:19px; line-height:1.6; background:var(--paper-dk); padding:12px 14px; border:1px solid var(--hair);">
+              ε̂ = ε(∅) + s<sub>por</sub>·[ε(por) − ε(∅)] + s<sub>nb</sub>·[ε(por, nb) − ε(por)]</p>
+            <p style="margin-top:10px;"><b>Two guidable buckets, not five.</b> The neighbour summary is pooled inside the UNet, so neighbour latents, availability and summary are inseparable; position is a weak boundary signal not worth its own pass.</p>
+            <p><b>Asymmetric nulls.</b> Zero is a valid porosity, so porosity gets a learned 512-dim null embedding. Neighbours already have a null — all-UNKNOWN is exactly the anchor state, so it costs no new parameter.</p>
+            <p><b>Nested, not symmetric.</b> Porosity and neighbours are correlated, and symmetric high-scale guidance on correlated conditions drifts off-manifold. Nested measures neighbour guidance <i>given</i> porosity, at 3 denoiser calls per step instead of 6.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="stats" style="gap:0;">
+            <div class="stat" style="padding-left:0;"><div class="n">7.1<small>×</small></div><div class="k">Generated latent std against real</div></div>
+            <div class="stat blue"><div class="n">24.8<small>%</small></div><div class="k">x̂₀ clamp saturation</div></div>
+          </div>
+          <div class="panel dk">
+            <h5>What actually happened</h5>
+            <p>The run finished and the loss looked fine. The samples were off-manifold by a factor of seven and <b>nobody was measuring it</b>. Worse, the first-stage VAE checkpoint for this rung was later lost, so no ldm03 output can be decoded at all — the run is unrecoverable, not merely bad.</p>
+          </div>
+          <div class="panel">
+            <h5>The two structural fixes</h5>
+            <p>Latents are now normalised <b>per channel</b> using train-split statistics stored in the latent store, validated against the VAE checkpoint at load time and failing loudly on mismatch. And ldm04 was defined as an <b>unconditional</b> rung from scratch, whose only job was to prove the normalisation fixed the off-manifold failure before any conditioning work resumed.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>The guidance sweep was never run on ldm03; s_por and s_nb stayed at 1.0, where the nested form telescopes to the plain conditional. Every piece of evidence about whether the conditioning works therefore comes from ldm05 — nothing in this deck rests on ldm03 outputs.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">22 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 23 — THE NEIGHBOUR LEAK
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">The neighbours were handing the model the <em>answer</em></h2>
+      <div class="tb-right"><span class="tag hollow">05 · Diffusion</span><span class="tag red">D38</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>1 · The measurement that condemns it</h5>
+          <p>With neighbours at offset 32, the +z neighbour reproduces the target's overlapping region at MAE <b>0.067</b>, against <b>0.744</b> for a random patch — a ratio of <b>0.09</b>. The neighbour latent was very nearly a literal copy of half the target.</p>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:19px; padding:8px 0 0; border-top:1px dashed var(--ink); margin-top:12px;"><span style="opacity:.7">Healthy, at offset 64</span><span style="color:var(--green);">0.86</span></div>
+        </div>
+        <div class="panel">
+          <h5>2 · And the coverage was total</h5>
+          <p>Opposite neighbours invert the <b>same</b> parity bit, so they always fall in the same group and always arrive together. One opposite pair tiles the target completely: −z supplies latent cells 0–7, +z supplies 8–15, across the full y and x extent. Result: <b>7 of the 8 parity groups received the target's entire content</b>. The model would learn to copy, not to generate.</p>
+        </div>
+        <div class="panel dk">
+          <h5>3 · How it was caught</h5>
+          <p>By a loss that was <b>too good</b>. The contaminated ldm05 run hit val 0.497 at step 1000 — already below ldm04's best-ever 0.524 at step 36k. The first reading was "the conditioning is informative." The information was the answer.</p>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1.25fr 1fr;">
+        <div class="panel">
+          <h5>The fix, and what it costs</h5>
+          <p><code>neighbour_offset = 64</code> — neighbours now <b>touch</b>, sharing zero voxels. <code>generation_stride = 64</code> — exact tiling, no overlap, and therefore <b>no blending</b>. <code>sample_stride</code> stays at 32, since dataset density was only ever a data multiplier. No dataset rebuild was needed: neighbours at ±64 are two steps of the existing stride-32 grid and were already in the store. This repealed two of the three assembly fixes decided two days earlier — both solved problems that only exist when neighbours overlap.</p>
+        </div>
+        <div class="panel">
+          <h5>Why removing the blending is an <i>improvement</i></h5>
+          <p>Blending <b>conceals</b> disagreement rather than resolving it. With exact tiling, continuity rests entirely on the learned conditioning, and seam quality becomes a <b>measured quantity</b> instead of a disguised artefact.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>The tempting alternative — a denser grid with averaged overlaps — is unsound for the same reason: the mean of two independent unit-variance latents has variance ½, so every seam would feed the decoder systematically shrunken latents. It also multiplies the dataset by 8 (≈18 M patches, ≈860 GB) and does not fix the leak.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">23 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 24 — D39 MONITORING PROTOCOL
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">What "converged" means when the loss will not tell you</h2>
+      <div class="tb-right"><span class="tag hollow">05 · Diffusion</span><span class="tag ink">D39</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 1.25fr 1fr; gap:26px; align-items:start;">
+        <div>
+          <div class="micro" style="margin-bottom:10px;">Generation health metrics · measured on 64 DDIM-50 samples every 2k steps</div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 70px 1fr 190px;"><span></span><span>Metric</span><span>Gate</span></div>
+            <div class="lrow" style="grid-template-columns: 70px 1fr 190px;"><span class="v big" style="color:var(--red);">B1</span><span class="d"><b>std-ratio, "wildness"</b> — per-channel std of generated latents over real. The primary off-manifold detector; ldm03 died at 7.1× with nobody watching.</span><span class="v">±10% of 1.0</span></div>
+            <div class="lrow" style="grid-template-columns: 70px 1fr 190px;"><span class="v big" style="color:var(--red);">B2</span><span class="d"><b>x̂₀ saturation</b> — fraction of clean-sample estimates hitting the ±10σ clamp.</span><span class="v">&lt; 1%</span></div>
+            <div class="lrow" style="grid-template-columns: 70px 1fr 190px;"><span class="v big" style="color:var(--red);">B3</span><span class="d"><b>Degenerate masks</b> — decoded φ below 1e-4 or above 0.5. The target is the <i>real</i> rate, not zero.</span><span class="v">≈ 6%</span></div>
+            <div class="lrow" style="grid-template-columns: 70px 1fr 190px;"><span class="v big" style="color:var(--red);">B4</span><span class="d"><b>Decoded porosity</b> vs the real validation distribution, plus Wasserstein-1.</span><span class="v">overlap real</span></div>
+            <div class="lrow" style="grid-template-columns: 70px 1fr 190px;"><span class="v big" style="color:var(--red);">B5</span><span class="d"><b>Seam ratio</b> — boundary-plane jump over the interior slice-to-slice baseline. Replaces blending as the assembly-quality measure.</span><span class="v">→ 1.0</span></div>
+            <div class="lrow" style="grid-template-columns: 70px 1fr 190px; border-bottom:1.5px solid var(--ink);"><span class="v big" style="color:var(--red);">B6</span><span class="d"><b>por_cond_mae</b> — |decoded φ − conditioned φ|. The project's primary metric, and meaningless while off-manifold.</span><span class="v">&lt; 0.005</span></div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>Val loss is not a stopping signal</h5>
+            <p>Across its entire run, ldm04's full-validation loss improved by <b>2.9%</b> — while its samples went from garbage to near-manifold. Every small improvement reset the patience counter. Stopping decisions come from the B-metrics flattening; early stopping is a backstop only.</p>
+          </div>
+          <div class="panel dk">
+            <h5>Two near-misdiagnoses that built this protocol</h5>
+            <p><b>EMA lag.</b> At decay 0.9999 the averaging horizon is ≈10k steps. At step 20k, ldm04 measured 7.1 on EMA weights while the raw model was at 3.8. Judge early training on raw weights.</p>
+            <p><b>Bucket blindness.</b> The zero-neighbour case is the <i>rarest</i> in training, 1 group in 8. Measuring only it gave 4.30 when the same checkpoint with real context was at 3.59 — and nearly triggered an unnecessary restart. Every check is now split by 0/2/4/6 neighbours, weighted 1/3/3/1.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>B1 is crude by design — it sees spread, not content — so it is the first gate, never the last. And while saturation is high, B2 biases B1 <b>downward</b>, because clipped values understate spread: the two are not independent until saturation drops.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">24 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 25 — ldm05 TRAJECTORY
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">ldm05: 130k steps, and the primary metric crossed</h2>
+      <div class="tb-right"><span class="tag hollow">05 · Diffusion</span><span class="tag green">target met</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns: 1.3fr 1fr; gap:26px; align-items:start;">
+        <div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px;">
+              <span>Step</span><span>Wildness raw</span><span>Wildness EMA</span><span>Patch φ error</span><span>Kill-switch 0.005 / 0.05</span><span>Verdict</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px;"><span class="v">52k</span><span class="v">2.84</span><span class="v">5.94</span><span class="v">0.047</span><span class="v">—</span><span class="d">seed</span></div>
+            <div class="lrow" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px;"><span class="v">60k</span><span class="v">2.33</span><span class="v">4.91</span><span class="v">0.031</span><span class="v">0.011 / 0.055</span><span><span class="chip green">converging</span></span></div>
+            <div class="lrow" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px;"><span class="v">80k</span><span class="v">2.12</span><span class="v">2.76</span><span class="v">0.021</span><span class="v">0.009 / 0.045</span><span><span class="chip green">converging</span></span></div>
+            <div class="lrow" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px;"><span class="v">106k</span><span class="v">1.53</span><span class="v">1.95</span><span class="v" style="color:var(--green);">0.0037</span><span class="v">0.0049 / 0.0453</span><span><span class="chip green">converging</span></span></div>
+            <div class="lrow" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px;"><span class="v">120k</span><span class="v">1.71</span><span class="v">1.84</span><span class="v">0.0045</span><span class="v">0.0071 / 0.0550</span><span><span class="chip green">converging</span></span></div>
+            <div class="lrow" style="grid-template-columns: 110px 1fr 1fr 1.1fr 1.2fr 190px; border-bottom:1.5px solid var(--ink);"><span class="v">130k</span><span class="v">1.65</span><span class="v">1.78</span><span class="v">0.0056</span><span class="v" style="color:var(--green);">0.0051 / 0.0523</span><span><span class="chip red">stalled −3.4%</span></span></div>
+          </div>
+          <div class="cols" style="grid-template-columns:1fr 1fr; gap:18px; margin-top:16px;">
+            <div class="panel">
+              <h5>The conditioning is alive and strengthening</h5>
+              <p>Neutralising one input at a fixed seed moves the output by a measurable fraction of the total noise scale: porosity from 9% to <b>13.7%</b> and orientation from 6% to <b>11.0%</b> over training. And ldm05's raw wildness (1.53) beats ldm04's (1.9–2.1) — the conditioning <b>improves</b> the manifold fit rather than fighting it.</p>
+            </div>
+            <div class="panel dk">
+              <h5>The stop was the protocol working</h5>
+              <p>STALLED arrives exactly at the end of the cosine schedule. Earlier, early stopping had cut the run at 112k while the D39 diagnostics were still improving — precisely the failure mode D39 documents. It was resumed with patience 0 to let the schedule finish.</p>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="stats" style="gap:0;"><div class="stat" style="padding-left:0;"><div class="n">0.0037</div><div class="k">Patch φ error at 106k — the project's primary gate is 0.005</div></div></div>
+          <div class="panel">
+            <h5>Gates <span style="color:var(--red);">not</span> met — stated plainly</h5>
+            <p><b>Wildness</b> stalls at ≈1.65 raw and 1.78 EMA. The gate is ±10% of 1.0. DDIM-200 gives 1.57, so more steps help slightly but do not close it.</p>
+            <p><b>Degenerate masks</b> at 14–16% against a real rate of ≈6%.</p>
+            <p><b>x̂₀ saturation</b> 2% at DDIM-50; only DDIM-200, at 0.5%, meets the &lt;1% gate.</p>
+            <p>The 1.53 reading at 106k was n = 8 noise. The patch φ error oscillates around the gate: 0.0037 → 0.0045 → 0.0056, with the well-conditioned buckets at 0.002–0.003 and the sparse-context buckets at ≈0.009.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>One training run. Batch size, learning rate, warm-up, weight decay and gradient clipping were <b>inherited and never swept</b> — they must be reported as untuned. Nothing here separates the contribution of the architecture from that of the schedule.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">25 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 26 — SEQUENTIAL VS JOINT
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Trained conditioning was not enough for invisible seams</h2>
+      <div class="tb-right"><span class="tag hollow">06 · Sampler</span></div>
+    </div>
+    <div class="stack">
+      <div class="lead rv">During ldm05 training the seam diagnostic did something unwelcome: as the model matured, seams got <b>worse</b> — grayscale 1.71 → 2.96 between steps 40k and 80k. Interiors sharpen; joints do not.</div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1.05fr;">
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>The joint sampler</h5>
+            <p>Overlapping windows at stride 32 denoise <b>jointly</b>: ε predictions are fused on one shared latent canvas at every DDIM step, and the canvas is decoded once at the end on the stride-64 tiling grid. This is MultiDiffusion's mechanism, applied inside the reverse process — inference-time only, no retraining, exactly as pre-registered.</p>
+          </div>
+          <div class="panel dk">
+            <h5>Why fusing <i>predictions</i> and not outputs</h5>
+            <p>Averaging decoded patches, or averaging latents, is unsound: the mean of two independent unit-variance latents has variance ½, which is systematically off-manifold — the same defect class as the decode-scale bug. Averaging the model's ε predictions inside the reverse process is the principled form.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="micro">Head-to-head at the ldm05 86k checkpoint · φ = 0.02, layup A, 192³, DDIM-50</div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1.3fr 1fr 1fr;"><span>Measure</span><span>Sequential</span><span>Joint</span></div>
+            <div class="lrow" style="grid-template-columns: 1.3fr 1fr 1fr;"><span class="d">Seam ratio, grayscale (→1)</span><span class="v">4.41</span><span class="v" style="color:var(--green);">2.34</span></div>
+            <div class="lrow" style="grid-template-columns: 1.3fr 1fr 1fr;"><span class="d">Seam ratio, mask</span><span class="v">2.61</span><span class="v" style="color:var(--green);">1.82</span></div>
+            <div class="lrow" style="grid-template-columns: 1.3fr 1fr 1fr;"><span class="d"><b>Delivered φ, asked 0.02</b></span><span class="v" style="color:var(--red);">0.194</span><span class="v" style="color:var(--green);">0.0192</span></div>
+            <div class="lrow" style="grid-template-columns: 1.3fr 1fr 1fr; border-bottom:1.5px solid var(--ink);"><span class="d">Wall clock / memory</span><span class="v">15 s / 1.05 GB</span><span class="v">70 s / 1.05 GB</span></div>
+          </div>
+          <div class="panel">
+            <h5>The unexpected part</h5>
+            <p>Seams nearly halved — expected. But the <b>volume-porosity overshoot largely disappeared too</b>: joint mode delivered the requested porosity almost exactly, where sequential delivered ten times the request. The long-standing "global porosity comes out far above the target" mystery was, in substantial part, an <b>assembly artefact</b>.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>At the 130k checkpoint a single-seed rerun appeared to <b>invert</b> this result, with joint mode delivering 0.0478 for a 0.02 request. Three seeds showed it was seed noise: the mean is 0.0359 ± 0.0072. No conclusion in this deck rests on a one-seed comparison — which is why the next slides use 153 volumes.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">26 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 27 — THE THREE ARMS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">The evaluation campaign: three sampler arms</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag ink">153 volumes</span></div>
+    </div>
+    <div class="stack">
+      <div class="cards rv" style="grid-template-columns: repeat(3, 1fr);">
+        <div class="card"><div class="strip blue"></div><div class="cbody">
+          <h4>seq</h4>
+          <p>Sequential generation on the eight-group parity schedule, with trained neighbour latents and true distance-to-surface. The mode the model was actually trained for.</p>
+          <div class="drule">
+            <div class="spec"><span>mode</span><span>sequential</span></div>
+            <div class="spec"><span>semantics</span><span>specimen</span></div>
+            <div class="spec"><span>s_por</span><span>1.0</span></div>
+          </div>
+        </div></div>
+        <div class="card"><div class="strip orange"></div><div class="cbody">
+          <h4>joint_legacy</h4>
+          <p>Joint denoising with neighbours set all-UNKNOWN — the overlap supplies context implicitly — but true distance-to-surface. Internally contradictory at the volume edges; kept as an evaluation arm.</p>
+          <div class="drule">
+            <div class="spec"><span>mode</span><span>joint</span></div>
+            <div class="spec"><span>semantics</span><span>legacy</span></div>
+            <div class="spec"><span>s_por</span><span>1.5</span></div>
+          </div>
+        </div></div>
+        <div class="card"><div class="strip green"></div><div class="cbody">
+          <h4>joint_oob</h4>
+          <p>Joint denoising with directional out-of-bounds encoding on the faces that leave the volume, plus true distance-to-surface. The volume is treated as being the whole specimen.</p>
+          <div class="drule">
+            <div class="spec"><span>mode</span><span>joint</span></div>
+            <div class="spec"><span>semantics</span><span>specimen</span></div>
+            <div class="spec"><span>s_por</span><span>1.5</span></div>
+          </div>
+        </div></div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1.2fr 1fr;">
+        <div class="panel">
+          <h5>What "specimen semantics" honestly implies</h5>
+          <p>If the generated volume <i>is</i> the specimen, then near its faces the conditioning legitimately asks for exterior air — because near-surface training patches contain unlabelled exterior air (T-C). The arm is not misconfigured; it is faithfully requesting something the training data never labelled. Holding this hypothesis explicitly is what let the audit on slide 32 <b>refute</b> it as the main explanation.</p>
+        </div>
+        <div class="panel dk">
+          <h5>Campaign shape</h5>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Dose-response</span><span>63 vols · 192³</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">CFG sweep</span><span>72 vols · 192³</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Layup round-trip</span><span>18 vols · 1024×1024×192</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Seeds</span><span>101 / 202 / 303</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Sampler</span><span>DDIM-50, raw weights</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">27 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 28 — DOSE RESPONSE
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Ask for a porosity — measure what arrives</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag blue">63 volumes</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 0.82fr 1.5fr; gap:22px; align-items:start;">
+        <div>
+          <div class="fig" style="height:354px; width:476px; margin:0 auto;"><img src="figs/dose_global.png" alt="Delivered volume porosity against requested porosity, by arm"></div>
+          <div class="figcap">Global: delivered vs requested volume porosity, 7 targets × 3 arms × 3 seeds.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:354px; width:997px; margin:0 auto;"><img src="figs/dose_local.png" alt="Per-cell delivered porosity against the local target of the coherent field"></div>
+          <div class="figcap">Local: every 64³ cell against its own target from the coherent field — 567 points per arm.</div>
+        </div>
+      </div>
+      <div class="rv" style="display:grid; grid-template-columns: 1.25fr 1fr; gap:24px;">
+        <div class="ledger">
+          <div class="lrow head" style="grid-template-columns: 1fr 130px 150px 130px 160px 170px;"><span>Arm</span><span>Slope</span><span>Intercept</span><span>Global R²</span><span>Local R²</span><span>Cells in gate</span></div>
+          <div class="lrow" style="grid-template-columns: 1fr 130px 150px 130px 160px 170px;"><span class="t">seq</span><span class="v">1.261</span><span class="v">−0.0012</span><span class="v">0.960</span><span class="v" style="color:var(--red);">0.496</span><span class="v">48%</span></div>
+          <div class="lrow" style="grid-template-columns: 1fr 130px 150px 130px 160px 170px;"><span class="t">joint_legacy</span><span class="v">1.213</span><span class="v">−0.0066</span><span class="v">0.995</span><span class="v">0.952</span><span class="v">55%</span></div>
+          <div class="lrow" style="grid-template-columns: 1fr 130px 150px 130px 160px 170px; border-bottom:1.5px solid var(--ink);"><span class="t" style="color:var(--green);">joint_oob</span><span class="v">1.226</span><span class="v">−0.0041</span><span class="v">0.998</span><span class="v" style="color:var(--green);">0.965</span><span class="v">59%</span></div>
+        </div>
+        <div class="panel dk">
+          <h5>The result that matters</h5>
+          <p>Globally all three arms look similar. <b>Locally they do not.</b> Sequential obeys the local field at R² 0.496 with runaway cells up to 0.51 absolute error; joint_oob obeys it at <b>0.965</b>, median absolute error 0.0030. The local conditioning is honoured in joint mode and largely ignored in sequential mode.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>Every arm overshoots with a slope near <b>1.22</b>. joint_oob passes the volume gate 3 seeds out of 3 at every target ≤ 0.03, and <b>both joint arms fail at targets ≥ 0.07</b>. Fewer than 60% of individual cells fall inside the gate even in the best arm.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">28 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 29 — CFG SWEEP
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Guidance: how hard to push the porosity condition</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag blue">72 volumes</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 1.4fr 1fr; gap:26px; align-items:start;">
+        <div>
+          <div class="fig" style="height:354px; width:768px; margin:0 auto;"><img src="figs/cfg_delivered.png" alt="Delivered porosity against guidance scale for each arm and target"></div>
+          <div class="figcap">Delivered φ against s_por ∈ {0.5, 1, 1.5, 2} for targets 0.02 and 0.05, all three arms, 3 seeds.</div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1fr 1fr 1fr;"><span>Arm</span><span>Best at 0.02</span><span>Best at 0.05</span></div>
+            <div class="lrow" style="grid-template-columns: 1fr 1fr 1fr;"><span class="t">seq</span><span class="v">2.0 <span class="chip green">pass</span></span><span class="v">1.5 <span class="chip red">fail</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1fr 1fr 1fr;"><span class="t">joint_legacy</span><span class="v">1.5 <span class="chip green">pass</span></span><span class="v">1.5 <span class="chip green">pass</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1fr 1fr 1fr; border-bottom:1.5px solid var(--ink);"><span class="t">joint_oob</span><span class="v">1.5 <span class="chip green">0.0006</span></span><span class="v">1.0 <span class="chip red">0.0054</span></span></div>
+          </div>
+          <div class="panel">
+            <h5>Three readings</h5>
+            <p><b>The bias was under-guidance, not a structural defect.</b> joint_oob at s_por 1.5 hits |error| 0.0006 at target 0.02 — the best porosity control the project has produced.</p>
+            <p><b>Guidance is also a variance clamp.</b> Seed spread falls by a factor of 4 to 10 when guidance is on.</p>
+            <p><b>Sanity holds.</b> At s_por = 0 the model delivers ≈0.21 and ignores the request entirely, so the conditioning pathway is genuinely doing the work.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p><b>No single guidance scale covers the range.</b> The optimum decreases as the target rises — about 1.5 below 0.03 and about 1.0 above it — and raising s_por to 1.5 range-wide rotates the curve (slope 1.02 → 1.21) so the high end overshoots again. A monotone s_por(target) map is a candidate recipe, and it is <b>not yet validated on unseen seeds</b>. Guidance also degrades seams gradually, from 2.2 to 3.1.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">29 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 30 — LAYUP ROUND-TRIP
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Write a layup, generate, read it back</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag green">unseen layups</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 0.85fr 1.5fr; gap:26px; align-items:start;">
+        <div>
+          <div class="fig" style="height:366px; width:392px; margin:0 auto;"><img src="figs/layup_recovery.png" alt="Recovered ply angle against requested ply angle"></div>
+          <div class="figcap">Requested against recovered ply angle, 1024×1024×192 volumes, T-I estimator adapted and validated on real volumes to 0.5° median agreement.</div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div class="micro">Median absolute ply error / strict 4-class accuracy · pore_axes channel</div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1.15fr 1fr 1fr 1fr;"><span>Layup</span><span>seq</span><span>joint_legacy</span><span>joint_oob</span></div>
+            <div class="lrow" style="grid-template-columns: 1.15fr 1fr 1fr 1fr;"><span class="t">A · training</span><span class="v">9.5° / 65%</span><span class="v">6.0° / 90%</span><span class="v">7.5° / 75%</span></div>
+            <div class="lrow" style="grid-template-columns: 1.15fr 1fr 1fr 1fr;"><span class="t">B · permuted, <b>unseen</b></span><span class="v" style="color:var(--red);">24.0° / 40%</span><span class="v">3.5° / 95%</span><span class="v" style="color:var(--green);">2.5° / 95%</span></div>
+            <div class="lrow" style="grid-template-columns: 1.15fr 1fr 1fr 1fr;"><span class="t">C · simple, <b>unseen</b></span><span class="v" style="color:var(--red);">34.5° / 40%</span><span class="v">7.5° / 85%</span><span class="v">6.0° / 85%</span></div>
+            <div class="lrow" style="grid-template-columns: 1.15fr 1fr 1fr 1fr; border-bottom:1.5px solid var(--ink);"><span class="t">Delivered φ, asked 0.03</span><span class="v" style="color:var(--red);">0.059</span><span class="v">0.020</span><span class="v">0.019</span></div>
+          </div>
+          <div class="cols" style="grid-template-columns:1fr 1fr; gap:18px;">
+            <div class="panel">
+              <h5>The layup lives in the pores</h5>
+              <p>Recovery through the pore principal-axis channel correlates at <b>R = 0.63</b>; through grayscale slice FFT, at <b>R = 0.07</b>. The ply sequence is written into where the voids sit, not into the grey texture. Individual fibres are not resolved at 25 µm, so this is the physically sensible channel.</p>
+            </div>
+            <div class="panel dk">
+              <h5>The sequential failure was <i>assembly</i></h5>
+              <p>Sequential mode degrades angles <b>and</b> loses porosity control on unseen layups (0.059 for a 0.03 request), with the error growing as the layup moves further from the training sequence. Joint mode recovers both — so the failure was not the model being off-manifold, it was how the patches were put together.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>74 of 78 training volumes share layup A, so B and C <b>demonstrate</b> generalisation rather than validating it — with two seeds each. The ±45 sign ambiguity documented in T-I persists in the generated volumes. And the pooled combined estimator is much weaker on generated volumes (53%) than the pore-axes channel alone, so the headline numbers are channel-specific.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">30 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 31 — THE AIR AUDIT: THE FINDING
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Air the mask never labels</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag red">critical finding</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns: 0.46fr 1.54fr; gap:26px; align-items:start;">
+        <div>
+          <div class="fig" style="height:464px; width:375px; margin:0 auto;"><img src="figs/audit_montage.png" alt="Worst offending slices: grayscale, pore mask, and unmasked air overlay for one real and three generated volumes"></div>
+          <div class="figcap">Worst offending slices. Top row real; below, one volume per arm. Red = dark air the mask does not label, blue = mask.</div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div style="display:grid; grid-template-columns: 0.95fr 1.05fr; gap:24px; align-items:start;">
+            <div>
+              <div class="fig" style="height:340px; width:587px; margin:0 auto;"><img src="figs/audit_by_arm.png" alt="Unmasked air fraction by sampler arm and experiment"></div>
+              <div class="figcap">Unmasked air fraction by arm and experiment, with the conservative bound.</div>
+            </div>
+            <div class="panel">
+              <h5>The detector is defensible</h5>
+              <p>Decoder-native u8 scale, calibrated on three real volumes against their ground-truth masks. Best estimate T = 185 at pooled pore Dice <b>0.799</b>; a conservative bound at T = 178 chosen so false positives on <b>real</b> volumes stay ≤0.2%. Measured real baseline <b>0.002–0.003</b>, with a 300-voxel minimum component so only coherent air masses count. Every generated number sits one to two orders of magnitude above that baseline, in every arm.</p>
+            </div>
+          </div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1.1fr 1fr 1fr 1fr;"><span>Experiment</span><span>seq</span><span>joint_legacy</span><span>joint_oob</span></div>
+            <div class="lrow" style="grid-template-columns: 1.1fr 1fr 1fr 1fr;"><span class="d">Dose-response, 192³</span><span class="v">0.235</span><span class="v">0.289</span><span class="v" style="color:var(--green);">0.151</span></div>
+            <div class="lrow" style="grid-template-columns: 1.1fr 1fr 1fr 1fr;"><span class="d">CFG sweep, 192³</span><span class="v">0.254</span><span class="v">0.188</span><span class="v" style="color:var(--green);">0.127</span></div>
+            <div class="lrow" style="grid-template-columns: 1.1fr 1fr 1fr 1fr; border-bottom:1.5px solid var(--ink);"><span class="d"><b>Layup, 1024×1024×192</b></span><span class="v" style="color:var(--red);">0.613</span><span class="v" style="color:var(--red);">0.570</span><span class="v" style="color:var(--red);">0.617</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Caveat</span>
+        <p>The detector is a grayscale threshold, and real masks are themselves annotations that miss some dark features (drilled holes, edge effects), so pooled Dice ≈0.8 is the ceiling. Every number carries a conservative lower bound and a ±σ sensitivity band of about ±0.02–0.05. A material-mode cross-check (generated mode ≈208 against real ≈209) rules out a brightness artefact.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">31 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 32 — THE AIR AUDIT: WHAT IT BREAKS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Where the air is massive, the mask says nothing</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag red">mask collapse</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns:1fr 1fr; gap:22px;">
+        <div>
+          <div class="fig" style="height:258px; width:540px; margin:0 auto;"><img src="figs/audit_interior.png" alt="Interior versus edge air density by arm"></div>
+          <div class="figcap">Local air density in the ≤32-voxel edge shell against the interior, per arm.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:258px; width:504px; margin:0 auto;"><img src="figs/audit_collapse.png" alt="Mask capture of dark air against cell air fraction"></div>
+          <div class="figcap">Mask capture of dark air against per-cell air fraction, 17 469 cells of 64³.</div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>The OOB hypothesis is refuted</h5>
+          <p>If specimen semantics were the cause, the excess would sit at the edges. It does not: joint_legacy carries <b>more interior than edge</b> air (0.32 against 0.26), and in the large layup volumes interior air is 0.35–0.42 of the <i>whole volume</i> in every arm. The semantics explains the edge excess at most — it cannot explain the interior.</p>
+        </div>
+        <div class="panel">
+          <h5>The air percolates</h5>
+          <p>Largest unmasked connected component: median 8–23 mm³ per 192³ volume, and <b>1800–2200 mm³</b> per layup volume — an equivalent diameter of 15–16 mm, a single mass spanning the volume. This is not scattered noise; it is structure.</p>
+        </div>
+        <div class="panel dk">
+          <h5>Collapse is progressive, then total</h5>
+          <p>Per 64³ cell, dark-air fraction and mask/grayscale disagreement correlate at <b>r = 0.95–1.00</b>. Sequential holds capture near 0.8 up to ≈5% cell air and then collapses; both joint arms capture only 0.3–0.5 even at low air. Above ≈15% cell air, capture is <b>0.02–0.03</b> in every arm.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp">Consequence</span>
+        <p>Absolute mask-based porosity numbers <b>seriously undercount</b> the real air content at large scale, and the material description they imply is not trustworthy there. The 192³ dose-response curves keep their comparative value between arms — a like-for-like ranking — but the absolute φ claims at 1024 scale do not survive this audit. Bigger canvases are worse: ≈0.6 unmasked air at 1024 against 0.13–0.29 at 192³ in the same arms.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">32 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 33 — SCOREBOARD
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Scoreboard: what is proven, what is not</h2>
+      <div class="tb-right"><span class="tag hollow">07 · Evaluation</span><span class="tag ink">honest ledger</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 1.55fr 1fr; gap:26px; align-items:stretch; flex:1 1 auto; min-height:0;">
+        <div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span>Gate</span><span>Target</span><span>Measured</span><span>Verdict</span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Patch porosity control (B6)</span><span class="v">&lt; 0.005</span><span class="v">0.0037 – 0.0056</span><span><span class="chip yellow">marginal</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Kill-switch, 0.005 request</span><span class="v">&lt; 0.005 error</span><span class="v">0.0051 delivered</span><span><span class="chip green">pass</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Local dose-response, joint_oob</span><span class="v">R² high</span><span class="v">0.965</span><span><span class="chip green">pass</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Volume φ at targets ≥ 0.07</span><span class="v">slope ≈ 1.0</span><span class="v">slope 1.21 – 1.23</span><span><span class="chip red">fail</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Unseen layup recovery</span><span class="v">≤ 10° median</span><span class="v">2.5° / 6.0°</span><span><span class="chip green">pass</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Seam ratio, grayscale (B5)</span><span class="v">→ 1.0</span><span class="v">1.5 – 3.9 joint</span><span><span class="chip yellow">partial</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Seam ratio, mask</span><span class="v">→ 1.0</span><span class="v">≈ 2.0 – 2.8 both modes</span><span><span class="chip red">fail</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Latent std-ratio (B1)</span><span class="v">1.0 ± 10%</span><span class="v">1.65 raw / 1.78 EMA</span><span><span class="chip red">fail</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">Degenerate masks (B3)</span><span class="v">≈ 6%</span><span class="v">14 – 16%</span><span><span class="chip red">fail</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px;"><span class="d">x̂₀ saturation (B2)</span><span class="v">&lt; 1%</span><span class="v">2% at 50 · 0.5% at 200</span><span><span class="chip yellow">steps</span></span></div>
+            <div class="lrow" style="grid-template-columns: 1.5fr 200px 220px 150px; border-bottom:1.5px solid var(--ink);"><span class="d">Unmasked interior air</span><span class="v">≈ 0.003 real</span><span class="v">0.036 – 0.384</span><span><span class="chip red">fail</span></span></div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>Method limitations, stated once and plainly</h5>
+            <p><b>One training run.</b> No seed variation at the training level, and the optimisation hyperparameters were inherited, never swept.</p>
+            <p><b>Few seeds at evaluation.</b> Three per cell, two for the layup experiment. Seed spread is reported, but the distributions are not tight enough for fine per-cell ranking.</p>
+            <p><b>One layup family.</b> 74 of 78 volumes. Generalisation to new stacking sequences is demonstrated, not validated.</p>
+            <p><b>No baselines yet.</b> SliceGAN, a pixel-space DDPM, and a Naiff-style comparison are deliberately scheduled after porosity control closes — so there is no external reference point in this deck.</p>
+            <p><b>No downstream evaluation yet.</b> The synthetic-to-real segmentation transfer that would prove usefulness has not been run.</p>
+          </div>
+          <div class="panel dk">
+            <h5>The honest one-line summary</h5>
+            <p>Control works and is measurable. The generated <b>material</b> is not yet trustworthy at large canvas scale.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">33 / 42</div>
+</section>
+
+<!-- =====================================================================
+     SLIDE 34 — ldm06 AND ROADMAP
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">ldm06: teach the model where material <em>is</em></h2>
+      <div class="tb-right"><span class="tag hollow">08 · Outlook</span><span class="tag ink">D40</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns: 1.5fr 1fr; gap:26px; align-items:start;">
+        <div>
+          <div class="cards" style="grid-template-columns: repeat(2, 1fr);">
+            <div class="card"><div class="strip red"></div><div class="cbody">
+              <h4>1 · Labelled material map</h4>
+              <p><code>onlypores</code> already returns a material boundary. Store it per patch at latent resolution and feed it as an input channel. At inference it is <b>painted</b>: all-material for interiors, "no material here" outside the specimen, arbitrary shapes as a new generative control.</p>
+            </div></div>
+            <div class="card"><div class="strip orange"></div><div class="cbody">
+              <h4>2 · Mask-aware auxiliary loss</h4>
+              <p>ε-MSE is blind to air and to φ. Add an auxiliary term in decoded x̂₀ space at low t: air outside the material map, |mask mean − conditioned φ|, grayscale/mask agreement, and the real patch mask. Same objective, reweighted in the space that matters. Cost ≈1.3–1.5× per step.</p>
+            </div></div>
+            <div class="card"><div class="strip blue"></div><div class="cbody">
+              <h4>3 · Neighbours for joint mode</h4>
+              <p>Today the trained neighbour channels have no valid input in joint mode, so they are set all-UNKNOWN. Train them with random corruption at a declared noise level, then feed them at inference from the canvas x̂₀ at ±64 voxels, with a per-neighbour descriptor.</p>
+            </div></div>
+            <div class="card"><div class="strip green"></div><div class="cbody">
+              <h4>4 · Directional distances</h4>
+              <p>Replace the single distance-to-surface scalar with six per-face distances, consistent with the OOB flags — so "which way is the outside" is expressible, not just "how far".</p>
+            </div></div>
+          </div>
+          <div class="panel dk" style="margin-top:16px;">
+            <h5>Pre-registered gates — written before the run, not after</h5>
+            <p>Unmasked interior air ≤2% at 192³ and ≤8% at 1024 scale (against 15% / 38% today). Mask pore capture ≥0.8 in cells with ≤5% air (against 0.3–0.5). No regression on E2: local dose-response R² ≥0.95, unseen layups ≤5° median. Budget ≈2.5 GPU-days for the base run, 7–8 days including the two ablations.</p>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div class="fig" style="height:274px; width:513px; margin:0 auto;"><img src="figs/probe_latent.png" alt="Latent statistics of high-air versus low-air cells"></div>
+          <div class="figcap">Pre-training probe: 150 high-air and 93 low-air cells re-encoded through the frozen VAE.</div>
+          <div class="panel">
+            <h5>The probe already says something useful</h5>
+            <p>High-air cells are <b>not</b> wilder — std ratio 0.98 against 1.08 — but they are <b>displaced</b>: per-channel mean shift 0.383 against 0.178 in train-std units, Cohen's d = 1.17. One channel carries almost all of it, correlating with dark-air fraction at <b>r = 0.956</b>. The failure is a mean shift in a specific latent direction, not a variance blow-up — which is what makes a targeted conditioning and loss fix plausible.</p>
+          </div>
+          <div class="panel">
+            <h5>Then</h5>
+            <p>DDIM step sweep {50, 100, 200, 300} to separate discretisation from model error · baselines (SliceGAN, pixel DDPM, Naiff 2025) · downstream 3D U-Net synthetic-to-real transfer · Paper 1 to IEEE TIP, November 2026.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">34 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX DIVIDER
+     ===================================================================== -->
+<section class="slide">
+  <div class="ribbons" style="top: 58%; height: 420px;">
+    <div class="ribbon" style="top: 0;    background: var(--blue);"></div>
+    <div class="ribbon" style="top: 84px; background: var(--green);"></div>
+    <div class="ribbon" style="top: 168px;background: var(--yellow);"></div>
+    <div class="ribbon" style="top: 252px;background: var(--orange);"></div>
+    <div class="ribbon" style="top: 336px;background: var(--red);"></div>
+  </div>
+  <div class="petals" style="left: 1380px; top: 120px; width: 340px; height: 280px;">
+    <div class="petal" style="left: 0;    top: 30px;  width: 132px; background: var(--pink);"></div>
+    <div class="petal" style="left: 86px; top: 0;     width: 118px; background: var(--yellow);"></div>
+    <div class="petal" style="left: 168px;top: 54px;  width: 150px; background: var(--blue);"></div>
+    <div class="petal" style="left: 52px; top: 118px; width: 128px; background: var(--orange);"></div>
+  </div>
+  <div style="position:absolute; left:64px; top:70px;"><span class="micro micro-xl">Backup material</span></div>
+  <h2 class="disp" style="position:absolute; left:60px; top:150px; margin:0; font-size:180px; line-height:0.86; color:var(--ink);">Appendix</h2>
+  <div style="position:absolute; left:64px; top:400px; width:940px;">
+    <div class="ledger">
+      <div class="lrow head" style="grid-template-columns: 90px 1fr;"><span>Slide</span><span>Contents</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr;"><span class="v">36</span><span class="d">Orientation deep dive — T-G and T-H in full</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr;"><span class="v">37</span><span class="d">T-I extras — measured against truth, and the class confusion matrix</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr;"><span class="v">38</span><span class="d">The full VAE compression sweep, all three families</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr;"><span class="v">39</span><span class="d">Seam behaviour against target and against guidance</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr;"><span class="v">40</span><span class="d">ldm05 configuration and the sampling constants</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr;"><span class="v">41</span><span class="d">Void detector calibration and the eval_v2 caveat list</span></div>
+      <div class="lrow" style="grid-template-columns: 90px 1fr; border-bottom:1.5px solid var(--ink);"><span class="v">42</span><span class="d">Decisions index D1 – D40</span></div>
+    </div>
+  </div>
+  <div class="seal" style="position:absolute; right:96px; bottom:150px; width:170px;"><span>A</span></div>
+  <div class="pagenum">35 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 1 — ORIENTATION DEEP DIVE
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · orientation, the long version</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag orange">T-G · T-H</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns:0.62fr 1.38fr; gap:22px; align-items:start;">
+        <div>
+          <div class="fig" style="height:300px; width:304px; margin:0 auto;"><img src="figs/tg_depth.png" alt="Orientation against depth for example volumes"></div>
+          <div class="figcap">T-G · orientation against depth. Autocorrelation of exp(2iθ) troughs sharply at lag 20–23 voxels — one ply pitch — in every volume, meaning the angle turns 45–90° at each interface.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:300px; width:892px; margin:0 auto;"><img src="figs/th_lobes.png" alt="Lobe counts per ply block by specimen family"></div>
+          <div class="figcap">T-H · lobe counts per ply block. 52% of Nacho blocks show two lobes at a median 85° separation; Pegaso and Juan Ignacio separate at 46° and 45°.</div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>What T-G got right</h5>
+          <p>Ply interfaces coincide with porosity maxima: the porosity profile correlates with the orientation change rate at +0.257 at zero lag, positive in 85% of volumes, and 98% of the strong cases peak within 3 voxels of zero lag or one ply pitch. That is a genuine, independent confirmation of the T-A periodicity — and a good physical story for the paper.</p>
+        </div>
+        <div class="panel">
+          <h5>The resolution limit, stated honestly</h5>
+          <p>Individual fibres are <b>not</b> resolved: a 7 µm fibre is about one voxel at 25 µm. Anisotropy grows with scale — 0.071 at 8–16 voxels, 0.188 at 16–64, 0.333 at 64–256 — so the signal is <b>tow-level</b>: tow bands and resin channels, not fibres.</p>
+        </div>
+        <div class="panel dk">
+          <h5>The artefact control T-H ran</h5>
+          <p>The discrete FFT puts kx = 0 and ky = 0 into single angular bins, producing a one-bin spike at exactly 0° and 90° in every volume. Excised; ±1° against ±3° excision moves the coefficients by under 8%. The 8 Nacho volumes with lobes ≥10° off both image axes show the +90 lobe <i>more</i> clearly, at 62% excess — a geometric artefact would co-vary positively, and it does not.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp flat ink">Note</span>
+        <p>Both analyses were internally careful and both reached a wrong conclusion, because both asked the absolute-density question. T-H's own cached data was what made the diagnosis on slide 19 possible — the analyses were not wasted, they were the instrument.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">36 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 2 — T-I EXTRAS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · layup extraction, detail</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag green">T-I</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns:1fr 1fr; gap:22px;">
+        <div>
+          <div class="fig" style="height:314px; width:844px; margin:0 auto;"><img src="figs/ti_truth.png" alt="Measured ply angle against expert ground truth"></div>
+          <div class="figcap">Measured against expert ground truth, per ply, all 78 usable volumes.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:290px;"><img src="figs/ti_confusion.png" alt="Four-class confusion matrix for ply angle"></div>
+          <div class="figcap">Four-class confusion. +45 against −45 confuse at 3.8% / 4.6%; 0 against 90 at 4.9% / 0.6%.</div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr;">
+        <div class="panel">
+          <h5>The feature definition, for the paper</h5>
+          <p>Per volume, two 1024×1024 in-plane windows at 30% and 70% of the y extent, centred in x, per z-slice. Each window is mean-removed, Hann-windowed, 2D FFT. Power is binned into 12 log-radial × 180 angular bins, <b>each divided by its pixel count</b> so there is no square-grid bias, and the angular axis is rotated 90° into the real-space texture frame. The band used is 0.82–3.27 × the volume's own measured ply pitch — per-volume scaled, not fixed.</p>
+        </div>
+        <div class="panel">
+          <h5>The residual is real material, not error</h5>
+          <p>The two windows are independent measurements of the same ply, so they give a built-in noise estimate. Nacho's larger residual is <b>shared</b> between windows at r = +0.60 — 71% real variance — so Nacho genuinely has about twice Pegaso's ply misalignment, 3.6° against 1.8° standard deviation. Within-ply deviation has lag-1 autocorrelation +0.38, positive in 99% of volumes: spatially coherent fibre <b>waviness</b>. That is why waviness is left for the model to generate rather than being used as a control input.</p>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp flat ink">Negatives worth recording</span>
+        <p>Slab-averaging inside a ply costs <b>12 accuracy points</b> — do not do it. Radon adds nothing (it is the Fourier-slice dual of the same FFT). The four <code>_cleaned</code> Pegaso volumes score 0.650 against 0.885: that preprocessing variant damages the signal, and whether to exclude them is still open. Layup A is near-palindromic, so a wrong face ordering changes only two plies and a wrong sign convention swaps all ±45 — the thin fit margins are largely a symmetry artefact.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">37 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 3 — FULL VAE SWEEP
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · the full compression sweep</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag ink">R05 · R06 · R07</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: 1.35fr 1fr; gap:26px; align-items:stretch; flex:1 1 auto; min-height:0;">
+        <div>
+          <div class="ledger">
+            <div class="lrow head" style="grid-template-columns: 1fr 130px 150px 150px 150px 150px 150px;">
+              <span>Sweep</span><span>2×</span><span>4×</span><span>8×</span><span>16×</span><span>32×</span><span>64×</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 1fr 130px 150px 150px 150px 150px 150px;">
+              <span class="t">R06 · XCT only<br><span class="mono" style="font-size:14px; opacity:.7;">val xct_loss</span></span>
+              <span class="v">.0327</span><span class="v">.0343</span><span class="v">.0354</span><span class="v">.0363</span><span class="v">.0370</span><span class="v">—</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 1fr 130px 150px 150px 150px 150px 150px;">
+              <span class="t">R05 · mask out<br><span class="mono" style="font-size:14px; opacity:.7;">val xct_loss</span></span>
+              <span class="v">.0348</span><span class="v">.0367</span><span class="v">.0368</span><span class="v">.0385</span><span class="v">.0391</span><span class="v">.0405</span>
+            </div>
+            <div class="lrow" style="grid-template-columns: 1fr 130px 150px 150px 150px 150px 150px; border-bottom:1.5px solid var(--ink);">
+              <span class="t">R05 · mask out<br><span class="mono" style="font-size:14px; opacity:.7;">val porosity_mae</span></span>
+              <span class="v">.00168</span><span class="v">.00206</span><span class="v" style="color:var(--green);">.00159</span><span class="v" style="color:var(--green);">.00152</span><span class="v" style="color:var(--green);">.00161</span><span class="v">.00204</span>
+            </div>
+          </div>
+          <div class="cols" style="grid-template-columns:1fr 1fr; gap:18px; margin-top:18px;">
+            <div class="panel">
+              <h5>The narrow neck regularises the mask</h5>
+              <p>XCT reconstruction degrades smoothly and monotonically, +16% from 2× to 64×. Porosity-MAE does <b>not</b>: its best values land at 8×–32×, and only z = 1 degrades both. This is why 16× was an easy choice for the production latent.</p>
+            </div>
+            <div class="panel dk">
+              <h5>Why <code>val.total</code> is unusable here</h5>
+              <p>KL is summed per channel and each channel has a free-bits floor, so the total scales with channel count regardless of model quality. Comparing the sweep on <code>val.total</code> ranks z by <b>arithmetic</b>, not by reconstruction. Use <code>val.xct_loss</code>.</p>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>Infrastructure notes from the sweep</h5>
+            <p>Several small-z shapes triggered a pathological <code>torch.compile</code> autotuner kernel: 7.2–8.5 s/step against a normal 1.8–2.3 s/step, with the GPU at 96% and no throttling. The protocol became: check step time at step 60 and relaunch eager if it exceeds 4 s/step. One 28-hour run was lost to this before the check existed.</p>
+          </div>
+          <div class="panel">
+            <h5>Mask sanity gate on the chosen latent</h5>
+            <p>Perturbing the latent up to 2× the posterior standard deviation moves mask porosity only from 0.022 to 0.028, and ambiguous voxels stay under 0.5%. The decoder degrades <b>gracefully</b> — decoder robustness is not the binding constraint, which is what licensed the aggressive 16× choice.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">38 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 4 — SEAMS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · seam behaviour</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag blue">B5</span></div>
+    </div>
+    <div class="stack">
+      <div class="rv" style="display:grid; grid-template-columns:1fr 1fr; gap:22px;">
+        <div>
+          <div class="fig" style="height:344px; width:780px; margin:0 auto;"><img src="figs/dose_seam.png" alt="Seam ratio against porosity target for each arm"></div>
+          <div class="figcap">Seam ratio against porosity target, per arm. Grayscale seams are worst at low porosity, where there is least texture to hide a discontinuity.</div>
+        </div>
+        <div>
+          <div class="fig" style="height:344px; width:780px; margin:0 auto;"><img src="figs/cfg_seam.png" alt="Seam ratio against guidance scale"></div>
+          <div class="figcap">Seam ratio against guidance scale. Guidance costs seam quality gradually — 2.2 to 3.1 as s_por rises to 1.5.</div>
+        </div>
+      </div>
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr;">
+        <div class="panel">
+          <h5>How the metric is defined</h5>
+          <p>Mean absolute slice-to-slice difference at the patch-boundary planes, divided by the same quantity at interior planes. A value of 1.0 means the seam is statistically invisible against the volume's own texture. The untrained baseline sits at 1.8–2.1. Measured on both the grayscale channel and the mask logits.</p>
+        </div>
+        <div class="panel dk">
+          <h5>The open item this leaves</h5>
+          <p>Joint denoising nearly halves the <b>grayscale</b> seam but does <b>not</b> improve the <b>mask</b> seam, which stays at 2.0–2.8 in both modes. Pore structure still steps at patch boundaries. This is one of the reasons ldm06 adds a mask-aware auxiliary loss rather than only changing the sampler.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">39 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 5 — CONFIGURATION AND SAMPLING CONSTANTS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · configuration and sampling constants</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag ink">D39</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel">
+          <h5>ldm05 run</h5>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Latent</span><span>r07 z=4, 16³</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Latent mode</span><span>sampled μ+σε</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Batch</span><span>256</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">LR</span><span>1e-4 cosine → 1e-5</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Warm-up</span><span>250 steps</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Steps</span><span>130 000</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Precision</span><span>bfloat16 autocast</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Grad clip / wd</span><span>1.0 / 0.01</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:3px 0;"><span style="opacity:.7">Hardware</span><span>NVIDIA GB10, 128 GB</span></div>
+        </div>
+        <div class="panel">
+          <h5>Sampling constants</h5>
+          <p><b>x̂₀ clamp at ±10σ.</b> x̂₀ divides by √ᾱ, which is near zero at high t, so one exploded estimate contaminates the whole trajectory — the ldm03 runaway mechanism. Real normalised latents reach about ±6σ, so ±10 never clips a legitimate value.</p>
+          <p><b>Cosine schedule, T = 1000, s = 0.008.</b> Nichol &amp; Dhariwal defaults, not ablated.</p>
+          <p><b>ε-prediction.</b> Kept for ldm04 ↔ ldm05 comparability; v-prediction is a separate deferred rung.</p>
+          <p><b>DDIM-50</b> for every in-training evaluation. Note: on an <i>immature</i> model 200 steps measures worse than 50, because more steps follow a bad score field more faithfully. The ordering flips as the model matures — the flip is itself a convergence signature.</p>
+          <p><b>EMA 0.9999</b>, and <b>φ requests clamped</b> to the observed data range [0.002, 0.107]: no extrapolation outside training support.</p>
+        </div>
+        <div class="panel dk">
+          <h5>Convergence protocol</h5>
+          <p>Every 20k steps, roughly one minute of wall clock, reading <code>latest.ckpt</code> from disk with no shared state with the training process.</p>
+          <p>Raw <b>and</b> EMA weights — raw answers "is it learning", EMA answers "what would we ship".</p>
+          <p>Split by neighbour-context bucket 0/2/4/6, n = 16 each, pooled 1/3/3/1.</p>
+          <p>Automatic verdict appended to a JSONL: CONVERGING if the overall std-ratio fell ≥5% since the last check, STALLED within ±5%, REGRESSING if it rose ≥5%, with per-bucket deltas so a stall in one context cannot hide in the average.</p>
+          <p>Plus a conditioning-alive check at fixed seed, and an on-demand input-contribution probe — the latter was used to <b>refute</b> the input-dilution hypothesis: the first convolution weights the 4 latent channels about 10× above any conditioning group, and zeroing the neighbours moves the output by 37% of the noise scale.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">40 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 6 — DETECTOR CALIBRATION AND CAVEATS
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · detector calibration and campaign caveats</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag red">eval_v2</span></div>
+    </div>
+    <div class="stack">
+      <div class="cols rv" style="grid-template-columns: 1fr 1.2fr; flex:1 1 auto; min-height:0;">
+        <div class="panel">
+          <h5>Void detector</h5>
+          <p>Operates on the decoder-native u8 scale, obtained by exact logit inversion of the sampler's sigmoid, and calibrated on three real validation and test volumes against their ground-truth masks.</p>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:4px 0; border-top:1px dashed var(--ink); margin-top:10px;"><span style="opacity:.7">Best estimate</span><span>T = 185, pore dice 0.799</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:4px 0;"><span style="opacity:.7">Conservative bound</span><span>T = 178, real FP ≤ 0.2%</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:4px 0;"><span style="opacity:.7">Measured real FP</span><span>0.32% / 0.20%</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:4px 0;"><span style="opacity:.7">Minimum component</span><span>300 voxels</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:4px 0;"><span style="opacity:.7">Sensitivity, ±σ = 9.3 u8</span><span>±0.02 – 0.05</span></div>
+          <div class="spec" style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:18px; padding:4px 0;"><span style="opacity:.7">Material mode, gen / real</span><span>≈208 / ≈209</span></div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="panel">
+            <h5>Campaign caveats, verbatim from the record</h5>
+            <p><b>1.</b> Real masks are annotations and miss some dark features (drilled holes, edge effects), so pooled Dice ≈0.8 is a ceiling, not a shortfall.</p>
+            <p><b>2.</b> The <code>corrected_porosity</code> values written into the per-volume <code>stats.json</code> during phases 1–2 use an earlier, over-inclusive material-referenced threshold. Use the audit's recalibrated per-volume numbers instead.</p>
+            <p><b>3.</b> Layup generalisation is demonstrated, not validated: 74 of 78 training volumes share layup A.</p>
+            <p><b>4.</b> Three seeds per cell, two for layup. Seed spread is reported; the distributions are not tight enough for fine per-cell ranking.</p>
+            <p><b>5.</b> Direct angle scores use the frozen identity convention; fitted variants live in the per-volume layup records.</p>
+          </div>
+          <div class="panel dk">
+            <h5>Where everything lives</h5>
+            <p><code>runs/eval_v2/</code> is self-contained and copyable: 153 volumes, per-phase findings and results, four audit figures, the per-volume and per-cell tables, and a README that is the single entry point for the campaign.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">41 / 42</div>
+</section>
+
+<!-- =====================================================================
+     APPENDIX 7 — DECISIONS INDEX
+     ===================================================================== -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar">
+      <h2 class="rv">Appendix · decisions index</h2>
+      <div class="tb-right"><span class="tag hollow">Backup</span><span class="tag ink">D1 – D40</span></div>
+    </div>
+    <div class="stack spread">
+      <div class="rv" style="display:grid; grid-template-columns: repeat(3, 1fr); gap:34px; font-family:'Albert Sans',sans-serif; font-size:19px; line-height:1.5; color:var(--ink);">
+        <div>
+          <div class="micro" style="margin-bottom:10px; color:var(--red);">VAE stage</div>
+          <div><b>D1</b> KL over VQ</div>
+          <div><b>D2</b> No skip connections</div>
+          <div><b>D3</b> β = 0.05, warm-up, free-bits</div>
+          <div><b>D4</b> z = 8 with an ablation trigger</div>
+          <div><b>D5</b> Charbonnier, no adversarial</div>
+          <div><b>D6</b> BCE + Tversky, class balanced</div>
+          <div><b>D7</b> No perceptual or adversarial loss</div>
+          <div style="opacity:.55;"><b>D8</b> Bottleneck attention — superseded</div>
+          <div style="opacity:.55;"><b>D9</b> 2-channel encoder — superseded</div>
+          <div><b>D10</b> AdamW, cosine decay</div>
+          <div><b>D11</b> Warm-up = one data pass</div>
+          <div><b>D12</b> Global /255 normalisation</div>
+          <div><b>D13</b> Attention removed</div>
+          <div><b>D14</b> Encoder XCT only</div>
+          <div><b>D15</b> z 8 → 16</div>
+        </div>
+        <div>
+          <div class="micro" style="margin-bottom:10px; color:var(--orange);">Texture, bottleneck, latent choice</div>
+          <div><b>D16</b> 2D multi-plane discriminator</div>
+          <div><b>D17</b> Focal replaces BCE</div>
+          <div><b>D18</b> Dual-branch encoder</div>
+          <div><b>D19</b> disc_weight 0.01 → 0.05</div>
+          <div><b>D20</b> free_bits 0.25 → 0.1</div>
+          <div><b>D25</b> VRRAE bottleneck</div>
+          <div><b>D26</b> Linear ablation before pivoting</div>
+          <div><b>D27</b> R06 compression sweep</div>
+          <div><b>D28</b> R05 compression sweep</div>
+          <div><b>D29</b> Extend to 32× / 64×, add R07</div>
+          <div><b>D30</b> VAE-agnostic LDM pipeline first</div>
+          <div><b>D31</b> Audit conditioning before ldm04</div>
+          <div><b>D33</b> Production latent r07 z = 4</div>
+          <div><b>D34</b> Memmap latent store</div>
+        </div>
+        <div>
+          <div class="micro" style="margin-bottom:10px; color:var(--blue);">Diffusion stage</div>
+          <div><b>D21</b> ε-prediction, simple loss</div>
+          <div style="opacity:.55;"><b>D22</b> No CFG — superseded</div>
+          <div><b>D23</b> Checkerboard-parity neighbours</div>
+          <div><b>D24</b> Nested CFG, asymmetric nulls</div>
+          <div><b>D32</b> The ldm05 conditioning vector</div>
+          <div><b>D35</b> ldm04 unconditional, from scratch</div>
+          <div><b>D36</b> Naming and tmux convention</div>
+          <div style="opacity:.55;"><b>D37</b> Assembly fixes — partly repealed</div>
+          <div><b>D38</b> Touching neighbours, no blending</div>
+          <div><b>D39</b> Sampling constants and monitoring</div>
+          <div><b>D40</b> ldm06 design</div>
+          <div style="margin-top:18px;" class="panel dk">
+            <p style="font-size:19px;">Every entry carries a dated justification and, where it applies, the decision it supersedes. Two were repealed by measurement within days of being written — which is the point of keeping the log.</p>
+          </div>
+        </div>
+      </div>
+      <div class="caveat rv">
+        <span class="stamp flat ink">Sources</span>
+        <p>Decisions Log D1–D40 · VAE and LDM experiment logs · analyses T-A to T-I, A1/A2, E1, E2 · ldm05 and ldm06 design notes · <code>runs/eval_v2/README.md</code>.</p>
+      </div>
+    </div>
+  </div>
+  <div class="pagenum">42 / 42</div>
+</section>
+
+</div><!-- /deck-stage -->
+</div><!-- /deck-viewport -->
+
+<div class="navhint">← / → · space · press E to edit</div>
+<div class="editbadge" id="editbadge">edit: off</div>
+
+<script>
+/* =====================================================================
+   DECK RUNTIME
+   1. Uniform stage scaling — the 1920x1080 canvas is scaled as a whole,
+      never re-laid out, so the deck stays 16:9 on every screen.
+   2. Keyboard, touch and click navigation.
+   3. Optional inline text editing (press E).
+   ===================================================================== */
+(function () {
+    var stage = document.getElementById('stage');
+    var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+    var index = 0;
+
+    /* --- 1. Fit the fixed stage into the viewport ------------------- */
+    function fit() {
+        var s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+        var x = (window.innerWidth - 1920 * s) / 2;
+        var y = (window.innerHeight - 1080 * s) / 2;
+        stage.style.transform = 'translate(' + x + 'px,' + y + 'px) scale(' + s + ')';
+    }
+    window.addEventListener('resize', fit);
+    fit();
+
+    /* --- 2. Navigation --------------------------------------------- */
+    function show(n) {
+        index = Math.max(0, Math.min(slides.length - 1, n));
+        slides.forEach(function (sl, i) { sl.classList.toggle('active', i === index); });
+        try { history.replaceState(null, '', '#' + (index + 1)); } catch (e) {}
+    }
+    function next() { show(index + 1); }
+    function prev() { show(index - 1); }
+
+    document.addEventListener('keydown', function (e) {
+        if (document.body.classList.contains('editing') &&
+            e.target && e.target.isContentEditable) { return; }
+        switch (e.key) {
+            case 'ArrowRight': case 'PageDown': case ' ': e.preventDefault(); next(); break;
+            case 'ArrowLeft':  case 'PageUp':            e.preventDefault(); prev(); break;
+            case 'Home': e.preventDefault(); show(0); break;
+            case 'End':  e.preventDefault(); show(slides.length - 1); break;
+            case 'e': case 'E': toggleEdit(); break;
+        }
+    });
+
+    /* Touch swipe */
+    var tx = 0, ty = 0;
+    document.addEventListener('touchstart', function (e) {
+        tx = e.changedTouches[0].clientX; ty = e.changedTouches[0].clientY;
+    }, { passive: true });
+    document.addEventListener('touchend', function (e) {
+        var dx = e.changedTouches[0].clientX - tx;
+        var dy = e.changedTouches[0].clientY - ty;
+        if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) { dx < 0 ? next() : prev(); }
+    }, { passive: true });
+
+    /* Click the right or left third of the window */
+    document.addEventListener('click', function (e) {
+        if (document.body.classList.contains('editing')) { return; }
+        if (e.target.closest('.editbadge')) { return; }
+        if (e.clientX > window.innerWidth * 0.66) { next(); }
+        else if (e.clientX < window.innerWidth * 0.34) { prev(); }
+    });
+
+    /* Deep link to #n */
+    var hash = parseInt((location.hash || '').replace('#', ''), 10);
+    show(isNaN(hash) ? 0 : hash - 1);
+
+    /* --- 3. Inline editing ----------------------------------------- */
+    var badge = document.getElementById('editbadge');
+    var SEL = 'h1, h2, h4, h5, h6, p, span, div.d, div.t, li, .figcap, .micro';
+    function toggleEdit() {
+        var on = document.body.classList.toggle('editing');
+        badge.textContent = 'edit: ' + (on ? 'ON — click any text' : 'off');
+        document.querySelectorAll(SEL).forEach(function (el) {
+            if (el.children.length === 0 || el.classList.contains('figcap')) {
+                el.contentEditable = on ? 'true' : 'false';
+            }
+        });
+    }
+    badge.addEventListener('click', toggleEdit);
+})();
+</script>
+</body>
+</html>

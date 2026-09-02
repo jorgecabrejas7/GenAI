@@ -337,7 +337,7 @@ def section4_logit_range(report_lines: list[str], checkpoint: str | None, config
             xct    = batch["xct"].to(device)
             mask   = batch["mask"].to(device)
             out    = model(xct, mask)
-            logits = out.xct_logits
+            logits = out.xct_out
 
             gt_mins.append(xct.min().item());       gt_maxs.append(xct.max().item());       gt_means.append(xct.mean().item())
             recon_mins.append(logits.min().item()); recon_maxs.append(logits.max().item()); recon_means.append(logits.mean().item())
@@ -384,7 +384,7 @@ def _save_slice_comparison(model, loader, device, checkpoint: str | None, report
         xct    = batch["xct"].to(device)   # (B,1,D,H,W) in [0,1]
         mask   = batch["mask"].to(device)
         out    = model(xct, mask)
-        logits = out.xct_logits.clamp(0.0, 1.0)  # (B,1,D,H,W) clamped to [0,1] for display
+        logits = out.xct_out.clamp(0.0, 1.0)  # (B,1,D,H,W) clamped to [0,1] for display
 
     label_suffix = "trained" if checkpoint else "random_init"
 

@@ -27,6 +27,7 @@ model:
   use_neighbor_cond: false
   use_avail_embedding: false
   use_nb_global_cond: false
+  use_orient_cond: false
   use_pos_cond: false
   use_por_cond: false
   use_por_null: false

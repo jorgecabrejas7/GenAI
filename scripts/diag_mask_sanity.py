@@ -4,7 +4,7 @@ Encodes ~256 val patches, perturbs the posterior means with Gaussian noise at
 several scales, decodes each latent set, and reports mask porosity statistics,
 degenerate-mask fractions, and mushy-voxel fractions per set.
 
-Outputs land in runs/diag/mask_sanity_r07z4/ (summary.json + one slice-grid
+Outputs land in runs/diagnostics/mask_sanity_r07z4/ (summary.json + one slice-grid
 PNG per latent set).
 """
 
@@ -30,7 +30,7 @@ DEFAULT_CKPT = (
     "-z4-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt"
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OUT_DIR = REPO_ROOT / "runs/diag/mask_sanity_r07z4"
+OUT_DIR = REPO_ROOT / "runs/diagnostics/mask_sanity_r07z4"
 N_PATCHES = 256
 N_SHOW = 8
 DEGENERATE_LO = 1e-5

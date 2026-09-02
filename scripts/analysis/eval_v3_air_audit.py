@@ -20,7 +20,7 @@ interior vs edge shell, mask capture (how much of the detected air the mask
 head actually claims), largest components, and the per-cell correlation
 between dark-air fraction and mask collapse.
 
-Outputs -> ``runs/eval_v3/air_audit/``: results.json, per_volume.csv,
+Outputs -> ``runs/campaigns/05-eval-v3-fixed-decode/air_audit/``: results.json, per_volume.csv,
 per_cell.csv, findings.md, figures (PDF + PNG, 300 dpi).
 
 Usage:

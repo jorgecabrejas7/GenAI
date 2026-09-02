@@ -30,7 +30,7 @@ volume's own material mode and robust spread, k calibrated on real volumes)
 is reported as a normalisation-free cross-check on the raw generated scale.
 All intensities are u8-scale (0..255).
 
-Outputs to ``runs/analysis/void_mask_audit/``: results.json, findings.md and
+Outputs to ``runs/campaigns/02-porosity-control-v1/void_mask_audit/``: results.json, findings.md and
 figures (PDF + PNG, 300 dpi).
 
 Usage:
@@ -58,9 +58,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common  # noqa: E402
 from _common import DATA_ROOT, REPO, ZARR_ROOT, savefig, set_style, write_json  # noqa: E402
 
-OUT_DIR = REPO / "runs" / "analysis" / "void_mask_audit"
-GEN_ROOT = REPO / ("inference/ldm05-run-0001-20260827-114902-z4-c128-bs256-lr1e-04"
-                   "/layup_roundtrip_volumes")
+OUT_DIR = REPO / "runs" / "campaigns" / "02-porosity-control-v1" / "void_mask_audit"
+# Written by scripts/analysis/regen_layup_volumes.py.  The original set was
+# deleted, so this script cannot run until that regeneration is re-done.
+GEN_ROOT = REPO / "runs/campaigns/02-porosity-control-v1/layup_roundtrip/volumes"
 LATENT_META = DATA_ROOT / "latents_r07z4" / "metadata.json"
 
 # Voxel size: 25 um (user-supplied; not recorded in dataset metadata).
@@ -610,8 +611,22 @@ def main() -> None:
         print(f"  {name}: unmasked-dark {r['dark_unmasked_fraction']:.4f}", flush=True)
 
     print("Generated volumes...", flush=True)
+    if not GEN_ROOT.is_dir():
+        raise SystemExit(
+            f"Missing input: {GEN_ROOT}\n"
+            "This audit reads the regenerated layup-roundtrip volumes.  The "
+            "original set (under inference/ldm05-.../layup_roundtrip_volumes) "
+            "was deleted and was never migrated.  Recreate it with:\n"
+            "    python scripts/analysis/regen_layup_volumes.py\n"
+            "Note this script is superseded by scripts/analysis/air_audit_v2.py "
+            "(162 volumes, better calibration) — see "
+            "runs/campaigns/AUDIT.md section 6.")
     gen_dirs = sorted(d for d in GEN_ROOT.iterdir()
                       if (d / "mask.tif").exists() and (d / "volume.tif").exists())
+    if not gen_dirs:
+        raise SystemExit(
+            f"No volumes with both volume.tif and mask.tif under {GEN_ROOT}. "
+            "Run scripts/analysis/regen_layup_volumes.py first.")
     results["generated"] = {}
     results["localisation"] = {}
     gen_cache = {}

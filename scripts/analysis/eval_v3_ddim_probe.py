@@ -6,7 +6,7 @@ with specimen (OOB) semantics, s_por 1.5, target porosity 0.03 as a coherent
 local field, 192^3 voxels = 8 volumes.  Identical settings and seeds to the
 originals, so the numbers are directly comparable.
 
-Volumes land under ``runs/eval_v3/volumes/ddim_probe/steps_<n>_seed_<s>/``
+Volumes land under ``runs/campaigns/05-eval-v3-fixed-decode/volumes/ddim_probe/steps_<n>_seed_<s>/``
 (volume.tif uint8 on the raw-scan grey scale, mask.tif uint8 0/255,
 stats.json), so a crashed run resumes by skipping completed cells.
 

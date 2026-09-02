@@ -1,12 +1,12 @@
 """Stage-by-stage inspection pack for ``onlypores`` on generated vs real volumes.
 
-`runs/analysis/onlypores_generated/` reports that onlypores measures a porosity
+`runs/campaigns/04-measurement-limits/onlypores_generated/` reports that onlypores measures a porosity
 on the generated volumes that does not track the requested target.  Before that
 number can be read as a statement about the MODEL, the segmentation itself has
 to be shown to work on synthetic grayscale.  This script produces the evidence
 for that check — it draws no conclusion.
 
-What it produces (all under ``runs/analysis/onlypores_inspection/``):
+What it produces (all under ``runs/campaigns/04-measurement-limits/onlypores_inspection/``):
 
 1. ``stages/`` — one PNG per (volume, z-slice) with every intermediate of the
    onlypores pipeline side by side:
@@ -75,9 +75,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-OUT_DIR = REPO / "runs" / "analysis" / "onlypores_inspection"
-VOL_ROOT = REPO / "runs" / "eval_v2" / "volumes"
-PROBE_ROOT = REPO / "runs" / "analysis" / "ldm06_probe" / "volumes"
+OUT_DIR = REPO / "runs" / "campaigns" / "04-measurement-limits" / "onlypores_inspection"
+VOL_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes"
+PROBE_ROOT = REPO / "runs" / "campaigns" / "06-ldm06-probe" / "ldm06_probe" / "volumes"
 ZARR_ROOT = REPO / "data" / "split_v2" / "volumes.zarr"
 
 # onlypores production defaults, exactly as poregen.dataset.io.compute_mask calls it
@@ -85,7 +85,7 @@ SAUVOLA_RADIUS = 30
 SAUVOLA_K = 0.125
 MIN_SIZE_FILTERING = -1
 
-# audit-calibrated dark-voxel detector (runs/eval_v2/audit/results.json)
+# audit-calibrated dark-voxel detector (runs/campaigns/03-eval-v2-buggy-decode/audit/results.json)
 T_BEST = 185
 T_CONS = 178
 MIN_CC = 300
@@ -921,7 +921,7 @@ def write_findings_md(records: list[dict], sens: pd.DataFrame | None) -> None:
     L.append("# onlypores inspection pack — measurements\n")
     L.append("Evidence only. No claim is made here about whether the generator or the "
              "segmentation is responsible for the porosity-control result in "
-             "`runs/analysis/onlypores_generated/`.\n")
+             "`runs/campaigns/04-measurement-limits/onlypores_generated/`.\n")
     L.append("## 1. Per-volume stage numbers\n")
     L.append("| volume | kind | requested | Otsu T | material mode | max-proj comps | "
              "first==largest | Otsu-above frac | prefill frac | sample frac | "
