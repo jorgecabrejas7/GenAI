@@ -119,9 +119,18 @@ def compute_total_loss(
     #    a variant emits one or the other, never both. ───────────────────
     class_dict: dict[str, Any] = {}
     if output.class_logits is not None:
-        if class_weights is None and c.get("class_weights") is not None:
+        if class_weights is None:
+            w = c.get("class_weights")
+            if not w:
+                raise ValueError(
+                    "loss.class_weights is required for a 3-class head — "
+                    "unweighted cross-entropy is dominated by the material "
+                    "class and both minority classes collapse. Compute them "
+                    "with `python scripts/build_split_v3.py --stage weights` "
+                    "and paste the result into the experiment config."
+                )
             class_weights = torch.tensor(
-                [float(w) for w in c["class_weights"]],
+                [float(x) for x in w],
                 dtype=output.class_logits.dtype,
                 device=output.class_logits.device,
             )

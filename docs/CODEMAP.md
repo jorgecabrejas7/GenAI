@@ -60,12 +60,13 @@ companion docs listed under [docs/](#docs).
 | Path | What it does |
 |---|---|
 | `models/nn/blocks.py` | Shared 3-D conv blocks: v1 family (GroupNorm/SiLU/ConvTranspose3d) and v2 family (BatchNorm3d/GELU/Upsample+Conv), plus `reparameterize`. |
-| `models/vae/base.py` | `VAEConfig` and `VAEOutput` dataclasses. |
+| `models/vae/base.py` | `VAEConfig` and `VAEOutput` dataclasses, the class constants, and every decode helper: `decode_xct`, `decode_xct_u8`, `decode_mask`, `decode_label`, `decode_class_probs`. |
 | `models/vae/registry.py` | `@register_vae(name)` / `build_vae(name, **kw)` / `list_vaes()`. |
 | `models/vae/v1/{conv,conv_noattn,unet}.py` | 🕰 First-gen architectures `conv`, `conv_noattn`, `unet`. Kept for old-checkpoint compatibility; not used by current experiments. |
 | `models/vae/v2/conv.py`, `v2/unet.py` | Second-gen attention and skip-connection variants (`v2.conv`, `v2.unet`). |
 | `models/vae/v2/conv_noattn.py` | `v2.conv_noattn` — R03 baseline trunk; also the `v2.conv_noattn_xctonly` (mask head removed) used by r06. |
-| `models/vae/v2/conv_noattn_dualbranch.py` | `v2.conv_noattn_dualbranch` — dual encoder branch + fusion. **Current VAE** (r04/r05/r07). |
+| `models/vae/v2/conv_noattn_dualbranch.py` | `v2.conv_noattn_dualbranch` — dual encoder branch + fusion. r04/r05/r07. **Still live**, not legacy: the r07 checkpoint behind `data/split_v2/latents_r07z4` is loaded by the campaign 05 and 08 analysis scripts. |
+| `models/vae/v2/conv_noattn_dualbranch_cls.py` | `v2.conv_noattn_dualbranch_cls` — same trunk, encoder input `cat([xct, pore, air])` (`in_channels` 3) and a 3-class decoder head (material/pore/air) in place of the binary mask head. **Current VAE** (r08, the one ldm06 builds on). |
 | `models/vae/v2/vrrae.py` | `v2.vrrae` — VRRAE-bottleneck VAE, XCT-only encoder and decoder (no mask head). |
 | `models/vae/v2/vrrae_bottleneck.py` | The bottleneck itself: flatten → FC → truncated-SVD RR layer (vendored) → identity posterior mean. |
 | `models/vae/v2/vrrae_linear.py` | `v2.vrrae_linear` — SVD ablation twin: same flat bottleneck, plain `Linear` heads. |
@@ -79,11 +80,11 @@ companion docs listed under [docs/](#docs).
 | Path | What it does |
 |---|---|
 | `losses/recon.py` | XCT recon losses in z-score space: `l1`, `mse`, `charbonnier`, `get_recon_loss`. |
-| `losses/mask.py` | Mask losses on logits: BCE, Dice, Tversky, focal, `combined_mask_loss`. |
+| `losses/mask.py` | Mask losses on logits: BCE, Dice, Tversky, focal, `combined_mask_loss`; and for the r08 3-class head `multiclass_ce_loss`, `multiclass_dice_loss`, `combined_class_loss`. |
 | `losses/kl.py` | KL with free-bits (per-channel and flat) + `beta_schedule`. |
 | `losses/total.py` | `compute_total_loss` — composes recon + mask + β·KL. Gotchas live in `AGENTS.md`. |
 | `metrics/recon.py` | MAE, MSE, PSNR, sharpness proxy. |
-| `metrics/seg.py` | Vectorised Dice / precision / recall, porosity metrics, binned porosity MAE. |
+| `metrics/seg.py` | Vectorised Dice / precision / recall, porosity metrics, binned porosity MAE; `multiclass_metrics` reads per-class Dice and porosity/air MAE off the 3-class argmax. |
 | `metrics/latent.py` | KL per channel, active units, streaming channel moments and their merge. |
 
 ### training
@@ -264,7 +265,8 @@ Hierarchical YAML. Resolution order (`extends` → `components` → body → `ov
 | `r04/` | 🕰 historical | R03 + dual-branch encoder + focal mask loss + LSGAN discriminator (`disc_weight=0.01`). |
 | `r05/` | **current sweep** | R04 with `free_bits=0.1`, `disc_weight=0.05`. `reduction-factor-{2,8,16,32,64}` sweep latent compression. |
 | `r06/` | **current sweep** | XCT-only (`v2.conv_noattn_xctonly`, no mask head) compression sweep, same rungs plus `-4`. |
-| `r07/` | **current sweep — supplies the live latents** | Full AE (`in_channels=2`, both decoder heads) on the dual-branch trunk. `r07/reduction-factor-4` (z=4) produced the VAE behind `latents_r07z4`. |
+| `r07/` | **supplies the live latents** | Full AE (`in_channels=2`, both decoder heads) on the dual-branch trunk. `r07/reduction-factor-16` (z=4) produced `r07-run-0006-…-z4-c32-…`, the VAE behind `latents_r07z4`. The rung name is the TOTAL VOXEL reduction, not the channel count: `reduction-factor-4` is z=16, `-16` is z=4. |
+| `r08/` | **current VAE** | The 3-class VAE for ldm06: `v2.conv_noattn_dualbranch_cls` on `data/split_v3`, encoder `cat([xct, pore, air])`, decoder emitting material/pore/air logits. Extends `r07/reduction-factor-16`, so every other hyperparameter is that run's. `loss.class_weights` comes from `data/split_v3/class_weights.json`. |
 | `vrrae/`, `vrrae03/`, `vrrae04/` | 🕰 historical ablation | Flat SVD rank-reduction bottleneck (`vrrae03`) vs its plain-`Linear` twin (`vrrae04`). `vrrae/smoke100.yaml` is a self-labelled throwaway 100-step smoke test. |
 | `ldm05/` | **current LDM rung** | First conditional LDM (D32): orientation profile as input channels, porosity/depth/distance by FiLM, touching (offset-64) neighbours, eight-group assembly on a stride-64 tiling grid. Trained from scratch, not warm-started from ldm04. |
 | `ldm04/` | previous rung | First LDM on the normalised r07z4 store: z=4, 16³ latents, **unconditional** (neighbour/position/porosity conditioning present in code but off). ldm01–ldm03 configs were removed; only their `runs/ldm/` output remains. |

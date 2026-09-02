@@ -66,18 +66,33 @@ and the `train_step` / `eval_step` / `train_loop` internals.
 
 ### Decoder output contract
 
-The two decoder heads are **not** symmetric, despite both being called "heads":
+The decoder heads are **not** symmetric, despite all being called "heads". Each
+has its own decode helper in `src/poregen/models/vae/base.py`, and every decode
+site must use them so the behaviour cannot drift apart again.
 
 - **XCT head** (`VAEOutput.xct_out`) emits the grey level in `[0, 1]` — the same
   scale as `xct / 255`. `compute_total_loss` regresses it directly
   (L1/MSE/Charbonnier). It is **not** a logit: decode it with
   `decode_xct()` / `decode_xct_u8()`, which clamp. Applying a sigmoid squashes
   the output into `[0.5, 0.731]` and destroys contrast.
-- **Mask head** (`VAEOutput.mask_logits`) genuinely is a logit (BCE-with-logits);
-  decode it with `decode_mask()`, which applies the sigmoid.
+- **Mask head** (`VAEOutput.mask_logits`) genuinely is a logit
+  (BCE-with-logits); decode it with `decode_mask()`, which applies the sigmoid.
+  Emitted by every variant up to r07.
+- **Class head** (`VAEOutput.class_logits`) is a 3-channel logit over the voxel
+  label — 0 material, 1 pore, 2 air — trained with class-weighted cross-entropy
+  plus soft Dice. Decode it with `decode_label()` (argmax) or
+  `decode_class_probs()` (softmax). Emitted by the `*_cls` variants from r08 on.
 
-All three helpers live in `src/poregen/models/vae/base.py`. Every decode site
-must use them so the behaviour cannot drift apart again.
+**A variant emits `mask_logits` or `class_logits`, never both.** A two-valued
+head and a three-valued one are different contracts; emitting both would let a
+caller consume a pore mask that disagrees with the label.
+`compute_total_loss` and the eval loop branch on which one is populated, so the
+binary-mask config keys are simply inert for a 3-class variant.
+
+Which input a variant's `forward()` takes is declared on the class as
+`encoder_inputs` — `("xct", "mask")` historically, `("xct", "label")` for the
+r08 3-class variant, whose encoder sees `cat([xct, pore, air])`. The training
+engine reads that attribute rather than hard-coding the pair.
 
 ## Loss composition gotchas
 
@@ -92,6 +107,13 @@ must use them so the behaviour cannot drift apart again.
   don't reallocate per step
 - `combined_mask_loss`/`focal_loss` take an optional `sigmoid=` kwarg — pass
   `torch.sigmoid(logits)` when already computed, to skip redundant work
+- For a 3-class head, `loss.class_weights` is **required** and
+  `compute_total_loss` refuses to run without it: unweighted cross-entropy is
+  dominated by the material class and both minority classes collapse. Compute
+  them with `python scripts/build_split_v3.py --stage weights`
+  (`w_c = 1 / (n_classes · f_c)`, so `Σ f_c w_c = 1`) and paste the result into
+  the experiment config. Soft Dice is averaged over pore and air only —
+  material is the background and its Dice sits near 1 regardless
 
 ## Experiment run structure
 
