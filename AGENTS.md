@@ -25,6 +25,8 @@ practice only — what the project *is* lives in `docs/`.
 
 ## Results and provenance
 
+- **Commit and push every code change.** An uncommitted change is undocumented: it cannot be attributed, reviewed, reverted, or tied to the result it produced. Commit when a change is coherent — not at the end of a session — with a message saying what changed and *why*, including the measured consequence when there is one. Push so the work exists somewhere other than this machine.
+- Never commit data or generated output. `.gitignore` covers them by DIRECTORY rule (`/data/`, `/raw_data/`, `/runs/`, `/inference/`, `/eval_results/`, …). Do not append individual file paths — they go stale as soon as a run is renamed, and they hide the fact that a whole tree is untracked. If something large is not covered, add the directory.
 - Analysis output goes in `runs/campaigns/<NN>-<name>/` — one campaign per question, never a new ad-hoc directory. Each campaign carries a `README.md` (question, exact command, checkpoint and settings, headline numbers, caveats, vault note) and a line in `runs/campaigns/INDEX.md`.
 - Every result must be traceable to committed code. Commit the script that produced it.
 - A measurement is only as good as its validation on known-good data. State what you validated against, and what the method's failure modes are.
