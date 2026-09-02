@@ -13,6 +13,47 @@ Roots, newest first:
 | `data/split_v2` | superseded for training; still holds the live latent store and conditioning | campaigns 02-08, ldm05 |
 | `data/split_v1` | owns the only real `volumes.zarr` (207 GB) | everything, through symlinks |
 
+## Deletion checklist
+
+Before removing anything from a derived data root. Written for the planned
+removal of `data/split_v2/patches_xct.bin` and `patches_mask.bin` (1.19 TB),
+but the hazards apply to any cleanup here.
+
+**1. Never delete through the symlink.** `volumes.zarr` is a symlink in both
+v2 and v3, chained `split_v3 -> split_v2 -> split_v1`, and only
+`data/split_v1/volumes.zarr` (207 GB) is real. A recursive delete of a derived
+root that follows symlinks destroys every root at once. Name the files to
+remove explicitly; never `rm -rf` a root. Check first:
+
+```bash
+ls -l data/split_v2/volumes.zarr data/split_v3/volumes.zarr   # both -> a link
+readlink -f data/split_v3/volumes.zarr                        # split_v1's store
+```
+
+and confirm afterwards that both still resolve.
+
+**2. The memmap layout is one-way.** Rebuilding `split_v2`'s memmaps with the
+extractor as it stands produces the 3-class `patches_label.bin`, not the
+original `patches_xct.bin` + `patches_mask.bin`. The binary-mask layout cannot
+be recreated from the current tree. This is acceptable only because `split_v3`
+supersedes that root for training.
+
+**3. Keep everything in the survival table** of the root's section below —
+`patch_index.parquet`, `splits.json`, `volume_stats.json`,
+`patches_meta.json` (the only surviving record of N, the strides and the
+parquet checksum of the deleted memmaps), `orientation_field.json`, and
+`latents_r07z4/`, which campaigns 02-08 and ldm05 all resolve through.
+
+**4. Loading still works afterwards.** `build_patch_dataloaders` checks for the
+files the memmap backend actually reads, so a root whose `.bin` files are gone
+falls back to the Zarr backend rather than failing on a missing file. Confirm
+with a one-batch load before considering the cleanup done.
+
+**5. Gates.** The `split_v2` memmap removal is gated on the r08 VAE passing its
+acceptance gates AND the r08 latent store being built and verified.
+`latents_r07z4/` is NOT part of that removal; it goes only after ldm06 is
+evaluated.
+
 ---
 
 ## `data/split_v3`
