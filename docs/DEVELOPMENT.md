@@ -26,6 +26,15 @@ python scripts/train_ldm.py resume runs/ldm/<run_name> checkpoints/<ckpt>
 experiments list                                   # list all defined experiments
 experiments clone r05/base r06/my_variant         # create new experiment extending r05
 
+# Generated-volume evaluation (eval v4) - see docs/eval_methodology.md
+eval_v4 real-floor --root runs/campaigns/10-eval-v4/          # run this FIRST
+eval_v4 generate sampler --model runs/ldm/<run> --ckpt 130000 \
+                 --out runs/campaigns/10-eval-v4/             # GPU, hours
+eval_v4 generate sampler --model runs/ldm/<run> --ckpt best --dry-run
+eval_v4 measure sampler --root runs/campaigns/10-eval-v4/     # CPU, repeatable
+eval_v4 report --root runs/campaigns/10-eval-v4/
+eval_v4 manifest-check --root runs/campaigns/10-eval-v4/      # exit 1 on a fault
+
 # TensorBoard
 tensorboard --logdir runs/vae/
 ```
@@ -38,7 +47,7 @@ Do not fix unless explicitly asked:
 - `tests/test_latent_metrics.py::test_active_units_counts_collapsed_channels`
 - `tests/test_recon_metrics.py` (3 failures)
 
-A clean run is therefore **264 passed, 5 failed**.
+A clean run is therefore **323 passed, 5 failed**.
 
 ## Testing inside a git worktree
 
