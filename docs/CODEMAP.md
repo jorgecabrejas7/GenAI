@@ -140,19 +140,22 @@ companion docs listed under [docs/](#docs).
 
 The rerunnable suite behind the `eval_v4` CLI. See
 [eval_methodology.md](eval_methodology.md) for what each metric means and why.
-Replaces `scripts/eval_generated_volumes.py` (deleted): that script scored
-distribution distances, which cannot express a *request*, and every question
-ldm06 exists to answer is conditional.
+Replaces `scripts/eval_generated_volumes.py` (deleted). Most of that script
+scored distribution distances, which cannot express a *request*, and every
+question ldm06 exists to answer is conditional. Its five statistics that ARE
+worth having were ported into assessment 8, where they finally carry a
+real-vs-real floor.
 
 | Path | What it does |
 |---|---|
 | `eval_v4/manifest.py` | `Manifest` — what a volume claims about itself (model run, step, raw/EMA, objective, `cfg_rescale`, sampler geometry, the request, shape, commit, wall time, peak GPU memory) with a schema that refuses an unknown field or a self-contradiction. `requires(*fields)` is the decorator every metric declares itself with: it refuses a volume whose manifest lacks a field the metric reads, or whose positional array shape contradicts `volume_shape`. |
 | `eval_v4/io.py` | Campaign layout, `save_case` (manifest written LAST, so a truncated case has none), `Case` with lazily-read arrays and the derived requests (`material_voxels`, `requested_phi_per_tile`). `load_u8` refuses anything not already uint8 — no rescaling branch, on purpose. |
 | `eval_v4/metrics.py` | Every measurement: phase fractions, porosity error and the 0.005 gate, failure flags and degenerate cells, the WITHIN-volume local fit (plus `pooled_dose_fit`, named `..._not_obedience`), both seam periods via the sampler's own `seam_discontinuity`, pore Dice and the chunk-plane slab, the grey air detector (constants and calibration imported from `_eval_v3`, never forked), cross-head disagreement, layup recovery through the T-I readers, geometry Dice, and the campaign-08 layup floor / VAE tile-decode control read from their `results.json`. |
-| `eval_v4/cases.py` | The seven assessments as data — 93 `CaseSpec`s over seeds 101/202/303 — plus the requested-field painters (halves, checkerboard, coherent), the notch-and-hole material map, and the three layups (A and B16 from `data/layup_ground_truth.json`, C a fixed permutation of A). Nothing here knows the sampler. |
+| `eval_v4/cases.py` | The eight assessments as data — 102 `CaseSpec`s over seeds 101/202/303 — plus the requested-field painters (halves, checkerboard, coherent), the notch-and-hole material map, and the three layups (A and B16 from `data/layup_ground_truth.json`, C a fixed permutation of A). Nothing here knows the sampler. |
 | `eval_v4/generate.py` | The ONLY module that knows the sampler API. `VolumeRunner` loads the LDM, VAE and latent stats once, then rebuilds sampler + generator per case. Reaches the model through `DDPMSchedule.from_cfg` and `VolumeGenerator.generate` only. Documents the three places the sampler's interface shapes the suite: seeding is global, size is in millimetres (and is checked to snap back), and the window phase has no parameter, so assessment 6 translates the request inside a larger canvas instead. |
-| `eval_v4/measure.py` | One measurer per assessment, aggregating mean ± sd over seeds; plus `manifest_check`, which separates a manifest that does not parse, a volume that contradicts its manifest, and a case the assessment defines but the campaign lacks. Never re-reads the model. |
-| `eval_v4/real_floor.py` | Cuts crops of the split_v3 TEST panels at the generated shapes and runs every request-free metric on them. Reduces the crop depth a tile at a time until a box fits entirely inside `sample_mask` (a 192-deep one does not exist on a real laminate), never below 128. |
+| `eval_v4/measure.py` | One measurer per assessment, aggregating mean ± sd over seeds (`measure_microstructure` instead reports every distance three ways — generated vs real, the real-vs-real floor, and the ratio); plus `manifest_check`, which separates a manifest that does not parse, a volume that contradicts its manifest, and a case the assessment defines but the campaign lacks. Never re-reads the model. |
+| `eval_v4/microstructure.py` | The five distribution statistics, ported from the deleted `scripts/eval_generated_volumes.py` and each validated against a structure whose answer is known: S2(r) by Hann-windowed FFT autocorrelation debiased with the window's own autocorrelation, the pore-size distribution of 6-connected components, border-corrected Ripley's K over a KD-tree (converges to the CSR `(4/3)pi r^3`, unlike the uncorrected estimator it replaces), FID on 64x64 native slice crops through torchvision's InceptionV3 pool3, and the latent nearest-neighbour memorisation check against the current `latents_r08z4` store layout. `compare_sets` is the two-sample comparison the assessment runs twice — generated against real, and real against real. A missing torchvision or a missing latent store is a reported skip, not a failure. |
+| `eval_v4/real_floor.py` | Cuts crops of the split_v3 TEST panels at the generated shapes and runs every request-free metric on them. Reduces the crop depth a tile at a time until a box fits entirely inside `sample_mask` (a 192-deep one does not exist on a real laminate), never below 128. `--shapes micro` additionally cuts the matched-porosity reference PAIRS assessment 8 is floored against: per level and per PANEL, two 128-cubed crops at that porosity that share no material. Candidates are scored exactly from a one-pass cell summary of the pore mask, so no candidate needs the volume read for it. |
 | `eval_v4/report.py` | `findings.md` + figures (PDF and PNG, 300 dpi) from `results.json` alone, with the real-floor row first in every table that has one. Touches no volume. |
 | `eval_v4/cli.py` | `eval_v4 generate \| measure \| report \| manifest-check \| real-floor`. |
 
@@ -340,7 +343,7 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 | `docs/vae_architecture.md` | VAE model family and the `engine.py` train/eval data flow. |
 | `docs/ldm_training.md` | How to launch, resume, and babysit an LDM run (tmux recipes). |
 | `docs/metrics_guide.md` | Every training/eval metric: formula, healthy range, what to do. (Spanish.) |
-| `docs/eval_methodology.md` | eval v4: the manifest contract, every metric, the seven assessments and the real-volume floor — the paper methods reference. |
+| `docs/eval_methodology.md` | eval v4: the manifest contract, every metric, the eight assessments and the real-volume floor — the paper methods reference. |
 
 ---
 
