@@ -52,7 +52,9 @@ from _real_windows import cell_ok_by_slice, find_region  # noqa: E402
 
 sys.path.insert(0, str(REPO / "src"))
 
+from poregen.dataset.loader import build_label  # noqa: E402
 from poregen.diffusion.sampler import seam_discontinuity  # noqa: E402
+from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, N_CLASSES  # noqa: E402
 from poregen.eval.blended import tukey_window_3d  # noqa: E402
 from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 
@@ -105,50 +107,65 @@ def _encode_mu(model, xct: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def decode_patches(model, xct_pad: np.ndarray, mask_pad: np.ndarray,
+def seg_channels(model) -> int:
+    """Channels the segmentation head emits: 1 for a mask head, 3 for a class head."""
+    return N_CLASSES if getattr(model, "class_head", None) is not None else 1
+
+
+def decode_patches(model, xct_pad: np.ndarray, seg_pad: np.ndarray,
                    coords: list[tuple[int, int, int]],
                    device: torch.device, batch: int = BATCH):
-    """Encode -> mu -> decode each patch. Yields (coords, xct_out, mask_logit).
+    """Encode -> mu -> decode each patch. Yields (coords, xct_out, seg_logits).
 
     ``xct_out`` is the raw XCT-head output (grey level in [0, 1] before the
-    clamp) and ``mask_logit`` the raw mask logit — both pre-activation, which
-    is what assembly B has to blend.  bfloat16 autocast matches the sampler's
-    decode path, so the numbers are comparable with the generated volumes.
+    clamp).  ``seg_logits`` is ``(B, C, P, P, P)``: the single mask logit for a
+    binary head, the three class logits for an r08 class head.  Both are
+    pre-activation, which is what assembly B has to blend — a blend after the
+    sigmoid or softmax would pull patch boundaries toward the flat part of the
+    nonlinearity.  bfloat16 autocast matches the sampler's decode path, so the
+    ratios are comparable with the generated volumes.
+
+    ``seg_pad`` is whatever the encoder takes alongside the XCT: the binary
+    mask for a mask-head VAE, the int64 class label for a class-head one.
     """
+    is_cls = seg_channels(model) == N_CLASSES
     for b0 in range(0, len(coords), batch):
         bc = coords[b0:b0 + batch]
         xa = np.stack([xct_pad[z:z + PATCH, y:y + PATCH, x:x + PATCH] for z, y, x in bc])
-        ma = np.stack([mask_pad[z:z + PATCH, y:y + PATCH, x:x + PATCH] for z, y, x in bc])
+        sa = np.stack([seg_pad[z:z + PATCH, y:y + PATCH, x:x + PATCH] for z, y, x in bc])
         xt = torch.from_numpy(xa).unsqueeze(1).to(device)
-        mt = torch.from_numpy(ma).unsqueeze(1).to(device)
+        st = torch.from_numpy(sa).to(device)
+        if not is_cls:
+            st = st.unsqueeze(1)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            dec = model.decoder(_encode_mu(model, xt, mt))
+            dec = model.decoder(model.encode_moments(xt, st)[0])
             xct_out = model.xct_head(dec)
-            mask_logit = model.mask_head(dec)
+            seg = (model.class_head(dec) if is_cls else model.mask_head(dec))
         yield (bc,
                xct_out.squeeze(1).float().cpu().numpy(),
-               mask_logit.squeeze(1).float().cpu().numpy())
+               seg.float().cpu().numpy())
 
 
-def assemble_tiled(model, core: np.ndarray, core_mask: np.ndarray,
+def assemble_tiled(model, core: np.ndarray, core_seg: np.ndarray,
                    device) -> tuple[np.ndarray, np.ndarray, int]:
     """Assembly A — stride-64 tiling, each decoded block written in place."""
     D, H, W = core.shape
+    C = seg_channels(model)
     coords = [(z, y, x)
               for z in range(0, D - PATCH + 1, STRIDE_A)
               for y in range(0, H - PATCH + 1, STRIDE_A)
               for x in range(0, W - PATCH + 1, STRIDE_A)]
     xct = np.zeros(core.shape, np.float32)
-    mlog = np.zeros(core.shape, np.float32)
-    for bc, xo, mo in decode_patches(model, core, core_mask, coords, device):
+    slog = np.zeros((C, *core.shape), np.float32)
+    for bc, xo, so in decode_patches(model, core, core_seg, coords, device):
         for i, (z, y, x) in enumerate(bc):
             sl = np.s_[z:z + PATCH, y:y + PATCH, x:x + PATCH]
             xct[sl] = xo[i]
-            mlog[sl] = mo[i]
-    return xct, mlog, len(coords)
+            slog[(slice(None), *sl)] = so[i]
+    return xct, slog, len(coords)
 
 
-def assemble_blended(model, padded: np.ndarray, padded_mask: np.ndarray,
+def assemble_blended(model, padded: np.ndarray, padded_seg: np.ndarray,
                      device, core_shape, off: int
                      ) -> tuple[np.ndarray, np.ndarray, int]:
     """Assembly B — stride-32 patches, Tukey-blended, then cropped to the core.
@@ -162,21 +179,24 @@ def assemble_blended(model, padded: np.ndarray, padded_mask: np.ndarray,
               for z in range(0, D - PATCH + 1, STRIDE_B)
               for y in range(0, H - PATCH + 1, STRIDE_B)
               for x in range(0, W - PATCH + 1, STRIDE_B)]
+    C = seg_channels(model)
     w3 = tukey_window_3d(PATCH)
     xct_w = np.zeros(padded.shape, np.float32)
-    mlog_w = np.zeros(padded.shape, np.float32)
+    slog_w = np.zeros((C, *padded.shape), np.float32)
     acc = np.zeros(padded.shape, np.float32)
     for z, y, x in coords:
         acc[z:z + PATCH, y:y + PATCH, x:x + PATCH] += w3
-    for bc, xo, mo in decode_patches(model, padded, padded_mask, coords, device):
+    for bc, xo, so in decode_patches(model, padded, padded_seg, coords, device):
         for i, (z, y, x) in enumerate(bc):
             sl = np.s_[z:z + PATCH, y:y + PATCH, x:x + PATCH]
             xct_w[sl] += w3 * xo[i]
-            mlog_w[sl] += w3 * mo[i]
+            slog_w[(slice(None), *sl)] += w3 * so[i]
     safe = np.where(acc > 0, acc, 1.0)
     D0, H0, W0 = core_shape
     crop = np.s_[off:off + D0, off:off + H0, off:off + W0]
-    return (xct_w / safe)[crop].copy(), (mlog_w / safe)[crop].copy(), len(coords)
+    return ((xct_w / safe)[crop].copy(),
+            (slog_w / safe[None])[(slice(None), *crop)].copy(),
+            len(coords))
 
 
 # ---------------------------------------------------------------------------
@@ -198,17 +218,51 @@ def dice(pred: np.ndarray, gt: np.ndarray) -> float:
     return 2.0 * inter / denom if denom > 0 else float("nan")
 
 
-def score(name: str, grey: np.ndarray, mlog: np.ndarray,
-          gt_mask: np.ndarray | None) -> dict:
-    s = {"assembly": name}
+def pore_logit(slog: np.ndarray) -> np.ndarray:
+    """(C, D, H, W) segmentation logits -> the pore logit, one channel.
+
+    For a binary mask head the logit IS the pore logit.  For a 3-class head the
+    comparable quantity is ``log p_pore - log(1 - p_pore)`` — the same
+    two-outcome contrast the binary head emits — so the seam ratio measured on
+    it can be read against the mask-head numbers of campaign 08 and against the
+    generated volumes.  Taking a raw class logit instead would measure a
+    quantity with a free additive constant per voxel (softmax is
+    shift-invariant), which is not comparable to anything.
+    """
+    if slog.shape[0] == 1:
+        return slog[0]
+    m = slog.max(axis=0, keepdims=True)
+    e = np.exp(slog - m)
+    p = e[CLASS_PORE] / e.sum(axis=0)
+    p = np.clip(p, 1e-6, 1.0 - 1e-6)
+    return np.log(p) - np.log1p(-p)
+
+
+def score(name: str, grey: np.ndarray, slog: np.ndarray,
+          gt_label: np.ndarray | None) -> dict:
+    """Seam ratios on grey and on the pore logit, plus per-class Dice."""
+    s = {"assembly": name, "n_seg_channels": int(slog.shape[0])}
     s.update({k: v for k, v in seam_discontinuity(grey, PATCH, "seam_xct").items()
               if k.endswith("ratio") or k == "seam_xct_mad"})
-    s.update({k: v for k, v in seam_discontinuity(mlog, PATCH, "seam_mask").items()
+    plog = pore_logit(slog)
+    s.update({k: v for k, v in seam_discontinuity(plog, PATCH, "seam_mask").items()
               if k.endswith("ratio") or k == "seam_mask_mad"})
-    pred = mlog > 0.0
-    s["porosity"] = float(pred.mean())
-    s["dice_vs_stored_mask"] = (float("nan") if gt_mask is None
-                                else dice(pred, gt_mask))
+
+    if slog.shape[0] == 1:
+        pred_pore = slog[0] > 0.0
+        pred_air = None
+    else:
+        pred = slog.argmax(axis=0)
+        pred_pore = pred == CLASS_PORE
+        pred_air = pred == CLASS_AIR
+
+    s["porosity"] = float(pred_pore.mean())
+    s["dice_pore"] = (float("nan") if gt_label is None
+                      else dice(pred_pore, gt_label == CLASS_PORE))
+    if pred_air is not None:
+        s["air_fraction"] = float(pred_air.mean())
+        s["dice_air"] = (float("nan") if gt_label is None
+                         else dice(pred_air, gt_label == CLASS_AIR))
     return s
 
 
@@ -259,65 +313,81 @@ def run_volume(model, device, short: str, vid: str, g, field: dict,
     sl = np.s_[clo[0]:chi[0], clo[1]:chi[1], clo[2]:chi[2]]
     padded = np.pad(np.asarray(arr_x[sl]).astype(np.float32) / 255.0,
                     pad, mode="reflect")
-    padded_mask = np.pad((np.asarray(arr_m[sl]) > 0).astype(np.float32),
-                         pad, mode="reflect")
+    # The encoder takes the binary mask (mask head) or the 3-class label
+    # (class head); build_label is the same rule the memmap extractor uses.
+    padded_label = np.pad(
+        build_label(np.asarray(arr_m[sl]), np.asarray(arr_s[sl])),
+        pad, mode="reflect")
+    is_cls = seg_channels(model) == N_CLASSES
+    padded_seg = (padded_label.astype(np.int64) if is_cls
+                  else (padded_label == CLASS_PORE).astype(np.float32))
     crop_core = np.s_[MARGIN:MARGIN + D, MARGIN:MARGIN + H, MARGIN:MARGIN + W]
     core = padded[crop_core].copy()
-    core_mask = padded_mask[crop_core].copy()
-    gt_mask = core_mask > 0
+    core_seg = padded_seg[crop_core].copy()
+    gt_label = padded_label[crop_core].copy()
 
     region_shape = (D, H, W)
     rows = []
     vols = {}
 
     t = time.time()
-    xa, ma, na = assemble_tiled(model, core, core_mask, device)
+    xa, ma, na = assemble_tiled(model, core, core_seg, device)
     log(f"{short}: assembly A done, {na} patches, {time.time() - t:.0f}s")
-    rows.append(score("A_tiled", grey_u8_scale(xa), ma, gt_mask))
+    rows.append(score("A_tiled", grey_u8_scale(xa), ma, gt_label))
     rows[-1]["n_patches"] = na
     vols["A_tiled"] = (grey_u8_scale(xa), ma)
     del xa
 
     t = time.time()
-    xb, mb, nb = assemble_blended(model, padded, padded_mask, device, region_shape, MARGIN)
+    xb, mb, nb = assemble_blended(model, padded, padded_seg, device, region_shape, MARGIN)
     log(f"{short}: assembly B done, {nb} patches, {time.time() - t:.0f}s")
-    rows.append(score("B_overlapped", grey_u8_scale(xb), mb, gt_mask))
+    rows.append(score("B_overlapped", grey_u8_scale(xb), mb, gt_label))
     rows[-1]["n_patches"] = nb
     vols["B_overlapped"] = (grey_u8_scale(xb), mb)
     del xb
 
-    # Control: the real data.  The stored mask is binary, so its "logit" is a
-    # two-valued surrogate — the seam_mask number for C measures how the binary
-    # mask itself changes across a 64-plane, not a decoder disagreement.
-    ctrl_logit = np.where(gt_mask, MASK_LOGIT_CLIP, -MASK_LOGIT_CLIP).astype(np.float32)
-    rows.append(score("C_real", core * 255.0, ctrl_logit, gt_mask))
+    # Control: the real data.  The stored label is discrete, so its "logit" is
+    # a two-valued surrogate — C's seam_mask measures how the stored label
+    # itself changes across a 64-plane, not a decoder disagreement.  Built with
+    # the same channel count as the model's head so score() takes the same path.
+    C = seg_channels(model)
+    if C == 1:
+        ctrl = np.where(gt_label == CLASS_PORE, MASK_LOGIT_CLIP,
+                        -MASK_LOGIT_CLIP).astype(np.float32)[None]
+    else:
+        ctrl = np.full((C, *gt_label.shape), -MASK_LOGIT_CLIP, np.float32)
+        for c in range(C):
+            ctrl[c][gt_label == c] = MASK_LOGIT_CLIP
+    rows.append(score("C_real", core * 255.0, ctrl, gt_label))
     rows[-1]["n_patches"] = 0
 
     if save:
-        for name, (grey, mlog) in vols.items():
+        for name, (grey, slog) in vols.items():
             d = OUT_DIR / "volumes" / short / name
             d.mkdir(parents=True, exist_ok=True)
             tifffile.imwrite(str(d / "volume.tif"),
                              np.round(grey).astype(np.uint8))
-            tifffile.imwrite(str(d / "mask.tif"),
-                             ((mlog > 0).astype(np.uint8) * 255))
+            lab = (slog.argmax(axis=0).astype(np.uint8) if slog.shape[0] > 1
+                   else (slog[0] > 0).astype(np.uint8))
+            tifffile.imwrite(str(d / "label.tif"), lab)
         d = OUT_DIR / "volumes" / short / "C_real"
         d.mkdir(parents=True, exist_ok=True)
         tifffile.imwrite(str(d / "volume.tif"),
                          np.round(core * 255.0).astype(np.uint8))
-        tifffile.imwrite(str(d / "mask.tif"), (gt_mask.astype(np.uint8) * 255))
+        tifffile.imwrite(str(d / "label.tif"), gt_label.astype(np.uint8))
 
     return {"volume": short, "volume_id": vid, "region": reg,
             "region_shape": list(region_shape),
             "halo_real_fraction": halo_real,
-            "stored_mask_porosity": float(gt_mask.mean()),
+            "stored_porosity": float((gt_label == CLASS_PORE).mean()),
+            "stored_air_fraction": float((gt_label == CLASS_AIR).mean()),
             "assemblies": rows}
 
 
 def build_findings(records: list[dict], meta: dict) -> str:
     L = ["# 0a — VAE tile seam: assembly, not the LDM", "",
-         f"VAE `{meta['vae_checkpoint']}` (production r07 z=4, the one that "
-         f"built `data/split_v2/latents_r07z4`). {len(records)} real val "
+         f"VAE `{meta['vae_checkpoint']}` ({meta['vae_model']}). "
+         f"{len(records)} real val "
          f"volumes, one box each ("
          + ", ".join("%s %dx%dx%d" % (r["volume"], *r["region_shape"])
                      for r in records)
@@ -329,7 +399,7 @@ def build_findings(records: list[dict], meta: dict) -> str:
          "| porosity |", "|---|---|---|---|---|---|"]
     for r in records:
         for a in r["assemblies"]:
-            d = a["dice_vs_stored_mask"]
+            d = a["dice_pore"]
             L.append(f"| {r['volume']} | {a['assembly']} "
                      f"| {a['seam_xct_ratio']:.3f} | {a['seam_mask_ratio']:.3f} "
                      f"| {'—' if not np.isfinite(d) else f'{d:.3f}'} "
@@ -344,8 +414,18 @@ def build_findings(records: list[dict], meta: dict) -> str:
         L.append(f"| {name} "
                  f"| {np.mean([a['seam_xct_ratio'] for a in sel]):.3f} "
                  f"| {np.mean([a['seam_mask_ratio'] for a in sel]):.3f} "
-                 f"| {np.nanmean([a['dice_vs_stored_mask'] for a in sel]):.3f} "
+                 f"| {np.nanmean([a['dice_pore'] for a in sel]):.3f} "
                  f"| {np.mean([a['porosity'] for a in sel]):.4f} |")
+    if any(a.get("dice_air") is not None for r in records for a in r["assemblies"]):
+        L += ["", "## Air class (3-class head only)", "",
+              "| volume | assembly | air Dice | air fraction |",
+              "|---|---|---|---|"]
+        for r in records:
+            for a in r["assemblies"]:
+                if a.get("dice_air") is None:
+                    continue
+                L.append(f"| {r['volume']} | {a['assembly']} "
+                         f"| {a['dice_air']:.4f} | {a['air_fraction']:.4f} |")
     L += ["",
           "Reference: the joint_oob arm of "
           "`runs/campaigns/05-eval-v3-fixed-decode` reports "
@@ -373,14 +453,26 @@ def build_findings(records: list[dict], meta: dict) -> str:
 
 
 def main() -> None:
+    global OUT_DIR
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-save-volumes", action="store_true")
+    ap.add_argument("--checkpoint", default=None,
+                    help="VAE checkpoint. Default: the r07 VAE recorded in "
+                         "the latents_r07z4 metadata, which reproduces "
+                         "campaign 08 task 0a.")
+    ap.add_argument("--out", default=None,
+                    help="output directory (default: the campaign 08 0a folder)")
     args = ap.parse_args()
 
+    if args.out:
+        OUT_DIR = Path(args.out)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda")
-    meta = json.loads((LATENTS_ROOT / "metadata.json").read_text())
-    ckpt = Path(meta["vae_checkpoint"])
+    if args.checkpoint:
+        ckpt = Path(args.checkpoint)
+    else:
+        ckpt = Path(json.loads(
+            (LATENTS_ROOT / "metadata.json").read_text())["vae_checkpoint"])
     vae, cfg, _, _ = load_vae_from_checkpoint(ckpt, device)
     vae.requires_grad_(False)
     log(f"VAE loaded: {cfg['model']['name']} from {ckpt}")
@@ -394,7 +486,7 @@ def main() -> None:
 
     info = {"vae_checkpoint": str(ckpt), "vae_model": cfg["model"]["name"]}
     results = {
-        "campaign": "08 — 0a VAE tile seam (assembly vs LDM)",
+        "campaign": "VAE tile seam — tiled vs overlapped assembly",
         "question": "Do the mask seams in generated volumes come from the VAE "
                     "tiled assembly or from the LDM?",
         **info,
