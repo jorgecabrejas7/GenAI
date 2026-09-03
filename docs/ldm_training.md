@@ -54,7 +54,7 @@ The rungs available today, all on the same store and the same denoiser:
 |---|---|---|
 | `ldm06/base` | the ε baseline | — |
 | `ldm06/aux` | adds the decoded-space auxiliary loss through the frozen r08 VAE | `ldm06/base`, same seed and budget |
-| `ldm07/base` | v-prediction + zero terminal SNR | `ldm06/base`, same seed and budget |
+| `ldm06/eps` | ablation: ε objective instead of v | `ldm06/base`, same seed and budget |
 
 Each is a separate rung with its own tmux session named after it; a new
 capability gets a new `ldmNN`, logged in the vault.
@@ -102,7 +102,7 @@ What to watch in TensorBoard:
 | `val/loss` | falling | ε-MSE with every neighbour at the target timestep — the situation the sampler runs in |
 | `gen/std_ratio_avg` | → 1.0 | generated latents' per-channel std vs the real train distribution |
 | `gen/por_cond_mae` | falling | conditional adherence: delivered vs requested φ on real val conditioning |
-| `gen/x0_clamp_sat_frac` | → 0 | fraction of x̂₀ elements hitting the ±10 clamp; a rising value means off-manifold sampling. Under the ε objective this has a FLOOR: at the terminal step `sqrt(ᾱ_T) = 6.12e-17` makes the ε form of x̂₀ diverge and the whole first step saturates. ldm07's v objective removes that floor, so compare the two rungs on this scalar first |
+| `gen/x0_clamp_sat_frac` | → 0 | fraction of x̂₀ elements hitting the ±10 clamp; a rising value means off-manifold sampling. Under the ε objective this has a FLOOR: at the terminal step `sqrt(ᾱ_T) = 6.12e-17` makes the ε form of x̂₀ diverge and the whole first step saturates. `ldm06/base` trains on v, which removes that floor; compare it against the `ldm06/eps` ablation on this scalar first |
 | `samples/seam_xct_ratio` | → 1.0 | window-period (64-voxel) seam vs the interior slice-to-slice baseline |
 | `samples/seam_chunk_xct_ratio` | → 1.0 | chunk-period seam; a gap between the two says the chunk boundary is the problem, not the window overlap |
 

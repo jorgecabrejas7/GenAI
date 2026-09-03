@@ -1,0 +1,24 @@
+experiment:
+  name: ldm06
+  variant: eps
+  description: >-
+    Ablation: ldm06/base with the epsilon objective instead of v, and the
+    terminal-SNR exactness turned off. It exists to measure what the objective
+    is worth, not because anything should be trained on it.
+
+    Expect gen/x0_clamp_sat_frac to show a floor this variant cannot avoid:
+    with sqrt(alpha_bar_T) = 6.12e-17 on this schedule, the epsilon path's
+    x0_hat divides by ~0 at the terminal step and the +/-10 clamp saturates.
+    That is the defect v-prediction removes, and this config is how it gets
+    quantified rather than asserted.
+
+    zero_terminal_snr MUST stay false here: DDPMSchedule rejects the flag with
+    the epsilon objective, because there the division would be by exactly zero
+    rather than merely by 6.12e-17.
+
+extends: ldm06/base
+
+overrides:
+  noise_schedule:
+    objective: eps
+    zero_terminal_snr: false

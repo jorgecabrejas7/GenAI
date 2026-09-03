@@ -133,7 +133,7 @@ chunks the sampler has not reached.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `objective` | `eps` (ldm06) / `v` (ldm07) | ε-prediction, or the velocity target `v = sqrt(ᾱ)·ε − sqrt(1−ᾱ)·x₀` (Salimans & Ho 2022) |
+| `objective` | `v` (ldm06/base) / `eps` (ldm06/eps ablation) | ε-prediction, or the velocity target `v = sqrt(ᾱ)·ε − sqrt(1−ᾱ)·x₀` (Salimans & Ho 2022) |
 | `zero_terminal_snr` | bool | rescale sqrt(ᾱ) so its last entry is EXACTLY 0 (Lin et al. 2024, Alg. 1) |
 
 Nothing outside the schedule branches on the objective. `training_target`
@@ -141,7 +141,7 @@ names what the step regresses, `predict_x0` / `predict_eps` convert a model
 output back, and `ddim_step` is written on (x̂₀, ε̂) so there is one reverse
 process rather than one per parameterisation.
 
-**The terminal step is why ldm07 exists, and the usual justification does not
+**The terminal step is why ldm06 trains on v, and the usual justification does not
 apply here.** Lin et al. attack a cosine schedule that derives ᾱ as
 `cumprod(1 − clamp(β))`, which leaves a terminal `sqrt(ᾱ_T) ≈ 0.068` — real
 signal the model still sees on its last training step but never on its first

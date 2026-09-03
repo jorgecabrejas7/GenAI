@@ -59,6 +59,33 @@ noise_schedule:
   type: cosine
   T: 1000
   s: 0.008
+  # v-prediction from the start, not as a later rung. The reason is numerical,
+  # not stylistic, and the usual justification for zero terminal SNR does NOT
+  # apply here — saying otherwise would misreport what this trains.
+  #
+  # Lin et al. 2024 (arXiv:2305.08891) attack schedules that derive alpha_bar
+  # as cumprod(1 - beta) after clamping beta, leaving terminal
+  # sqrt(alpha_bar) ~ 0.068 — a real signal leak. DDPMSchedule computes
+  # alpha_bar directly from the cosine f, so f(T) = cos(pi/2)^2 is already
+  # zero to float precision. MEASURED on this schedule: alphas_cumprod[-1] =
+  # 3.75e-33, sqrt = 6.12e-17, and the Lin rescale moves it by at most that.
+  # There is no leak to close.
+  #
+  # What IS broken is the epsilon parameterisation at the terminal step. With
+  # sqrt(alpha_bar_T) = 6.12e-17, x0_hat = (x_t - sqrt(1-alpha_bar)*eps_hat) /
+  # sqrt(alpha_bar) multiplies the model output by 1.6e16 and the +/-10 clamp
+  # saturates — the x0_sat ~ 0.02 D39 recorded. Every eps sampling chain
+  # started from a clamp artefact rather than a prediction.
+  #
+  # v = sqrt(alpha_bar)*eps - sqrt(1-alpha_bar)*x0 (Salimans & Ho 2022,
+  # arXiv:2202.00512) recovers x0_hat with NO division, so the terminal step
+  # is well conditioned (x0_hat = -v_hat, order 1). zero_terminal_snr makes
+  # that exact; DDPMSchedule refuses the flag with objective eps, where the
+  # division would be by exactly zero.
+  #
+  # configs/experiments/ldm06/eps.yaml is the ablation that turns this off.
+  objective: v
+  zero_terminal_snr: true
 
 vae:
   # PLACEHOLDER — replace with the exact r08 checkpoint before launching.
@@ -119,6 +146,11 @@ training:
 guidance:
   s_por: 1.0
   s_nb: 1.0
+  # Lin et al. 2024 §3.4 rescale factor. Off while s_por = s_nb = 1: the
+  # correction only bites once a guidance scale extrapolates, and switching it
+  # on unguided adds a no-op std ratio of 1. Set it to 0.7 together with a
+  # guidance sweep.
+  cfg_rescale: 0.0
 
 generation:
   # Hybrid chunked joint denoising — the only generation path.

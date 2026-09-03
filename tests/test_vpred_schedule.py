@@ -1,4 +1,4 @@
-"""v-prediction and zero-terminal-SNR (ldm07).
+"""v-prediction and zero-terminal-SNR — the ldm06 objective.
 
 The four things that can silently go wrong here, and the tests that pin them:
 
@@ -11,7 +11,7 @@ The four things that can silently go wrong here, and the tests that pin them:
   straight from the cosine f, so its terminal value is already 6e-17 and the
   Lin rescale changes nothing measurable — the win is that the eps form's
   division by ~0 disappears, not that a signal leak was closed.  The test says
-  so, so the next reader does not attribute an ldm07 result to the wrong
+  so, so the next reader does not attribute an ldm06 result to the wrong
   cause;
 * a CFG decomposition that stops telescoping once the network emits v instead
   of eps, which would make s_por = s_nb = 1 quietly non-neutral.
@@ -118,7 +118,7 @@ class TestConversions:
         )
 
     def test_the_v_form_is_the_only_usable_one_at_the_terminal_step(self):
-        """The motivation for ldm07, stated as a measurement.
+        """The motivation for the v objective, stated as a measurement.
 
         The eps form recovers x0 by dividing by sqrt(alpha_bar_T), which this
         cosine schedule already puts at 6.1e-17.  The 1e-8 guard clamp turns
@@ -348,10 +348,16 @@ class TestRescaleGuidance:
         assert bool((out.std(dim=dims) < g.std(dim=dims)).all())
 
 
-def test_ldm07_config_resolves_to_a_v_schedule():
+def test_ldm06_base_resolves_to_a_v_schedule():
+    """ldm06 trains on v from the start; ldm07 was folded into it.
+
+    The objective is not a later rung because the defect it fixes is present
+    from the first step: on this schedule the epsilon form of x0_hat divides by
+    sqrt(alpha_bar_T) = 6.12e-17 at the terminal step.
+    """
     from poregen.configuration import resolve_experiment
 
-    cfg = resolve_experiment("ldm07/base").cfg
+    cfg = resolve_experiment("ldm06/base").cfg
     assert cfg["noise_schedule"]["objective"] == "v"
     assert cfg["noise_schedule"]["zero_terminal_snr"] is True
     # Everything else is ldm06/base: same store, same denoiser, same budget.
@@ -365,3 +371,22 @@ def test_ldm07_config_resolves_to_a_v_schedule():
     # The cosine offset survived the merge — the tail moved, not the shape.
     assert sch.s == pytest.approx(0.008)
     assert math.isclose(float(sch.alphas_cumprod_prev[0]), 1.0, abs_tol=1e-6)
+
+
+def test_ldm06_eps_ablation_is_the_only_eps_config():
+    """The eps variant exists to MEASURE the defect, so it must stay eps.
+
+    zero_terminal_snr has to be false there: the schedule rejects the flag with
+    the epsilon objective, because then the terminal division is by exactly
+    zero rather than by 6.12e-17.
+    """
+    from poregen.configuration import resolve_experiment
+
+    cfg = resolve_experiment("ldm06/eps").cfg
+    assert cfg["noise_schedule"]["objective"] == "eps"
+    assert cfg["noise_schedule"]["zero_terminal_snr"] is False
+    # Everything else is base: the ablation isolates the objective alone.
+    base = resolve_experiment("ldm06/base").cfg
+    assert cfg["data"]["latents_root"] == base["data"]["latents_root"]
+    assert cfg["training"]["total_steps"] == base["training"]["total_steps"]
+    assert DDPMSchedule.from_cfg(cfg).objective == "eps"
