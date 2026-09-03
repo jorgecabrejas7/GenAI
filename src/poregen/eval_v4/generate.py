@@ -20,6 +20,12 @@ recorded here rather than worked around silently:
   is no phase parameter.  Assessment 6 gets its 32-voxel shift by translating
   the REQUEST inside a larger canvas (``CaseSpec.request_offset``), which moves
   the assembly grid relative to the content without touching the sampler.
+
+The runner reaches the model through two entry points only -
+``DDPMSchedule.from_cfg`` and ``VolumeGenerator.generate`` - and never through
+``DDIMSampler.predict_eps`` / ``predict_out``.  Whether a run predicts epsilon
+or v is the schedule's business; the suite records which it was and otherwise
+leaves the conversion alone.
 """
 
 from __future__ import annotations
@@ -84,6 +90,25 @@ def latent_material_map(voxel_material: np.ndarray) -> np.ndarray:
         .mean(axis=(1, 3, 5), dtype=np.float64)
         .astype(np.float32)
     )
+
+
+def _build_schedule(schedule_cls, cfg: dict, device):
+    """The noise schedule a run was trained with.
+
+    ``DDPMSchedule.from_cfg`` is the single builder: it is the only thing that
+    knows which keys of a resolved config describe the schedule, including the
+    prediction objective.  Reading those keys here would be a second definition
+    that drifts - and it would silently build an epsilon schedule for a run
+    trained on v, which produces a plausible volume that is wrong.
+    """
+    if not hasattr(schedule_cls, "from_cfg"):
+        raise AttributeError(
+            "DDPMSchedule.from_cfg does not exist in this checkout. It is the "
+            "single schedule builder added by the ldm07-vpred-aux branch; "
+            "eval v4 generation needs it to know whether a run predicts eps or "
+            "v. Rebase onto a refactor that carries it."
+        )
+    return schedule_cls.from_cfg(cfg, device=device)
 
 
 def _ckpt_path(run_dir: Path, ckpt: str) -> tuple[Path, int]:
@@ -189,10 +214,13 @@ class VolumeRunner:
         self.vae = vae
         self.vae_checkpoint = str(meta["vae_checkpoint"])
 
-        sched = cfg.get("noise_schedule", {})
-        self.schedule = DDPMSchedule(
-            T=int(sched.get("T", 1000)), s=float(sched.get("s", 0.008)), device=self.device
+        self.schedule = _build_schedule(DDPMSchedule, cfg, self.device)
+        sched_cfg = cfg.get("noise_schedule", {}) or {}
+        self.objective = str(
+            getattr(self.schedule, "objective", None)
+            or sched_cfg.get("objective", "eps")
         )
+        self.cfg_rescale = float((cfg.get("guidance", {}) or {}).get("cfg_rescale", 0.0))
         if self.device.type == "cuda":
             cap = torch.cuda.get_device_capability(self.device)
             self.autocast_dtype = torch.bfloat16 if cap[0] >= 8 else torch.float16
@@ -288,6 +316,8 @@ class VolumeRunner:
             decode_overlap=PATCH_SIZE - spec.decode_stride,
             s_por=spec.s_por,
             s_nb=spec.s_nb,
+            objective=self.objective,
+            cfg_rescale=self.cfg_rescale,
             seed=spec.seed,
             requested_global_phi=spec.target_phi,
             requested_field="requested_field.npy" if tile_field is not None else None,

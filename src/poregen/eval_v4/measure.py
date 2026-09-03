@@ -39,6 +39,7 @@ def case_identity(case: Case) -> dict:
     m = case.manifest
     return {
         "case": m.case,
+        "model_run": m.model_run,
         "seed": m.seed,
         "volume_shape": list(m.volume_shape),
         "ddim_steps": m.ddim_steps,
@@ -48,6 +49,8 @@ def case_identity(case: Case) -> dict:
         "decode_overlap": m.decode_overlap,
         "s_por": m.s_por,
         "s_nb": m.s_nb,
+        "objective": m.objective,
+        "cfg_rescale": m.cfg_rescale,
         "weights": m.weights,
         "checkpoint_step": m.checkpoint_step,
         "requested_global_phi": m.requested_global_phi,
@@ -468,14 +471,16 @@ def _measure_window_phase(root) -> dict:
             continue
         ra = M.crop_region(a.label, a.manifest)
         rb = M.crop_region(b.label, b.manifest)
-        if ra.shape != tuple(ASSEMBLY_REGION) or rb.shape != tuple(ASSEMBLY_REGION):
+        if ra.shape != rb.shape:
             raise ValueError(
-                f"window-phase seed {seed}: regions are {ra.shape} and {rb.shape}, "
-                f"expected {ASSEMBLY_REGION}."
+                f"window-phase seed {seed}: the two regions are {ra.shape} and "
+                f"{rb.shape}. The pair must be the SAME region assembled two ways, "
+                "or the Dice compares two different pieces of material."
             )
         pairs.append({
             "seed": seed,
             "offsets": [lo, hi],
+            "region_shape": list(ra.shape),
             "pore_dice": M.pore_dice(ra, rb),
             "phi_offset0": float((ra == 1).mean()),
             "phi_offset32": float((rb == 1).mean()),
@@ -483,7 +488,7 @@ def _measure_window_phase(root) -> dict:
         })
     return {
         "available": bool(pairs),
-        "region_shape": list(ASSEMBLY_REGION),
+        "region_shape": pairs[0]["region_shape"] if pairs else list(ASSEMBLY_REGION),
         "offsets": list(ASSEMBLY_OFFSETS),
         "note": (
             "The sampler anchors window origins at the chunk origin, so the shift "

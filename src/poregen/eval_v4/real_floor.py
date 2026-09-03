@@ -52,6 +52,9 @@ FLOOR_SHAPES = {"small": SHAPE_SMALL, "large": SHAPE_LARGE}
 #: Below this share of usable 64-cubed cells a large window is not worth taking:
 #: more than a tenth of it would be exterior air.
 MIN_USABLE_CELL_FRACTION = 0.9
+#: The shallowest crop worth measuring.  ``interior_mask`` excludes a 32-voxel
+#: shell at each face, so a 64-deep crop would have no interior at all.
+MIN_DEPTH = 128
 
 
 def _real_windows(repo: Path):
@@ -122,6 +125,17 @@ def build_floor_volumes(
 
 
 def _one_crop(root, zgroup, vid, tag, shape, ok_z, rw, commit) -> dict:
+    """Cut the deepest clean box of the requested in-plane size.
+
+    A real laminate holds only ~185-212 voxels of continuous material and the
+    outer z slices are the specimen surface, so a 192-deep box that is entirely
+    inside ``sample_mask`` usually does not exist - campaign 08 hit the same
+    wall and dropped to a 128-deep box.  The depth is therefore reduced a tile
+    at a time until a clean box fits, never below :data:`MIN_DEPTH` (the
+    interior needs more than two 32-voxel shells).  Every metric here is a
+    ratio or a fraction, so a shallower crop does not bias it; the depth that
+    was actually taken goes in the manifest.
+    """
     d, h, w = shape
     cell = rw.CELL
     ky, kx = h // cell, w // cell
@@ -129,28 +143,37 @@ def _one_crop(root, zgroup, vid, tag, shape, ok_z, rw, commit) -> dict:
         return {"volume_id": vid, "shape_tag": tag,
                 "skipped": f"the scan is smaller than {h}x{w} in plane"}
 
-    # A fully-clean box first; a real laminate is only ~200 voxels deep, so a
-    # 192-deep one is often the only fit and its z origin is not 64-aligned.
-    hit = rw.find_region(None, d, ky, kx, ok_z=ok_z)
+    hit, depth = None, None
+    for cand in range(d, MIN_DEPTH - 1, -cell):
+        if cand > ok_z.shape[0]:
+            continue
+        hit = rw.find_region(None, cand, ky, kx, ok_z=ok_z)
+        if hit is not None:
+            depth = cand
+            break
+
     usable = 1.0
     if hit is None:
-        # No clean box: take the window with the most usable cells and carry
-        # the sample_mask through as the crop's requested material, so every
-        # fraction is still taken inside real specimen.
+        # No clean box at any depth: take the window with the most usable cells
+        # and carry the sample_mask through as the crop's requested material, so
+        # every fraction is still taken inside real specimen.
+        depth = min(d, ok_z.shape[0])
+        if depth < MIN_DEPTH:
+            return {"volume_id": vid, "shape_tag": tag,
+                    "skipped": f"the scan is shallower than {MIN_DEPTH} voxels"}
         best = None
-        for z0 in range(0, ok_z.shape[0] - d + 1):
-            iy, ix, frac = rw.find_window_best(ok_z[z0:z0 + d].all(axis=0), ky, kx)
+        for z0 in range(0, ok_z.shape[0] - depth + 1):
+            iy, ix, frac = rw.find_window_best(ok_z[z0:z0 + depth].all(axis=0), ky, kx)
             if best is None or frac > best[2]:
                 best = (iy, ix, frac, z0)
-        if best is None:
-            return {"volume_id": vid, "shape_tag": tag,
-                    "skipped": f"the scan is shallower than {d} voxels"}
         iy, ix, usable, z0 = best
         if usable < MIN_USABLE_CELL_FRACTION:
             return {"volume_id": vid, "shape_tag": tag, "usable_cell_fraction": usable,
+                    "depth": depth,
                     "skipped": f"best window is only {usable:.0%} inside sample_mask"}
         hit = {"z0": z0, "y0": iy * cell, "x0": ix * cell, "z_aligned": z0 % cell == 0}
 
+    shape = (depth, h, w)
     xct, label, smask = _crop(zgroup, hit["z0"], hit["y0"], hit["x0"], shape)
     full = bool(smask.all())
     material_map = None if full else latent_material_map(smask)
@@ -173,6 +196,7 @@ def _one_crop(root, zgroup, vid, tag, shape, ok_z, rw, commit) -> dict:
             "volume_id": vid,
             "shape_tag": tag,
             "split": "test",
+            "requested_shape": list(FLOOR_SHAPES[tag]),
             "origin_zyx": [hit["z0"], hit["y0"], hit["x0"]],
             "z_64_aligned": bool(hit["z_aligned"]),
             "usable_cell_fraction": float(usable),
@@ -188,6 +212,7 @@ def _one_crop(root, zgroup, vid, tag, shape, ok_z, rw, commit) -> dict:
     )
     return {
         "volume_id": vid, "shape_tag": tag, "case": manifest.case,
+        "shape": list(shape), "requested_shape": list(FLOOR_SHAPES[tag]),
         "origin_zyx": [hit["z0"], hit["y0"], hit["x0"]],
         "usable_cell_fraction": float(usable),
         "fully_inside_sample_mask": full,

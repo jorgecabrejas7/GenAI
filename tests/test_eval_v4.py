@@ -44,6 +44,7 @@ def make_manifest(**kw) -> Manifest:
         sampler="hybrid_chunked", model_run="runs/ldm/x", checkpoint_step=1000,
         weights="ema", ddim_steps=200, chunk_tiles=(3, 3, 3), window_stride=32,
         decode="overlapped", decode_overlap=32, s_por=1.0, s_nb=1.0, seed=101,
+        objective="v", cfg_rescale=0.0,
         requested_global_phi=0.03, requested_material="full",
     )
     base.update(kw)
@@ -97,6 +98,22 @@ class TestManifest:
         with pytest.raises(ManifestError, match="contradicts"):
             make_manifest(decode="overlapped", decode_overlap=0)
         assert make_manifest(decode="tiled", decode_overlap=0).decode == "tiled"
+
+    def test_the_prediction_objective_is_recorded_and_checked(self):
+        """Two checkpoints trained on different objectives are different models,
+        so the objective is required and its value is constrained."""
+        assert make_manifest(objective="eps").objective == "eps"
+        with pytest.raises(ManifestError, match="objective must be one of"):
+            make_manifest(objective="x0")
+        with pytest.raises(ManifestError, match="objective"):
+            make_manifest(objective=None)
+
+    def test_cfg_rescale_is_recorded_and_must_not_be_negative(self):
+        assert make_manifest(cfg_rescale=0.7).cfg_rescale == 0.7
+        with pytest.raises(ManifestError, match="cfg_rescale"):
+            make_manifest(cfg_rescale=-0.1)
+        with pytest.raises(ManifestError, match="cfg_rescale"):
+            make_manifest(cfg_rescale=None)
 
     def test_an_unknown_field_is_refused_rather_than_ignored(self):
         d = make_manifest().to_dict()

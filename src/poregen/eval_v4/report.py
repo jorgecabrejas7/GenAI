@@ -94,9 +94,17 @@ def ms(d: dict | None, digits: int = 4) -> str:
 
 
 def table(header: list[str], rows: list[list[str]]) -> str:
-    out = ["| " + " | ".join(header) + " |",
+    """A markdown table with every cell's own pipes escaped.
+
+    A metric name like ``|err|`` splits a row into the wrong number of columns
+    and silently shifts every value one place left, which is a table that lies.
+    """
+    def cell(v) -> str:
+        return str(v).replace("|", "\\|")
+
+    out = ["| " + " | ".join(cell(h) for h in header) + " |",
            "|" + "|".join(["---"] * len(header)) + "|"]
-    out += ["| " + " | ".join(r) + " |" for r in rows]
+    out += ["| " + " | ".join(cell(v) for v in r) + " |" for r in rows]
     return "\n".join(out)
 
 
@@ -134,13 +142,17 @@ def _header(res: dict, root: Path, floor: dict | None) -> str:
             [
                 ["campaign", f"`{root}`"],
                 ["cases measured", f"{res.get('n_cases_measured')} of {res.get('n_cases_expected')}"],
-                ["model run", f"`{(ident.get('notes') or {}).get('checkpoint', '--')}`"],
+                ["model run", f"`{ident.get('model_run', '--')}`"],
+                ["checkpoint", f"`{(ident.get('notes') or {}).get('checkpoint', '--')}`"],
                 ["checkpoint step", fmt(ident.get("checkpoint_step"))],
                 ["weights", str(ident.get("weights"))],
+                ["objective", str(ident.get("objective"))],
+                ["cfg_rescale", fmt(ident.get("cfg_rescale"), 2)],
                 ["code", f"`{ident.get('git_commit', '--')}`"],
                 ["real floor", "yes" if floor else "not measured - run `eval_v4 real-floor`"],
             ],
         ),
+        "",
         "",
     ]
     return "\n".join(lines)

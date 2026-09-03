@@ -40,9 +40,14 @@ DECODES = ("tiled", "overlapped")
 #: Fields a generated (non-real) volume must carry with a non-``None`` value.
 GENERATED_REQUIRED = (
     "model_run", "checkpoint_step", "weights", "ddim_steps", "chunk_tiles",
-    "window_stride", "decode", "decode_overlap", "s_por", "s_nb", "seed",
-    "requested_material",
+    "window_stride", "decode", "decode_overlap", "s_por", "s_nb", "objective",
+    "cfg_rescale", "seed", "requested_material",
 )
+
+#: What the denoiser is trained to predict.  The sampler converts through the
+#: schedule either way, so the objective never changes how a metric is computed
+#: - but it does change which numbers may be compared with which.
+OBJECTIVES = ("eps", "v")
 
 
 class ManifestError(ValueError):
@@ -78,6 +83,13 @@ class Manifest:
     decode_overlap: int | None = None
     s_por: float | None = None
     s_nb: float | None = None
+    #: What the denoiser predicts - ``eps`` or ``v``.  Two checkpoints trained
+    #: on different objectives are different models, and a seam or a porosity
+    #: number from one says nothing about the other, so the objective belongs
+    #: in the manifest beside the step count.
+    objective: str | None = None
+    #: Guidance rescaling factor; 0 is plain classifier-free guidance.
+    cfg_rescale: float | None = None
     seed: int | None = None
 
     # -- the request -------------------------------------------------------
@@ -170,6 +182,12 @@ class Manifest:
             raise ManifestError(f"weights must be one of {WEIGHTS}, got {self.weights!r}")
         if self.decode is not None and self.decode not in DECODES:
             raise ManifestError(f"decode must be one of {DECODES}, got {self.decode!r}")
+        if self.objective is not None and self.objective not in OBJECTIVES:
+            raise ManifestError(
+                f"objective must be one of {OBJECTIVES}, got {self.objective!r}"
+            )
+        if self.cfg_rescale is not None and self.cfg_rescale < 0:
+            raise ManifestError(f"cfg_rescale must not be negative, got {self.cfg_rescale}")
         if self.decode is not None:
             overlap = self.decode_overlap
             if overlap is None:
