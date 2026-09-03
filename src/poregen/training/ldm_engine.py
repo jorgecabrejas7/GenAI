@@ -23,6 +23,7 @@ from poregen.diffusion.conditioning import (
     neighbour_shared_voxels,
     validate_neighbour_geometry,
 )
+from poregen.losses.decoded import DecodedAuxLoss, DecodedLossConfig
 from poregen.training.checkpoint import copy_checkpoint, save_checkpoint, save_checkpoint_async
 
 import logging as _logging
@@ -199,6 +200,7 @@ def ldm_train_step(
     drop_por_p: float = 0.0,
     drop_nb_p: float = 0.0,
     nb_t_mix: float = 0.5,
+    decoded_aux: "DecodedAuxLoss | None" = None,
 ) -> dict[str, float]:
     """Single LDM training step on the ldm06 latent dataset.
 
@@ -214,9 +216,17 @@ def ldm_train_step(
     noised to the target's own timestep instead of a lower one (see
     :func:`noise_neighbours`).
 
+    ``decoded_aux`` adds the decoded-space auxiliary loss (ldm06/aux): the
+    lowest-t items' x̂₀ estimates are decoded through the frozen VAE and scored
+    on air placement, pore Dice, delivered porosity and grey/label agreement.
+    It sits OUTSIDE the autocast block on purpose — it runs its own autocast
+    around the decode only, so the denoiser's forward and the decoder's are not
+    forced into one dtype policy.
+
     Returns
     -------
-    {"loss": float, "grad_norm": float}
+    ``{"loss": float, "grad_norm": float}``, plus ``latent_loss`` and one
+    ``aux_*`` entry per decoded term when ``decoded_aux`` is active.
     """
     model.train()
     b = _batch_to_device(batch, device)
@@ -250,6 +260,17 @@ def ldm_train_step(
                           c["cond_material"], drop_por_mask)
         loss      = F.mse_loss(model_out, target)
 
+    extra: dict[str, float] = {}
+    if decoded_aux is not None:
+        latent_loss = float(loss.detach())
+        aux_loss, aux_metrics = decoded_aux(
+            model_out=model_out, z_t=z_t, t=t, schedule=schedule,
+            batch=b, step=step, autocast_dtype=autocast_dtype,
+        )
+        extra = {"latent_loss": latent_loss, **aux_metrics}
+        if aux_loss is not None:
+            loss = loss + aux_loss
+
     scaler.scale(loss).backward()
 
     if scaler.is_enabled():
@@ -266,7 +287,7 @@ def ldm_train_step(
     if scheduler is not None:
         scheduler.step()
 
-    return {"loss": loss.item(), "grad_norm": grad_norm}
+    return {"loss": loss.item(), "grad_norm": grad_norm, **extra}
 
 
 @torch.no_grad()
@@ -531,6 +552,10 @@ def ldm_train_loop(
     Reads from cfg["guidance"]:
       s_por, s_nb, cfg_rescale  (guidance scales and the Lin et al. guidance
       rescale factor, for in-training sample viz)
+
+    Reads from cfg["loss"]["decoded"]:
+      enabled, t_max_frac, ramp_steps, decoded_max_items, weights
+      (the decoded-space auxiliary loss; see poregen.losses.decoded)
     """
     if device is None:
         device = next(model.parameters()).device
@@ -611,6 +636,26 @@ def ldm_train_loop(
             s_por_scale, s_nb_scale, cfg_rescale,
         )
 
+    # Decoded-space auxiliary loss (ldm06/aux).  Built once: it holds the
+    # frozen VAE and the store's denormalisation stats, neither of which
+    # changes per step.
+    decoded_cfg = DecodedLossConfig.from_cfg(cfg)
+    decoded_aux: DecodedAuxLoss | None = None
+    if decoded_cfg is not None:
+        if vae is None:
+            raise RuntimeError(
+                "loss.decoded.enabled requires the frozen VAE (vae=...) — the "
+                "auxiliary terms are scored on the DECODED x0 estimate."
+            )
+        decoded_aux = DecodedAuxLoss(decoded_cfg, vae, latent_mean, latent_std)
+        _logger.info(
+            "Decoded auxiliary loss ON — t < %.2f*T, <=%d items/step, ramp %d steps, "
+            "weights air=%.2f dice=%.2f por=%.2f grey=%.2f",
+            decoded_cfg.t_max_frac, decoded_cfg.max_items, decoded_cfg.ramp_steps,
+            decoded_cfg.w_air_outside_material, decoded_cfg.w_pore_dice,
+            decoded_cfg.w_porosity_consistency, decoded_cfg.w_grey_agreement,
+        )
+
     compile_model = bool(training_cfg.get("compile", False))
     if compile_model:
         model = torch.compile(model, mode="max-autotune", dynamic=False)  # type: ignore[assignment]
@@ -653,6 +698,7 @@ def ldm_train_loop(
                 max_grad_norm=max_grad_norm, scheduler=scheduler,
                 sample_posterior=sample_posterior, drop_por_p=drop_por_p,
                 drop_nb_p=drop_nb_p, nb_t_mix=nb_t_mix,
+                decoded_aux=decoded_aux,
             )
             ema.update(model)
             _step_elapsed = time.perf_counter() - _step_t0
@@ -682,6 +728,14 @@ def ldm_train_loop(
                 tb_writer.add_scalar("train/loss",      metrics["loss"],      step)
                 tb_writer.add_scalar("train/grad_norm", metrics["grad_norm"], step)
                 tb_writer.add_scalar("train/steps_per_sec", steps_per_sec,    step)
+                # Every decoded term goes out on its own scalar: a single
+                # summed aux number cannot say WHICH defect moved.
+                for _k in ("latent_loss",):
+                    if _k in metrics:
+                        tb_writer.add_scalar(f"train/{_k}", metrics[_k], step)
+                for _k, _v in metrics.items():
+                    if _k.startswith("aux_"):
+                        tb_writer.add_scalar(f"train/{_k}", _v, step)
                 if scheduler is not None:
                     tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
 

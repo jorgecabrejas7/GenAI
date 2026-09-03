@@ -23,6 +23,14 @@ conditioning sidecar produced by ``scripts/build_conditioning.py``::
 Row i of ``index.parquet``, ``cond.parquet``, ``material.bin``, ``air.bin``
 and ``latents.bin`` all align.
 
+With ``with_label=True`` the dataset also serves the source patch's 3-class
+voxel label.  That array is NOT part of the store: it is
+``patches_label.bin`` in the data root recorded as
+``metadata["source_patch_index"]``, addressed by ``source_row`` and
+row-aligned with ``patch_index.parquet`` by construction.  Only the decoded
+auxiliary loss needs it, and it is 64x the size of a latent, so it stays
+opt-in.
+
 Latents are stored raw; :class:`LatentDataset` optionally applies per-channel
 normalisation ``(mu - mean_c) / std_c`` at load time.  The posterior std is
 scaled by ``1 / std_c`` under the same affine map.
@@ -107,6 +115,12 @@ class LatentDataset(Dataset):
         the store metadata, resolved relative to the repo root.
     sample_stride, generation_stride, neighbour_offset : int
         See the module docstring.  Kept separate on purpose.
+    with_label : bool
+        Also serve the source patch's 3-class voxel label, read from
+        ``patches_label.bin`` in the data root the store was built from.  Off
+        by default: the label is 256 KB per item and only the decoded
+        auxiliary loss (``loss.decoded.enabled``) consumes it, so paying for
+        it on every ldm06 run would be a pure loader tax.
     """
 
     def __init__(
@@ -119,6 +133,7 @@ class LatentDataset(Dataset):
         sample_stride: int = 32,
         generation_stride: int = 64,
         neighbour_offset: int = 64,
+        with_label: bool = False,
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -126,6 +141,7 @@ class LatentDataset(Dataset):
         self.sample_stride = int(sample_stride)
         self.generation_stride = int(generation_stride)
         self.neighbour_offset = int(neighbour_offset)
+        self.with_label = bool(with_label)
 
         with open(self.root / "metadata.json") as fh:
             self.metadata: dict[str, Any] = json.load(fh)
@@ -275,6 +291,9 @@ class LatentDataset(Dataset):
                                    shape=(n, L, L, L))
         self._air = np.memmap(str(air_path), dtype=np.float32, mode="r", shape=(n,))
 
+        # ── voxel-label memmap (decoded auxiliary loss only) ─────────────────
+        self._label = self._open_label_memmap() if self.with_label else None
+
         # ── neighbour lookup ─────────────────────────────────────────────────
         self._nb_dir_offsets = np.array(
             [[d[0], d[1], d[2]] for d in NEIGHBOUR_DIRS], dtype=np.int64
@@ -300,6 +319,64 @@ class LatentDataset(Dataset):
         )
 
     # -- helpers -----------------------------------------------------------
+
+    def _open_label_memmap(self) -> np.memmap:
+        """Map ``patches_label.bin`` of the data root this store was built from.
+
+        The store does not copy the voxel label — it is 256 KB per patch and
+        the LDM does not normally need it.  What the store DOES record is
+        ``metadata["source_patch_index"]``, the ``patch_index.parquet`` its
+        rows point into through ``source_row``; ``patches_label.bin`` lives
+        beside that file and is row-aligned with it by construction
+        (``scripts/extract_patches_memmap.py``).  Deriving the path from the
+        recorded provenance means the label can never come from a different
+        dataset than the latents.
+
+        The memmap covers the WHOLE patch index, not this split, so a row is
+        addressed by ``source_row`` directly.
+        """
+        index_path = Path(self.metadata["source_patch_index"])
+        data_root = index_path.parent
+        label_path = data_root / "patches_label.bin"
+        meta_path = data_root / "patches_meta.json"
+        if not label_path.exists() or not meta_path.exists():
+            raise FileNotFoundError(
+                f"LatentDataset [{self.split}]: loss.decoded needs the voxel "
+                f"label, but {label_path} or {meta_path} is missing.  The store "
+                f"records its source index as {index_path}; run "
+                f"scripts/extract_patches_memmap.py on that data root."
+            )
+        with open(meta_path) as fh:
+            patch_meta = json.load(fh)
+        n_all = int(patch_meta["N"])
+        ps = int(patch_meta["patch_size"])
+        if ps != self.patch_size:
+            raise RuntimeError(
+                f"LatentDataset [{self.split}]: {meta_path} says patch_size={ps} "
+                f"but the latent store was built at {self.patch_size} — the two "
+                f"were produced from different datasets."
+            )
+        expected = n_all * ps ** 3
+        actual = label_path.stat().st_size
+        if actual != expected:
+            raise RuntimeError(
+                f"LatentDataset [{self.split}]: {label_path} is {actual} bytes, "
+                f"expected {expected} for {n_all} patches of {ps}^3 uint8 — "
+                f"re-extract it."
+            )
+        max_row = int(self._source_row.max(initial=0))
+        if max_row >= n_all:
+            raise RuntimeError(
+                f"LatentDataset [{self.split}]: source_row reaches {max_row} but "
+                f"{label_path.name} holds {n_all} patches — the store and the "
+                f"patch index are out of step."
+            )
+        logger.info(
+            "LatentDataset [%s]: serving voxel labels from %s (%d patches)",
+            self.split, label_path, n_all,
+        )
+        return np.memmap(str(label_path), dtype=np.uint8, mode="r",
+                         shape=(n_all, ps, ps, ps))
 
     def _check_store_geometry(self, cond_meta: dict[str, Any]) -> None:
         """Fail when the store was built for a different assembly geometry.
@@ -413,6 +490,7 @@ class LatentDataset(Dataset):
         nb_avail       (6,)                        int64      EXISTS / OOB
         air_fraction   ()                          float32    air voxels / patch
         phi            (1,)                        float32    raw porosity
+        label          (64, 64, 64)                uint8      voxel label*
         volume_id      —                           str        provenance
         coords         (3,)                        int32      z0, y0, x0
         grid_index     (3,)                        int64      assembly grid index
@@ -428,6 +506,13 @@ class LatentDataset(Dataset):
         which the model has to generate.
         ``nb_latents`` are the neighbours' clean posterior means; nothing in
         this dataset noises them.
+
+        ``label`` (the starred row) is present ONLY when the dataset was built with
+        ``with_label=True`` (the decoded auxiliary loss).  It is the source
+        patch's 3-class voxel label — 0 material, 1 pore, 2 air — read from
+        ``patches_label.bin`` at ``source_row``, and it is kept uint8 so a
+        batch of 256 costs 64 MB rather than 512 MB; the loss casts what it
+        needs.
         """
         packed = torch.from_numpy(
             np.asarray(self._latents[idx], dtype=np.float32)  # one contiguous read
@@ -447,7 +532,7 @@ class LatentDataset(Dataset):
         )
         nb_latents, nb_avail = self._neighbours(idx, self.neighbour_rows(idx))
 
-        return {
+        item: dict[str, Any] = {
             "z": z,                                                      # (C, d, h, w)
             "std": std,                                                  # (C, d, h, w)
             "cond_por": torch.tensor(self._cond_por[idx], dtype=torch.float32),
@@ -469,6 +554,13 @@ class LatentDataset(Dataset):
             "grid_index": torch.tensor(self.grid_index(idx), dtype=torch.int64),
             "source_row": int(self._source_row[idx]),
         }
+        if self._label is not None:
+            # np.array copies: a memmap slice is read-only, and torch refuses
+            # to share memory it cannot write to.
+            item["label"] = torch.from_numpy(
+                np.array(self._label[int(self._source_row[idx])])
+            )                                                        # (P, P, P) uint8
+        return item
 
 
 def _repo_root() -> Path:
@@ -487,6 +579,11 @@ def build_latent_dataloaders(
     Reads ``data.sample_stride`` (32) / ``data.generation_stride`` (64) /
     ``data.neighbour_offset`` (64) — three separate knobs, never one.
 
+    ``loss.decoded.enabled`` turns on the voxel label in the batch.  The flag
+    is read here, in the one place that builds the loaders, so a run cannot
+    ask for the decoded auxiliary loss and be served batches without the
+    label it scores against.
+
     Returns
     -------
     (train_loader, val_loader)
@@ -495,12 +592,16 @@ def build_latent_dataloaders(
     batch_size  = int(cfg["training"]["batch_size"])
     num_workers = int(data_cfg.get("num_workers", 4))
 
+    decoded_cfg = (cfg.get("loss") or {}).get("decoded") or {}
+    with_label  = bool(decoded_cfg.get("enabled", False))
+
     ds_kwargs: dict[str, Any] = dict(
         normalize=True,
         sample_stride=int(data_cfg.get("sample_stride", 32)),
         generation_stride=int(data_cfg.get("generation_stride", 64)),
         neighbour_offset=int(data_cfg.get("neighbour_offset", 64)),
         orientation_field=data_cfg.get("orientation_field"),
+        with_label=with_label,
     )
     train_ds = LatentDataset(latents_root, "train", **ds_kwargs)
     val_ds   = LatentDataset(latents_root, "val",   **ds_kwargs)

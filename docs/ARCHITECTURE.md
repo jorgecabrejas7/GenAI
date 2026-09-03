@@ -171,6 +171,54 @@ deviation of the combined prediction, which decodes over-exposed;
 per-item standard deviation and interpolates by φ. At `s_por = s_nb = 1` it
 would be a no-op, so it only earns its cost alongside a guidance sweep.
 
+## Decoded-space auxiliary loss (ldm06/aux)
+
+The latent objective is blind to any error that leaves the residual unchanged,
+and three of the defects the diagnostics keep reporting are exactly that: air
+placed inside the specimen envelope, a delivered porosity that ignores
+`cond_por`, and dark regions the class head calls material. Two latents can
+differ in all three and carry the same ε (or v) residual.
+
+`loss.decoded.enabled` puts the frozen r08 VAE in the training graph and
+scores the decode (precedent: Berrada et al. 2025, arXiv:2411.04873). Four
+terms, in `src/poregen/losses/decoded.py`, each logged separately as
+`train/aux_*` — one summed number could not say which defect moved:
+
+| Term | What it measures |
+|---|---|
+| `air_outside_material` | mean p(air) where the upsampled `cond_material` is `> 0.99`; partially-filled cells are surface or drilled-hole cells and their air is legitimate |
+| `pore_dice` | soft Dice of p(pore) against the source patch's real pore mask |
+| `porosity_consistency` | \|mean p(pore) − φ\| on the raw scale — `gen/por_cond_mae` made differentiable |
+| `grey_agreement` | p(pore)·relu(grey − 182/255) + p(material)·relu(182/255 − grey); both heads decode from ONE latent, so they cannot legitimately disagree. Air is unscored — it is dark AND correct |
+
+Three constraints make it affordable and safe:
+
+- **Lowest quartile of `t` only** (`t_max_frac` 0.25). x̂₀ from a high-t step is
+  a blur with no pore structure to score, so every term would be measuring the
+  schedule instead of the model.
+- **A hard sub-batch cap** (`decoded_max_items` 32), taking the LOWEST-t items.
+  Measured on the real r08 decoder, a 64³ decode with a live autograd graph
+  holds **0.33 GB of intermediate activations per item in float32, ~0.20 GB
+  under bf16 autocast** — decoding a whole 256 batch would need ~84 / ~51 GB on
+  top of the denoiser.
+- **A frozen VAE, in both senses.** Its parameters carry `requires_grad_(False)`
+  so nothing accumulates on them, and the decode runs in `eval()`. The second
+  is not hygiene: the r08 decoder is BatchNorm3d, and a decode in train mode
+  would fold generated latents into the frozen VAE's running statistics.
+  `requires_grad_(False)` does **not** prevent that.
+
+x̂₀ is deliberately **not** clamped here. The ±10 clamp guards a reverse
+process against one bad step; this loss only looks at low `t`, where
+`predict_x0` is well conditioned, and a clamp would zero the gradient on
+exactly the items that are most wrong.
+
+The label the terms score against is not part of the latent store: it is
+`patches_label.bin` in the data root recorded as
+`metadata["source_patch_index"]`, addressed by `source_row`.
+`LatentDataset(with_label=True)` serves it, and `build_latent_dataloaders`
+sets that flag from `loss.decoded.enabled` — one place, so a run cannot ask
+for the loss and be served batches without the label.
+
 ## Volume generation
 
 One path: **hybrid chunked joint denoising** (`diffusion/sampler.py`).
