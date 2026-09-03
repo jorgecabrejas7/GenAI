@@ -5,13 +5,9 @@ describes a request; :class:`VolumeRunner` turns it into a
 :class:`poregen.diffusion.sampler.VolumeGenerator` call and writes the case
 directory with its manifest.
 
-Three places where the sampler's interface shapes what the suite can do, all
+Two places where the sampler's interface shapes what the suite can do, both
 recorded here rather than worked around silently:
 
-* **Seeding.** ``VolumeGenerator.generate`` takes no seed; the initial noise
-  comes from the global torch generator.  The runner therefore seeds
-  ``torch.manual_seed`` immediately before each call, and the manifest records
-  the seed it set.
 * **Size in millimetres.** ``generate`` takes a physical size and snaps it DOWN
   to whole tiles.  The runner converts a voxel shape to millimetres and then
   checks that the generator snapped back to exactly the shape that was asked
@@ -20,6 +16,11 @@ recorded here rather than worked around silently:
   is no phase parameter.  Assessment 6 gets its 32-voxel shift by translating
   the REQUEST inside a larger canvas (``CaseSpec.request_offset``), which moves
   the assembly grid relative to the content without touching the sampler.
+
+Seeding is the sampler's own: ``generate(seed=...)`` drives every random draw
+of the reverse process from a local generator, so a case is reproducible from
+its manifest alone and one case cannot shift the noise another case will draw.
+The requested field is seeded separately, by the case's own ``field_fn``.
 
 The runner reaches the model through two entry points only -
 ``DDPMSchedule.from_cfg`` and ``VolumeGenerator.generate`` - and never through
@@ -251,8 +252,6 @@ class VolumeRunner:
         tile_field, por_map = self._porosity_request(spec)
         voxel_material, material_map = self._material_request(spec)
 
-        torch.manual_seed(spec.seed)
-        np.random.seed(spec.seed)
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
 
@@ -269,6 +268,7 @@ class VolumeRunner:
                 window_batch=WINDOW_BATCH,
                 decode_batch_size=DECODE_BATCH,
                 return_class_probs=True,
+                seed=spec.seed,
             )
         wall = time.perf_counter() - t0
         peak = (

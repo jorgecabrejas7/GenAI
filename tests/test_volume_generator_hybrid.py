@@ -497,3 +497,101 @@ def test_a_vae_without_a_class_head_is_refused():
     with pytest.raises(TypeError, match="class_head"):
         gen.generate(volume_size_mm=size_mm, autocast_dtype=torch.float32,
                      window_batch=64)
+
+
+# ── seeding ──────────────────────────────────────────────────────────────────
+
+class _EchoModel(nn.Module):
+    """Returns a scaled copy of its input, so the sample depends on the noise.
+
+    A model that ignores ``z_t`` would make every seeding test pass by
+    accident: the volume would be identical whatever noise the chain started
+    from, and a seed that was silently dropped would look reproducible.
+    """
+
+    cfg = _Cfg()
+
+    def forward(self, z_t, t, nb_latents, nb_avail, nb_t, cond_por, cond_depth,
+                cond_dist6, cond_orient, cond_material, drop_por=None):
+        return z_t * 0.5
+
+
+class TestSeeding:
+    """Every random draw of the reverse process comes from the local generator."""
+
+    @staticmethod
+    def _run(seed, tiles=(2, 2, 2), chunk_tiles=(1, 1, 1)):
+        gen, size_mm = _generator(_EchoModel(), _LatentVAE(), chunk_tiles,
+                                  n_steps=3, tiles=tiles)
+        return gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                            autocast_dtype=torch.float32, window_batch=8,
+                            return_class_probs=True, seed=seed)
+
+    def test_the_same_seed_gives_a_bit_identical_volume(self):
+        xct_a, label_a, stats_a, probs_a = self._run(101)
+        xct_b, label_b, stats_b, probs_b = self._run(101)
+        np.testing.assert_array_equal(xct_a, xct_b)
+        np.testing.assert_array_equal(label_a, label_b)
+        # Bit-identical, not merely close: the probabilities are the decoder's
+        # own floats, so any divergence in the chain shows up here first.
+        np.testing.assert_array_equal(probs_a, probs_b)
+        assert stats_a["seed"] == stats_b["seed"] == 101
+
+    def test_a_different_seed_gives_a_different_volume(self):
+        """Guards the test above: it must be the seed that fixes the result."""
+        _, _, _, probs_a = self._run(101)
+        _, _, _, probs_b = self._run(202)
+        assert not np.array_equal(probs_a, probs_b)
+
+    def test_the_re_noising_draw_is_seeded_too(self):
+        """Several chunks, so the finished-chunk re-noising actually happens.
+
+        With one chunk per tile the canvas is re-noised at every timestep of
+        every chunk after the first; a seed that only reached the initial noise
+        would leave those draws on the global generator and this pair would
+        differ.
+        """
+        _, _, _, probs_a = self._run(303, tiles=(2, 2, 2), chunk_tiles=(1, 1, 1))
+        _, _, _, probs_b = self._run(303, tiles=(2, 2, 2), chunk_tiles=(1, 1, 1))
+        np.testing.assert_array_equal(probs_a, probs_b)
+
+    def test_generate_leaves_the_global_generator_untouched(self):
+        """A seeded generation must not consume or reset the caller's stream."""
+        torch.manual_seed(7)
+        before_state = torch.get_rng_state()
+        expected = torch.randn(4)
+
+        torch.manual_seed(7)
+        self._run(101)
+        after_state = torch.get_rng_state()
+        assert torch.equal(before_state, after_state)
+        torch.testing.assert_close(torch.randn(4), expected)
+
+    def test_an_unseeded_generation_says_so(self):
+        gen, size_mm = _generator(_EchoModel(), _LatentVAE(), (2, 2, 2), n_steps=2)
+        _, _, stats = gen.generate(volume_size_mm=size_mm, target_porosity=0.03,
+                                   autocast_dtype=torch.float32, window_batch=8)
+        assert stats["seed"] is None
+
+
+def test_sample_batch_takes_the_same_generator():
+    """The patch-level sampler's one draw is seedable the same way."""
+    from poregen.diffusion.noise_schedule import DDPMSchedule
+
+    dev = torch.device("cpu")
+    sampler = DDIMSampler(_EchoModel(), DDPMSchedule(T=100, device=dev), dev, n_steps=3)
+    args = (
+        torch.zeros(2, 6, C, LAT, LAT, LAT),
+        torch.full((2, 6), NB_OOB, dtype=torch.long),
+        torch.zeros(2, 6, dtype=torch.long),
+        torch.zeros(2), torch.zeros(2), torch.zeros(2, 6),
+        torch.zeros(2, 2, LAT, LAT, LAT), torch.zeros(2, 1, LAT, LAT, LAT),
+    )
+
+    def draw(seed):
+        g = torch.Generator(device=dev)
+        g.manual_seed(seed)
+        return sampler.sample_batch(*args, autocast_dtype=torch.float32, generator=g)
+
+    torch.testing.assert_close(draw(11), draw(11), rtol=0, atol=0)
+    assert not torch.equal(draw(11), draw(12))

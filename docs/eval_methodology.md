@@ -107,7 +107,7 @@ every reader refuses it instead of measuring a truncated volume.
 | `ddim_steps`, `chunk_tiles`, `window_stride` | sampler geometry |
 | `decode`, `decode_overlap` | `overlapped` with 32-voxel overlap, or `tiled` with 0 |
 | `s_por`, `s_nb` | the two guidance scales |
-| `seed` | the seed set on the global torch generator before the call |
+| `seed` | the seed of the LOCAL generator every random draw of the reverse process is taken from; the global torch generator is left untouched |
 | `requested_global_phi` | the uniform target, when there was one |
 | `requested_field` | `.npy` of the requested phi per 64-voxel tile |
 | `requested_layup`, `requested_ply_thickness_vox` | the stacking sequence and its pitch |

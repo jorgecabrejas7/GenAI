@@ -431,6 +431,7 @@ class DDIMSampler:
         autocast_dtype: torch.dtype = torch.bfloat16,
         return_x0_saturation: bool = False,
         return_intermediates: bool = False,
+        generator: torch.Generator | None = None,
     ) -> Any:
         """Run the DDIM reverse process for a batch of independent patches.
 
@@ -438,6 +439,11 @@ class DDIMSampler:
         this is the patch-level sampler used by the in-training diagnostics,
         not the volume path.  ``nb_t`` therefore describes the noise level of
         the neighbours as handed in, and stays constant.
+
+        ``generator`` seeds the one random draw this method makes — the initial
+        noise the chain starts from.  Pass one to make the batch reproducible
+        without touching the global torch generator; ``None`` draws from the
+        global one, which is what an unseeded caller wants.
 
         Parameters
         ----------
@@ -465,7 +471,7 @@ class DDIMSampler:
         C = nb_latents.shape[2]
         D = nb_latents.shape[3]
 
-        x = torch.randn(B, C, D, D, D, device=self.device)
+        x = torch.randn(B, C, D, D, D, device=self.device, generator=generator)
         sat_sum = torch.zeros((), device=self.device)
         n_steps = 0
         inter: list[torch.Tensor] = []
@@ -666,8 +672,16 @@ class VolumeGenerator:
         autocast_dtype: torch.dtype,
         window_batch: int,
         progress=None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Denoise the whole latent canvas chunk by chunk.  Returns (C, Z, Y, X)."""
+        """Denoise the whole latent canvas chunk by chunk.  Returns (C, Z, Y, X).
+
+        Two random draws happen here and nowhere else in generation: the noise
+        each chunk's canvas starts from, and the fresh noise that re-noises the
+        already-finished chunks to the current timestep.  Both take
+        ``generator``, so a seeded call is reproducible without disturbing the
+        global torch generator.
+        """
         sampler  = self.sampler
         schedule = sampler.schedule.to(self.device)
         sampler.model.eval()
@@ -745,7 +759,7 @@ class VolumeGenerator:
             for sl in win_sl:
                 weight_sum[0, 0, sl[0], sl[1], sl[2]] += weight
 
-            x = torch.randn(1, C, *chunk_cells, device=self.device)
+            x = torch.randn(1, C, *chunk_cells, device=self.device, generator=generator)
             B_max = max(1, min(int(window_batch), n_win))
 
             for i, t_val in enumerate(timesteps[:-1]):
@@ -753,8 +767,14 @@ class VolumeGenerator:
                 # Context canvas at this timestep: finished chunks re-noised to
                 # t with FRESH noise, the current chunk at its live state.
                 t_one = torch.full((1,), t_val, dtype=torch.long, device=self.device)
+                ctx_clean = z_clean[(slice(None), *ctx_sl)].unsqueeze(0)
                 ctx = schedule.q_sample(
-                    z_clean[(slice(None), *ctx_sl)].unsqueeze(0), t_one
+                    ctx_clean,
+                    t_one,
+                    noise=torch.randn(
+                        ctx_clean.shape, device=self.device,
+                        dtype=ctx_clean.dtype, generator=generator,
+                    ),
                 ) * done_mask
                 ctx[(0, slice(None), *cur_sl)] = x[0]
 
@@ -970,6 +990,7 @@ class VolumeGenerator:
         window_batch: int = 32,
         decode_batch_size: int = 64,
         return_class_probs: bool = False,
+        seed: int | None = None,
     ) -> tuple:
         """Generate one volume: chunked joint denoising, then blended decode.
 
@@ -993,6 +1014,17 @@ class VolumeGenerator:
         decode_batch_size : latent windows decoded in one VAE forward
         return_class_probs: also return the blended per-voxel class
                             probabilities, (3, D, H, W) float32
+        seed              : makes the generation reproducible.  Every random
+                            draw in the reverse process — each chunk's initial
+                            canvas noise and the fresh noise that re-noises the
+                            finished chunks at every timestep — is taken from a
+                            LOCAL ``torch.Generator`` on this generator's own
+                            device.  Two calls with the same seed and the same
+                            request are therefore bit-identical, and the global
+                            torch generator is left exactly as it was found, so
+                            a caller's own RNG stream is not silently consumed
+                            or reset by a generation.  ``None`` draws from the
+                            global generator, and the volume is not reproducible.
 
         Returns
         -------
@@ -1008,6 +1040,11 @@ class VolumeGenerator:
             specimen_box = ((0, 0, 0), volume_shape)
         box_lo, box_hi = tuple(specimen_box[0]), tuple(specimen_box[1])
 
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(int(seed))
+
         z_clean = self._generate_latents(
             volume_shape,
             target_porosity=target_porosity,
@@ -1017,6 +1054,7 @@ class VolumeGenerator:
             autocast_dtype=autocast_dtype,
             window_batch=window_batch,
             progress=progress,
+            generator=generator,
         )
         xct, class_logits = self._decode_canvas(
             z_clean, volume_shape, autocast_dtype, decode_batch_size
@@ -1078,6 +1116,9 @@ class VolumeGenerator:
             "s_nb": float(self.sampler.s_nb),
             "cfg_rescale": float(self.sampler.cfg_rescale),
             "objective": str(self.sampler.schedule.objective),
+            # None says plainly that this volume cannot be reproduced, which is
+            # a property of the result and belongs beside it.
+            "seed": None if seed is None else int(seed),
             "target_porosity": None if target_porosity is None else float(target_porosity),
             "conditioned_porosity": clamped_por,
             "actual_label_porosity": actual_por,
