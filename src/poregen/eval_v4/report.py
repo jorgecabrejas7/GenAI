@@ -115,15 +115,6 @@ def load_floor(root: Path) -> dict | None:
     return json.loads(path.read_text())
 
 
-def _floor_for(floor: dict | None, shape) -> dict | None:
-    """The floor block whose crops match ``shape``."""
-    if not floor:
-        return None
-    for entry in floor.get("by_shape", {}).values():
-        if list(entry.get("volume_shape", [])) == list(shape):
-            return entry
-    return None
-
 
 def _header(res: dict, root: Path, floor: dict | None) -> str:
     per = res.get("per_case") or [{}]

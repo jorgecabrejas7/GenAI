@@ -34,7 +34,6 @@ from poregen.eval_v4 import metrics as M
 from poregen.eval_v4.cases import CHUNK_TILES, SHAPE_LARGE, SHAPE_SMALL, WINDOW_STRIDE
 from poregen.eval_v4.generate import latent_material_map
 from poregen.eval_v4.io import (
-    LATENT_DOWNSAMPLE,
     load_cases,
     repo_root,
     save_case,
