@@ -137,17 +137,24 @@ def porosity_binned_mae(
 
     Returns
     -------
-    dict with keys ``porosity_mae_bin_0`` … ``porosity_mae_bin_{n-1}``.
-    Bins with no samples get ``float("nan")``.
+    dict with keys ``porosity_mae_bin_0`` … ``porosity_mae_bin_{n-1}`` and the
+    matching ``porosity_n_bin_0`` … counts.  Bins with no samples get
+    ``float("nan")`` for the MAE and 0 for the count.
+
+    The counts are not decoration: a bin's MAE is only worth reading when the
+    bin holds enough patches, and the sparse high-porosity bins are exactly the
+    ones a periodic eval over a few batches can leave nearly empty.
     """
     abs_err = (pred_por - gt_por).abs()
     result: dict[str, float] = {}
     for i in range(len(bins) - 1):
         lo, hi = bins[i], bins[i + 1]
         sel = (gt_por >= lo) & (gt_por < hi)
+        n = int(sel.sum().item())
         result[f"porosity_mae_bin_{i}"] = (
-            float(abs_err[sel].mean().item()) if sel.sum() > 0 else float("nan")
+            float(abs_err[sel].mean().item()) if n > 0 else float("nan")
         )
+        result[f"porosity_n_bin_{i}"] = float(n)
     return result
 
 
