@@ -535,7 +535,17 @@ class TestPhasesAndFailure:
 # The requests the cases build
 # ---------------------------------------------------------------------------
 
+#: The layup requests are read from the dataset, not typed into source, so the
+#: case builders need it.  A worktree has no `data/` until it is symlinked in -
+#: see docs/DEVELOPMENT.md - and a missing dataset is a skip, not a failure.
+LAYUP_TRUTH = Path(__file__).resolve().parents[1] / "data" / "layup_ground_truth.json"
+needs_layup_truth = pytest.mark.skipif(
+    not LAYUP_TRUTH.exists(), reason=f"{LAYUP_TRUTH} is not present"
+)
+
+
 class TestRequests:
+    @needs_layup_truth
     def test_every_assessment_builds_cases_with_unique_names(self):
         for name in ("sampler", "porosity_global", "porosity_local", "cfg",
                      "layup", "assembly", "geometry"):
@@ -546,6 +556,7 @@ class TestRequests:
             for s in specs:
                 assert all(v % TILE == 0 for v in s.volume_shape), s.name
 
+    @needs_layup_truth
     def test_the_s_nb_arm_runs_on_a_volume_that_has_a_chunk_plane(self):
         nb = [s for s in build_cases("cfg") if s.notes.get("arm") == "s_nb"]
         assert nb
@@ -553,6 +564,7 @@ class TestRequests:
             period = tuple(TILE * c for c in s.chunk_tiles)
             assert any(p < d for p, d in zip(period, s.volume_shape)), s.name
 
+    @needs_layup_truth
     def test_the_layup_c_request_is_a_permutation_of_a(self):
         from poregen.eval_v4.cases import load_layups
 
