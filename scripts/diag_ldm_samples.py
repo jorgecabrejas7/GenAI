@@ -384,11 +384,7 @@ def main() -> None:
     # ── model + schedule ────────────────────────────────────────────────────
     ucfg = UNet3DConfig.from_cfg(cfg)
     model = UNet3DDenoiser(ucfg).to(device)
-    schedule = DDPMSchedule(
-        T=int(cfg["noise_schedule"].get("T", 1000)),
-        s=float(cfg["noise_schedule"].get("s", 0.008)),
-        device=device,
-    )
+    schedule = DDPMSchedule.from_cfg(cfg, device)
 
     # ── latent store + frozen VAE ───────────────────────────────────────────
     latents_root = Path(cfg["data"]["latents_root"])

@@ -311,12 +311,7 @@ def main() -> None:
         )
     por_log_stats = (float(_st["mean"]), float(_st["std"]))
 
-    sched_cfg = ldm_cfg.get("noise_schedule", {})
-    schedule = DDPMSchedule(
-        T=int(sched_cfg.get("T", 1000)),
-        s=float(sched_cfg.get("s", 0.008)),
-        device=device,
-    )
+    schedule = DDPMSchedule.from_cfg(ldm_cfg, device)
 
     out_root = Path(f"{Path(args.checkpoint).stem}_denoising")
 

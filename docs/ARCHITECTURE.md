@@ -125,6 +125,52 @@ Availability has three states: **OOB** (the specimen ends at that face),
 store only ever emits EXISTS and OOB; UNKNOWN comes from `drop_nb` and from the
 chunks the sampler has not reached.
 
+## Diffusion objective and the terminal step
+
+`DDPMSchedule` owns what the denoiser regresses. Two keys under
+`noise_schedule` decide it, and every entry point builds the schedule with
+`DDPMSchedule.from_cfg(cfg, device)` so the two cannot disagree.
+
+| Key | Values | Meaning |
+|---|---|---|
+| `objective` | `eps` (ldm06) / `v` (ldm07) | ε-prediction, or the velocity target `v = sqrt(ᾱ)·ε − sqrt(1−ᾱ)·x₀` (Salimans & Ho 2022) |
+| `zero_terminal_snr` | bool | rescale sqrt(ᾱ) so its last entry is EXACTLY 0 (Lin et al. 2024, Alg. 1) |
+
+Nothing outside the schedule branches on the objective. `training_target`
+names what the step regresses, `predict_x0` / `predict_eps` convert a model
+output back, and `ddim_step` is written on (x̂₀, ε̂) so there is one reverse
+process rather than one per parameterisation.
+
+**The terminal step is why ldm07 exists, and the usual justification does not
+apply here.** Lin et al. attack a cosine schedule that derives ᾱ as
+`cumprod(1 − clamp(β))`, which leaves a terminal `sqrt(ᾱ_T) ≈ 0.068` — real
+signal the model still sees on its last training step but never on its first
+sampling step. This schedule takes ᾱ straight from the cosine `f`, where
+`f(T) = cos(π/2)²` is already zero to float precision. **Measured: the rescale
+moves sqrt(ᾱ) by at most 6.12e-17 anywhere.** There is no leak to close.
+
+What *is* broken is the ε form at that step. With `sqrt(ᾱ_T) = 6.12e-17`,
+`x̂₀ = (x_t − sqrt(1−ᾱ)·ε̂)/sqrt(ᾱ)` divides by the `1e-8` guard clamp and
+returns x̂₀ of order 1e8, which the ±10 clamp saturates — so the first DDIM
+step of every ldm06 chain started from a clamp artefact, not a prediction.
+The v form recovers `x̂₀ = sqrt(ᾱ)·x_t − sqrt(1−ᾱ)·v̂` with no division and
+stays order 1. `DDPMSchedule` therefore refuses `zero_terminal_snr` with
+`objective: eps`: there the division is by exactly zero.
+
+### Guidance in objective space
+
+`DDIMSampler.predict_out` returns the model's RAW output and the nested CFG
+combines the three arms there. That is valid for either objective: at a fixed
+`t` the map v ↔ ε is affine with shared coefficients, so an affine combination
+of arms commutes with it. The conversion happens once, in `ddim_step`.
+
+`guidance.cfg_rescale` (φ, Lin et al. §3.4) is off by default. A guidance
+scale above 1 is an extrapolation, and extrapolation inflates the standard
+deviation of the combined prediction, which decodes over-exposed;
+`rescale_guidance` scales the guided output back to the conditional arm's own
+per-item standard deviation and interpolates by φ. At `s_por = s_nb = 1` it
+would be a no-op, so it only earns its cost alongside a guidance sweep.
+
 ## Volume generation
 
 One path: **hybrid chunked joint denoising** (`diffusion/sampler.py`).

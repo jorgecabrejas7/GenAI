@@ -242,11 +242,13 @@ def ldm_train_step(
 
     optimizer.zero_grad(set_to_none=True)
 
+    target = schedule.training_target(z, noise, t)
+
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, nb_t, c["cond_por"],
-                         c["cond_depth"], c["cond_dist6"], c["cond_orient"],
-                         c["cond_material"], drop_por_mask)
-        loss     = F.mse_loss(eps_pred, noise)
+        model_out = model(z_t, t, nb_latents, nb_avail, nb_t, c["cond_por"],
+                          c["cond_depth"], c["cond_dist6"], c["cond_orient"],
+                          c["cond_material"], drop_por_mask)
+        loss      = F.mse_loss(model_out, target)
 
     scaler.scale(loss).backward()
 
@@ -297,11 +299,13 @@ def ldm_eval_step(
         schedule, c["nb_latents"], c["nb_avail"], t, nb_t_mix=1.0, drop_nb_p=0.0,
     )
 
+    target = schedule.training_target(z, noise, t)
+
     with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-        eps_pred = model(z_t, t, nb_latents, nb_avail, nb_t, c["cond_por"],
-                         c["cond_depth"], c["cond_dist6"], c["cond_orient"],
-                         c["cond_material"])
-        loss     = F.mse_loss(eps_pred, noise)
+        model_out = model(z_t, t, nb_latents, nb_avail, nb_t, c["cond_por"],
+                          c["cond_depth"], c["cond_dist6"], c["cond_orient"],
+                          c["cond_material"])
+        loss      = F.mse_loss(model_out, target)
 
     return {"loss": loss.item()}
 
@@ -391,6 +395,7 @@ def _log_sample_volume(
     window_batch: int = 32,
     s_por: float = 1.0,
     s_nb: float = 1.0,
+    cfg_rescale: float = 0.0,
     por_log_stats: tuple[float, float] | None = None,
     layup_angles: "list[float] | None" = None,
     ply_thickness_vox: float = 19.6,
@@ -420,7 +425,7 @@ def _log_sample_volume(
 
     try:
         sampler = DDIMSampler(model, schedule, device, n_steps=ddim_steps,
-                              s_por=s_por, s_nb=s_nb)
+                              s_por=s_por, s_nb=s_nb, cfg_rescale=cfg_rescale)
         vol_shape: tuple[int, int, int] = tuple(g * patch_size for g in grid)  # type: ignore[assignment]
         local_por_map = _gaussian_por_grid(grid, global_por)
         theta_deg = theta_from_layup(
@@ -501,7 +506,10 @@ def ldm_train_loop(
 
     Trains in normalised latent space; *latent_mean*/*latent_std* are the
     per-channel denormalisation stats from the latent store's metadata, used
-    by every decode path (generation eval, sample visualisation).
+    by every decode path (generation eval, sample visualisation).  What the
+    denoiser regresses — ε or v — is the schedule's business, not this loop's:
+    ``schedule.training_target`` names the target and every conversion back to
+    x̂₀ goes through the schedule too.
 
     Reads from cfg["training"]:
       total_steps, log_every, eval_every, val_batches, save_every,
@@ -521,7 +529,8 @@ def ldm_train_loop(
       (the sampler geometry the in-training sample volumes use)
 
     Reads from cfg["guidance"]:
-      s_por, s_nb  (guidance scales for in-training sample viz)
+      s_por, s_nb, cfg_rescale  (guidance scales and the Lin et al. guidance
+      rescale factor, for in-training sample viz)
     """
     if device is None:
         device = next(model.parameters()).device
@@ -590,6 +599,7 @@ def ldm_train_loop(
     guidance_cfg = cfg.get("guidance", {})
     s_por_scale  = float(guidance_cfg.get("s_por", 1.0))
     s_nb_scale   = float(guidance_cfg.get("s_nb",  1.0))
+    cfg_rescale  = float(guidance_cfg.get("cfg_rescale", 0.0))
 
     _logger.info(
         "CFG dropout — drop_por=%.2f  drop_nb=%.2f  |  nb_t_mix=%.2f",
@@ -597,7 +607,8 @@ def ldm_train_loop(
     )
     if s_por_scale != 1.0 or s_nb_scale != 1.0:
         _logger.info(
-            "Guided sample viz enabled — s_por=%.2f  s_nb=%.2f", s_por_scale, s_nb_scale,
+            "Guided sample viz enabled — s_por=%.2f  s_nb=%.2f  cfg_rescale=%.2f",
+            s_por_scale, s_nb_scale, cfg_rescale,
         )
 
     compile_model = bool(training_cfg.get("compile", False))
@@ -818,6 +829,7 @@ def ldm_train_loop(
                         window_batch=window_batch,
                         s_por=s_por_scale,
                         s_nb=s_nb_scale,
+                        cfg_rescale=cfg_rescale,
                         por_log_stats=por_log_stats,
                         layup_angles=sample_layup,
                         ply_thickness_vox=sample_ply_thickness_vox,

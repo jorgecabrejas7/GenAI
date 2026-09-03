@@ -219,6 +219,10 @@ def main() -> None:
                     help="Porosity guidance scale (default: from resolved_config.yaml guidance.s_por, else 1.0)")
     ap.add_argument("--s-nb",  type=float, default=None,
                     help="Neighbour guidance scale (default: from resolved_config.yaml guidance.s_nb, else 1.0)")
+    ap.add_argument("--cfg-rescale", type=float, default=None,
+                    help="Guidance rescale factor phi (Lin et al. 2024 §3.4); 0 = off "
+                         "(default: from resolved_config.yaml guidance.cfg_rescale, else 0.0). "
+                         "Only acts when a guidance scale is above 1.")
     ap.add_argument("--chunk-tiles", type=int, nargs=3, default=None, metavar=("Z", "Y", "X"),
                     help="Tiles per jointly denoised chunk (default: config "
                          "generation.chunk_tiles, else 3 3 3).  1 1 1 = patch-at-a-time.")
@@ -255,17 +259,16 @@ def main() -> None:
         latents_root = (repo / latents_root).resolve()
     vae, latent_mean, latent_std, store_meta = _load_latent_store_meta(latents_root, device)
 
-    sched_cfg = ldm_cfg.get("noise_schedule", {})
-    schedule = DDPMSchedule(
-        T=int(sched_cfg.get("T", 1000)),
-        s=float(sched_cfg.get("s", 0.008)),
-        device=device,
-    )
+    schedule = DDPMSchedule.from_cfg(ldm_cfg, device)
 
     # Resolve guidance scales: CLI flags override resolved config, which overrides 1.0 default.
     guidance_cfg = ldm_cfg.get("guidance", {})
     s_por = float(args.s_por if args.s_por is not None else guidance_cfg.get("s_por", 1.0))
     s_nb  = float(args.s_nb  if args.s_nb  is not None else guidance_cfg.get("s_nb",  1.0))
+    cfg_rescale = float(
+        args.cfg_rescale if args.cfg_rescale is not None
+        else guidance_cfg.get("cfg_rescale", 0.0)
+    )
 
     # Sampler geometry: CLI overrides the config's generation block, which overrides
     # the defaults.  The training run logged its own values here, so a generation run
@@ -285,9 +288,12 @@ def main() -> None:
     )
 
     sampler = DDIMSampler(ldm, schedule, device, n_steps=args.ddim_steps,
-                          s_por=s_por, s_nb=s_nb)
-    logger.info("DDIM sampler (%d steps)  guided=%s  s_por=%.2f  s_nb=%.2f",
-                args.ddim_steps, sampler.guided, s_por, s_nb)
+                          s_por=s_por, s_nb=s_nb, cfg_rescale=cfg_rescale)
+    logger.info(
+        "DDIM sampler (%d steps)  objective=%s  guided=%s  s_por=%.2f  s_nb=%.2f  "
+        "cfg_rescale=%.2f",
+        args.ddim_steps, schedule.objective, sampler.guided, s_por, s_nb, cfg_rescale,
+    )
 
     # Derive voxel dimensions (snapped to nearest patch_size multiple, downward)
     vol_shape = tuple(

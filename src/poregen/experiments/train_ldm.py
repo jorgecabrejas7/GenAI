@@ -50,15 +50,6 @@ def _build_model(cfg: dict[str, Any], device: torch.device) -> UNet3DDenoiser:
     return UNet3DDenoiser(model_cfg).to(device)
 
 
-def _build_schedule(cfg: dict[str, Any], device: torch.device) -> DDPMSchedule:
-    ns = cfg.get("noise_schedule", {})
-    return DDPMSchedule(
-        T=int(ns.get("T", 1000)),
-        s=float(ns.get("s", 0.008)),
-        device=device,
-    )
-
-
 def _build_optimizer(cfg: dict[str, Any], model: torch.nn.Module) -> torch.optim.Optimizer:
     tc = cfg["training"]
     return torch.optim.AdamW(
@@ -222,7 +213,7 @@ def run_ldm_experiment(
     save_resolved_config(run_ctx.run_dir, cfg)
 
     model     = _build_model(cfg, device)
-    schedule  = _build_schedule(cfg, device)
+    schedule  = DDPMSchedule.from_cfg(cfg, device)
     optimizer = _build_optimizer(cfg, model)
     scheduler = _build_scheduler(cfg, optimizer)
     ema_decay = float(cfg["training"].get("ema_decay", 0.9999))
@@ -294,7 +285,7 @@ def resume_ldm_run(
     data = _prepare_data_and_vae(cfg, repo, device)
 
     model     = _build_model(cfg, device)
-    schedule  = _build_schedule(cfg, device)
+    schedule  = DDPMSchedule.from_cfg(cfg, device)
     optimizer = _build_optimizer(cfg, model)
     scheduler = _build_scheduler(cfg, optimizer)
     ema_decay = float(cfg["training"].get("ema_decay", 0.9999))

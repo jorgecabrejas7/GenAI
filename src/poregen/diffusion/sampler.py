@@ -51,6 +51,7 @@ from poregen.diffusion.conditioning import (
     dist6_from_box,
     porosity_to_cond,
 )
+from poregen.diffusion.noise_schedule import X0_CLAMP
 from poregen.diffusion.orientation import orientation_tensor
 from poregen.eval.blended import tukey_window_3d
 from poregen.models.vae.base import decode_class_probs, decode_label
@@ -69,11 +70,46 @@ __all__ = [
     "DDIMSampler",
     "VolumeGenerator",
     "porosity_to_cond",
+    "rescale_guidance",
     "theta_from_layup",
     "window_origins",
     "window_weight",
     "seam_discontinuity",
 ]
+
+
+def rescale_guidance(
+    guided: torch.Tensor,
+    conditional: torch.Tensor,
+    phi: float,
+) -> torch.Tensor:
+    """Rescale a CFG-combined prediction back onto the conditional arm's scale.
+
+    Lin et al. 2024 (arXiv:2305.08891) §3.4.  A guidance scale above 1 is an
+    extrapolation, and extrapolation inflates the standard deviation of the
+    combined prediction; the inflated prediction decodes to an over-exposed
+    sample.  Correcting it is a two-step operation — rescale to the
+    conditional arm's own per-item standard deviation, then interpolate back
+    towards the raw guided value by ``phi`` so the correction can be dialled
+    rather than being all-or-nothing::
+
+        rescaled = guided · std(conditional) / std(guided)
+        out      = phi·rescaled + (1 − phi)·guided
+
+    The standard deviation is taken per item over every non-batch dimension,
+    which is where the inflation lives.
+
+    Parameters
+    ----------
+    guided      : (B, C, …) the CFG-combined model output
+    conditional : (B, C, …) the full-conditional arm, the reference scale
+    phi         : interpolation factor in [0, 1]; the paper uses 0.7
+    """
+    dims = tuple(range(1, guided.ndim))
+    std_cond = conditional.float().std(dim=dims, keepdim=True)
+    std_guided = guided.float().std(dim=dims, keepdim=True).clamp(min=1e-8)
+    rescaled = guided * (std_cond / std_guided).to(guided.dtype)
+    return phi * rescaled + (1.0 - phi) * guided
 
 
 def theta_from_layup(
@@ -141,7 +177,7 @@ def window_weight(win_cells: int) -> torch.Tensor:
     weighting: a uniform average makes the effective per-voxel weight field
     piecewise constant with jumps exactly at window borders (where the model
     has the least receptive-field context), re-introducing a grid of weak
-    seams into the fused ε field.  The cosine profile down-weights each
+    seams into the fused prediction field.  The cosine profile down-weights each
     window's border predictions and varies smoothly across the canvas.
     """
     L = int(win_cells)
@@ -260,20 +296,40 @@ class DDIMSampler:
     n_steps  : int — number of denoising steps (default 50)
     s_por    : float — porosity guidance scale; 1.0 = un-guided (default)
     s_nb     : float — neighbour guidance scale; 1.0 = un-guided (default)
+    cfg_rescale : float — guidance rescale factor φ (Lin et al. 2024 §3.4);
+                  0.0 = off (default), the paper's setting is 0.7
 
     When both scales are 1.0 the standard single-pass full-conditional denoiser
     is used.  Any other combination activates the 3-pass nested CFG
-    decomposition::
+    decomposition, written on the model's RAW OUTPUT — ε under an ε-objective
+    schedule, v under a v-objective one::
 
-        eps_uncond = model(z_t, t, nb, ALL_UNK, nb_t=0, por, …, drop_por=True)
-        eps_por    = model(z_t, t, nb, ALL_UNK, nb_t=0, por, …, drop_por=False)
-        eps_full   = model(z_t, t, nb, REAL,    nb_t,    por, …, drop_por=False)
-        eps = eps_uncond + s_por*(eps_por - eps_uncond) + s_nb*(eps_full - eps_por)
+        out_uncond = model(z_t, t, nb, ALL_UNK, nb_t=0, por, …, drop_por=True)
+        out_por    = model(z_t, t, nb, ALL_UNK, nb_t=0, por, …, drop_por=False)
+        out_full   = model(z_t, t, nb, REAL,    nb_t,    por, …, drop_por=False)
+        out = out_uncond + s_por*(out_por - out_uncond) + s_nb*(out_full - out_por)
 
-    At s_por=s_nb=1 this telescopes to eps_full — exact un-guided equality.
+    Combining in v-space is the same operation as combining in ε-space: at a
+    fixed ``t`` the map v ↔ ε is affine with shared coefficients, so an affine
+    combination of the three arms commutes with it.  The conversion to x̂₀/ε̂
+    happens once, in :meth:`DDPMSchedule.ddim_step`.
+
+    At s_por=s_nb=1 this telescopes to out_full — exact un-guided equality.
     The ALL_UNKNOWN arms use ``nb_t = 0`` because that is exactly the neighbour
     null the training step draws (``drop_nb``).  Position, orientation and
     material are always on in all three passes.
+
+    ``cfg_rescale`` addresses the over-exposure Lin et al. describe: raising a
+    guidance scale inflates the standard deviation of the combined prediction,
+    which pushes the sample towards saturated extremes.  The fix rescales the
+    guided output back to the conditional arm's own standard deviation and then
+    interpolates by φ::
+
+        rescaled = out · std(out_full) / std(out)
+        out      = φ·rescaled + (1 − φ)·out
+
+    φ = 0 leaves the guided output untouched, which is why it is the default:
+    the correction only makes sense once a guidance scale is actually above 1.
     """
 
     def __init__(
@@ -284,6 +340,7 @@ class DDIMSampler:
         n_steps: int = 50,
         s_por: float = 1.0,
         s_nb: float = 1.0,
+        cfg_rescale: float = 0.0,
     ) -> None:
         self.model    = model
         self.schedule = schedule
@@ -291,13 +348,23 @@ class DDIMSampler:
         self.n_steps  = n_steps
         self.s_por    = s_por
         self.s_nb     = s_nb
+        self.cfg_rescale = float(cfg_rescale)
         self.guided   = not (s_por == 1.0 and s_nb == 1.0)
         T = schedule.T
         ts = torch.linspace(0, T - 1, n_steps + 1, dtype=torch.long)
         # Store as Python ints for torch.compile compatibility (no dynamic shapes)
         self.timesteps: list[int] = ts.flip(0).tolist()   # [T-1, ..., 0]
+        # The chain must start at the schedule's most-noisy step: under zero
+        # terminal SNR that is the only index where ᾱ = 0, i.e. the pure-noise
+        # state the initial randn actually is.  Starting one step in would hand
+        # the model a latent it believes still carries signal.
+        if self.timesteps[0] != T - 1 or self.timesteps[-1] != 0:
+            raise ValueError(
+                f"DDIM timestep grid must run from T-1={T - 1} down to 0, got "
+                f"{self.timesteps[0]} … {self.timesteps[-1]}."
+            )
 
-    def predict_eps(
+    def predict_out(
         self,
         x: torch.Tensor,
         t: torch.Tensor,
@@ -311,11 +378,14 @@ class DDIMSampler:
         cond_material: torch.Tensor,
         autocast_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
-        """One ε prediction for a batch, honouring the CFG guidance scales.
+        """One denoiser output for a batch, honouring the CFG guidance scales.
 
-        This is the single choke point every sampling loop goes through — the
-        chunked joint path calls it directly to get raw per-window predictions
-        before fusing them on the chunk canvas.
+        The return value is in the schedule's own objective space (ε or v) —
+        never converted here.  This is the single choke point every sampling
+        loop goes through: the chunked joint path calls it directly to get raw
+        per-window predictions before fusing them on the chunk canvas, and a
+        fusion of v predictions at one shared ``t`` is the same latent as a
+        fusion of the matching ε predictions.
         """
         if not self.guided:
             with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
@@ -328,21 +398,24 @@ class DDIMSampler:
         drop_all = torch.ones(B, dtype=torch.bool, device=x.device)
 
         with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
-            eps_uncond = self.model(x, t, nb_latents, all_unk, zero_t, cond_por,
+            out_uncond = self.model(x, t, nb_latents, all_unk, zero_t, cond_por,
                                     cond_depth, cond_dist6, cond_orient,
                                     cond_material, drop_all)
-            eps_por    = self.model(x, t, nb_latents, all_unk, zero_t, cond_por,
+            out_por    = self.model(x, t, nb_latents, all_unk, zero_t, cond_por,
                                     cond_depth, cond_dist6, cond_orient,
                                     cond_material, None)
-            eps_full   = self.model(x, t, nb_latents, nb_avail, nb_t, cond_por,
+            out_full   = self.model(x, t, nb_latents, nb_avail, nb_t, cond_por,
                                     cond_depth, cond_dist6, cond_orient,
                                     cond_material, None)
 
-        return (
-            eps_uncond
-            + self.s_por * (eps_por  - eps_uncond)
-            + self.s_nb  * (eps_full - eps_por)
+        guided = (
+            out_uncond
+            + self.s_por * (out_por  - out_uncond)
+            + self.s_nb  * (out_full - out_por)
         )
+        if self.cfg_rescale > 0.0:
+            guided = rescale_guidance(guided, out_full, self.cfg_rescale)
+        return guided
 
     @torch.no_grad()
     def sample_batch(
@@ -400,15 +473,15 @@ class DDIMSampler:
             t_prev_val = self.timesteps[i + 1]
             t      = torch.full((B,), t_val,      dtype=torch.long, device=self.device)
             t_prev = torch.full((B,), t_prev_val, dtype=torch.long, device=self.device)
-            eps_pred = self.predict_eps(
+            model_out = self.predict_out(
                 x, t, nb_latents, nb_avail, nb_t, cond_por, cond_depth,
                 cond_dist6, cond_orient, cond_material, autocast_dtype,
             )
             if return_x0_saturation:
-                x0_pred = schedule.predict_x0(x, t, eps_pred)
-                sat_sum += (x0_pred.abs() >= 10.0).float().mean()
+                x0_pred = schedule.predict_x0(x, t, model_out)
+                sat_sum += (x0_pred.abs() >= X0_CLAMP).float().mean()
                 n_steps += 1
-            x = schedule.ddim_step(x, t, t_prev, eps_pred)
+            x = schedule.ddim_step(x, t, t_prev, model_out)
             if return_intermediates:
                 inter.append(x.float().cpu())
 
@@ -685,7 +758,7 @@ class VolumeGenerator:
                 ) * done_mask
                 ctx[(0, slice(None), *cur_sl)] = x[0]
 
-                eps_sum = torch.zeros_like(x)
+                out_sum = torch.zeros_like(x)
                 for start in range(0, n_win, B_max):
                     idx = list(range(start, min(start + B_max, n_win)))
                     B = len(idx)
@@ -705,18 +778,18 @@ class VolumeGenerator:
                         torch.zeros_like(av),
                     )
                     t_b = torch.full((B,), t_val, dtype=torch.long, device=self.device)
-                    eps = sampler.predict_eps(
+                    out = sampler.predict_out(
                         xw, t_b, nb, av, nb_t,
                         cond["por"][idx], cond["depth"][idx], cond["dist6"][idx],
                         cond["orient"][idx], cond["material"][idx], autocast_dtype,
                     ).float()
                     for k, j in enumerate(idx):
                         sl = win_sl[j]
-                        eps_sum[0, :, sl[0], sl[1], sl[2]] += weight * eps[k]
+                        out_sum[0, :, sl[0], sl[1], sl[2]] += weight * out[k]
 
                 t      = torch.tensor([t_val],      dtype=torch.long, device=self.device)
                 t_prev = torch.tensor([t_prev_val], dtype=torch.long, device=self.device)
-                x = schedule.ddim_step(x, t, t_prev, eps_sum / weight_sum)
+                x = schedule.ddim_step(x, t, t_prev, out_sum / weight_sum)
                 if progress is not None:
                     progress.update(1)
 
@@ -1003,6 +1076,8 @@ class VolumeGenerator:
             "ddim_steps": len(self.sampler.timesteps) - 1,
             "s_por": float(self.sampler.s_por),
             "s_nb": float(self.sampler.s_nb),
+            "cfg_rescale": float(self.sampler.cfg_rescale),
+            "objective": str(self.sampler.schedule.objective),
             "target_porosity": None if target_porosity is None else float(target_porosity),
             "conditioned_porosity": clamped_por,
             "actual_label_porosity": actual_por,

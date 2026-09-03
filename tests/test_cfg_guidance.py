@@ -1,4 +1,4 @@
-"""The nested CFG decomposition in ``DDIMSampler.predict_eps``.
+"""The nested CFG decomposition in ``DDIMSampler.predict_out``.
 
 The null arms are structural, not numerical: the porosity null is the learned
 ``null_por`` token and the neighbour null is all-UNKNOWN at ``nb_t = 0`` — the
@@ -79,17 +79,17 @@ def test_three_pass_formula_telescopes_at_scale_one(model):
     s = _sampler(model)
     s.guided = True                       # force the 3-pass path
     with torch.no_grad():
-        three_pass = s.predict_eps(**b, autocast_dtype=torch.float32)
+        three_pass = s.predict_out(**b, autocast_dtype=torch.float32)
     assert torch.allclose(reference.float(), three_pass.float(), atol=1e-5)
 
 
 def test_guidance_scales_change_the_prediction(model):
     b = _batch()
     with torch.no_grad():
-        plain = _sampler(model).predict_eps(**b, autocast_dtype=torch.float32)
-        por_guided = _sampler(model, s_por=3.0).predict_eps(
+        plain = _sampler(model).predict_out(**b, autocast_dtype=torch.float32)
+        por_guided = _sampler(model, s_por=3.0).predict_out(
             **b, autocast_dtype=torch.float32)
-        nb_guided = _sampler(model, s_nb=3.0).predict_eps(
+        nb_guided = _sampler(model, s_nb=3.0).predict_out(
             **b, autocast_dtype=torch.float32)
     assert not torch.allclose(plain, por_guided, atol=1e-5)
     assert not torch.allclose(plain, nb_guided, atol=1e-5)
@@ -101,8 +101,8 @@ def test_the_neighbour_arm_is_inert_when_there_are_no_neighbours(model):
     b["nb_avail"] = torch.full((B, N_NEIGHBOURS), NB_UNKNOWN)
     b["nb_t"] = torch.zeros_like(b["nb_t"])
     with torch.no_grad():
-        plain = _sampler(model).predict_eps(**b, autocast_dtype=torch.float32)
-        guided = _sampler(model, s_nb=4.0).predict_eps(
+        plain = _sampler(model).predict_out(**b, autocast_dtype=torch.float32)
+        guided = _sampler(model, s_nb=4.0).predict_out(
             **b, autocast_dtype=torch.float32)
     assert torch.allclose(plain, guided, atol=1e-5)
 
@@ -120,7 +120,7 @@ def test_the_null_arms_carry_no_neighbour_information(model):
     model.forward = spy                                   # type: ignore[method-assign]
     try:
         with torch.no_grad():
-            _sampler(model, s_por=2.0, s_nb=2.0).predict_eps(
+            _sampler(model, s_por=2.0, s_nb=2.0).predict_out(
                 **_batch(), autocast_dtype=torch.float32)
     finally:
         model.forward = real_forward                      # type: ignore[method-assign]
