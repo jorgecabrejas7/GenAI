@@ -5,15 +5,26 @@ the authoritative reference for the paper methods section and for anyone reading
 a `runs/campaigns/<NN>-<name>/` result.
 
 The suite is the package `src/poregen/eval_v4/`, driven by the `eval_v4` CLI.
-It replaces `scripts/eval_generated_volumes.py`, which is **deleted**. That
-script measured a generated set against a real set with distribution distances —
-porosity W1, PSD W1, S₂(r) RMSE, Ripley K, FID on 2-D crops. Those answer "does
-this look like the training data". They cannot answer the questions ldm06 is
-built to answer, which are all *conditional*: did the volume deliver the porosity
-it was **asked** for, in the cells it was asked for, with the layup it was asked
-for, inside the material envelope it was asked for. A distribution distance has
-no notion of a request, so it scores a model that ignores its conditioning
-exactly as well as one that obeys it.
+It replaces `scripts/eval_generated_volumes.py`, which is **deleted** — its five
+distribution statistics were ported into assessment 8 and the rest of it was
+not worth keeping.
+
+Most of what the suite asks is *conditional*: did the volume deliver the
+porosity it was **asked** for, in the cells it was asked for, with the layup it
+was asked for, inside the material envelope it was asked for. A distribution
+distance has no notion of a request, so it scores a model that ignores its
+conditioning exactly as well as one that obeys it, and that is why the old
+script could not answer the questions ldm06 exists to answer.
+
+It could not be dropped either. A model can obey every request and still draw
+the wrong microstructure, and Naiff et al. (*Computers & Geosciences* 206,
+2026) — the paper to beat — report FID on 2-D slices, a W1 pore-size distance
+and the two-point correlation, so those numbers are the head-to-head. They live
+in assessment 8, on the same three rules as everything else: a manifest, a
+declared requirement, and a **real-vs-real floor**. That floor is what the old
+script never had. A Wasserstein distance between two finite samples of the same
+material is not zero, so a generated distance is only readable as a multiple of
+what real material scores against itself.
 
 ---
 
@@ -107,7 +118,7 @@ every reader refuses it instead of measuring a truncated volume.
 | `ddim_steps`, `chunk_tiles`, `window_stride` | sampler geometry |
 | `decode`, `decode_overlap` | `overlapped` with 32-voxel overlap, or `tiled` with 0 |
 | `s_por`, `s_nb` | the two guidance scales |
-| `seed` | the seed set on the global torch generator before the call |
+| `seed` | the seed of the LOCAL generator every random draw of the reverse process is taken from; the global torch generator is left untouched |
 | `requested_global_phi` | the uniform target, when there was one |
 | `requested_field` | `.npy` of the requested phi per 64-voxel tile |
 | `requested_layup`, `requested_ply_thickness_vox` | the stacking sequence and its pitch |
@@ -270,11 +281,63 @@ the air fraction inside and outside the requested material. A model that obeys
 the map scores a high Dice, a high air fraction outside and a low one inside.
 There is no real floor for the Dice: a real volume was never asked for a hole.
 
+### Microstructure statistics
+
+`src/poregen/eval_v4/microstructure.py`. Five two-sample distances, each
+reported three ways — **generated vs real**, the **real-vs-real floor**, and
+their **ratio**. A ratio of 1 means the generated set is as close to real
+material as two disjoint crops of one real panel are to each other, which is as
+close as the measurement can tell.
+
+| statistic | what it is | units |
+|---|---|---|
+| **S₂(r) W1** | Hann-windowed FFT autocorrelation of the pore phase, debiased by the window's own autocorrelation so `S₂(0) = φ`, radially binned; the two mean curves normalised to unit mass and compared as distributions over r | voxels |
+| **pore-size W1** | Wasserstein-1 between the pooled equivalent diameters `(6V/π)^(1/3)` of every connected pore | voxels |
+| **Ripley's K** | K(r) of the pore centroids, border-corrected; the distance is the mean \|log(K_gen/K_real)\| over r | dimensionless |
+| **FID** | Fréchet distance on 2-D slices along all three axes, mean of the three | dimensionless |
+| **memorisation** | mean nearest-neighbour L2 distance in latent space from the generated 64³ patches, encoded by the frozen VAE, to a random 10 000 of the **train** latents | latent L2 |
+
+The memorisation ratio reads the **other way round**: held-out real crops are
+not memorised by construction, so a ratio of 1 or more means the generated
+patches are no nearer the training set than real material is.
+
+**Analysis geometry.** The generated cases are 192³; no test panel holds a
+clean 192-deep box, so the reference crops are 128³. Every statistic is
+therefore defined on geometry both can supply: S₂ on **128³ windows** (r up to
+48 voxels, one bin per voxel) so the FFT support, the Hann debias and the bin
+edges are identical for both sets; the pore-size distribution and K on the
+whole requested material, both being size-normalised; FID on 64×64 native
+crops; memorisation on 64³ patches, the size the VAE was trained on.
+
+**Connected components are 6-connected** everywhere. At a median pore diameter
+of 1.79 voxels, 26-connectivity fuses voids that meet at a single corner.
+
+**The FID feature extractor** is torchvision's `inception_v3` with
+`Inception_V3_Weights.DEFAULT` (ImageNet IMAGENET1K_V1), 2048-d pool3
+(`avgpool`) features. Crops go in on [0, 1], replicated to three channels and
+bilinearly resized 64 → 299. A full slice resized to 299 would be a ~10×
+downscale, which shrinks a 1.79-voxel pore to 0.18 pixels — the structure the
+metric exists to see would be gone before Inception saw it. 5000 crops per axis
+per set, because a 2048-dimensional covariance estimated from fewer samples
+than that is singular. FID values are comparable **within this
+implementation only**.
+
+**Ripley's K is border-corrected** (reduced-sample): only pores further than r
+from every face contribute, so the estimate is unbiased and converges to the
+complete-spatial-randomness value `(4/3)πr³` — the volume of a ball, not the
+2-D `πr²`. `K(r) / (4/3)πr³` above 1 is clustering, below 1 is regularity. The
+old script applied no edge correction, so its K was biased low by a factor that
+grew with r and had no known value to be validated against.
+
+FID needs torchvision and the memorisation check needs the latent store; each
+reports an explicit skip with the reason when its dependency is absent, so the
+other statistics are still measured.
+
 ---
 
-## The seven assessments
+## The eight assessments
 
-Seeds 101 / 202 / 303 throughout; 93 cases in total. `chunk_tiles = (3, 3, 3)`,
+Seeds 101 / 202 / 303 throughout; 102 cases in total. `chunk_tiles = (3, 3, 3)`,
 `window_stride = 32` and `decode_stride = 32` unless a case says otherwise.
 
 | # | Assessment | Cases | Asks |
@@ -286,6 +349,12 @@ Seeds 101 / 202 / 303 throughout; 93 cases in total. `chunk_tiles = (3, 3, 3)`,
 | 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
 | 6 | `assembly` | 6 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the window-phase pair generated here, and the campaign-08 VAE control row. |
 | 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
+| 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K, FID on 2-D slices and the memorisation check, each against the matched real-vs-real floor. |
+
+**Assessment 8 runs at three porosity levels and no more** because every
+statistic in it is confounded by pore fraction, and each level needs its own
+matched real reference. Reading a generated set against real material at a
+different porosity would show the porosity gap and call it a texture gap.
 
 **The off-manifold request (assessment 2)** asks for φ = 0.15. `cond_por` clamps
 at the training maximum of 0.107, so this is a failure-mode row and is excluded
@@ -350,16 +419,37 @@ Three metrics have no floor here, on purpose:
 * **layup recovery** — campaign 08 already measured that floor on real scans
   with the nominal ply sequence as truth.
 
+### The matched-porosity reference pairs
+
+`--shapes micro` cuts what assessment 8 is read against: for every requested
+porosity level and every test **panel**, two 128³ crops of that panel whose
+measured porosity matches the level and which **share no material**. Crop `a`
+is the reference the generated set is scored against; `a` against `b` is the
+floor. Two crops of one panel, never two panels: panels differ in cure and in
+void population, so a cross-panel pair would fold the between-panel spread into
+the floor and flatter every generated number read against it.
+
+Every candidate box is scored exactly, and for free, from a one-pass cell
+summary of the pore mask — the same trick `cell_ok_by_slice` uses for the
+specimen mask — so the search never reads a volume once per candidate. A box
+must lie entirely inside `sample_mask`, which excludes exterior air and the
+three drilled registration holes.
+
+Measured on the current dataset — three test panels, Na_05, Na_09 and JI_8:
+
+| requested φ | panels matched exactly | worst miss |
+|---|---|---:|
+| 0.01 | all three | 0.0000 |
+| 0.03 | all three | 0.0000 |
+| 0.06 | Na_09 only | 0.0194 |
+
+**φ = 0.06 does not exist in Na_05 or JI_8** at this crop size: the best boxes
+those panels hold are 0.041 and 0.043. The crops are written anyway, with
+`phi_miss` in the manifest and a warning line in `findings.md`, because the
+alternative — silently comparing against real material at another porosity — is
+what turns a porosity gap into a reported texture gap.
+
 ---
-
-## What the suite does not measure
-
-No distribution distances: no FID, no PSD W1, no S₂(r) RMSE, no Ripley K. They
-were the whole of v1–v3 and none of them can express a request. If a
-"does it look like the data" number is wanted later it belongs beside these, not
-instead of them, and it needs its own real-volume floor — a held-out real set
-scored against another held-out real set — before any generated number is read
-against it.
 
 ## Failure modes of the method
 
@@ -376,25 +466,13 @@ against it.
 * **The window-phase pair changes the chunk boundary as well as the window
   phase**, because the sampler anchors windows at the chunk origin. A Dice below
   1 there says the assembly grid matters; it does not separate the two causes.
-
-## What eval v4 does not measure
-
-`poregen.eval_v4` is an **operational** suite: does the model deliver the
-porosity, layup, geometry and assembly quality it was asked for. It says
-nothing about whether the generated microstructure has the right *statistics*.
-
-Those live in `scripts/eval_generated_volumes.py`, which is kept for exactly
-that reason: two-point correlation S2 with a Wasserstein-1 distance, Ripley's
-K, FID on 2-D slices, pore-size distribution, and a memorisation check. None of
-them is implemented in `eval_v4`.
-
-This matters for Paper 1. Naiff et al. (*Computers & Geosciences* 206, 2026),
-the designated paper to beat, reports FID on 2-D slices, W1 pore-size-
-distribution distance and TPCF. Three of those four are only available from the
-older script. Deleting it would have removed the head-to-head comparison the
-paper is built on.
-
-Its memorisation step, and only that step, expects the pre-`latents_r07z4`
-latent layout; it warns and skips rather than failing. Porting these metrics
-into `eval_v4` is worth doing, and until it happens the older script is the
-implementation of record.
+* **The microstructure floor is two crops per panel per level.** A distance
+  between two samples that small is itself noisy, so a ratio near 1 means
+  "indistinguishable at this sample size" and not "identical".
+* **φ = 0.06 is not reachable on two of the three test panels** (see below), so
+  part of that row's distance is a porosity gap. The miss is reported beside
+  the number; it is not corrected for.
+* **The generated volumes are 192³ and the real crops 128³.** Every
+  microstructure statistic is defined on the fixed 128³ analysis window or on a
+  size-normalised quantity, but a residual shape effect cannot be ruled out by
+  construction alone.

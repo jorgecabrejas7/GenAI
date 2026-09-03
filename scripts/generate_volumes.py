@@ -64,6 +64,9 @@ PLY_THICKNESS_VOX  = 19.6
 POROSITY_LEVELS    = [0.01, 0.02, 0.03, 0.05, 0.07, 0.10]
 DISTRIBUTIONS      = ["center", "edges", "uniform", "coherent"]
 DEFAULT_DDIM_STEPS = 200
+#: Default seed for the reverse process.  A sweep that cannot be repeated is a
+#: sweep whose differences cannot be attributed, so the script always seeds.
+DEFAULT_SEED       = 0
 # Batch sizes calibrated to ≤75% of 128 GB unified memory (GB10 DGX Spark).
 # Measured on CPU (conservative upper bound; GPU bfloat16 autocast uses ~half):
 #   UNet forward:  ~42 MB/patch  (empirical: B=2048 → 85 GB RSS)
@@ -92,6 +95,7 @@ def _build_local_por_map(
     gx: int,
     target_por: float,
     distribution: str,
+    seed: int,
     sigma_norm: float = 0.3,
 ) -> dict[tuple[int, int, int], float]:
     """Build per-patch local porosity dict keyed by (iz, iy, ix).
@@ -101,8 +105,9 @@ def _build_local_por_map(
     uniform  — every patch conditioned to target_por exactly (calibration baseline).
     coherent — one spatially coherent field over the volume (D32 §4): T-E
                marginal draw per patch, smoothed with the T-D correlation
-               lengths, mean rescaled to target_por.  Seeded from the
-               porosity level so repeated runs are reproducible.
+               lengths, mean rescaled to target_por.  Seeded from the run seed
+               AND the porosity level, so a rerun repeats and two levels of the
+               same run do not share one field.
     """
     if distribution == "uniform":
         val = float(np.clip(target_por, 0.001, 0.999))
@@ -124,9 +129,7 @@ def _build_local_por_map(
             sampler=load_sampler(repo_root / DEFAULT_TE_RESULTS),
             corr_lengths_voxels=load_corr_lengths_voxels(repo_root / DEFAULT_TD_RESULTS),
             stride_voxels=TILE_SIZE,
-            # The script has no global seed; derive one from the porosity
-            # level so each sweep cell is deterministic across runs.
-            seed=int(round(target_por * 1e6)),
+            seed=int(seed) + int(round(target_por * 1e6)),
         )
         return {
             (iz, iy, ix): float(field[iz, iy, ix])
@@ -234,6 +237,11 @@ def main() -> None:
                          "generation.decode_stride, else 32)")
     ap.add_argument("--window-batch", type=int, default=WINDOW_BATCH,
                     help="Windows per UNet forward per timestep")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="Seed for every random draw of the reverse process. The "
+                         "SAME seed is used for every sweep cell on purpose, so two "
+                         "cells start from the same noise and differ only by what "
+                         "was requested. Recorded in generation_stats.json.")
     ap.add_argument("--out-dir", type=str, default=None,
                     help="Resume into this existing run directory instead of creating a new "
                          "timestamped one (e.g. inference/<ldm_run>/<run_tag>). Combos whose "
@@ -365,7 +373,7 @@ def main() -> None:
                 vol_pbar.update(1)
                 continue
 
-            local_por_map = _build_local_por_map(gz, gy, gx, por_level, dist)
+            local_por_map = _build_local_por_map(gz, gy, gx, por_level, dist, args.seed)
 
             # One progress tick per DDIM step, over every chunk.
             step_pbar.reset(total=n_chunks * args.ddim_steps)
@@ -380,6 +388,7 @@ def main() -> None:
                     progress=step_pbar,
                     window_batch=args.window_batch,
                     decode_batch_size=DECODE_BATCH_SIZE,
+                    seed=args.seed,
                 )
 
             out_dir.mkdir(parents=True, exist_ok=True)
