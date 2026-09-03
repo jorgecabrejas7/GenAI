@@ -65,6 +65,15 @@ BIN_LABELS = ["<1%", "1-3%", "3-6%", ">=6%"]
 TAUS = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
 GATE = 0.005
 PATCH = 64
+
+# The three panels holding the dense microstructure. The calibration probe
+# located the capacity residual here and nowhere else: after de-weighting
+# r08-run-0002 they were the only panels still failing a bin, and their pore
+# Dice is 0.69-0.77 against 0.95-0.96 for the JI panels. Porosity TOTALS are
+# fixable by calibration; the Dice gap is not, so this is the number a latent
+# rung has to move. Na_10 and Pegaso_1 are TRAIN panels, which is why this
+# lives in the probe (all 17 panels) and not in the rung report (val/test).
+DENSE_PANELS = ("Na_10", "Na_09", "Pegaso_1")
 _T0 = time.time()
 
 
@@ -102,7 +111,10 @@ def probe(model, rows: pd.DataFrame, g, device, weights: np.ndarray,
                                   np.asarray(grp["sample_mask"][sl])))
         X = torch.from_numpy(np.stack(xs)).unsqueeze(1).to(device)
         T = torch.from_numpy(np.stack(ts).astype(np.int64)).to(device)
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        if device.type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits = model(X, T).class_logits
+        else:
             logits = model(X, T).class_logits
         p = torch.softmax(logits.float(), dim=1)
 
@@ -165,11 +177,22 @@ def summarise(res: dict, rows: pd.DataFrame) -> dict:
                          for lab in BIN_LABELS
                          if (ps & np.asarray(b == lab)).sum()},
             }
+        dense = np.isin(panels, DENSE_PANELS)
+        groups = {}
+        for name, sel in (("dense", dense), ("rest", ~dense)):
+            if sel.sum():
+                groups[name] = {
+                    "panels": sorted(set(panels[sel].tolist())),
+                    "n": int(sel.sum()),
+                    "dice_pore": float(d["dice"][sel].mean()),
+                    "porosity_mae": float(err[sel].mean()),
+                }
         worst = max((c["mae"] for c in per_bin.values()), default=float("nan"))
         out[v] = {"overall_mae": float(err.mean()),
                   "overall_dice": float(d["dice"].mean()),
                   "worst_bin_mae": worst,
                   "passes_every_bin": bool(worst < GATE),
+                  "dense_vs_rest": groups,
                   "per_bin": per_bin, "per_panel": per_panel}
     return out
 
@@ -201,6 +224,21 @@ def build_findings(meta: dict, summ: dict) -> str:
             cells.append("—" if c is None
                          else f"{c['mae']:.5f} ({c['n']})")
         L.append(f"| {v} | " + " | ".join(cells) + " |")
+
+    L += ["", "## Dense panels vs the rest", "",
+          "`" + "`, `".join(DENSE_PANELS) + "` hold the dense microstructure. "
+          "Porosity totals there are fixable by calibration; the pore Dice gap "
+          "is not, so this is the number a latent rung has to move.", "",
+          "| scoring | dense pore Dice | rest pore Dice | gap | dense φ MAE | rest φ MAE |",
+          "|---|---|---|---|---|---|"]
+    for v, s_ in summ.items():
+        g = s_.get("dense_vs_rest", {})
+        if "dense" in g and "rest" in g:
+            L.append(f"| {v} | {g['dense']['dice_pore']:.4f} "
+                     f"| {g['rest']['dice_pore']:.4f} "
+                     f"| {g['rest']['dice_pore'] - g['dense']['dice_pore']:+.4f} "
+                     f"| {g['dense']['porosity_mae']:.5f} "
+                     f"| {g['rest']['porosity_mae']:.5f} |")
 
     best = min(summ, key=lambda v: summ[v]["worst_bin_mae"])
     L += ["", f"## Per panel — best scoring (`{best}`)", "",
@@ -238,15 +276,28 @@ def build_findings(meta: dict, summ: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
+    ap.add_argument("--checkpoint", default=None,
+                    help="checkpoint inside the run dir (default best.ckpt, "
+                         "which only exists once the final full eval has run; "
+                         "use latest.ckpt to check a gate mid-training)")
     ap.add_argument("--per-bin", type=int, default=96)
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--device", default="cuda",
+                    help="cuda, or cpu to check a gate while a training run "
+                         "holds the GPU — slower, but it cannot OOM the run")
+    ap.add_argument("--out-name", default="calibration_probe",
+                    help="subdirectory under the campaign root")
     args = ap.parse_args()
 
     import zarr
     run_dir = Path(args.run)
     cfg = yaml.safe_load((run_dir / "resolved_config.yaml").read_text())
-    ckpt = run_dir / "best.ckpt"
-    device = torch.device("cuda")
+    ckpt = run_dir / (args.checkpoint or "best.ckpt")
+    if not ckpt.exists():
+        raise SystemExit(f"{ckpt} not found — best.ckpt is only written by the "
+                         "final full eval; pass --checkpoint latest.ckpt to "
+                         "probe a run that is still training.")
+    device = torch.device(args.device)
     model = build_model(cfg, device)
     step, _ = load_checkpoint(str(ckpt), model=model, map_location=device,
                               restore_rng=False)
@@ -271,9 +322,9 @@ def main() -> None:
         "class_weights": weights.tolist(),
         "per_bin": args.per_bin, "n_patches": int(len(rows)),
         "n_panels": int(rows.panel_id.nunique()),
-        "taus": list(TAUS), "gate": GATE,
+        "taus": list(TAUS), "gate": GATE, "device": args.device,
     }
-    out_dir = OUT_ROOT / "calibration_probe"
+    out_dir = OUT_ROOT / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json({**meta, "summary": summ}, out_dir)
     write_findings(build_findings(meta, summ), out_dir)

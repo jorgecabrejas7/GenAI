@@ -309,17 +309,47 @@ def compare() -> None:
     if not rows:
         raise SystemExit(f"no rung reports under {OUT_ROOT}")
     rows.sort(key=lambda r: -r["z_channels"])
+    def dense_cols(r):
+        """Pore Dice on the dense panels, from that rung's calibration probe.
+
+        Na_10 and Pegaso_1 are TRAIN panels, so the val/test report above
+        cannot see them; the probe samples all 17. Blank when the probe has
+        not been run for a rung.
+        """
+        f = OUT_ROOT / f"calibration_probe_{r['experiment'].replace('/', '_')}" / "results.json"
+        if not f.exists():
+            f = OUT_ROOT / "calibration_probe" / "results.json"
+        if not f.exists():
+            return "—", "—", "—"
+        try:
+            g = json.loads(f.read_text())["summary"]["argmax"]["dense_vs_rest"]
+            return (f"{g['dense']['dice_pore']:.4f}", f"{g['rest']['dice_pore']:.4f}",
+                    f"{g['rest']['dice_pore'] - g['dense']['dice_pore']:+.4f}")
+        except (KeyError, ValueError):
+            return "—", "—", "—"
+
     L = ["# r08 latent-compression sweep — comparison", "",
          f"{len(rows)} rung(s), whole val split. Reduction = 64³ / (z · 16³).", "",
+         "The last three columns are the point of the sweep. `Na_10`, `Na_09` "
+         "and `Pegaso_1` hold the dense microstructure, and after the class "
+         "weights were tempered they are the only place a residual survives: "
+         "porosity totals there are fine, pore Dice is not. Calibration cannot "
+         "close that gap — more latent capacity is the only lever left, so the "
+         "dense-panel Dice is what a rung has to move. They come from each "
+         "rung's calibration probe, which samples all 17 panels; the val/test "
+         "columns cannot see Na_10 or Pegaso_1 because those are train.", "",
          "| rung | z | reduction | step | porosity_mae | pore Dice | air Dice "
-         "| material Dice | air_mae | params |", "|---|---|---|---|---|---|---|---|---|---|"]
+         "| material Dice | air_mae | params | DENSE pore Dice | rest | gap |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         v = r["splits"]["val"]
         red = 64 ** 3 / (r["z_channels"] * 16 ** 3)
+        dense, rest, gap = dense_cols(r)
         L.append(f"| {r['experiment']} | {r['z_channels']} | {red:.0f}x "
                  f"| {r['step']} | {v['porosity_mae']:.5f} | {v['dice_pore']:.4f} "
                  f"| {v['dice_air']:.4f} | {v['dice_material']:.4f} "
-                 f"| {v['air_mae']:.5f} | {r['n_params']} |")
+                 f"| {v['air_mae']:.5f} | {r['n_params']} "
+                 f"| {dense} | {rest} | {gap} |")
     L += ["", "Selection rule (D31/D33): among rungs with val porosity_mae < "
           "0.005 and air Dice > 0.98, take the SMALLEST z whose pore Dice is "
           "within 0.01 of the best and whose overlapped-decode seam ratio is "
