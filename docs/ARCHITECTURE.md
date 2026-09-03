@@ -125,6 +125,100 @@ Availability has three states: **OOB** (the specimen ends at that face),
 store only ever emits EXISTS and OOB; UNKNOWN comes from `drop_nb` and from the
 chunks the sampler has not reached.
 
+## Diffusion objective and the terminal step
+
+`DDPMSchedule` owns what the denoiser regresses. Two keys under
+`noise_schedule` decide it, and every entry point builds the schedule with
+`DDPMSchedule.from_cfg(cfg, device)` so the two cannot disagree.
+
+| Key | Values | Meaning |
+|---|---|---|
+| `objective` | `eps` (ldm06) / `v` (ldm07) | ε-prediction, or the velocity target `v = sqrt(ᾱ)·ε − sqrt(1−ᾱ)·x₀` (Salimans & Ho 2022) |
+| `zero_terminal_snr` | bool | rescale sqrt(ᾱ) so its last entry is EXACTLY 0 (Lin et al. 2024, Alg. 1) |
+
+Nothing outside the schedule branches on the objective. `training_target`
+names what the step regresses, `predict_x0` / `predict_eps` convert a model
+output back, and `ddim_step` is written on (x̂₀, ε̂) so there is one reverse
+process rather than one per parameterisation.
+
+**The terminal step is why ldm07 exists, and the usual justification does not
+apply here.** Lin et al. attack a cosine schedule that derives ᾱ as
+`cumprod(1 − clamp(β))`, which leaves a terminal `sqrt(ᾱ_T) ≈ 0.068` — real
+signal the model still sees on its last training step but never on its first
+sampling step. This schedule takes ᾱ straight from the cosine `f`, where
+`f(T) = cos(π/2)²` is already zero to float precision. **Measured: the rescale
+moves sqrt(ᾱ) by at most 6.12e-17 anywhere.** There is no leak to close.
+
+What *is* broken is the ε form at that step. With `sqrt(ᾱ_T) = 6.12e-17`,
+`x̂₀ = (x_t − sqrt(1−ᾱ)·ε̂)/sqrt(ᾱ)` divides by the `1e-8` guard clamp and
+returns x̂₀ of order 1e8, which the ±10 clamp saturates — so the first DDIM
+step of every ldm06 chain started from a clamp artefact, not a prediction.
+The v form recovers `x̂₀ = sqrt(ᾱ)·x_t − sqrt(1−ᾱ)·v̂` with no division and
+stays order 1. `DDPMSchedule` therefore refuses `zero_terminal_snr` with
+`objective: eps`: there the division is by exactly zero.
+
+### Guidance in objective space
+
+`DDIMSampler.predict_out` returns the model's RAW output and the nested CFG
+combines the three arms there. That is valid for either objective: at a fixed
+`t` the map v ↔ ε is affine with shared coefficients, so an affine combination
+of arms commutes with it. The conversion happens once, in `ddim_step`.
+
+`guidance.cfg_rescale` (φ, Lin et al. §3.4) is off by default. A guidance
+scale above 1 is an extrapolation, and extrapolation inflates the standard
+deviation of the combined prediction, which decodes over-exposed;
+`rescale_guidance` scales the guided output back to the conditional arm's own
+per-item standard deviation and interpolates by φ. At `s_por = s_nb = 1` it
+would be a no-op, so it only earns its cost alongside a guidance sweep.
+
+## Decoded-space auxiliary loss (ldm06/aux)
+
+The latent objective is blind to any error that leaves the residual unchanged,
+and three of the defects the diagnostics keep reporting are exactly that: air
+placed inside the specimen envelope, a delivered porosity that ignores
+`cond_por`, and dark regions the class head calls material. Two latents can
+differ in all three and carry the same ε (or v) residual.
+
+`loss.decoded.enabled` puts the frozen r08 VAE in the training graph and
+scores the decode (precedent: Berrada et al. 2025, arXiv:2411.04873). Four
+terms, in `src/poregen/losses/decoded.py`, each logged separately as
+`train/aux_*` — one summed number could not say which defect moved:
+
+| Term | What it measures |
+|---|---|
+| `air_outside_material` | mean p(air) where the upsampled `cond_material` is `> 0.99`; partially-filled cells are surface or drilled-hole cells and their air is legitimate |
+| `pore_dice` | soft Dice of p(pore) against the source patch's real pore mask |
+| `porosity_consistency` | \|mean p(pore) − φ\| on the raw scale — `gen/por_cond_mae` made differentiable |
+| `grey_agreement` | p(pore)·relu(grey − 182/255) + p(material)·relu(182/255 − grey); both heads decode from ONE latent, so they cannot legitimately disagree. Air is unscored — it is dark AND correct |
+
+Three constraints make it affordable and safe:
+
+- **Lowest quartile of `t` only** (`t_max_frac` 0.25). x̂₀ from a high-t step is
+  a blur with no pore structure to score, so every term would be measuring the
+  schedule instead of the model.
+- **A hard sub-batch cap** (`decoded_max_items` 32), taking the LOWEST-t items.
+  Measured on the real r08 decoder, a 64³ decode with a live autograd graph
+  holds **0.33 GB of intermediate activations per item in float32, ~0.20 GB
+  under bf16 autocast** — decoding a whole 256 batch would need ~84 / ~51 GB on
+  top of the denoiser.
+- **A frozen VAE, in both senses.** Its parameters carry `requires_grad_(False)`
+  so nothing accumulates on them, and the decode runs in `eval()`. The second
+  is not hygiene: the r08 decoder is BatchNorm3d, and a decode in train mode
+  would fold generated latents into the frozen VAE's running statistics.
+  `requires_grad_(False)` does **not** prevent that.
+
+x̂₀ is deliberately **not** clamped here. The ±10 clamp guards a reverse
+process against one bad step; this loss only looks at low `t`, where
+`predict_x0` is well conditioned, and a clamp would zero the gradient on
+exactly the items that are most wrong.
+
+The label the terms score against is not part of the latent store: it is
+`patches_label.bin` in the data root recorded as
+`metadata["source_patch_index"]`, addressed by `source_row`.
+`LatentDataset(with_label=True)` serves it, and `build_latent_dataloaders`
+sets that flag from `loss.decoded.enabled` — one place, so a run cannot ask
+for the loss and be served batches without the label.
+
 ## Volume generation
 
 One path: **hybrid chunked joint denoising** (`diffusion/sampler.py`).
