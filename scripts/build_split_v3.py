@@ -23,6 +23,7 @@ Stages (all idempotent, run with ``--stage``)::
     holes    holes/<volume_id>.npy + holes.json
     splits   splits.json  (rule, panel_id and split per volume)
     index    patch_index.parquet + index_report.json
+    resplit  re-assign splits in place on an already-built root (--dry-run)
     weights  class_weights.json  (the r08 cross-entropy class weights)
     report   build_report.md
 
@@ -79,15 +80,33 @@ AIR_HEAVY = 0.5                 # "mostly air" threshold for the report
 EXCLUDED = ("MedidasDB__Juan_Ignacio_probetas_11_volume_eq_aligned",)
 
 # Whole panels, so no panel is split across train/val/test.
-TEST_PANELS = ("Na_05", "JI_8")
-VAL_PANELS = ("Na_08", "JI_12")
+TEST_PANELS = ("Na_05", "Na_09", "JI_8")
+VAL_PANELS = ("Na_08", "Na_01", "JI_12")
 SPLIT_RULE = (
-    "Split by PANEL, never by coupon. test = every coupon of panel Na_05 plus "
-    "Juan_Ignacio_probetas_8; val = every coupon of panel Na_08 plus "
-    "Juan_Ignacio_probetas_12; train = everything else. The 24 "
+    "Split by PANEL, never by coupon. test = every coupon of panels Na_05 and "
+    "Na_09 plus Juan_Ignacio_probetas_8; val = every coupon of panels Na_08 "
+    "and Na_01 plus Juan_Ignacio_probetas_12; train = everything else. The 24 "
     "Airbus_Panel_Pegaso coupons are one single panel, so they can only ever "
     "be train — holding them out would remove a whole material family. Each "
-    "Juan_Ignacio coupon is its own panel."
+    "Juan_Ignacio coupon is its own panel. "
+    "Na_09 and Na_01 were added so the phi >= 6 % porosity bin is judgeable on "
+    "both val and test: the first split (Na_05 + JI_8 / Na_08 + JI_12) left "
+    "only 263 and 42 patches there, below any sensible floor. They were chosen "
+    "over the panels with the MOST high-porosity material because the "
+    "high-porosity regime is extremely concentrated — Na_02 alone holds 77 % "
+    "of the train patches at phi >= 6 % and Na_02 + Na_10 hold 92 % — so "
+    "holding those out would have left train with 8 % of its high-porosity "
+    "data and tested a regime the model had barely seen. Na_09 + Na_01 give "
+    "6055 and 1220 patches in that bin while train keeps 96 %."
+)
+
+# The high-porosity regime in TRAIN rests on two panels. Recorded because a
+# reader judging a phi >= 6 % result needs to know the training support for it
+# is not spread across the dataset.
+HIGH_POROSITY_NOTE = (
+    "Training support for phi >= 6 % is concentrated: Na_02 holds 77 % of it "
+    "and Na_10 a further 15 %. Losing either panel from train would change "
+    "what the model can represent at high porosity."
 )
 
 
@@ -323,6 +342,115 @@ def stage_index() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Stage: resplit — re-assign splits in place, without re-extracting
+# ---------------------------------------------------------------------------
+
+def panel_table(df: pd.DataFrame) -> list[dict]:
+    """Per-panel porosity profile, for the record in splits.json and the docs."""
+    rows = []
+    for p, d in df.groupby("panel_id"):
+        rows.append({
+            "panel": p,
+            "volumes": int(d.volume_id.nunique()),
+            "patches": int(len(d)),
+            "mean_porosity": float(d.porosity.mean()),
+            "n_ge_6pct": int((d.porosity >= 0.06).sum()),
+            "n_3_to_6pct": int(((d.porosity >= 0.03) & (d.porosity < 0.06)).sum()),
+            "n_1_to_3pct": int(((d.porosity >= 0.01) & (d.porosity < 0.03)).sum()),
+        })
+    return sorted(rows, key=lambda r: -r["n_ge_6pct"])
+
+
+def stage_resplit(dry_run: bool = False) -> dict:
+    """Apply the current TEST_PANELS/VAL_PANELS to an already-built root.
+
+    Only the ``split`` COLUMN of the parquet changes. Row order is untouched,
+    so ``patches_xct.bin`` and ``patches_label.bin`` stay row-aligned and are
+    not re-extracted — that is the whole reason this stage exists rather than
+    re-running ``--stage all``, which would cost 78 minutes of extraction to
+    reach the same bytes.
+    """
+    idx = DST_ROOT / "patch_index.parquet"
+    df = pd.read_parquet(idx)
+    before = df["split"].value_counts().to_dict()
+    order_before = df[["volume_id", "z0", "y0", "x0"]].copy()
+
+    new_split = df["panel_id"].map(split_of)
+    changed = int((new_split != df["split"]).sum())
+    df["split"] = new_split
+    after = df["split"].value_counts().to_dict()
+
+    # The invariant the memmaps depend on.
+    assert order_before.equals(df[["volume_id", "z0", "y0", "x0"]]), \
+        "row order changed — the memmaps would no longer be row-aligned"
+
+    bins = [0.0, 0.01, 0.03, 0.06, float("inf")]
+    labels = ["<1%", "1-3%", "3-6%", ">=6%"]
+    per_split_bins = {}
+    for sp in ("train", "val", "test"):
+        d = df[df.split == sp]
+        cut = pd.cut(d.porosity, bins=bins, right=False, labels=labels)
+        per_split_bins[sp] = {
+            "n_patches": int(len(d)),
+            "n_volumes": int(d.volume_id.nunique()),
+            "panels": sorted(d.panel_id.unique().tolist()),
+            "mean_porosity": float(d.porosity.mean()),
+            "bins": {l: int(v) for l, v in cut.value_counts().reindex(labels).items()},
+        }
+
+    report = {
+        "changed_rows": changed,
+        "counts_before": before,
+        "counts_after": after,
+        "per_split": per_split_bins,
+        "panel_table": panel_table(df),
+    }
+    if dry_run:
+        log.info("DRY RUN — nothing written")
+        for sp, v in per_split_bins.items():
+            log.info(f"  {sp:5s} {v['n_volumes']:2d} vols {v['n_patches']:8d} patches "
+                f"mean phi {v['mean_porosity']:.5f} bins {v['bins']} panels {v['panels']}")
+        log.info(f"  rows whose split changes: {changed}")
+        return report
+
+    save_patch_index(df, idx)
+    splits = json.loads((DST_ROOT / "splits.json").read_text())
+    splits.update({
+        "resplit_created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "rule": SPLIT_RULE,
+        "high_porosity_note": HIGH_POROSITY_NOTE,
+        "test_panels": list(TEST_PANELS),
+        "val_panels": list(VAL_PANELS),
+        "panel_table": report["panel_table"],
+        "per_split": per_split_bins,
+        "volumes": {v: split_of(p) for v, p in splits["panel_id"].items()},
+        "counts": {sp: per_split_bins[sp]["n_volumes"] for sp in per_split_bins},
+    })
+    (DST_ROOT / "splits.json").write_text(json.dumps(splits, indent=2))
+
+    meta_path = DST_ROOT / "patches_meta.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        meta["splits"] = {sp: per_split_bins[sp]["n_patches"] for sp in per_split_bins}
+        meta["split_rule"] = SPLIT_RULE
+        meta["parquet_sha256"] = _sha256(idx)
+        meta_path.write_text(json.dumps(meta, indent=2))
+        log.info(f"patches_meta.json updated; parquet sha {meta['parquet_sha256'][:16]}…")
+
+    log.info(f"resplit applied: {changed} rows changed split; counts {after}")
+    return report
+
+
+def _sha256(path: Path, block: int = 1 << 20) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(block):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # Stage: class weights
 # ---------------------------------------------------------------------------
 
@@ -448,19 +576,27 @@ def stage_report() -> str:
 # ---------------------------------------------------------------------------
 
 STAGES = {"holes": stage_holes, "splits": stage_splits,
-          "index": stage_index, "weights": stage_weights,
-          "report": stage_report}
+          "index": stage_index, "resplit": stage_resplit,
+          "weights": stage_weights, "report": stage_report}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="all",
                     choices=[*STAGES, "all"])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="resplit only: report what would change, write nothing")
     args = ap.parse_args()
-    names = list(STAGES) if args.stage == "all" else [args.stage]
+    # `all` rebuilds from scratch, which already produces the current split
+    # rule; `resplit` is the in-place path for a root that is already built.
+    names = ([n for n in STAGES if n != "resplit"] if args.stage == "all"
+             else [args.stage])
     for n in names:
         log.info("=== stage %s ===", n)
-        STAGES[n]()
+        if n == "resplit":
+            STAGES[n](dry_run=args.dry_run)
+        else:
+            STAGES[n]()
 
 
 if __name__ == "__main__":

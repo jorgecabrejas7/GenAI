@@ -47,6 +47,6 @@ overrides:
     # numbers and the patch count are in data/split_v3/class_weights.json.
     # Without weights the loss is dominated by material and pore and air both
     # collapse, so compute_total_loss refuses to run when this is unset.
-    # train frequencies material/pore/air = 0.907569 / 0.020702 / 0.071730
-    # over 1861639 patches.
-    class_weights: [0.367282, 16.101824, 4.647067]
+    # train frequencies material/pore/air = 0.900142 / 0.020744 / 0.079114
+    # over 1598000 patches.
+    class_weights: [0.370312, 16.068781, 4.213323]

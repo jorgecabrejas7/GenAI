@@ -139,17 +139,71 @@ dilated footprint 2.9–3.4 % of a slice.
 By **panel**, never by coupon — `split_v2` scattered the five coupons of a panel
 across train/val/test, so val and test shared a panel with train.
 
-- test = every coupon of `Na_05` + `Juan_Ignacio_probetas_8`
-- val = every coupon of `Na_08` + `Juan_Ignacio_probetas_12`
-- train = everything else, 13 panels
-- excluded: `MedidasDB__Juan_Ignacio_probetas_11_volume_eq_aligned` (not in
-  `split_v2` either)
+- test = every coupon of panels `Na_05` and `Na_09` + `Juan_Ignacio_probetas_8`
+- val = every coupon of panels `Na_08` and `Na_01` + `Juan_Ignacio_probetas_12`
+- train = everything else, 11 panels
+- excluded: `MedidasDB__Juan_Ignacio_probetas_11_volume_eq_aligned`
 
 The 24 Airbus_Panel_Pegaso coupons are one single panel, so they can only ever
 be train (`pegaso_single_panel_train_only: true`); holding them out would remove
 a whole material family. Each Juan_Ignacio coupon is its own panel.
 
-Counts: train 68 / val 6 / test 6 volumes.
+Counts: train 58 / val 11 / test 11 volumes.
+
+**Why Na_09 and Na_01 are in val/test (re-split of 2026-09-03).** The first
+split — `Na_05 + JI_8` / `Na_08 + JI_12` — left only 263 and 42 patches at
+φ ≥ 6 %, so that porosity bin could not be judged on either split. It was not a
+sampling accident: both panels are low-porosity.
+
+They were NOT chosen as the panels with the most high-porosity material, and
+that matters, because the high-porosity regime is extremely concentrated:
+
+| panel | volumes | patches | mean φ | n ≥6 % | n 3–6 % | n 1–3 % |
+|---|---|---|---|---|---|---|
+| Na_02 | 5 | 138736 | 0.09948 | 130376 | 8136 | 223 |
+| Na_10 | 5 | 181950 | 0.03320 | 25110 | 71969 | 43738 |
+| Na_09 | 5 | 138114 | 0.01775 | 5792 | 26163 | 28996 |
+| Pegaso_1 | 24 | 677023 | 0.01224 | 5428 | 77648 | 186033 |
+| Na_01 | 5 | 125525 | 0.02340 | 1178 | 34309 | 72429 |
+| Na_07 | 5 | 132077 | 0.01522 | 306 | 16617 | 58657 |
+| JI_8 | 1 | 23435 | 0.01105 | 255 | 2073 | 6430 |
+| Na_06 | 5 | 126722 | 0.00695 | 142 | 3948 | 16965 |
+| JI_5 | 1 | 22915 | 0.00975 | 138 | 1522 | 6273 |
+| JI_7 | 1 | 23895 | 0.00621 | 100 | 926 | 3694 |
+| JI_4 | 1 | 22930 | 0.00771 | 53 | 1141 | 5036 |
+| Na_03 | 5 | 118791 | 0.00577 | 52 | 2817 | 10341 |
+| JI_12 | 1 | 22450 | 0.01364 | 42 | 1637 | 11088 |
+| JI_10 | 1 | 22410 | 0.01473 | 39 | 1676 | 12806 |
+| Na_05 | 5 | 128897 | 0.00587 | 8 | 1536 | 17390 |
+| Na_04 | 5 | 130551 | 0.00433 | 1 | 450 | 8493 |
+| Na_08 | 5 | 118144 | 0.00487 | 0 | 783 | 9283 |
+
+**`Na_02` alone holds 77 % of the train patches at φ ≥ 6 %, and `Na_02` +
+`Na_10` hold 92 %.** Moving those two out — which is what "largest ≥6 % count
+to test, second-largest to val" would have done — would have left train with
+8 % of its high-porosity data and its mean φ down from 0.0207 to 0.0121, then
+tested a regime the model had barely seen. `Na_09` + `Na_01` instead give 6055
+and 1220 patches in that bin while train keeps 96 % of it and its mean φ is
+unchanged.
+
+Resulting patches per bin:
+
+| split | volumes | patches | mean φ | φ<1 % | 1–3 % | 3–6 % | ≥6 % |
+|---|---|---|---|---|---|---|---|
+| train | 58 | 1598000 | 0.02074 | 897146 | 352259 | 186850 | 161745 |
+| val | 11 | 266119 | 0.01435 | 135370 | 92800 | 36729 | 1220 |
+| test | 11 | 290446 | 0.01194 | 201803 | 52816 | 29772 | 6055 |
+
+> **Training support for φ ≥ 6 % rests on two panels.** `Na_02` (77 %) and
+> `Na_10` (15 %). A reader judging any high-porosity result needs to know the
+> training support for it is not spread across the dataset, and that losing
+> either panel from train would change what the model can represent there.
+
+The re-split was applied in place with
+`python scripts/build_split_v3.py --stage resplit`, which rewrites only the
+`split` COLUMN of the parquet. Row order is asserted unchanged, so
+`patches_xct.bin` and `patches_label.bin` stay row-aligned and were not
+re-extracted. `--stage all` from scratch produces the same assignment.
 
 ### 3. `index` → `patch_index.parquet`, `index_report.json`
 
