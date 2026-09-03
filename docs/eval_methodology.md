@@ -1,404 +1,400 @@
-# PoreGen Evaluation Methodology
+# Evaluation methodology — eval v4
 
-This document describes exactly how every metric in `scripts/eval_generated_volumes.py`
-is computed.  It serves as the authoritative reference for the paper methods section
-and for comparing results against Naiff 2025, He 2024, and Pinaya 2022.
+How a generated volume is measured, and why each number means something. This is
+the authoritative reference for the paper methods section and for anyone reading
+a `runs/campaigns/<NN>-<name>/` result.
 
-All metrics operate on **3D binary pore masks** (and, where noted, the corresponding
-XCT greyscale volumes).  Masks are binarised from Sauvola-segmented TIFFs at load
-time: uint8 → `> 0` (if max ≤ 1) or `>= 128` (if max = 255); float32 → `>= 0.5`.
-XCT volumes are normalised to float32 in [0, 1] (uint8 → / 255.0).
-
-**EDA ground truth** (held-out test set, used for sanity checks):
-
-| Quantity | Value |
-|:---------|------:|
-| Mean porosity φ̄ | 0.055 |
-| Std porosity | 0.027 |
-| Median equivalent pore diameter | 1.79 voxels |
-| P90 equivalent pore diameter | 2.92 voxels |
-| S₂(r=30) / φ² | 4.73 |
+The suite is the package `src/poregen/eval_v4/`, driven by the `eval_v4` CLI.
+It replaces `scripts/eval_generated_volumes.py`, which is **deleted**. That
+script measured a generated set against a real set with distribution distances —
+porosity W1, PSD W1, S₂(r) RMSE, Ripley K, FID on 2-D crops. Those answer "does
+this look like the training data". They cannot answer the questions ldm06 is
+built to answer, which are all *conditional*: did the volume deliver the porosity
+it was **asked** for, in the cells it was asked for, with the layup it was asked
+for, inside the material envelope it was asked for. A distribution distance has
+no notion of a request, so it scores a model that ignores its conditioning
+exactly as well as one that obeys it.
 
 ---
 
-## 1  Porosity fraction
+## The three rules
 
-**What it measures**: mean pore fraction φ = |pore voxels| / |total voxels| per volume.
-Captures the primary scalar descriptor of pore structure.
+**1. Every generated volume carries a manifest.** `manifest.json` sits beside
+`volume.tif` and `label.tif` and records what made the volume and what was asked
+of it. Nothing is inferred from a directory name. Eval v3 recovered a volume's
+requested porosity from its path, so renaming a directory changed the answer.
 
-**Computation** (`aggregate_comparison`):
+**2. Every metric declares the manifest fields it reads, and refuses a volume
+that does not carry them** — or whose array shape contradicts the manifest.
+The declaration is enforced by a decorator, so it cannot go stale:
 
-```
-φ_i = mask_i.mean()      # per volume; mask is {0,1} bool array
-```
+```python
+@requires("requested_global_phi")
+def porosity_error(label, material, *, manifest): ...
 
-Aggregated scalars reported:
-
-| Key | Formula |
-|:----|:--------|
-| `porosity_mean_gen` / `_real` | mean(φ) over all volumes in each set |
-| `porosity_std_gen` / `_real` | std(φ) |
-| `porosity_w1` | Wasserstein-1 between the two φ distributions (scipy `wasserstein_distance`) |
-| `porosity_mae_paired` | mean\|φ_gen_i − φ_real_i\| per matched pair (only when sets are same size) |
-| `porosity_dist_mae` | \|mean(φ_gen) − mean(φ_real)\| |
-
-**Primary success metric**: `val/porosity_mae < 0.005`.
-
-**Sanity check**: `porosity_mean_gen` must be within 3× of EDA reference 0.055.
-
----
-
-## 2  Pore Size Distribution (PSD)
-
-**What it measures**: the distribution of individual pore sizes via equivalent spherical
-diameter.  Captures pore-scale morphology in a single scalar distribution.
-
-**Computation** (`_pore_diameters`):
-
-1. Label connected components of the binary mask with `scipy.ndimage.label`.
-2. Compute voxel volume V of each component.
-3. Convert to equivalent spherical diameter:
-
-```
-d_i = (6 · V_i / π)^(1/3)
+porosity_error.requires        # ("requested_global_phi",)
 ```
 
-All diameters from all volumes in a set are pooled into one flat array before the
-comparison metrics are computed.
+Positional array arguments are volume-shaped and are checked against
+`manifest.volume_shape`; an array on another grid (a tile-grid field, a second
+volume) goes in by keyword and is checked by the metric against its own grid.
 
-**Aggregate scalars** (`aggregate_comparison`):
-
-| Key | Formula |
-|:----|:--------|
-| `psd_w1` | Wasserstein-1 between pooled generated and real diameter arrays |
-| `psd_median_gen` / `_real` | median(d) |
-| `psd_p90_gen` / `_real` | 90th percentile of d |
-| `psd_mean_gen` / `_real` | mean(d) |
-| `psd_n_gen` / `_n_real` | total pore count |
-
-**Sanity checks**: `psd_median_gen` within 3× of 1.79 voxels; `psd_p90_gen` within 3×
-of 2.92 voxels.
-
-**Figure**: `figures/psd_histogram.png` — density histograms on linear and log scale,
-one curve per directory, bins spanning [0, P99.5] capped at 20 voxels.
+**3. Real test volumes go through the metrics first, and their values are the
+floor row of every table.** A seam ratio of 0.96 is not "nearly perfect" — it is
+what a real scan scores, and a generated volume that reaches it has nothing left
+to fix. A cell-to-cell porosity spread of 0.003 is not "good local control" — it
+is what real material does with no request at all.
 
 ---
 
-## 3  Two-Point Correlation S₂(r)
-
-**What it measures**: the probability that two randomly chosen points separated by
-distance r are both in pore space: S₂(r) = P(x ∈ pore, x+r ∈ pore).  Encodes
-pore size, spatial arrangement, and connectivity simultaneously.  S₂(0) = φ,
-S₂(∞) = φ².
-
-**Computation** (`_s2_radial_crop`):
-
-Because the assembled volumes are large (~128 × 3200 × 1280 voxels), the FFT is
-computed on random 3D crops rather than the full volume to stay within memory:
-
-1. Draw `n_s2_crops` (default 3) random cube crops of size `s2_crop_size`³
-   (default 128, clamped to volume dims).
-2. For each crop, apply a 3D Hann window before the FFT to suppress spectral leakage
-   from finite crop boundaries, then normalise by the window's own autocorrelation to
-   recover an unbiased estimate of S₂:
-   ```
-   hann_1d      = np.hanning(crop_size)
-   hann_3d      = hann_1d[:, None, None] * hann_1d[None, :, None] * hann_1d[None, None, :]
-   win_autocorr = real(ifftn(fftn(hann_3d) · conj(fftn(hann_3d))))   # computed once
-
-   windowed = crop * hann_3d
-   S₂_raw   = real(ifftn(fftn(windowed) · conj(fftn(windowed))))
-   S₂_3D    = where(win_autocorr > 1e-10, S₂_raw / win_autocorr, 0.0)
-   ```
-   **Why dividing by crop.size is wrong after windowing**: `S₂_raw[r] ≈ S₂(r) · win_autocorr[r]`
-   because the Hann window down-weights contributions at large lags.  Dividing by
-   `win_autocorr` debiases this, recovering `S₂(r)`.  Dividing by `crop.size` instead
-   leaves a lag-dependent suppression factor and causes `S₂(r=30) ~ 250× below φ²`.
-
-   **Zero-lag sanity check**: `S₂_3D[0,0,0]` must equal the crop's porosity `φ`
-   (within ~10% relative + 0.005 absolute; logged as a warning if violated).
-3. **Safe-radius rule**: bins are capped at `r_max = min(r_max_arg, int(crop_size × 0.4))`.
-   For the default 128³ crop this gives r_max = 51 voxels; beyond this radius, edge
-   effects from the finite crop dominate the estimate even after windowing.
-   The default `--r-max` is 50 (within the safe limit).
-4. Bin `S₂_3D` by radial distance into `n_bins` (default 50, spanning [0, safe_r_max]):
-   ```
-   S₂(r_i) = mean of S₂_3D values where r_edges[i] ≤ ‖Δx‖ < r_edges[i+1]
-   ```
-5. Average the binned curves over all crops.
-
-**Aggregate scalars** (`aggregate_comparison`):
-
-| Key | Formula |
-|:----|:--------|
-| `s2_rmse` | RMSE between mean S₂ curves: √mean((S₂_gen(r) − S₂_real(r))²) over all bins. Matches the Gayon-Lombardo 2020 / Naiff 2025 convention of comparing raw curves |
-| `s2_w1_per_vol_mean` / `_std` | per-volume W1 against pooled-real mean curve; std measures diversity (valid as a diversity signal, not a fidelity signal) |
-| `s2_r30_check_ratio` | S₂_gen(r=30) / (EDA_S2_R30_COEFF × φ_mean²); expected ≈ 1.0; r=30 is within the safe range for 128³ crops |
-
-**Sanity check**: `s2_r30_check_ratio` must be within [1/3, 3].
-
-**Figure**: `figures/s2_curves.png` — mean S₂(r) curves per directory vs r (voxels).
-
----
-
-## 4  Ripley's K(r)
-
-**What it measures**: spatial clustering of pore centres relative to complete spatial
-randomness (CSR).  K(r) = expected number of additional pore centres within distance r
-of an arbitrary centre, scaled by volume / density.  For CSR, K(r) = (4/3)πr³.
-Values above CSR indicate clustering; below indicate regularity.
-
-**Computation** (`_ripleys_k` / `_ripleys_k_per_patch`):
-
-1. Label connected components; compute centre-of-mass (`regionprops`).
-2. If fewer than 3 components → skip (return None).
-3. If more than `max_pores_ripley` (default **5000**) → random subsample to control O(N²)
-   cost; a warning is logged when subsampling occurs.
-4. Compute all pairwise Euclidean distances between centres using `scipy.spatial.distance.pdist`.
-5. For each integer r from 1 to `r_max // 2` (default r_max = 50, so up to r = 25):
-   ```
-   K(r) = (V / N²) · 2 · #{(i,j) : i<j, d_ij < r}
-   ```
-   The factor of 2 converts unordered pairs (i<j, from `pdist`) to all ordered pairs (i≠j),
-   which is the standard K(r) definition.  V is total volume (voxels³), N is pore count.
-   For CSR: K(r) = (4/3)πr³.
-
-**Per-patch fallback** (`_ripleys_k_per_patch`):
-
-When `--ripley-per-patch` is set, **or** when the estimated pore count exceeds 50 000
-(estimated as φ_mean × volume_voxels / median_pore_volume, with median_pore_volume = (π/6) × 1.79³ ≈ 3.0 voxels³),
-Ripley's K is computed on individual non-overlapping 64³ patches extracted from the volume
-and the per-patch curves are averaged.  This avoids O(N²) scaling on millions of pore
-centres and is consistent with the spatial scale the model operates at.
-
-**Aggregate scalars** (`aggregate_comparison`):
-
-| Key | Formula |
-|:----|:--------|
-| `ripley_w1` | Wasserstein-1 between mean K(r) curves |
-| `ripley_K_at_mean_spacing_gen` / `_real` | K(r) evaluated at r = mean pore diameter (interpolated) |
-
-**Figure**: `figures/ripley_k.png` — mean K(r) curves per directory vs r, with CSR
-reference (4/3)πr³ plotted as a dashed black line.
-
----
-
-## 5  FID on 2D slices
-
-### Why full-slice resize was rejected
-
-PoreGen volumes are ~3 179 × 1 759 voxels.  The median equivalent pore diameter is
-**1.79 voxels**.  Resizing a full slice to InceptionV3's 299 × 299 input requires a
-~10.6× downscale; pores shrink to ~0.17 pixels and vanish before the network sees
-them.  Full-slice FID measures macro-scale rock texture, not pore morphology.
-
-### Protocol (`compute_fid_crop_based`)
-
-1. **Crop extraction**: for each 3D volume, extract `crops_per_volume` (default 500)
-   random 2D crops — approximately `crops_per_volume // 3` per axis (axial z, coronal y,
-   sagittal x).  Each crop is **64 × 64 pixels** at native voxel resolution, drawn from
-   a uniformly random slice with replacement.  If a slice dimension < 64, it is padded
-   with reflection before cropping.
-
-2. **Minimum sample guard**: total crops per set must be ≥ 5 000 before any computation;
-   a `ValueError` is raised otherwise.
-
-3. **Feature extraction**: crops are resized from 64 × 64 → 299 × 299 with **bilinear
-   interpolation** (`torch.nn.functional.interpolate`, `align_corners=False`), replicated
-   to 3 channels, and passed through **InceptionV3** (pretrained on ImageNet, eval mode,
-   no gradient).  Features are the 2 048-dimensional `avgpool` (pool3) output.  Batch
-   size: 32.
-
-4. **FID formula**: let R, G be the (N, 2048) feature matrices for real and generated:
-   ```
-   FID = ‖μ_R − μ_G‖²  +  Tr(Σ_R + Σ_G − 2·(Σ_R·Σ_G + ε·I)^½)
-   ```
-   with ε = 1×10⁻⁶ added to the product matrix before `scipy.linalg.sqrtm` to prevent
-   numerical instability.  Complex residuals from `sqrtm` are discarded (real part taken).
-
-5. **Output**: FID is computed separately for axial, coronal, and sagittal planes; the
-   mean of the three values is also reported.
-
-### Comparison with prior work
-
-| Work | Volume size | Protocol | Pore size after resize | Comparable to PoreGen? |
-|:-----|:------------|:---------|:----------------------|:-----------------------|
-| Naiff 2025 | 256³, ~6 µm/vox | full 256×256 slice → 299×299 (1.17× up) | ~21 px | No — different pore scale |
-| He 2024 | ~128³ | full slice → 299×299 | tens of px | No |
-| Pinaya 2022 | 3D brain MRI | full axial slice → 299×299 | N/A (not porous) | No |
-| **PoreGen** | 3 179×1 759, ~25 µm/vox | 64×64 crop → 299×299 (4.7× up) | ~8 px | — |
-
-**Internal comparisons** within a single PoreGen run (generated vs. baseline vs. real,
-all evaluated with the same script) are valid and meaningful.  Cross-paper FID numbers
-are not directly comparable.
-
----
-
-## 6  Boundary inconsistency
-
-**What it measures**: artefacts at patch assembly seams.  Because the LDM generates
-non-overlapping 64³ patches that are stitched together, voxel-pair differences across
-seam boundaries should be no larger than across interior positions.  A ratio > 1
-indicates visible stitching artefacts.
-
-**Computation** (`_boundary_inconsistency`):
-
-Seam positions are multiples of `stride` (default 32) along each axis.  Interior
-positions are all other positions, subsampled to ≤ 200 per axis to bound runtime
-on large volumes.
-
-For each of the two modalities (XCT, mask) and each axis:
-```
-seam_MAE   = mean |vol[i-1] - vol[i]|  for all seam i
-interior_MAE = mean |vol[i-1] - vol[i]|  for all interior i
-seam_ratio = seam_MAE / interior_MAE
-```
-
-Values are averaged across all three axes, then averaged across all volumes in the set.
-
-**Reported keys**: `boundary_xct_seam_ratio_mean_gen` / `_real`,
-`boundary_mask_seam_ratio_mean_gen` / `_real`.
-Ratio ≈ 1 means no seam artefact.  Values substantially > 1 indicate stitching artefacts.
-
----
-
-## 7  Pore morphology
-
-**What it measures**: per-pore shape statistics — sphericity (how round each pore is)
-and aspect ratio (elongation).
-
-**Computation** (`_morphology_stats`):
-
-Up to `max_pores_morph` (default 2 000) largest pores (by voxel count) are analysed.
-
-**Sphericity** (Wadell definition):
-```
-Ψ = π^(1/3) · (6·V)^(2/3) / A
-```
-where V is voxel count and A is surface area from marching cubes
-(`skimage.measure.marching_cubes`, level = 0.5).  Pores with V < 4 voxels are skipped
-(too small for reliable surface reconstruction).  Ψ = 1 for a perfect sphere; < 1 for
-elongated or rough pores.
-
-**Aspect ratio**: ratio of longest to shortest 3D bounding-box dimension
-(bbox extent along each spatial axis; skipped if shortest dimension = 0).
-
-**Reported statistics**: mean, std, P5, P50, P95 for both quantities, separately for
-generated and real sets.
-
-**Keys**: `morph_sphericity_{mean,std,p5,p50,p95}_{gen,real}`,
-`morph_aspect_ratio_{mean,std,p5,p50,p95}_{gen,real}`.
-
----
-
-## 8  Diversity
-
-**What it measures**: whether the generative model covers the variability in the real
-distribution, not just the mean.  Low diversity indicates mode collapse.
-
-**Computation** (`compute_diversity`):
-
-Three diversity signals, each compared between generated and real:
-
-| Key | Formula |
-|:----|:--------|
-| `diversity_phi_std_{gen,real}` | std(φ) across volumes |
-| `diversity_psd_w1_mean_{gen,real}` | mean over volumes of W1(per-vol PSD, pooled-real PSD) |
-| `diversity_psd_w1_std_{gen,real}` | std of the per-volume W1 values above |
-| `diversity_ripley_K_std_{gen,real}` | std of mean(K(r)) over volumes |
-
-Generated std values substantially below real values indicate mode collapse.
-
----
-
-## 9  Memorisation check
-
-**What it measures**: whether the LDM has memorised training patches.  Low nearest-
-neighbour distance in latent space from generated patches to training patches indicates
-overfitting; high values indicate genuine generalisation.
-
-**Computation** (`compute_memorization`):
-
-Requires `--vae-run` (directory with `resolved_config.yaml` and
-`checkpoints/best.ckpt`) and `--latents-dir` (precomputed training latents).
-
-1. Load the VAE encoder from checkpoint.
-2. Slide a non-overlapping 64³ window over each generated XCT volume; encode each
-   patch through the encoder to obtain μ (the mean of the posterior), shape (z_ch, 16, 16, 16).
-3. Flatten each μ to a 1D vector of length z_ch × 16³.
-4. Sample `n_train_sample` (default 10 000) training latents from the memmap file
-   (μ channels only, first z_ch channels of the stored (mu ‖ logvar) representation).
-5. For each generated latent, find the L2 nearest neighbour in the training set
-   (chunked in groups of 256 to avoid OOM).
-
-**Reported keys**:
-- `memorization_nn_dist_mean`: mean min-L2 distance (higher = less memorisation)
-- `memorization_nn_dist_std`: std of per-patch distances
-- `memorization_n_gen_patches`: number of generated patches encoded
-- `memorization_n_train_latents`: number of training latents sampled
-
-Skipped automatically if `--vae-run` is not provided or checkpoint/latents are missing.
-
----
-
-## Sanity checks
-
-After computing all aggregate metrics, `sanity_check` flags any value that deviates by
-more than **3×** from the EDA ground truth reference:
-
-| Check | EDA reference | Flagged if |
-|:------|:-------------|:-----------|
-| `porosity_mean_gen` | 0.055 | outside (0.018, 0.165) |
-| `psd_median_gen` | 1.79 vox | outside (0.60, 5.37) |
-| `psd_p90_gen` | 2.92 vox | outside (0.97, 8.76) |
-| `s2_r30_check_ratio` | 1.0 | outside (0.33, 3.0) |
-
-Warnings appear in the log and in the `sanity_warnings` key of `eval_results.json`.
-
----
-
-## Output files
-
-| File | Contents |
-|:-----|:---------|
-| `eval_results.json` | All scalars, per-volume metrics, per-volume curves (S₂, K), FID per axis, diversity, memorisation |
-| `eval_report.md` | Markdown report: FID table, summary metrics table, sanity warnings, figure links |
-| `figures/s2_curves.png` | Mean S₂(r) curves, real vs generated (vs baseline) |
-| `figures/psd_histogram.png` | PSD density histogram, linear and log scale |
-| `figures/ripley_k.png` | Mean K(r) curves with CSR reference |
-| `figures/fid_table.png` | FID table image (per axis + mean, per directory) |
-
----
-
-## CLI reference
+## Stages
+
+| Command | Needs | Produces |
+|---|---|---|
+| `eval_v4 real-floor --root <campaign>` | the dataset | `real_floor/` — run this first |
+| `eval_v4 generate <assessment> --model <run_dir> --ckpt <step> --out <campaign>` | GPU, hours | `<assessment>/volumes/<case>/` |
+| `eval_v4 measure <assessment> --root <campaign>` | the volumes only | `<assessment>/results.json` |
+| `eval_v4 report --root <campaign>` | the results file only | `findings.md`, `figures/*.{pdf,png}` |
+| `eval_v4 manifest-check --root <campaign>` | the manifests | a pass/fail listing; exit 1 on any fault |
+
+The stages are separate because their costs are. Measurement must be repeatable
+from the volumes alone — a metric that needed the model back could not be
+re-run after a checkpoint moved — and the report must be rebuildable after the
+volumes are deleted.
+
+`generate --dry-run` lists every case and what it asks for, without a GPU.
+`generate` skips a case whose `manifest.json` already exists, so an interrupted
+run resumes.
+
+### Campaign layout
 
 ```
-python scripts/eval_generated_volumes.py \
-    --real-dir      path/to/real/volumes/ \
-    --generated-dir inference/ldm03-run-0001-.../ \
-    [--baseline-dir inference/baseline/] \
-    [--out-dir      eval_results/stage4/] \
-    [--vae-run      runs/vae/r05-run-0001-.../] \
-    [--latents-dir  data/split_v2/latents_s64_sampled/] \
-    [--stride 32] [--r-max 50] [--s2-crop 128] [--n-s2-crops 3] \
-    [--crops-per-volume 500] [--device cuda] \
-    [--skip-fid] [--skip-ripley] [--skip-morphology] \
-    [--ripley-per-patch]
-
-# FID-only (fast path):
-python scripts/eval_generated_volumes.py --fid \
-    --real-dir ... --generated-dir ... [--baseline-dir ...]
+runs/campaigns/<NN>-<name>/
+    <assessment>/
+        volumes/<case>/
+            volume.tif              uint8, raw-scan grey
+            label.tif               uint8, 0 material / 1 pore / 2 air
+            probs.npz               pore log-odds (+ class probs when small)
+            requested_field.npy     requested phi per 64-voxel tile
+            requested_material.npy  requested envelope per latent cell
+            manifest.json
+        results.json
+        findings.md
+        figures/*.pdf, *.png        300 dpi
+    real_floor/                     same shape; sampler = "real"
+    README.md
 ```
 
-**Key defaults**:
+`volume.tif` and `label.tif` go in and come out on their **native** scale. The
+loader refuses anything that is not already `uint8` rather than guessing a
+conversion: a silent rescale cost a whole evaluation campaign once
+(`runs/campaigns/03-eval-v2-buggy-decode`).
 
-| Flag | Default | Controls |
-|:-----|:--------|:---------|
-| `--r-max` | 50 | Max radius (voxels) for S₂ and Ripley K; safe limit for S₂ is `s2_crop × 0.4` (= 51 for default 128³ crop) |
-| `--s2-crop` | 128 | Crop size³ for S₂ FFT |
-| `--n-s2-crops` | 3 | Crops averaged per volume for S₂ |
-| `--stride` | 32 | Patch stride for boundary inconsistency |
-| `--crops-per-volume` | 500 | FID crops per volume (all 3 axes combined) |
-| `--max-pores-ripley` | 5000 | Pore subsampling cap for O(N²) Ripley K; warning logged when hit |
-| `--max-pores-morph` | 2000 | Largest-N pores for morphology |
-| `--ripley-per-patch` | off | Force per-patch Ripley K; auto-enabled when est. pore count > 50 000 |
+The manifest is written **last**, so a half-written case has no manifest and
+every reader refuses it instead of measuring a truncated volume.
+
+---
+
+## The manifest
+
+| Field | Meaning |
+|---|---|
+| `assessment`, `case` | where the volume belongs |
+| `sampler` | `hybrid_chunked` for a generated volume, `real` for a crop of a scan |
+| `model_run`, `checkpoint_step`, `weights` | the LDM run directory, the step, `raw` or `ema` |
+| `objective` | what the denoiser predicts — `eps` or `v` |
+| `cfg_rescale` | guidance rescaling; 0 is plain classifier-free guidance |
+| `ddim_steps`, `chunk_tiles`, `window_stride` | sampler geometry |
+| `decode`, `decode_overlap` | `overlapped` with 32-voxel overlap, or `tiled` with 0 |
+| `s_por`, `s_nb` | the two guidance scales |
+| `seed` | the seed set on the global torch generator before the call |
+| `requested_global_phi` | the uniform target, when there was one |
+| `requested_field` | `.npy` of the requested phi per 64-voxel tile |
+| `requested_layup`, `requested_ply_thickness_vox` | the stacking sequence and its pitch |
+| `requested_material` | `"full"`, or the `.npy` of the envelope per latent cell |
+| `region_offset`, `region_shape` | the sub-block the case is about (assessment 6) |
+| `volume_shape`, `git_commit`, `wall_time_s`, `peak_gpu_memory_bytes` | what it is and what it cost |
+
+A `hybrid_chunked` manifest must carry every generation field and at least one
+porosity request; a `real` manifest carries none of them, so any metric that
+needs a request refuses it. That is why the floor is reported for the
+request-free metrics only.
+
+Self-consistency the schema enforces: `decode` and `decode_overlap` cannot
+contradict each other, `objective` must be `eps` or `v`, `region` must lie inside
+the volume, an unknown field is an error rather than being ignored.
+
+---
+
+## Shared definitions
+
+**material** — the requested specimen envelope at voxel resolution. The stored
+map is the per-latent-cell envelope *fraction*, which is what `cond_material`
+means; the voxel-level request is that map upsampled by 4 and thresholded at half
+a cell. Every fraction is taken inside it, because a volume asked for a hole
+should not be scored for the pores it does not put in the hole. For a real crop
+the material is the crop's own `sample_mask`.
+
+**interior** — more than **32 voxels** from every face. Air near a face may be
+the specimen surface that was asked for; air in the interior cannot be. The 32
+matches `scripts/analysis/air_audit_v2.EDGE_VOX`, and the detector loader asserts
+they still agree, so a v3 and a v4 interior number mean the same thing.
+
+**tile** — 64 voxels, the patch the model was trained on, the unit the requested
+porosity field is defined on, and the period of the window seam.
+
+**mean ± sd** — always over the three seeds (101, 202, 303) of one cell, sample
+standard deviation.
+
+---
+
+## The metrics
+
+### Porosity and air
+
+```
+phi_pore      = mean(label == PORE)  inside the material
+air_fraction  = mean(label == AIR)   inside the material
+air_interior  = mean(label == AIR)   inside the material and the interior
+error         = phi_pore - requested_global_phi
+```
+
+Gate: `|error| < 0.005` (decision D39, carried over from v3).
+
+**Failure** is not the same as inaccuracy. A volume has failed when
+`phi < 1e-4`, `phi > 0.5`, or more than 20 % of the requested material is air.
+The failure rate is the share of a cell's seeds that failed.
+
+**Degenerate cells** apply the same two porosity bounds per 64-voxel tile, so a
+volume that fails outright and a volume where a tenth of its tiles fail are
+described on one scale. Tiles holding less than half material are excluded.
+
+### Local obedience — the within-volume fit
+
+Per 64-voxel tile: `delivered[c] = pore voxels / material voxels`, `requested[c]`
+from the field. Then, **after subtracting each volume's own mean from both
+sides**, OLS of delivered on requested gives the slope and R². Slope 1 is exact
+obedience; slope 0 is a volume that ignored its field.
+
+The mean removal is the whole point. Pooling cells from volumes at different
+global targets and quoting the R² is what made eval v3 look obedient: most of
+that variance is the global dose response, which assessment 2 already measures.
+A unit test builds two volumes that ignore their field entirely, at two
+different global levels, and shows they pool to R² ≈ 1.0 while each scores a
+within-volume slope of 0. The pooled fit is still reported, under the key
+`pooled_r2_not_obedience`.
+
+A real volume has no request, so it reports only its **cell-to-cell spread** —
+the noise floor a slope has to beat.
+
+### Assembly seams
+
+`seam_discontinuity` is imported from `poregen.diffusion.sampler`, so the number
+the sampler logs and the number the suite reports are the same function. For each
+axis it takes the mean absolute slice-to-slice difference at the **seam** planes
+and at every **interior** plane, and reports the ratio. Ratio ≈ 1 means the plane
+is indistinguishable from ordinary internal texture change.
+
+Two periods, both judged against the same interior baseline (the interior
+excludes the 64-voxel window planes in both cases, so the two ratios are
+comparable):
+
+| period | where | what it catches |
+|---|---|---|
+| **window**, 64 voxels | every tile face | the decoder-side seam and the LDM disagreeing between neighbouring latents |
+| **chunk**, `64 × chunk_tiles` | where two independently denoised canvases meet | the joint-denoising seam |
+
+Every chunk plane is also a window plane, which is why both are reported: the
+window metric averages one bad plane over five and dilutes it; the chunk metric
+looks only where two canvases met. A 192³ volume is one chunk and therefore has
+**no** chunk plane — its chunk columns are empty by construction, not by failure.
+
+Measured on the decoder's own continuous outputs: the grey level, and the pore
+log-odds `log p_pore − log(1 − p_pore)` from the blended 3-class logits. The
+log-odds is read from `probs.npz`; when a case did not store it the metric
+reports `pore_logit_available: false` rather than substituting the argmax, which
+is not a continuous field.
+
+### Cross-head disagreement
+
+The share of requested material where the **grey** head renders a dark void and
+the **class** head calls the same voxels material. One of them is wrong, and no
+single-head metric can see it.
+
+The detector is imported from `scripts/analysis/_eval_v3`, not re-implemented:
+`u8 < t_abs` with connected components below `min_cc` voxels dropped, where
+`t_abs = 182` is the Dice-optimal absolute threshold calibrated inside
+`sample_mask` on 8 real volumes (campaign 04, Dice 0.842) and `min_cc = 300`.
+Both are read from `runs/campaigns/04-measurement-limits/air_audit_v2/results.json`
+at call time.
+
+### Layup recovery
+
+Two readers, both imported from `scripts/analysis/layup_roundtrip.measure_volume`
+— the T-I estimators, unchanged, the same code campaign 08 measured the real
+floor with. The import is **inside the function**: that module's generation half
+is pinned to the dead ldm05 sampler API, and a module-scope import would tie the
+suite to it.
+
+* `fft_slice` — the angular-spectrum reader on the grey volume.
+* `pore_axes` — the pore principal-axis reader on the **predicted** pore class.
+
+Scoring is **direct**: `theta_from_layup` writes the requested angles in image
+coordinates, so measured == requested is the null hypothesis and no offset, sign
+flip or face reversal is granted. Reported per reader: median and max |error|,
+the fraction within 10°, strict 4-class accuracy (both rounded to the nearest of
+0/45/90/135), the per-ply hit, and the **recovered ply count** — one more than
+the number of 4-class changes between consecutive ply blocks, so two identical
+adjacent plies read as one, which is the honest answer because nothing in the
+volume distinguishes them.
+
+The readers need a 1024×1024 in-plane window, which is why the layup assessment
+generates at that size.
+
+Floors, read from `runs/campaigns/08-pre-ldm06-diagnostics/angle_reader_floor/results.json`
+and never hard-coded — a measurement typed into source drifts away from the file
+that produced it:
+
+| reader | median \|err\| | strict 4-class |
+|---|---:|---:|
+| `fft_slice` | 8.2° | 74 % |
+| `pore_axes` (STORED mask) | 4.2° | 86 % |
+
+`pore_axes` read the stored mask on real data, so its floor is a **ceiling** no
+predicted-mask reader can beat.
+
+### Requested geometry
+
+Dice of the predicted air class against the requested air (`material == 0`), plus
+the air fraction inside and outside the requested material. A model that obeys
+the map scores a high Dice, a high air fraction outside and a low one inside.
+There is no real floor for the Dice: a real volume was never asked for a hole.
+
+---
+
+## The seven assessments
+
+Seeds 101 / 202 / 303 throughout; 93 cases in total. `chunk_tiles = (3, 3, 3)`,
+`window_stride = 32` and `decode_stride = 32` unless a case says otherwise.
+
+| # | Assessment | Cases | Asks |
+|---|---|---:|---|
+| 1 | `sampler` | 18 | DDIM {50, 100, 200} × {192³, 1024×1024×192}, target 0.03, layup A. Porosity error, interior air, both seam periods, wall time, failure rate. |
+| 2 | `porosity_global` | 24 | targets {0.005 … 0.10} plus an off-manifold 0.15, 192³, DDIM-200. OLS slope/intercept/R², the gate per level. |
+| 3 | `porosity_local` | 9 | three painted fields on the 3×3×3 tile grid — two halves 0.01/0.05, checkerboard 0.01/0.05, and the coherent field from `poregen.diffusion.porosity_field`. Within-volume slope and R². |
+| 4 | `cfg` | 24 | `s_por` {1.0, 1.5, 2.0} × targets {0.02, 0.05}; plus `s_nb` {0, 1} at target 0.03. |
+| 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
+| 6 | `assembly` | 6 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the window-phase pair generated here, and the campaign-08 VAE control row. |
+| 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
+
+**The off-manifold request (assessment 2)** asks for φ = 0.15. `cond_por` clamps
+at the training maximum of 0.107, so this is a failure-mode row and is excluded
+from the dose-response fit. The manifest records the request; `notes` records the
+value after the clamp.
+
+**Layup C** is a fixed permutation of A with the same ply population — three
+−45, two 0, three 45, two 90 — so any difference in recovery is the stacking
+*order* and not the mix of angles. It is deliberately not the reverse of A,
+because reversing a stack is the face-order freedom the direct scoring already
+refuses to grant. A and B16 are read from `data/layup_ground_truth.json`.
+
+**The `s_nb` arm (assessment 4)** runs on a 256³ volume, not 192³. The metric is
+the pore Dice across the **chunk plane** between `s_nb = 0` and `s_nb = 1` at the
+same seed, and a 192³ volume with 3×3×3-tile chunks has no chunk plane at all.
+A Dice near 1 means turning the neighbour arm off changed nothing where it
+could first act, so the arm is inert.
+
+**The window-phase pair (assessment 6)** asks for the same 192³ region twice,
+same seed, at two positions in a 256³ canvas. The specimen box, the orientation
+profile and the uniform porosity request all move with the region, so the two
+runs ask for the same thing and differ only in the grid they are assembled on;
+at offset 32 the chunk plane at canvas voxel 192 runs through the region at
+region coordinate 160. The seam columns of this assessment come from the
+`sampler` volumes, whose grid is in canvas coordinates.
+
+---
+
+## The real floor
+
+`eval_v4 real-floor` cuts crops from the **split_v3 TEST panels** — the panels
+the model never saw — at the shapes the generated cases use, and runs every
+request-free metric on them: phase fractions, degenerate cells, failure flags,
+both seam periods, the cell-to-cell spread, and cross-head disagreement.
+
+A real laminate holds only ~185–212 voxels of continuous material and its outer
+z slices are the specimen surface, so a **192-deep box entirely inside
+`sample_mask` does not exist** on any test volume — the best window scores a
+usable-cell fraction of 0.000. Campaign 08 hit the same wall and dropped to a
+128-deep box. The floor therefore reduces the depth one tile at a time until a
+clean box fits, never below 128 (the interior needs more than two 32-voxel
+shells), and records both the requested and the taken shape. Every metric here
+is a ratio or a fraction, so a shallower crop does not bias it. Where no clean
+box exists at any depth, the best window is taken and its `sample_mask` is
+carried as the crop's requested material, so fractions stay inside real
+specimen; a window less than 90 % usable is skipped instead.
+
+Measured on the current dataset:
+
+| shape | n | φ | seam xct | chunk seam xct | cell φ sd | cross-head |
+|---|---:|---:|---:|---:|---:|---:|
+| 128×192×192 | 4 | 0.0007 | 0.966 ± 0.005 | — | 0.0010 | 0.0000 |
+| 128×1024×1024 | 3 | 0.0045 | 0.963 ± 0.009 | 0.902 ± 0.026 | 0.0031 | 0.0000 |
+
+The grey seam ratio lands on campaign 08's real-volume control (0.963), which is
+the validation that this implementation measures what that one did.
+
+Three metrics have no floor here, on purpose:
+
+* **porosity error** — a real volume was not asked for a porosity;
+* **geometry Dice** — it was not asked for a hole;
+* **layup recovery** — campaign 08 already measured that floor on real scans
+  with the nominal ply sequence as truth.
+
+---
+
+## What the suite does not measure
+
+No distribution distances: no FID, no PSD W1, no S₂(r) RMSE, no Ripley K. They
+were the whole of v1–v3 and none of them can express a request. If a
+"does it look like the data" number is wanted later it belongs beside these, not
+instead of them, and it needs its own real-volume floor — a held-out real set
+scored against another held-out real set — before any generated number is read
+against it.
+
+## Failure modes of the method
+
+* **`pore_axes` reads the predicted mask**, so its score confounds angle
+  recovery with segmentation quality. Its floor was measured on the stored mask
+  and is therefore a ceiling.
+* **The grey detector is calibrated inside `sample_mask`** on real volumes. A
+  generated volume has no `sample_mask`, so the requested material stands in for
+  it; near an outer face that mixes specimen surface with true exterior.
+* **The layup truth is the nominal sequence**, which excludes measured per-ply
+  deviations, so part of every residual is the truth's own error.
+* **Three seeds** bound the sd loosely. A cell whose sd matters should be
+  re-run with more.
+* **The window-phase pair changes the chunk boundary as well as the window
+  phase**, because the sampler anchors windows at the chunk origin. A Dice below
+  1 there says the assembly grid matters; it does not separate the two causes.
+
+## What eval v4 does not measure
+
+`poregen.eval_v4` is an **operational** suite: does the model deliver the
+porosity, layup, geometry and assembly quality it was asked for. It says
+nothing about whether the generated microstructure has the right *statistics*.
+
+Those live in `scripts/eval_generated_volumes.py`, which is kept for exactly
+that reason: two-point correlation S2 with a Wasserstein-1 distance, Ripley's
+K, FID on 2-D slices, pore-size distribution, and a memorisation check. None of
+them is implemented in `eval_v4`.
+
+This matters for Paper 1. Naiff et al. (*Computers & Geosciences* 206, 2026),
+the designated paper to beat, reports FID on 2-D slices, W1 pore-size-
+distribution distance and TPCF. Three of those four are only available from the
+older script. Deleting it would have removed the head-to-head comparison the
+paper is built on.
+
+Its memorisation step, and only that step, expects the pre-`latents_r07z4`
+latent layout; it warns and skips rather than failing. Porting these metrics
+into `eval_v4` is worth doing, and until it happens the older script is the
+implementation of record.
