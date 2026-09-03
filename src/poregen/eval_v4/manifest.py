@@ -297,14 +297,20 @@ def requires(*needed: str):
 
 
 def head_commit(repo: str | Path) -> str:
-    """HEAD of ``repo``, suffixed ``-dirty`` when the working tree is modified."""
+    """HEAD of ``repo``, suffixed ``-dirty`` when a TRACKED file is modified.
+
+    Untracked files are ignored on purpose: a scratch file or a symlinked data
+    directory beside the source does not change what ran, and marking every
+    volume dirty for one would make the flag mean nothing.
+    """
     repo = str(repo)
     try:
         sha = subprocess.check_output(
             ["git", "-C", repo, "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
         ).strip()
         dirty = subprocess.check_output(
-            ["git", "-C", repo, "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+            ["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"],
+            text=True, stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - env
         raise ManifestError(f"cannot read the source commit of {repo}: {exc}") from exc
