@@ -41,12 +41,21 @@ overrides:
     # Dice sits near 1 whatever the model does, so scoring it would dilute the
     # signal from the two classes that matter.
     class_dice_classes: [1, 2]
-    # w_c = 1 / (n_classes * f_c), so sum_c f_c * w_c = 1 and the weighted loss
-    # keeps the magnitude of an unweighted one. Measured on the split_v3 TRAIN
-    # split by `python scripts/build_split_v3.py --stage weights`; the source
-    # numbers and the patch count are in data/split_v3/class_weights.json.
-    # Without weights the loss is dominated by material and pore and air both
+    # w_c proportional to 1/sqrt(f_c), normalised so sum_c f_c * w_c = 1, so
+    # the weighted loss keeps the magnitude of an unweighted one. Measured on
+    # the split_v3 TRAIN split by `build_split_v3.py --stage weights`; source
+    # numbers and patch count in data/split_v3/class_weights.json. Without
+    # weights the loss is dominated by material and both minority classes
     # collapse, so compute_total_loss refuses to run when this is unset.
+    #
+    # TEMPERED (sqrt) rather than full inverse frequency. r08-run-0002 used
+    # 1/f_c, which put pore at 16.1 and made a false positive cheap enough that
+    # the model over-predicted pore ~2.2x wherever porosity was appreciable —
+    # on TRAINING panels too. Dividing that model's softmax back by its own
+    # weights cut the worst-bin porosity MAE 7.7x (0.04258 -> 0.00551) AND
+    # improved pore Dice, so the bias was calibration from the weights rather
+    # than a recall/precision trade. See
+    # runs/campaigns/09-r08-latent-sweep/calibration_probe/.
     # train frequencies material/pore/air = 0.900142 / 0.020744 / 0.079114
     # over 1598000 patches.
-    class_weights: [0.370312, 16.068781, 4.213323]
+    class_weights: [0.767078, 5.052971, 2.587425]

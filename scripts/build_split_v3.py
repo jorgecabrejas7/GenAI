@@ -454,7 +454,7 @@ def _sha256(path: Path, block: int = 1 << 20) -> str:
 # Stage: class weights
 # ---------------------------------------------------------------------------
 
-def stage_weights() -> dict:
+def stage_weights(rule: str = "sqrt_inverse") -> dict:
     """Train-split voxel frequency of each label class, and the CE weights.
 
     The parquet already carries both minority fractions per patch — ``porosity``
@@ -463,29 +463,46 @@ def stage_weights() -> dict:
     Every patch has the same voxel count, so a mean over patches IS the voxel
     frequency.
 
-    Weight rule: ``w_c = 1 / (n_classes * f_c)``, which makes ``sum_c f_c w_c
-    = 1`` — the weighted cross-entropy keeps the magnitude of an unweighted one
-    instead of being inflated by the rare classes.
+    Two rules, both normalised so ``sum_c f_c w_c = 1`` — the weighted
+    cross-entropy then keeps the magnitude of an unweighted one instead of
+    being inflated by the rare classes:
+
+    ``inverse``       ``w_c ∝ 1 / f_c``. Full inverse-frequency. Used for
+                      r08-run-0002, where it put pore at 16.1 and made a false
+                      positive cheap enough that the model over-predicted pore
+                      ~2.2x wherever porosity was appreciable — see
+                      ``runs/campaigns/09-r08-latent-sweep/calibration_probe``.
+    ``sqrt_inverse``  ``w_c ∝ 1 / sqrt(f_c)``. Tempered: it still lifts the
+                      rare classes but by the square root, so the decision
+                      boundary is not pushed as far. The default from
+                      r08-run-0003 on.
     """
+    if rule not in ("inverse", "sqrt_inverse"):
+        raise ValueError(f"unknown weight rule {rule!r}")
     df = pd.read_parquet(DST_ROOT / "patch_index.parquet",
                          columns=["split", "porosity", "air_fraction"])
     tr = df[df.split == "train"]
     f_pore = float(tr.porosity.mean())
     f_air = float(tr.air_fraction.mean())
     f = [1.0 - f_pore - f_air, f_pore, f_air]
-    n = len(f)
-    w = [1.0 / (n * x) for x in f]
+    raw = ([1.0 / x for x in f] if rule == "inverse"
+           else [1.0 / (x ** 0.5) for x in f])
+    norm = sum(fc * rc for fc, rc in zip(f, raw))   # so sum_c f_c w_c = 1
+    w = [r / norm for r in raw]
     out = {
         "computed_from": "data/split_v3/patch_index.parquet, split == train",
         "n_train_patches": int(len(tr)),
         "class_names": ["material", "pore", "air"],
         "class_frequency": f,
-        "weight_rule": "w_c = 1 / (n_classes * f_c), so sum_c f_c w_c = 1",
+        "weight_rule_name": rule,
+        "weight_rule": ("w_c proportional to 1/f_c" if rule == "inverse"
+                        else "w_c proportional to 1/sqrt(f_c)")
+                       + ", normalised so sum_c f_c w_c = 1",
         "class_weights": w,
     }
     (DST_ROOT / "class_weights.json").write_text(json.dumps(out, indent=2))
-    log.info("class frequencies material/pore/air = %.6f / %.6f / %.6f",
-             *f)
+    log.info("rule %s | class frequencies material/pore/air = %.6f / %.6f / %.6f",
+             rule, *f)
     log.info("class weights                      = %.4f / %.4f / %.4f", *w)
     return out
 
