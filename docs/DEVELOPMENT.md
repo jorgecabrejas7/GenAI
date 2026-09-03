@@ -47,7 +47,7 @@ Do not fix unless explicitly asked:
 - `tests/test_latent_metrics.py::test_active_units_counts_collapsed_channels`
 - `tests/test_recon_metrics.py` (3 failures)
 
-A clean run is therefore **323 passed, 5 failed**.
+A clean run is therefore **399 passed, 5 failed**.
 
 ## Testing inside a git worktree
 

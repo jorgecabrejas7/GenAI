@@ -23,9 +23,9 @@ recorded here rather than worked around silently:
 
 The runner reaches the model through two entry points only -
 ``DDPMSchedule.from_cfg`` and ``VolumeGenerator.generate`` - and never through
-``DDIMSampler.predict_eps`` / ``predict_out``.  Whether a run predicts epsilon
-or v is the schedule's business; the suite records which it was and otherwise
-leaves the conversion alone.
+``DDIMSampler.predict_out``.  Whether a run predicts epsilon or v is the
+schedule's business; the suite records which it was and otherwise leaves the
+conversion alone.
 """
 
 from __future__ import annotations
@@ -90,25 +90,6 @@ def latent_material_map(voxel_material: np.ndarray) -> np.ndarray:
         .mean(axis=(1, 3, 5), dtype=np.float64)
         .astype(np.float32)
     )
-
-
-def _build_schedule(schedule_cls, cfg: dict, device):
-    """The noise schedule a run was trained with.
-
-    ``DDPMSchedule.from_cfg`` is the single builder: it is the only thing that
-    knows which keys of a resolved config describe the schedule, including the
-    prediction objective.  Reading those keys here would be a second definition
-    that drifts - and it would silently build an epsilon schedule for a run
-    trained on v, which produces a plausible volume that is wrong.
-    """
-    if not hasattr(schedule_cls, "from_cfg"):
-        raise AttributeError(
-            "DDPMSchedule.from_cfg does not exist in this checkout. It is the "
-            "single schedule builder added by the ldm07-vpred-aux branch; "
-            "eval v4 generation needs it to know whether a run predicts eps or "
-            "v. Rebase onto a refactor that carries it."
-        )
-    return schedule_cls.from_cfg(cfg, device=device)
 
 
 def _ckpt_path(run_dir: Path, ckpt: str) -> tuple[Path, int]:
@@ -214,12 +195,13 @@ class VolumeRunner:
         self.vae = vae
         self.vae_checkpoint = str(meta["vae_checkpoint"])
 
-        self.schedule = _build_schedule(DDPMSchedule, cfg, self.device)
-        sched_cfg = cfg.get("noise_schedule", {}) or {}
-        self.objective = str(
-            getattr(self.schedule, "objective", None)
-            or sched_cfg.get("objective", "eps")
-        )
+        # DDPMSchedule.from_cfg is the single schedule builder: it is the only
+        # thing that knows which config keys describe the schedule, the
+        # prediction objective among them.  Reading those keys here would be a
+        # second definition, and it would silently build an epsilon schedule for
+        # a run trained on v - a plausible volume that is wrong.
+        self.schedule = DDPMSchedule.from_cfg(cfg, self.device)
+        self.objective = str(self.schedule.objective)
         self.cfg_rescale = float((cfg.get("guidance", {}) or {}).get("cfg_rescale", 0.0))
         if self.device.type == "cuda":
             cap = torch.cuda.get_device_capability(self.device)
@@ -242,6 +224,7 @@ class VolumeRunner:
         sampler = DDIMSampler(
             self.model, self.schedule, self.device,
             n_steps=spec.ddim_steps, s_por=spec.s_por, s_nb=spec.s_nb,
+            cfg_rescale=self.cfg_rescale,
         )
         generator = VolumeGenerator(
             sampler=sampler,
