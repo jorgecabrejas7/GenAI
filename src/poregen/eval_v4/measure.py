@@ -535,6 +535,145 @@ def measure_geometry(root, repo) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 8 - microstructure statistics
+# ---------------------------------------------------------------------------
+
+def _micro_reference(root) -> dict[float, dict[str, list]]:
+    """The matched real crops, as ``{level: {"a": [...], "b": [...]}}``.
+
+    Written by ``eval_v4 real-floor --shapes micro`` and read back here, so the
+    measure stage still needs only the volumes: the dataset was consulted once,
+    at floor time, and what it produced is on disk beside everything else.
+    """
+    out: dict[float, dict[str, list]] = {}
+    for case in load_cases(root, "real_floor"):
+        notes = case.manifest.notes or {}
+        level = notes.get("micro_level")
+        if level is None:
+            continue
+        out.setdefault(float(level), {}).setdefault(notes["micro_pair"], []).append(case)
+    return out
+
+
+def measure_microstructure(root, repo) -> dict:
+    """Generated microstructure against real, and real against real.
+
+    Every distance here is read three ways: what the generated set scores
+    against real material, what two disjoint crops of one real panel score
+    against each other, and the ratio.  The floor is not a formality — a
+    Wasserstein distance between two finite samples of the SAME material is not
+    zero, so without it a generated number cannot be called large or small.
+    """
+    from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415
+    from poregen.eval_v4.generate import DEFAULT_LATENTS_ROOT  # noqa: PLC0415
+
+    cases = load_cases(root, "microstructure")
+    if not cases:
+        raise FileNotFoundError(f"no microstructure volumes under {root}")
+    reference = _micro_reference(root)
+    if not reference:
+        raise FileNotFoundError(
+            f"{root}/real_floor holds no matched-porosity reference crops. Run "
+            f"`eval_v4 real-floor --root {root} --shapes micro` first: every "
+            "statistic in this assessment is a distance, and a distance with no "
+            "real-vs-real floor cannot be read."
+        )
+
+    rows = [measure_core(c) for c in cases]
+    for row, case in zip(rows, cases):
+        row["micro_level"] = (case.manifest.notes or {}).get(
+            "micro_level", case.manifest.requested_global_phi)
+
+    by_level = _group(zip(rows, cases), lambda rc: float(rc[0]["micro_level"]))
+    latents_root = Path(
+        (cases[0].manifest.notes or {}).get("latents_root")
+        or Path(repo) / DEFAULT_LATENTS_ROOT
+    )
+
+    levels: dict[str, dict] = {}
+    for level in sorted(by_level):
+        gen = [c for _, c in by_level[level]]
+        ref = reference.get(level, {})
+        real_a, real_b = ref.get("a", []), ref.get("b", [])
+        if not real_a or not real_b:
+            levels[f"{level:g}"] = {
+                "requested": level, "n_generated": len(gen),
+                "available": False,
+                "reason": "the real reference for this level has no disjoint pair",
+            }
+            continue
+
+        gen_p = [MS.profile_volume(c, group="generated") for c in gen]
+        a_p = [MS.profile_volume(c, group="real_a") for c in real_a]
+        b_p = [MS.profile_volume(c, group="real_b") for c in real_b]
+
+        against = MS.compare_sets(gen_p, a_p + b_p)
+        floor = MS.compare_sets(a_p, b_p)
+        fid_gen = MS.fid_between(gen, real_a + real_b, seed=int(level * 1e6))
+        fid_floor = MS.fid_between(real_a, real_b, seed=int(level * 1e6) + 1)
+        memo_gen = MS.memorisation(gen, latents_root, repo=repo)
+        memo_floor = MS.memorisation(real_a + real_b, latents_root, repo=repo)
+
+        misses = [(c.manifest.notes or {}).get("phi_miss") for c in real_a + real_b]
+        levels[f"{level:g}"] = {
+            "available": True,
+            "requested": level,
+            "n_generated": len(gen),
+            "n_real_a": len(real_a), "n_real_b": len(real_b),
+            "generated_phi": _agg(
+                [r for r, _ in by_level[level]], ("porosity", "delivered_phi")),
+            "real_phi": M.mean_sd([p.phi for p in a_p + b_p]),
+            "real_phi_miss_max": max((m for m in misses if m is not None), default=None),
+            "real_panels": sorted({(c.manifest.notes or {}).get("panel_id")
+                                   for c in real_a + real_b}),
+            "generated_vs_real": against,
+            "real_vs_real": floor,
+            "ratio": {
+                "s2_w1": MS.ratio(against["s2_w1"], floor["s2_w1"]),
+                "psd_w1": MS.ratio(against["psd_w1"], floor["psd_w1"]),
+                "ripley_log_ratio": MS.ratio(
+                    against["ripley_log_ratio"], floor["ripley_log_ratio"]),
+                "fid": MS.ratio(fid_gen.get("mean"), fid_floor.get("mean")),
+                # A memorisation ratio is the other way round: the generated
+                # patches should be at least as FAR from the training set as
+                # held-out real material is, so 1 or more is the healthy side.
+                "memorisation_nn_distance": MS.ratio(
+                    memo_gen.get("nn_distance_mean"),
+                    memo_floor.get("nn_distance_mean")),
+            },
+            "fid_generated_vs_real": fid_gen,
+            "fid_real_vs_real": fid_floor,
+            "memorisation_generated": memo_gen,
+            "memorisation_real": memo_floor,
+            "profiles": [p.summary() for p in gen_p + a_p + b_p],
+        }
+
+    return {
+        "assessment": "microstructure",
+        "question": "Does the generated microstructure have the statistics of real material?",
+        "note": (
+            "Five distribution distances, each reported three ways: generated "
+            "against real, real against real (two disjoint crops of ONE panel), "
+            "and the ratio. A ratio of 1 means the generated set is as close to "
+            "real material as real material is to itself, which is as close as "
+            "this measurement can tell. The memorisation ratio reads the other "
+            "way: 1 or more means the generated patches are no nearer the "
+            "training latents than held-out real patches are. Every level is "
+            "scored against real crops matched to ITS porosity, because a "
+            "porosity gap would otherwise be read as a texture gap."
+        ),
+        "geometry": {
+            "s2_window": MS.S2_WINDOW, "s2_r_max": MS.S2_R_MAX,
+            "ripley_r_max": MS.RIPLEY_R_MAX,
+            "fid_crop": MS.FID_CROP, "fid_extractor": MS.FID_EXTRACTOR,
+            "connectivity": "6 (face-adjacent) for every connected-component count",
+        },
+        "per_case": rows,
+        "levels": levels,
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -543,6 +682,7 @@ MEASURERS = {
     "layup": measure_layup,
     "assembly": measure_assembly,
     "geometry": measure_geometry,
+    "microstructure": measure_microstructure,
 }
 
 

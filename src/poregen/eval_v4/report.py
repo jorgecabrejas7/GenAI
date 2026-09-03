@@ -680,6 +680,154 @@ def report_real_floor(res, root, floor) -> tuple[str, list[str]]:
     return "\n".join(text) + "\n", []
 
 
+def report_microstructure(res, root, floor) -> tuple[str, list[str]]:
+    """Five distances, each against the real-vs-real floor that makes it readable."""
+    geom = res["geometry"]
+    rows, notes = [], []
+    for key, cell in sorted(res["levels"].items(), key=lambda kv: kv[1]["requested"]):
+        if not cell.get("available"):
+            rows.append([key, "--", "--", "--", "--", cell.get("reason", "not measured")])
+            continue
+        got, fl, rat = cell["generated_vs_real"], cell["real_vs_real"], cell["ratio"]
+        stats = [
+            ("S2(r) W1, voxels", got["s2_w1"], fl["s2_w1"], rat["s2_w1"], 3),
+            ("pore-size W1, voxels", got["psd_w1"], fl["psd_w1"], rat["psd_w1"], 3),
+            ("Ripley K, mean |log ratio|", got["ripley_log_ratio"],
+             fl["ripley_log_ratio"], rat["ripley_log_ratio"], 3),
+            ("FID, 2-D slices", cell["fid_generated_vs_real"].get("mean"),
+             cell["fid_real_vs_real"].get("mean"), rat["fid"], 1),
+            ("memorisation NN distance",
+             cell["memorisation_generated"].get("nn_distance_mean"),
+             cell["memorisation_real"].get("nn_distance_mean"),
+             rat["memorisation_nn_distance"], 2),
+        ]
+        for i, (name, a, b, r, digits) in enumerate(stats):
+            memo = name.startswith("memorisation")
+            rows.append([
+                key if i == 0 else "", name, fmt(a, digits), fmt(b, digits),
+                fmt(r, 2),
+                "1 or more is healthy" if memo else "1 is the floor, lower is better",
+            ])
+        miss = cell.get("real_phi_miss_max")
+        if miss is not None and miss > 0.005:
+            notes.append(
+                f"- At the {key} level the closest real crop the test panels hold is "
+                f"{miss:.4f} away in porosity. Part of every distance in that row is "
+                "that porosity gap, not a texture difference."
+            )
+
+    fid_note = ""
+    first = next((c for c in res["levels"].values() if c.get("available")), None)
+    if first and not first["fid_generated_vs_real"].get("available"):
+        fid_note = ("\nFID was not computed: "
+                    f"{first['fid_generated_vs_real'].get('reason')}.\n")
+    memo_note = ""
+    if first and not first["memorisation_generated"].get("available"):
+        memo_note = ("\nThe memorisation check was skipped: "
+                     f"{first['memorisation_generated'].get('reason')}.\n")
+
+    text = [
+        "## Microstructure statistics against the real-vs-real floor",
+        "",
+        table(["phi", "statistic", "generated vs real", "real vs real (floor)",
+               "ratio", "reading"], rows),
+        "",
+        fid_note,
+        memo_note,
+        "## What was measured on what",
+        "",
+        table(["setting", "value"], [
+            ["S2 analysis window", f"{geom['s2_window']} cubed, r up to "
+                                   f"{geom['s2_r_max']} voxels"],
+            ["Ripley r range", f"1 to {geom['ripley_r_max']} voxels, border-corrected"],
+            ["connected components", geom["connectivity"]],
+            ["FID crops", f"{geom['fid_crop']}x{geom['fid_crop']} at native resolution"],
+            ["FID feature extractor", geom["fid_extractor"]],
+        ]),
+        "",
+        "The generated volumes are 192 cubed and the real reference crops are 128 "
+        "cubed, because no test panel holds a clean 192-deep box. Every statistic "
+        "above is defined either on the fixed analysis window or on a "
+        "size-normalised quantity, so the two shapes are compared like for like.",
+        "",
+        *notes,
+    ]
+    figs = _fig_microstructure(res, root)
+    return "\n".join(text) + "\n", figs
+
+
+def _fig_microstructure(res, root) -> list[str]:
+    set_style()
+    cells = [(k, c) for k, c in sorted(res["levels"].items(),
+                                       key=lambda kv: kv[1]["requested"])
+             if c.get("available")]
+    if not cells:
+        return []
+    fig, axes = plt.subplots(1, 4, figsize=(15.0, 3.5))
+
+    ax = axes[0]
+    for j, (key, c) in enumerate(cells):
+        cur = c["generated_vs_real"]["curves"]
+        col = SERIES_COLORS[j % len(SERIES_COLORS)]
+        ax.plot(cur["s2_r"], cur["s2_a"], color=col, label=f"gen {key}")
+        ax.plot(cur["s2_r"], cur["s2_b"], color=col, ls="--", label=f"real {key}")
+    ax.set_yscale("log")
+    ax.set_xlabel("r (voxels)")
+    ax.set_ylabel("S2(r)")
+    ax.set_title("two-point correlation")
+    ax.legend(frameon=False, ncol=2)
+
+    ax = axes[1]
+    for j, (key, c) in enumerate(cells):
+        cur = c["generated_vs_real"]["curves"]
+        edges = np.asarray(cur["psd_bin_edges"], float)
+        mid = 0.5 * (edges[:-1] + edges[1:])
+        col = SERIES_COLORS[j % len(SERIES_COLORS)]
+        ax.plot(mid, cur["psd_density_a"], color=col, label=f"gen {key}")
+        ax.plot(mid, cur["psd_density_b"], color=col, ls="--", label=f"real {key}")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("equivalent diameter (voxels)")
+    ax.set_ylabel("density")
+    ax.set_title("pore-size distribution")
+    ax.legend(frameon=False, ncol=2)
+
+    ax = axes[2]
+    for j, (key, c) in enumerate(cells):
+        cur = c["generated_vs_real"]["curves"]
+        r = np.asarray(cur["ripley_r"], float)
+        csr = (4.0 / 3.0) * np.pi * r ** 3
+        col = SERIES_COLORS[j % len(SERIES_COLORS)]
+        ax.plot(r, np.asarray(cur["k_a"], float) / csr, color=col, label=f"gen {key}")
+        ax.plot(r, np.asarray(cur["k_b"], float) / csr, color=col, ls="--",
+                label=f"real {key}")
+    ax.axhline(1.0, color=FLOOR_COLOR, ls=":", lw=0.9)
+    ax.set_xlabel("r (voxels)")
+    ax.set_ylabel("K(r) / CSR")
+    ax.set_title("clustering (1 = Poisson)")
+    ax.legend(frameon=False, ncol=2)
+
+    ax = axes[3]
+    keys = ["s2_w1", "psd_w1", "ripley_log_ratio", "fid", "memorisation_nn_distance"]
+    labels = ["S2", "PSD", "Ripley", "FID", "memo"]
+    xs = np.arange(len(keys))
+    width = 0.8 / max(len(cells), 1)
+    for j, (key, c) in enumerate(cells):
+        vals = [c["ratio"].get(k) for k in keys]
+        ax.bar(xs + (j - (len(cells) - 1) / 2) * width,
+               [np.nan if v is None else v for v in vals], width,
+               color=SERIES_COLORS[j % len(SERIES_COLORS)], label=f"phi {key}")
+    ax.axhline(1.0, color=FLOOR_COLOR, ls="--", lw=0.9, label="the real floor")
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("distance / real-vs-real floor")
+    ax.set_title("1.0 = as close as real is to real")
+    ax.legend(frameon=False)
+
+    fig.tight_layout()
+    return savefig(fig, figures_dir(root, "microstructure"), "microstructure")
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -688,6 +836,7 @@ REPORTERS = {
     "layup": report_layup,
     "assembly": report_assembly,
     "geometry": report_geometry,
+    "microstructure": report_microstructure,
     "real_floor": report_real_floor,
 }
 

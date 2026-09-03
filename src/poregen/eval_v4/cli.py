@@ -67,8 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root(f)
     f.add_argument("--data-root", type=Path, default=None,
                    help="dataset root (default data/split_v3)")
-    f.add_argument("--shapes", nargs="*", default=["small", "large"],
-                   choices=["small", "large"])
+    f.add_argument("--shapes", nargs="*", default=["small", "large", "micro"],
+                   choices=["small", "large", "micro"],
+                   help="'micro' cuts the matched-porosity reference PAIRS the "
+                        "microstructure assessment is floored against")
     f.add_argument("--max-volumes", type=int, default=None)
     f.add_argument("--rebuild", action="store_true",
                    help="re-cut the crops even when they already exist")

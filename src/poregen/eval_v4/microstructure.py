@@ -770,8 +770,27 @@ def compare_sets(a: list[VolumeProfile], b: list[VolumeProfile]) -> dict:
         "curves": {
             "s2_r": r_s2.tolist(), "s2_a": s2_a.tolist(), "s2_b": s2_b.tolist(),
             "ripley_r": r_k.tolist(), "k_a": k_a.tolist(), "k_b": k_b.tolist(),
+            **_psd_histogram(diam_a, diam_b),
         },
     }
+
+
+#: Diameter histogram edges, in voxels.  Fixed rather than data-derived: the
+#: two sets must be binned identically for the figure to be a comparison, and
+#: a real void population sits between one voxel and about ten.
+PSD_BIN_EDGES = np.concatenate([np.arange(1.0, 10.0, 0.25), [12.0, 16.0, 24.0, 64.0]])
+
+
+def _psd_histogram(a: np.ndarray, b: np.ndarray) -> dict:
+    """Densities of the two pooled diameter samples on one fixed set of bins."""
+    out = {"psd_bin_edges": PSD_BIN_EDGES.tolist()}
+    for name, d in (("psd_density_a", a), ("psd_density_b", b)):
+        if d.size:
+            h, _ = np.histogram(d, bins=PSD_BIN_EDGES, density=True)
+            out[name] = h.tolist()
+        else:
+            out[name] = [None] * (len(PSD_BIN_EDGES) - 1)
+    return out
 
 
 def ratio(measured: float | None, floor: float | None) -> float | None:
@@ -788,3 +807,156 @@ def ratio(measured: float | None, floor: float | None) -> float | None:
     if not np.isfinite(measured) or not np.isfinite(floor) or floor <= 0:
         return None
     return float(measured / floor)
+
+
+# ---------------------------------------------------------------------------
+# Set-level FID and memorisation over campaign cases
+# ---------------------------------------------------------------------------
+
+def collect_fid_crops(cases, axis: str, total: int, seed: int) -> np.ndarray:
+    """``total`` crops along ``axis``, shared out evenly over ``cases``.
+
+    Evenly, so no single volume dominates the feature statistics: a set of
+    three volumes contributes a third of the crops each whatever their shapes
+    are, and the FID then compares two SETS rather than two volumes.
+    """
+    if not cases:
+        raise ValueError("collect_fid_crops needs at least one case.")
+    per = [total // len(cases)] * len(cases)
+    for i in range(total - sum(per)):
+        per[i] += 1
+    out = [
+        fid_crops(c.xct, c.material_voxels(), manifest=c.manifest,
+                  axis=axis, n_crops=n, seed=seed + i)
+        for i, (c, n) in enumerate(zip(cases, per)) if n
+    ]
+    return np.concatenate(out)
+
+
+def fid_between(
+    cases_a,
+    cases_b,
+    *,
+    seed: int = 0,
+    n_per_axis: int = FID_CROPS_PER_AXIS,
+    device=None,
+) -> dict:
+    """FID per axis between two sets of cases, and their mean.
+
+    A missing torchvision is reported, not raised: it is an environment choice,
+    the other four statistics do not need it, and a measure stage that failed
+    outright would lose them too.
+    """
+    try:
+        import torchvision  # noqa: F401,PLC0415
+    except ImportError as exc:
+        return {"available": False, "extractor": FID_EXTRACTOR,
+                "reason": f"torchvision is not installed ({exc})"}
+    if not cases_a or not cases_b:
+        return {"available": False, "extractor": FID_EXTRACTOR,
+                "reason": "one of the two sets is empty"}
+
+    per_axis: dict[str, float] = {}
+    values: list[float] = []
+    for axis in FID_AXES:
+        fa = inception_features(
+            collect_fid_crops(cases_a, axis, n_per_axis, seed), device)
+        fb = inception_features(
+            collect_fid_crops(cases_b, axis, n_per_axis, seed + 10_000), device)
+        v = frechet_distance(fa, fb)
+        per_axis[axis] = v
+        if np.isfinite(v):
+            values.append(v)
+        logger.info("FID %s: %.2f over %d crops per set", axis, v, n_per_axis)
+    return {
+        "available": True,
+        "extractor": FID_EXTRACTOR,
+        "crops_per_axis_per_set": int(n_per_axis),
+        "crop_size": FID_CROP,
+        "per_axis": per_axis,
+        "mean": float(np.mean(values)) if values else float("nan"),
+    }
+
+
+def memorisation(
+    cases,
+    latents_root: str | Path,
+    *,
+    repo: str | Path | None = None,
+    device=None,
+    n_train: int = MEMO_TRAIN_SAMPLE,
+    seed: int = 0,
+) -> dict:
+    """Nearest-neighbour distance from each case's patches to the TRAIN latents.
+
+    Near zero means the model is reproducing training material.  The number
+    alone says nothing — a latent space carries no natural scale — so the
+    caller runs this over the real reference crops as well: held-out real
+    material is not memorised by construction, so what IT scores is the floor,
+    and a generated set at the same distance has copied nothing a real crop of
+    the same panels has not.
+
+    The store may not exist.  That is reported with the path it looked for,
+    because a silent zero here would read as "no memorisation".
+    """
+    import json  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    root = Path(latents_root)
+    if not (root / "metadata.json").exists():
+        return {"available": False, "latents_root": str(root),
+                "reason": f"no latent store at {root} — the memorisation check "
+                          "needs the training latents the LDM was trained on"}
+    if not cases:
+        return {"available": False, "latents_root": str(root),
+                "reason": "no cases to encode"}
+
+    meta = json.loads((root / "metadata.json").read_text())
+    ckpt = Path(meta["vae_checkpoint"])
+    if not ckpt.is_absolute():
+        ckpt = Path(repo or ".") / ckpt
+    if not ckpt.exists():
+        return {"available": False, "latents_root": str(root),
+                "reason": f"the store names VAE checkpoint {ckpt}, which is not there"}
+
+    from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: PLC0415
+
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    vae, _, _, _ = load_vae_from_checkpoint(ckpt, device)
+    vae.requires_grad_(False)
+    vae.eval()
+
+    bank = train_latent_mu(root, n_sample=n_train, seed=seed)
+    per_case: dict[str, dict] = {}
+    all_d: list[np.ndarray] = []
+    for c in cases:
+        mu = encode_volume_patches(
+            vae, c.xct, c.label, c.material_voxels(), device=device
+        )
+        if mu.size == 0:
+            per_case[c.manifest.case] = {"n_patches": 0}
+            continue
+        d = nearest_neighbour_distance(mu, bank)
+        all_d.append(d)
+        per_case[c.manifest.case] = {
+            "n_patches": int(len(d)),
+            "nn_distance_mean": float(d.mean()),
+            "nn_distance_min": float(d.min()),
+        }
+    if not all_d:
+        return {"available": False, "latents_root": str(root),
+                "reason": "no whole-material patch in any case"}
+    pooled = np.concatenate(all_d)
+    return {
+        "available": True,
+        "latents_root": str(root),
+        "vae_checkpoint": str(ckpt),
+        "n_train_latents": int(len(bank)),
+        "n_patches": int(len(pooled)),
+        "nn_distance_mean": float(pooled.mean()),
+        "nn_distance_sd": float(pooled.std(ddof=1)) if len(pooled) > 1 else 0.0,
+        "nn_distance_min": float(pooled.min()),
+        "nn_distance_p5": float(np.percentile(pooled, 5)),
+        "per_case": per_case,
+    }

@@ -10,6 +10,8 @@ statistic that is wrong rather than the model.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -404,3 +406,151 @@ class TestRatio:
         assert MS.ratio(0.4, None) is None
         assert MS.ratio(None, 0.4) is None
         assert MS.ratio(float("nan"), 0.4) is None
+
+
+# ---------------------------------------------------------------------------
+# The assessment: its cases, and the reference crops it is floored against
+# ---------------------------------------------------------------------------
+
+LAYUP_TRUTH = Path(__file__).resolve().parents[1] / "data" / "layup_ground_truth.json"
+needs_layup_truth = pytest.mark.skipif(
+    not LAYUP_TRUTH.exists(), reason=f"{LAYUP_TRUTH} is not present"
+)
+
+
+class TestCases:
+    @needs_layup_truth
+    def test_the_case_list_is_three_seeds_at_three_porosity_levels(self):
+        from poregen.eval_v4.cases import (
+            DDIM_DEFAULT,
+            MICRO_TARGETS,
+            SEEDS,
+            SHAPE_SMALL,
+            build_cases,
+        )
+
+        specs = build_cases("microstructure")
+        assert len(specs) == len(MICRO_TARGETS) * len(SEEDS)
+        assert len({s.name for s in specs}) == len(specs)
+        assert {s.target_phi for s in specs} == set(MICRO_TARGETS)
+        assert {s.seed for s in specs} == set(SEEDS)
+        for s in specs:
+            assert s.volume_shape == SHAPE_SMALL
+            assert s.ddim_steps == DDIM_DEFAULT
+            assert s.notes["layup"] == "A"
+
+    def test_the_assessment_declares_that_it_borrows_the_real_floor(self):
+        """Without the matched crops it has distances and no floor to read them."""
+        from poregen.eval_v4.cases import BORROWS
+
+        assert BORROWS["microstructure"] == ("real_floor",)
+
+    @needs_layup_truth
+    def test_a_generated_volume_is_big_enough_for_the_analysis_window(self):
+        from poregen.eval_v4.cases import build_cases
+
+        for s in build_cases("microstructure"):
+            assert min(s.volume_shape) >= MS.S2_WINDOW, s.name
+
+
+class TestReferenceCropSearch:
+    """The box search that finds matched-porosity real crops.
+
+    It runs on a hand-built cell summary, so the boxes it must pick are known
+    without any dataset.
+    """
+
+    SIDE, CELL = 128, 64
+
+    def _cands(self, phi_map, clean=True):
+        """``(clean, phi)`` arrays over box origins, from a per-box porosity map."""
+        c = np.full(phi_map.shape, clean, bool)
+        return c, np.asarray(phi_map, float)
+
+    def test_it_picks_the_box_closest_to_the_requested_level(self):
+        from poregen.eval_v4.real_floor import _pick_disjoint
+
+        phi = np.zeros((1, 1, 6))
+        phi[0, 0] = [0.001, 0.02, 0.031, 0.09, 0.05, 0.028]
+        picks = _pick_disjoint({"v": self._cands(phi)}, 0.03, self.SIDE, 2, n=1)
+        assert picks[0]["cell_index"] == (0, 2)   # 0.031 is the closest to 0.03
+        assert picks[0]["phi"] == pytest.approx(0.031)
+        assert picks[0]["phi_miss"] == pytest.approx(0.001)
+
+    def test_the_second_pick_does_not_overlap_the_first(self):
+        """The second-best box is next to the best one, so it shares material.
+
+        A box is two cells wide, so origins one cell apart overlap.  The pair
+        the floor needs must not, or the two halves of the comparison would be
+        measuring some of the same voxels.
+        """
+        from poregen.eval_v4.real_floor import _pick_disjoint
+
+        phi = np.zeros((1, 1, 6))
+        #                 0     1      2       3      4     5
+        phi[0, 0] = [0.20, 0.20, 0.0305, 0.031, 0.20, 0.029]
+        picks = _pick_disjoint({"v": self._cands(phi)}, 0.03, self.SIDE, 2, n=2)
+        assert [p["cell_index"] for p in picks] == [(0, 2), (0, 5)]
+        assert abs(picks[0]["cell_index"][1] - picks[1]["cell_index"][1]) >= 2
+
+    def test_two_volumes_of_one_panel_are_disjoint_by_construction(self):
+        from poregen.eval_v4.real_floor import _pick_disjoint
+
+        a = np.full((1, 1, 1), 0.030)
+        b = np.full((1, 1, 1), 0.031)
+        picks = _pick_disjoint(
+            {"va": self._cands(a), "vb": self._cands(b)}, 0.03, self.SIDE, 2, n=2)
+        assert sorted(p["volume_id"] for p in picks) == ["va", "vb"]
+
+    def test_a_box_outside_the_specimen_is_never_picked(self):
+        from poregen.eval_v4.real_floor import _pick_disjoint
+
+        phi = np.zeros((1, 1, 3))
+        phi[0, 0] = [0.030, 0.20, 0.20]
+        clean, phi_arr = self._cands(phi)
+        clean[0, 0, 0] = False                    # the perfect box is exterior air
+        picks = _pick_disjoint({"v": (clean, phi_arr)}, 0.03, self.SIDE, 2, n=1)
+        assert picks[0]["cell_index"] != (0, 0)
+
+    def test_a_volume_with_no_clean_box_yields_nothing(self):
+        from poregen.eval_v4.real_floor import _pick_disjoint
+
+        clean = np.zeros((1, 1, 3), bool)
+        assert _pick_disjoint({"v": (clean, np.zeros((1, 1, 3)))},
+                              0.03, self.SIDE, 2) == []
+
+    def test_the_origin_is_the_cell_index_in_voxels(self):
+        from poregen.eval_v4.real_floor import _pick_disjoint
+
+        phi = np.zeros((3, 2, 2))
+        phi[2, 1, 1] = 0.03
+        picks = _pick_disjoint({"v": self._cands(phi)}, 0.03, self.SIDE, 2, n=1)
+        assert (picks[0]["z0"], picks[0]["y0"], picks[0]["x0"]) == (2, 64, 64)
+
+    def test_the_box_sum_helpers_agree_with_the_slow_definition(self):
+        from poregen.eval_v4.real_floor import _box_sum_2d, _z_window_sum
+
+        rng = np.random.default_rng(0)
+        a = rng.integers(0, 9, size=(7, 5, 6)).astype(np.int64)
+        got = _box_sum_2d(a, 2)
+        assert got.shape == (7, 4, 5)
+        for z in range(7):
+            for i in range(4):
+                for j in range(5):
+                    assert got[z, i, j] == a[z, i:i + 2, j:j + 2].sum()
+        gotz = _z_window_sum(a, 3)
+        assert gotz.shape == (5, 5, 6)
+        for z in range(5):
+            np.testing.assert_array_equal(gotz[z], a[z:z + 3].sum(axis=0))
+
+    def test_the_cell_summary_counts_true_voxels_per_cell(self):
+        from poregen.eval_v4.real_floor import _cell_sums
+
+        arr = np.zeros((3, 128, 128), bool)
+        arr[1, :64, :64] = True                   # one whole cell of one slice
+        arr[2, :2, :3] = True                     # six voxels of another
+        out = _cell_sums(arr, cell=64)
+        assert out.shape == (3, 2, 2)
+        assert out[1, 0, 0] == 64 * 64
+        assert out[2, 0, 0] == 6
+        assert out[0].sum() == 0

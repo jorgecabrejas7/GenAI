@@ -451,6 +451,45 @@ def geometry_cases(repo=None) -> list[CaseSpec]:
     ]
 
 
+#: Porosity levels the microstructure statistics are compared at.  Three, not
+#: seven: every level needs its own matched real reference, and the test panels
+#: only reach so far up the porosity range.  They span it — 0.01 is where most
+#: real material sits, 0.06 is near the top of what a test panel offers.
+MICRO_TARGETS = (0.01, 0.03, 0.06)
+
+
+def microstructure_cases(repo=None) -> list[CaseSpec]:
+    """8 - does the microstructure have the right STATISTICS?
+
+    Three porosity levels, because every distribution statistic here is
+    confounded by porosity: a set with twice the pore fraction has a different
+    S2 amplitude, a different pore count and different slice texture whatever
+    the model does.  Comparing a generated set with a real set at a DIFFERENT
+    porosity would measure the porosity gap and call it a texture gap, so each
+    level is scored against real crops matched to it.
+
+    DDIM-200 and layup A throughout: this assessment asks about the
+    microstructure, so everything else is held at the setting the rest of the
+    suite treats as standard.
+    """
+    plies, pitch = layup_a(repo)
+    return [
+        CaseSpec(
+            name=f"phi{target:g}_seed{seed}",
+            assessment="microstructure",
+            volume_shape=SHAPE_SMALL,
+            seed=seed,
+            layup=plies,
+            ply_thickness_vox=pitch,
+            target_phi=target,
+            ddim_steps=DDIM_DEFAULT,
+            notes={"layup": "A", "micro_level": target},
+        )
+        for target in MICRO_TARGETS
+        for seed in SEEDS
+    ]
+
+
 ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "sampler": sampler_cases,
     "porosity_global": porosity_global_cases,
@@ -459,10 +498,14 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "layup": layup_cases,
     "assembly": assembly_cases,
     "geometry": geometry_cases,
+    "microstructure": microstructure_cases,
 }
 
 #: Assessments whose measure step also reads another assessment's volumes.
-BORROWS = {"assembly": ("sampler",)}
+#: ``microstructure`` reads the matched real crops the ``real-floor`` stage
+#: writes: without them it has a number and no floor to read it against, which
+#: for a distribution distance is no measurement at all.
+BORROWS = {"assembly": ("sampler",), "microstructure": ("real_floor",)}
 
 
 def build_cases(assessment: str, repo=None) -> list[CaseSpec]:

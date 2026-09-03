@@ -105,16 +105,18 @@ def _load_generate_volumes_module():
 def test_generate_volumes_coherent_distribution():
     mod = _load_generate_volumes_module()
     gz, gy, gx = 2, 3, 4
-    por_map = mod._build_local_por_map(gz, gy, gx, 0.03, "coherent")
+    por_map = mod._build_local_por_map(gz, gy, gx, 0.03, "coherent", seed=0)
     assert set(por_map) == {
         (iz, iy, ix) for iz in range(gz) for iy in range(gy) for ix in range(gx)
     }
     vals = np.array(list(por_map.values()))
     assert vals.mean() == pytest.approx(0.03, abs=1e-6)
     assert vals.min() >= PHI_MIN and vals.max() <= PHI_MAX
-    # Deterministic: same porosity level → identical map.
-    again = mod._build_local_por_map(gz, gy, gx, 0.03, "coherent")
+    # Deterministic: same run seed and porosity level → identical map.
+    again = mod._build_local_por_map(gz, gy, gx, 0.03, "coherent", seed=0)
     assert por_map == again
+    # And the run seed reaches the field: a different one draws a different map.
+    assert mod._build_local_por_map(gz, gy, gx, 0.03, "coherent", seed=7) != por_map
 
 
 # ── the other local-porosity map builders ────────────────────────────────────
@@ -125,7 +127,8 @@ def test_generate_volumes_coherent_distribution():
 
 def test_build_local_por_map_uniform_is_exact():
     mod = _load_generate_volumes_module()
-    m = mod._build_local_por_map(2, 3, 4, target_por=0.03, distribution="uniform")
+    m = mod._build_local_por_map(2, 3, 4, target_por=0.03, distribution="uniform",
+                                 seed=0)
     assert len(m) == 24
     assert all(v == pytest.approx(0.03) for v in m.values())
 
@@ -134,7 +137,8 @@ def test_build_local_por_map_center_peak_exceeds_the_training_clamp():
     from poregen.diffusion.conditioning import POR_MAX
 
     mod = _load_generate_volumes_module()
-    m = mod._build_local_por_map(4, 8, 8, target_por=0.05, distribution="center")
+    m = mod._build_local_por_map(4, 8, 8, target_por=0.05, distribution="center",
+                                 seed=0)
     vals = np.array(list(m.values()))
     assert vals.mean() == pytest.approx(0.05, rel=0.05)
     assert vals.max() > POR_MAX               # clamped downstream, not here

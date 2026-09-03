@@ -31,7 +31,13 @@ from pathlib import Path
 import numpy as np
 
 from poregen.eval_v4 import metrics as M
-from poregen.eval_v4.cases import CHUNK_TILES, SHAPE_LARGE, SHAPE_SMALL, WINDOW_STRIDE
+from poregen.eval_v4.cases import (
+    CHUNK_TILES,
+    MICRO_TARGETS,
+    SHAPE_LARGE,
+    SHAPE_SMALL,
+    WINDOW_STRIDE,
+)
 from poregen.eval_v4.generate import latent_material_map
 from poregen.eval_v4.io import (
     load_cases,
@@ -41,6 +47,7 @@ from poregen.eval_v4.io import (
     write_results,
 )
 from poregen.eval_v4.manifest import Manifest, head_commit
+from poregen.eval_v4.microstructure import S2_WINDOW
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,19 @@ ASSESSMENT = "real_floor"
 #: The shapes the generated assessments use, so the floor is measured at the
 #: same scale.  The geometry and assembly shapes reuse the small floor.
 FLOOR_SHAPES = {"small": SHAPE_SMALL, "large": SHAPE_LARGE}
+
+#: Side of a microstructure reference crop.  It is the S2 analysis window, and
+#: it is the deepest clean box a real laminate actually holds — the generated
+#: cases are 192 cubed, and only one test volume carries a clean 192-deep box.
+#: Every microstructure statistic is defined on this window or on a
+#: size-normalised quantity, so the two shapes are still comparable; see
+#: :mod:`poregen.eval_v4.microstructure`.
+MICRO_SIDE = S2_WINDOW
+MICRO_SHAPE = (MICRO_SIDE, MICRO_SIDE, MICRO_SIDE)
+#: A crop further than this from the requested level is written anyway, with the
+#: miss recorded: it is the best real material there is, and hiding the miss
+#: would let a porosity gap be read as a texture gap.
+MICRO_PHI_TOLERANCE = 0.005
 #: Below this share of usable 64-cubed cells a large window is not worth taking:
 #: more than a tenth of it would be exterior air.
 MIN_USABLE_CELL_FRACTION = 0.9
@@ -110,17 +130,244 @@ def build_floor_volumes(
         vol_ids = vol_ids[:max_volumes]
 
     records: list[dict] = []
+    box_shapes = [t for t in shapes if t in FLOOR_SHAPES]
     for vid in vol_ids:
         if vid not in g:
             records.append({"volume_id": vid, "skipped": "not in volumes.zarr"})
             continue
+        if not box_shapes:
+            continue
         ok_z = rw.cell_ok_by_slice(g[vid]["sample_mask"])
-        for tag in shapes:
+        for tag in box_shapes:
             shape = FLOOR_SHAPES[tag]
             rec = _one_crop(root, g[vid], vid, tag, shape, ok_z, rw, commit)
             records.append(rec)
             logger.info("%s %s: %s", vid, tag, rec.get("skipped") or "written")
+
+    if MICRO_TAG in shapes:
+        records += build_micro_reference(
+            root, g, vol_ids, data_root=data_root, rw=rw, commit=commit
+        )
     return records
+
+
+# ---------------------------------------------------------------------------
+# Matched-porosity reference crops for the microstructure assessment
+# ---------------------------------------------------------------------------
+
+MICRO_TAG = "micro"
+
+
+def micro_shape_tag(level: float) -> str:
+    return f"{MICRO_TAG}_phi{level:g}"
+
+
+def _panel_of(data_root: Path) -> dict[str, str]:
+    """``volume_id -> panel_id``, from the patch index.
+
+    The pair a microstructure floor compares must come from ONE panel: two
+    panels differ in cure and in void population, so a cross-panel pair would
+    fold the between-panel spread into the floor and flatter every generated
+    number that is read against it.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    df = pd.read_parquet(str(data_root / "patch_index.parquet"),
+                         columns=["volume_id", "panel_id"])
+    return dict(df.drop_duplicates("volume_id").itertuples(index=False, name=None))
+
+
+def _cell_sums(arr, cell: int, z_chunk: int = 32) -> np.ndarray:
+    """``(D, ny, nx)`` — True voxels in each ``cell``-square of each z slice.
+
+    The same one-pass summary trick ``_real_windows.cell_ok_by_slice`` uses for
+    the specimen mask, applied to the pore mask.  It makes the porosity of ANY
+    64-aligned box a cumulative-sum lookup, so every candidate crop can be
+    scored exactly without reading the volume once per candidate.
+    """
+    d, h, w = arr.shape
+    ny, nx = h // cell, w // cell
+    out = np.zeros((d, ny, nx), np.int64)
+    for z0 in range(0, d, z_chunk):
+        z1 = min(d, z0 + z_chunk)
+        blk = np.asarray(arr[z0:z1, : ny * cell, : nx * cell]) > 0
+        out[z0:z1] = blk.reshape(z1 - z0, ny, cell, nx, cell).sum(axis=(2, 4))
+    return out
+
+
+def _box_sum_2d(a: np.ndarray, k: int) -> np.ndarray:
+    """Sum over every ``k x k`` cell window, per z slice."""
+    c = np.pad(a.cumsum(1).cumsum(2), ((0, 0), (1, 0), (1, 0)))
+    return c[:, k:, k:] - c[:, :-k, k:] - c[:, k:, :-k] + c[:, :-k, :-k]
+
+
+def _z_window_sum(a: np.ndarray, side: int) -> np.ndarray:
+    """Sum over every ``side``-slice run in z; axis 0 becomes ``D - side + 1``."""
+    c = np.pad(a.cumsum(0), ((1, 0), (0, 0), (0, 0)))
+    return c[side:] - c[:-side]
+
+
+def _micro_candidates(zgroup, rw, side: int) -> tuple[np.ndarray, np.ndarray]:
+    """``(clean, phi)`` over every ``side``-cubed box origin ``(z0, iy, ix)``.
+
+    ``clean`` is True where the whole box lies inside ``sample_mask`` — no
+    exterior air and none of the drilled holes.  ``phi`` is the box's exact
+    pore fraction.  y and x origins are on the 64-cell grid; z is free, because
+    a laminate is only ~200 voxels deep and a 64-aligned z rarely fits.
+    """
+    cell = rw.CELL
+    k = side // cell
+    ok = rw.cell_ok_by_slice(zgroup["sample_mask"]).astype(np.int64)
+    pore = _cell_sums(zgroup["mask"], cell)
+    d = ok.shape[0]
+    if d < side or ok.shape[1] < k or ok.shape[2] < k:
+        empty = np.zeros((0, 0, 0))
+        return empty.astype(bool), empty
+    clean = _z_window_sum(_box_sum_2d(ok, k), side) == side * k * k
+    phi = _z_window_sum(_box_sum_2d(pore, k), side) / float(side ** 3)
+    return clean, phi
+
+
+def _pick_disjoint(candidates: dict, level: float, side: int, k: int, n: int = 2) -> list[dict]:
+    """The ``n`` boxes closest to ``level`` that share no material.
+
+    Greedy, and after each pick every box that overlaps it is struck out.  Two
+    boxes in different volumes are disjoint by construction — they are
+    different coupons — so a panel with several test volumes usually yields one
+    box per volume; a panel with only one (JI_8) has to find two boxes that do
+    not overlap inside it, which this handles the same way.
+    """
+    used = {vid: np.zeros(c.shape, bool) for vid, (c, _) in candidates.items()}
+    picks: list[dict] = []
+    while len(picks) < n:
+        best = None
+        for vid, (clean, phi) in candidates.items():
+            valid = clean & ~used[vid]
+            if not valid.any():
+                continue
+            miss = np.where(valid, np.abs(phi - level), np.inf)
+            flat = int(np.argmin(miss))
+            idx = np.unravel_index(flat, miss.shape)
+            if best is None or miss[idx] < best[0]:
+                best = (float(miss[idx]), vid, idx, float(phi[idx]))
+        if best is None:
+            break
+        miss, vid, (z0, iy, ix), phi = best
+        picks.append({"volume_id": vid, "z0": int(z0), "y0": int(iy) * (side // k),
+                      "x0": int(ix) * (side // k), "phi": phi, "phi_miss": miss,
+                      "cell_index": (int(iy), int(ix))})
+        z_lo, z_hi = max(0, z0 - side + 1), z0 + side
+        y_lo, y_hi = max(0, iy - k + 1), iy + k
+        x_lo, x_hi = max(0, ix - k + 1), ix + k
+        used[vid][z_lo:z_hi, y_lo:y_hi, x_lo:x_hi] = True
+    return picks
+
+
+def build_micro_reference(
+    root,
+    zroot,
+    vol_ids,
+    *,
+    data_root: Path,
+    rw,
+    commit: str,
+    levels=MICRO_TARGETS,
+) -> list[dict]:
+    """Cut the matched-porosity reference PAIRS the microstructure floor needs.
+
+    For every requested porosity level and every test panel, two crops of the
+    same panel whose measured porosity is as close to that level as real
+    material gets, and which share no material.  Crop ``a`` is the reference
+    the generated set is scored against; ``a`` against ``b`` is the floor.
+
+    A level the panels cannot reach is still written, with the miss recorded in
+    the manifest notes and carried into the report — the alternative is to
+    compare a generated set against real material at another porosity and let
+    the porosity gap be read as a texture gap.
+    """
+    panels = _panel_of(data_root)
+    cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for vid in vol_ids:
+        if vid not in zroot:
+            continue
+        clean, phi = _micro_candidates(zroot[vid], rw, MICRO_SIDE)
+        if clean.size and clean.any():
+            cache[vid] = (clean, phi)
+        else:
+            logger.info("%s: no clean %d-cubed box; not a microstructure reference",
+                        vid, MICRO_SIDE)
+
+    by_panel: dict[str, dict] = {}
+    for vid, cands in cache.items():
+        by_panel.setdefault(panels.get(vid, "unknown"), {})[vid] = cands
+
+    k = MICRO_SIDE // rw.CELL
+    records: list[dict] = []
+    for level in levels:
+        for panel, cands in sorted(by_panel.items()):
+            picks = _pick_disjoint(cands, float(level), MICRO_SIDE, k)
+            if len(picks) < 2:
+                records.append({"panel_id": panel, "micro_level": float(level),
+                                "skipped": "no two disjoint clean boxes in this panel"})
+                continue
+            for pair, pick in zip(("a", "b"), picks):
+                records.append(_write_micro_crop(
+                    root, zroot[pick["volume_id"]], panel, pair, float(level),
+                    pick, commit,
+                ))
+                logger.info("micro phi=%g %s/%s: %s phi=%.4f (miss %.4f)",
+                            level, panel, pair, pick["volume_id"],
+                            pick["phi"], pick["phi_miss"])
+    return records
+
+
+def _write_micro_crop(root, zgroup, panel, pair, level, pick, commit) -> dict:
+    """Write one matched-porosity reference crop as a ``real`` case."""
+    xct, label, smask = _crop(
+        zgroup, pick["z0"], pick["y0"], pick["x0"], MICRO_SHAPE
+    )
+    if not smask.all():
+        raise ValueError(
+            f"micro crop {panel}/{pair} at {pick['z0'], pick['y0'], pick['x0']} is "
+            "not entirely inside sample_mask, but the candidate search said it "
+            "was. The two disagree, so neither can be trusted."
+        )
+    tag = micro_shape_tag(level)
+    manifest = Manifest(
+        assessment=ASSESSMENT,
+        case=f"{tag}__{panel}__{pair}",
+        volume_shape=MICRO_SHAPE,
+        git_commit=commit,
+        sampler="real",
+        chunk_tiles=CHUNK_TILES,
+        window_stride=WINDOW_STRIDE,
+        decode="overlapped",
+        decode_overlap=32,
+        requested_material="full",
+        notes={
+            "volume_id": pick["volume_id"],
+            "panel_id": panel,
+            "shape_tag": tag,
+            "split": "test",
+            "micro_level": level,
+            "micro_pair": pair,
+            "phi_from_cells": pick["phi"],
+            "phi_miss": pick["phi_miss"],
+            "phi_within_tolerance": bool(pick["phi_miss"] <= MICRO_PHI_TOLERANCE),
+            "tolerance": MICRO_PHI_TOLERANCE,
+            "requested_shape": list(MICRO_SHAPE),
+            "origin_zyx": [pick["z0"], pick["y0"], pick["x0"]],
+            "fully_inside_sample_mask": True,
+            "usable_cell_fraction": 1.0,
+        },
+    )
+    save_case(volumes_dir(root, ASSESSMENT) / manifest.case, manifest, xct, label)
+    return {
+        "case": manifest.case, "panel_id": panel, "micro_pair": pair,
+        "micro_level": level, "volume_id": pick["volume_id"],
+        "shape": list(MICRO_SHAPE), "origin_zyx": [pick["z0"], pick["y0"], pick["x0"]],
+        "phi": pick["phi"], "phi_miss": pick["phi_miss"],
+    }
 
 
 def _one_crop(root, zgroup, vid, tag, shape, ok_z, rw, commit) -> dict:
@@ -297,17 +544,28 @@ def run(
     *,
     data_root: str | Path | None = None,
     repo: str | Path | None = None,
-    shapes: tuple[str, ...] = ("small", "large"),
+    shapes: tuple[str, ...] = ("small", "large", MICRO_TAG),
     max_volumes: int | None = None,
     rebuild: bool = False,
 ) -> dict:
-    """Cut the crops if they are not there, then measure them."""
+    """Cut the crops that are not there yet, then measure all of them.
+
+    Missing shapes are cut one shape at a time rather than all-or-nothing:
+    adding the microstructure references to a campaign that already carries the
+    small and large crops must not mean re-cutting those, and must not mean
+    quietly skipping the new ones because *something* is already there.
+    """
     root = Path(root)
-    existing = list(load_cases(root, ASSESSMENT)) if not rebuild else []
+    existing = [] if rebuild else list(load_cases(root, ASSESSMENT))
+    have = {(c.manifest.notes or {}).get("shape_tag", "") for c in existing}
+    todo = tuple(
+        s for s in shapes
+        if s not in have and not (s == MICRO_TAG and any(t.startswith(MICRO_TAG) for t in have))
+    )
     crops: list[dict] = []
-    if not existing:
+    if todo:
         crops = build_floor_volumes(
-            root, data_root=data_root, repo=repo, shapes=shapes, max_volumes=max_volumes
+            root, data_root=data_root, repo=repo, shapes=todo, max_volumes=max_volumes
         )
     results = measure_floor(root, repo)
     if crops:
