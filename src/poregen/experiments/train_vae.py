@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,43 @@ def resolve_data_root(cfg: dict[str, Any], repo_root: Path) -> Path:
     if dataset_root.is_absolute():
         return dataset_root.resolve()
     return (repo_root / "data" / dataset_root).resolve()
+
+
+def resolve_early_stopping_patience(cfg: dict[str, Any]) -> int:
+    """Early-stopping patience in EVAL CHECKS, from whichever field is set.
+
+    ``early_stopping_patience_steps`` is the field to use. Patience counted in
+    eval checks silently depends on the data: ``eval_every`` is derived from
+    the split sizes, so the split_v3 re-split — which grew val 89 % by moving
+    Na_01 into it — halved eval_every from 264 to 120 and with it the effective
+    patience, from 3168 training steps to 1440, without a config changing. A
+    rung sweep that shares a dataset stays self-consistent, but nothing is
+    comparable across datasets and nobody would notice.
+
+    ``early_stopping_patience`` (eval checks) is kept because r03-r07,
+    vrrae03/04 and ldm05/06 are configured with it and their runs are the
+    record; rewriting those configs would change what a historical experiment
+    id resolves to. The two are mutually exclusive per config, not a fallback
+    chain: setting both raises.
+    """
+    tcfg = cfg["training"]
+    steps = int(tcfg.get("early_stopping_patience_steps", 0) or 0)
+    checks = int(tcfg.get("early_stopping_patience", 0) or 0)
+    if steps > 0 and checks > 0:
+        raise ValueError(
+            "training.early_stopping_patience_steps and "
+            "training.early_stopping_patience are both set. They are the same "
+            "knob in different units; pick one (set the other to 0)."
+        )
+    if steps <= 0:
+        return checks
+    eval_every = max(1, int(tcfg["eval_every"]))
+    n = max(1, math.ceil(steps / eval_every))
+    logger.info(
+        "Early stopping: %d steps of patience = %d eval checks at "
+        "eval_every=%d", steps, n, eval_every,
+    )
+    return n
 
 
 def configure_training_schedule(
@@ -460,7 +498,7 @@ def run_experiment(
                 save_latest=bool(cfg["runtime"]["checkpoints"].get("save_latest", True)),
                 best_metric=cfg["runtime"]["checkpoints"].get("best_metric"),
                 best_mode=cfg["runtime"]["checkpoints"].get("best_mode", "min"),
-                early_stopping_patience=int(cfg["training"].get("early_stopping_patience", 0)),
+                early_stopping_patience=resolve_early_stopping_patience(cfg),
                 early_stopping_metric=cfg["training"].get("early_stopping_metric", "val.xct_loss"),
                 early_stopping_mode=cfg["training"].get("early_stopping_mode", "min"),
                 early_stopping_min_delta=float(
@@ -611,7 +649,7 @@ def resume_run(
                 save_latest=bool(cfg["runtime"]["checkpoints"].get("save_latest", True)),
                 best_metric=cfg["runtime"]["checkpoints"].get("best_metric"),
                 best_mode=cfg["runtime"]["checkpoints"].get("best_mode", "min"),
-                early_stopping_patience=int(cfg["training"].get("early_stopping_patience", 0)),
+                early_stopping_patience=resolve_early_stopping_patience(cfg),
                 early_stopping_metric=cfg["training"].get("early_stopping_metric", "val.xct_loss"),
                 early_stopping_mode=cfg["training"].get("early_stopping_mode", "min"),
                 early_stopping_min_delta=float(

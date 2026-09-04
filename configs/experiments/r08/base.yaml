@@ -25,6 +25,21 @@ overrides:
     in_channels: 3
     z_channels: 4
 
+  training:
+    # Patience in STEPS, not eval checks. eval_every is DERIVED from the split
+    # sizes, so counting patience in checks makes it depend on the data: the
+    # split_v3 re-split grew val 89 % by moving Na_01 into it, which halved
+    # eval_every from 264 to 120 and with it the effective patience, 3168
+    # training steps down to 1440 — without any config changing. All six rungs
+    # share this dataset so they would have been self-consistent, but nothing
+    # would have been comparable with run-0002 or r07 and nobody would have
+    # noticed. 3000 is run-0002's 3168 to the nearest round number.
+    #
+    # The inherited eval-check field must be 0: the two are the same knob in
+    # different units and train_vae raises if both are set.
+    early_stopping_patience: 0
+    early_stopping_patience_steps: 3000
+
   data:
     dataset_root: split_v3
     split_version: v2   # the parquet's own "split" column; v3 splits are baked in
