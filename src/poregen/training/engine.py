@@ -808,10 +808,24 @@ def train_loop(
     # re-armed below on every iteration, so it only ever fires if a single
     # iteration (batch fetch + train step + any eval/checkpoint) exceeds the
     # budget, dumping every thread's Python stack to stderr and continuing.
-    # Budget is deliberately far above the slowest legitimate iteration
-    # observed (452 s, a full-validation epoch boundary).
-    _WATCHDOG_SECONDS = 1800.0
+    # Budget is DERIVED, not fixed. A flat 1800 s was "far above the slowest
+    # legitimate iteration" when a full-validation epoch boundary took 452 s.
+    # The split_v3 re-split then grew val to 266 119 patches — 2080 batches at
+    # ~1 batch/s, so ~33 min — and the epoch-boundary full validation started
+    # tripping the watchdog on every epoch of every rung. A dump on a healthy
+    # run is worse than no watchdog: it trains the reader to ignore it.
+    #
+    # 3 s/batch is ~3x the measured rate, so a legitimate full eval never
+    # trips it, while the failure it exists for (vrrae-run-0001 wedged for
+    # 10.5 h) is still caught with hours to spare.
+    _max_eval_batches = max(
+        len(val_loader) if val_loader is not None else 0,
+        len(test_loader) if test_loader is not None else 0,
+    )
+    _WATCHDOG_SECONDS = max(1800.0, 3.0 * _max_eval_batches)
     faulthandler.enable()
+    _logger.info("Hang watchdog: %.0f s (largest eval %d batches)",
+                 _WATCHDOG_SECONDS, _max_eval_batches)
 
     # Use ExitStack so both log files are always closed — even on exception.
     with contextlib.ExitStack() as stack:
