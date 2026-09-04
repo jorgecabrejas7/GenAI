@@ -1,0 +1,35 @@
+experiment:
+  name: r08
+  variant: base-c64
+  description: >-
+    Contingency rung: base's latent (z=4, 16x total voxel reduction) with twice
+    the decoder width, base_channels 64 instead of 32. It asks a different
+    question from the rest of the sweep — not "how much latent capacity", but
+    "is the bottleneck the latent at all, or the width of the network either
+    side of it".
+
+    Base failed only in the dense regime: pore Dice 0.874 val against a 0.88
+    gate, per-bin porosity MAE 0.01244 at 3-6 % and 0.02698 at >=6 % on test,
+    and 0.8477 on the three campaign-08 volumes against r07's 0.8716. Every
+    aggregate gate passed. The sweep over z tests one explanation for that. If
+    z=8 and z=16 barely move dense pore Dice, the latent is not the constraint
+    and this rung tests the other obvious one.
+
+    LAUNCH RULE: only after rf-8 and rf-4 are in, and only if dense-panel pore
+    Dice improves by less than 0.02 across z=4 -> 16. Otherwise the sweep is
+    working and this rung is not needed.
+
+    Costs, measured rather than guessed: 3.02 M parameters against base's
+    0.76 M, a factor of 3.96. Peak GPU memory will rise well above base's
+    40.9 GB — the 64^3 decoder stage carries (N, base_channels, 64^3)
+    activations, so doubling the width doubles the largest tensors in the
+    graph. Check headroom before launching, and expect to halve batch_size and
+    rescale lr by sqrt(0.5) if it does not fit; that would make it not
+    strictly comparable with the z rungs, which is a reason to treat it as a
+    diagnostic rather than a sweep point.
+
+extends: r08/base
+
+overrides:
+  model:
+    base_channels: 64
