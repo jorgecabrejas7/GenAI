@@ -80,22 +80,47 @@ rc=$?; say "VERIFY rc=$rc"
 [ "$rc" -eq 0 ] || die "LatentDataset verification failed; see $SCRATCH/ldm06_verify.log"
 grep -q "VERIFY OK" "$SCRATCH/ldm06_verify.log" || die "verification did not reach VERIFY OK"
 
-# 4. point ldm06 at the store this rung produced, if it is not the default
-say "CONFIG latents_root should be data/split_v3/latents_r08z${Z}"
+# 4. point ldm06 at the store this rung produced, in one explicit commit.
+#    Editing the config silently would make "which store did ldm06 read?"
+#    unanswerable months later; committing it makes the switch attributable and
+#    revertable. Only this one key, and only to this one value — every other
+#    mismatch is still a refusal.
+say "CONFIG set ldm06/base data.latents_root -> data/split_v3/latents_r08z${Z}"
 python - "$Z" <<'PY'
-import sys, pathlib, yaml
+import sys, pathlib, re
 z = sys.argv[1]
 p = pathlib.Path("/home/jorgecabrejas/Dev/GenAI/configs/experiments/ldm06/base.yaml")
 want = f"data/split_v3/latents_r08z{z}"
-cfg = yaml.safe_load(p.read_text())
-have = (cfg.get("data") or {}).get("latents_root")
-print(f"ldm06/base latents_root = {have!r}; store is {want!r}")
-if have != want:
-    print("MISMATCH — ldm06/base must be edited before launch")
+s = p.read_text()
+m = re.search(r"^(\s*latents_root:[ \t]*)(\S+)[ \t]*$", s, re.M)
+if m is None:
+    print("no latents_root key in ldm06/base.yaml — refusing to invent one")
     sys.exit(3)
+if m.group(2) == want:
+    print(f"latents_root already {want}")
+    sys.exit(0)
+p.write_text(s[: m.start()] + m.group(1) + want + s[m.end() :])
+print(f"latents_root {m.group(2)} -> {want}")
+sys.exit(10)
 PY
 rc=$?
-[ "$rc" -eq 0 ] || die "ldm06/base latents_root does not match the chosen rung's store (rc=$rc)"
+if [ "$rc" -eq 10 ]; then
+    git -C "$REPO" commit -q -m "config: ldm06/base reads the chosen rung's latent store (z=${Z})
+
+The r08 compression sweep chose z=${Z}, so ldm06 trains on
+data/split_v3/latents_r08z${Z}. Written by scripts/ldm06_bringup.sh as a
+commit rather than an in-place edit: which store a run read is exactly the
+kind of fact that has to survive to the paper.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>" \
+        -- configs/experiments/ldm06/base.yaml \
+        || die "could not commit the latents_root change"
+    say "CONFIG committed $(git -C "$REPO" rev-parse --short HEAD)"
+elif [ "$rc" -eq 0 ]; then
+    say "CONFIG already correct"
+else
+    die "could not set latents_root (rc=$rc)"
+fi
 
 # 5. launch
 say "LDM06 launch in tmux ldm06"

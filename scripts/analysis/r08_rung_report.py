@@ -378,69 +378,160 @@ def run_one(run_dir: Path, batch_size: int, min_bin_n: int) -> dict:
     return {**meta, "splits": per_split}
 
 
+def _last(rows, split):
+    r = [x for x in rows if x.get("split") == split]
+    return r[-1] if r else None
+
+
+def gather_rung(run_dir: Path) -> dict | None:
+    """Everything known about one rung, from artefacts that already exist.
+
+    The full-split rung report is NOT required. Running it for four rungs costs
+    ~4.7 h of GPU and duplicates what the training run already computed: the
+    engine's own final val_full/test_full are whole-split evaluations with the
+    per-bin table and counts. This reads those, plus the CPU calibration probe
+    (dense/rest Dice and tau), the tile-seam and the latent-sanity summary.
+    """
+    cfg_p = run_dir / "resolved_config.yaml"
+    met_p = run_dir / "metrics.jsonl"
+    if not cfg_p.exists() or not met_p.exists():
+        return None
+    cfg = yaml.safe_load(cfg_p.read_text())
+    variant = cfg["experiment"]["variant"]
+    exp = f"{cfg['experiment']['name']}/{variant}"
+    rows = [json.loads(l) for l in open(met_p)]
+    vf, tf = _last(rows, "val_full"), _last(rows, "test_full")
+    if vf is None:
+        return None
+
+    ev = [x for x in rows if x.get("split") == "event"]
+    wall_h = (ev[-1].get("elapsed", 0) / 3600.0) if ev else float("nan")
+    stopped = ev[-1].get("event") if ev else None
+
+    # active latent channels, from the last periodic val
+    lv = _last(rows, "val") or {}
+    active = lv.get("mu_active_fraction")
+    n_active = lv.get("mu_n_active")
+
+    key = exp.replace("/", "_")
+    out = {"experiment": exp, "variant": variant, "run_dir": str(run_dir),
+           "z_channels": cfg["model"]["z_channels"], "step": vf.get("step"),
+           "wall_h": wall_h, "stopped": stopped,
+           "mu_active_fraction": active, "mu_n_active": n_active,
+           "val_full": vf, "test_full": tf}
+
+    probe_p = OUT_ROOT / f"calibration_probe_{key}" / "results.json"
+    if probe_p.exists():
+        summ = json.loads(probe_p.read_text())["summary"]
+        # Same rule the full report uses, on the probe's stratified sample:
+        # the tau whose WORST judged bin is smallest. tau0.5 is argmax.
+        best = min((k for k in summ if k.startswith("tau") or k == "argmax"),
+                   key=lambda k: summ[k]["worst_bin_mae"])
+        out["probe"] = {
+            "tau": 0.5 if best == "argmax" else float(best[3:]),
+            "tau_worst_bin": summ[best]["worst_bin_mae"],
+            "argmax_worst_bin": summ["argmax"]["worst_bin_mae"],
+            "dense_dice": summ["argmax"]["dense_vs_rest"]["dense"]["dice_pore"],
+            "rest_dice": summ["argmax"]["dense_vs_rest"]["rest"]["dice_pore"],
+            "dense_mae": summ["argmax"]["dense_vs_rest"]["dense"]["porosity_mae"],
+        }
+
+    seam_p = OUT_ROOT / key / "tile_seam" / "results.json"
+    if seam_p.exists():
+        recs = json.loads(seam_p.read_text())["records"]
+        ov = [a for r in recs for a in r["assemblies"] if a["assembly"] == "B_overlapped"]
+        if ov:
+            out["seam"] = {
+                "xct": float(np.mean([a["seam_xct_ratio"] for a in ov])),
+                "pore_logit": float(np.mean([a["seam_mask_ratio"] for a in ov])),
+                "overlapped_pore_dice": float(np.mean([a["dice_pore"] for a in ov])),
+            }
+
+    san = sorted((REPO / "runs/diagnostics/mask_sanity").glob(f"{run_dir.name}/summary.json"))
+    if san:
+        sets = json.loads(san[0].read_text())["sets"]
+        out["drift_2x"] = sets.get("noise_2.0x_post_std", {}).get("porosity_drift_vs_real_mu")
+    return out
+
+
 def compare() -> None:
-    rows = []
-    for d in sorted(OUT_ROOT.glob("r08_*")):
-        f = d / "results.json"
-        if f.exists():
-            rows.append(json.loads(f.read_text()))
-    if not rows:
-        raise SystemExit(f"no rung reports under {OUT_ROOT}")
-    rows.sort(key=lambda r: -r["z_channels"])
-    def dense_cols(r):
-        """Pore Dice on the dense panels, from that rung's calibration probe.
+    rungs = []
+    for d in sorted((REPO / "runs" / "vae").glob("r08-run-*")):
+        g = gather_rung(d)
+        if g:
+            rungs.append(g)
+    if not rungs:
+        raise SystemExit("no finished r08 rungs found under runs/vae/")
+    # Keep the newest run per variant, then order by descending z.
+    best: dict[str, dict] = {}
+    for g in rungs:
+        best[g["variant"]] = g
+    rungs = sorted(best.values(), key=lambda r: -r["z_channels"])
 
-        Na_10 and Pegaso_1 are TRAIN panels, so the val/test report above
-        cannot see them; the probe samples all 17. Blank when the probe has
-        not been run for a rung.
-        """
-        f = OUT_ROOT / f"calibration_probe_{r['experiment'].replace('/', '_')}" / "results.json"
-        if not f.exists():
-            f = OUT_ROOT / "calibration_probe" / "results.json"
-        if not f.exists():
-            return "—", "—", "—"
-        try:
-            g = json.loads(f.read_text())["summary"]["argmax"]["dense_vs_rest"]
-            return (f"{g['dense']['dice_pore']:.4f}", f"{g['rest']['dice_pore']:.4f}",
-                    f"{g['rest']['dice_pore'] - g['dense']['dice_pore']:+.4f}")
-        except (KeyError, ValueError):
-            return "—", "—", "—"
+    def f(x, n=5):
+        return "—" if x is None or (isinstance(x, float) and not np.isfinite(x)) else f"{x:.{n}f}"
 
-    L = ["# r08 latent-compression sweep — comparison", "",
-         f"{len(rows)} rung(s), whole val split. Reduction = 64³ / (z · 16³).", "",
-         "The last three columns are the point of the sweep. `Na_10`, `Na_09` "
-         "and `Pegaso_1` hold the dense microstructure, and after the class "
-         "weights were tempered they are the only place a residual survives: "
-         "porosity totals there are fine, pore Dice is not. Calibration cannot "
-         "close that gap — more latent capacity is the only lever left, so the "
-         "dense-panel Dice is what a rung has to move. They come from each "
-         "rung's calibration probe, which samples all 17 panels; the val/test "
-         "columns cannot see Na_10 or Pegaso_1 because those are train.", "",
-         "| rung | z | reduction | step | porosity_mae | pore Dice | air Dice "
-         "| material Dice | air_mae | params | DENSE pore Dice | rest | gap "
-         "| tau | worst bin val | worst bin test |",
-         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    for r in rows:
-        v = r["splits"]["val"]
+    L = ["# r08 latent-compression sweep — decision table", "",
+         f"{len(rungs)} rung(s). Built from artefacts that already exist: the "
+         "training run's own final `val_full` / `test_full` (whole-split, with "
+         "the per-bin table and counts), the CPU calibration probe, the "
+         "tile-seam and the latent-sanity check. The separate full-split rung "
+         "report is deferred — it costs ~70 min of GPU per rung and recomputes "
+         "what the engine already produced.", "",
+         "## Gates", "",
+         "| rung | z | red. | step | wall h | val φ MAE | pore Dice val/test "
+         "| air Dice val/test | active z | drift 2σ |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rungs:
+        v, t = r["val_full"], (r["test_full"] or {})
         red = 64 ** 3 / (r["z_channels"] * 16 ** 3)
-        dense, rest, gap = dense_cols(r)
-        tau = r.get("calibration", {}).get("tau")
-        tv = v.get("tau_calibrated", {})
-        tt = r["splits"]["test"].get("tau_calibrated", {})
-        tau_s = "—" if tau is None else f"{tau:.2f}"
-        wv = f"{tv['worst_bin_mae']:.5f}" if tv else "—"
-        wt = f"{tt['worst_bin_mae']:.5f}" if tt else "—"
-        L.append(f"| {r['experiment']} | {r['z_channels']} | {red:.0f}x "
-                 f"| {r['step']} | {v['porosity_mae']:.5f} | {v['dice_pore']:.4f} "
-                 f"| {v['dice_air']:.4f} | {v['dice_material']:.4f} "
-                 f"| {v['air_mae']:.5f} | {r['n_params']} "
-                 f"| {dense} | {rest} | {gap} | {tau_s} | {wv} | {wt} |")
-    L += ["", "Selection rule (D31/D33): among rungs with val porosity_mae < "
-          "0.005 and air Dice > 0.98, take the SMALLEST z whose pore Dice is "
-          "within 0.01 of the best and whose overlapped-decode seam ratio is "
-          "<= 1.1; ties go to z=4.", ""]
-    OUT_ROOT.mkdir(parents=True, exist_ok=True)
+        L.append(
+            f"| {r['experiment']} | {r['z_channels']} | {red:.0f}x | {r['step']} "
+            f"| {r['wall_h']:.1f} | {f(v.get('porosity_mae'))} "
+            f"| {f(v.get('dice_pore'),4)} / {f(t.get('dice_pore'),4)} "
+            f"| {f(v.get('dice_air'),4)} / {f(t.get('dice_air'),4)} "
+            f"| {r.get('mu_n_active','—')} | {f(r.get('drift_2x'),3)} |")
+
+    L += ["", "## Per-bin porosity MAE (whole split, counts in the run's own log)", "",
+          "| rung | val <1% | val 1-3% | val 3-6% | val >=6% | test <1% | test 1-3% "
+          "| test 3-6% | test >=6% |", "|---|---|---|---|---|---|---|---|---|"]
+    for r in rungs:
+        v, t = r["val_full"], (r["test_full"] or {})
+        cells = [f(v.get(f"porosity_mae_bin_{i}")) for i in range(4)] + \
+                [f(t.get(f"porosity_mae_bin_{i}")) for i in range(4)]
+        L.append(f"| {r['experiment']} | " + " | ".join(cells) + " |")
+
+    L += ["", "## Dense panels, tau, and assembly", "",
+          "`Na_10`, `Na_09`, `Pegaso_1` hold the dense microstructure — the gap "
+          "no decision rule closes. tau is chosen on the probe's stratified "
+          "sample by minimising the worst judged bin; tau 0.50 means argmax "
+          "needed no correction.", "",
+          "| rung | DENSE pore Dice | rest | gap | tau | worst bin @tau | @argmax "
+          "| seam grey | seam pore-logit | overlapped pore Dice |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rungs:
+        p_, s_ = r.get("probe"), r.get("seam")
+        gap = f(p_["rest_dice"] - p_["dense_dice"], 4) if p_ else "—"
+        L.append(
+            f"| {r['experiment']} "
+            f"| {f(p_['dense_dice'],4) if p_ else '—'} | {f(p_['rest_dice'],4) if p_ else '—'} | {gap} "
+            f"| {f(p_['tau'],2) if p_ else '—'} | {f(p_['tau_worst_bin']) if p_ else '—'} "
+            f"| {f(p_['argmax_worst_bin']) if p_ else '—'} "
+            f"| {f(s_['xct'],3) if s_ else '—'} | {f(s_['pore_logit'],3) if s_ else '—'} "
+            f"| {f(s_['overlapped_pore_dice'],4) if s_ else '—'} |")
+
+    L += ["", "## Reading it", "",
+          "- Gates: val φ MAE < 0.005, pore Dice >= 0.88, air Dice > 0.98, "
+          "overlapped seams <= 1.1, drift < 0.30.",
+          "- The per-bin gate applies after tau. A rung whose dense bins only "
+          "pass at a high tau is buying accuracy with recall — read the "
+          "overlapped pore Dice beside it.",
+          "- Dense-panel pore Dice is the number capacity is supposed to move; "
+          "no threshold moves it.",
+          "- A blank cell means that artefact has not been produced for that "
+          "rung, NOT that the value is zero.", ""]
     write_findings("\n".join(L), OUT_ROOT)
+    write_json({"rungs": rungs}, OUT_ROOT, name="decision_table.json")
     print("\n".join(L))
 
 

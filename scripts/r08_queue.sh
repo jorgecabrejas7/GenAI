@@ -109,20 +109,13 @@ for exp in "${RUNGS[@]}"; do
     post_reports "$(newest_run)" "$tag"
 done
 
-# Full-split rung reports for the deciding rungs. GPU, sequential, nothing else
-# on the card. Each is val 2080 + test 2270 batches at ~1 batch/s, so ~70 min
-# per rung — ~4.7 h for four. They are the decision input, so the cost is
-# deliberate, not incidental.
-for exp in "${DECIDING[@]}"; do
-    dir=$(ls -dt "$REPO"/runs/vae/r08-run-*/ 2>/dev/null | while read -r d; do
-              grep -q "variant: $exp\b" "$d/resolved_config.yaml" 2>/dev/null && echo "$d" && break
-          done)
-    if [ -z "$dir" ]; then say "REPORT $exp skipped: no run dir found"; continue; fi
-    say "REPORT $exp start (full split, GPU) $dir"
-    python scripts/analysis/r08_rung_report.py --run "$dir" \
-        > "$SCRATCH/rungreport_${exp}.log" 2>&1
-    say "REPORT $exp done rc=$?"
-done
+# The full-split rung reports are NOT on this path. They cost ~70 min of GPU
+# each and recompute what the training run already produced — the engine's own
+# final val_full/test_full are whole-split evaluations with the per-bin table
+# and counts. --compare now reads those, plus the CPU probe, the tile-seam and
+# the sanity summary. The full reports move to the second runner as OWED, for
+# the final paper table.
+say "OWED full-split rung reports for all rungs -> second runner (scripts/r08_queue_tail.sh)"
 
 say "START rung report --compare"
 python scripts/analysis/r08_rung_report.py --compare > "$SCRATCH/r08_compare.log" 2>&1
