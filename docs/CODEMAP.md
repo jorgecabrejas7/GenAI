@@ -167,6 +167,7 @@ real-vs-real floor.
 
 | Path | What it does |
 |---|---|
+| `build_split_v3.py` | Builds `data/split_v3/` in stages (`holes | splits | index | resplit | weights | report`): detects the drilled registration holes per volume, splits by PANEL (not by coupon — sibling coupons of one panel share microstructure and would leak), writes the patch index with hole-touching patches dropped, applies the manual re-split (`Na_09` -> test, `Na_01` -> val, which keeps 96 % of the high-porosity training patches instead of the 8 % the porosity-bin rule alone would have left), and derives the 3-class loss weights (`sqrt_inverse` by default, normalised so `sum_c f_c w_c = 1`). |
 | `extract_patches_memmap.py` | One-time Zarr → flat `patches_{xct,label}.bin` memmap extraction, row-aligned with `patch_index.parquet`. `patches_label.bin` holds the 3-class voxel label (0 material, 1 pore, 2 air = `sample_mask == 0`); air takes precedence over pore. Refuses to start when the filesystem cannot hold both arrays. |
 | `build_latent_dataset.py` | Encodes every patch with a trained VAE (encoder inputs read off the model's `encoder_inputs`) → raw `mu`/`std` memmap + train-split normalisation stats, AND `material.bin`/`air.bin` pooled from the same label tensor in the same pass. Builds the `latents_r08z4` store. |
 | `build_conditioning.py` | Builds the per-split `cond.parquet` sidecar (`cond_depth`, six `cond_dist6_*`, `cond_por_raw`) and the `conditioning` metadata block, reusing `data/split_v2/orientation_field.json` after asserting every store volume has a record and a foreground extent. `--rebuild-orientation` re-derives that field from the T-I fit + expert ground truth — the provenance of the artefact. |
@@ -217,7 +218,10 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 `03-eval-v2-buggy-decode` (`eval_v2_*`) · `04-measurement-limits`
 (`air_audit_v2`, `onlypores_*`) · `05-eval-v3-fixed-decode` (`eval_v3_*`) ·
 `06-ldm06-probe` (`ldm06_probe`) · `07-vae-metric-recompute`
-(`recompute_vae_metrics`, `report_vae_metric_recompute`).
+(`recompute_vae_metrics`, `report_vae_metric_recompute`) ·
+`08-pre-ldm06-diagnostics` (`vae_tile_seam`, `ddim200_1024`,
+`ply_angle_structure_tensor`) · `09-r08-latent-sweep` (`r08_rung_report`,
+`r08_calibration_probe`).
 
 | Path | What it does |
 |---|---|
@@ -258,6 +262,22 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/viz_orientation_volume.py` | Orientation colour volume for one XCT volume: RGB TIFF (hue = tow angle mod 180°, saturation = anisotropy, value = XCT grey), flat-colour ply-map TIFF, legend, y–z cut and ply-step verification. Writes `runs/campaigns/01-conditioning-design/orientation_viz/<volume_id>/`. |
 | `analysis/recompute_vae_metrics.py` | Recompute of the two VAE eval metrics the XCT-sigmoid bug corrupted (GPU). Until 2026-09-01 `engine._run_eval` applied `torch.sigmoid()` to the XCT head's output, which regresses `xct / 255` directly — that put a ~0.135 artefact floor under `val/mae` and scaled `val/sharpness_recon_over_gt` by the sigmoid slope. Loads each run's `best.ckpt`, rebuilds model + val loader from that run's own `resolved_config.yaml`, and calls the real `engine._run_eval` on a seeded validation subset; a `_DualDecodeProbe` swapped in for `engine.decode_xct` / `engine.F` also computes the old sigmoid-path values from the same forward pass, so the buggy→fixed delta carries no eval noise. Controls (`xct_loss`, `porosity_mae`, KL, Dice) must reproduce their logged `val_full` values. Reads only; writes `runs/campaigns/07-vae-metric-recompute/vae_metric_recompute/results.json`. |
 | `analysis/report_vae_metric_recompute.py` | Report generator for the above: per-run comparison tables, control verification, sweep-ranking assessment, `per_run_metrics.csv`, `findings.md` and the logged-vs-recomputed dumbbell figure (PDF + PNG 300 dpi). Writes `runs/campaigns/07-vae-metric-recompute/vae_metric_recompute/`. |
+| `analysis/_real_windows.py` | Finds 64-aligned boxes lying entirely inside `sample_mask` — the shared control surface for every campaign-08/09 measurement. Because `sample_mask` is False inside the drilled holes, a box that passes is hole-free by construction rather than by a separate check. `find_window` / `find_window_best` / `find_region`, sliced over z to bound memory. |
+| `analysis/vae_tile_seam.py` | Is the seam discontinuity the VAE's or the sampler's? Decodes the same posterior means three ways — A stride-64 tiled, B stride-32 Tukey-blended, C the real volume as a floor — and reports `seam_mad / interior_mad` at the 64-planes plus pore Dice and porosity. Head-agnostic: `pore_logit` returns the single logit for a binary head and `log p - log(1-p)` for the 3-class head, because a raw class logit carries a free additive constant per voxel (softmax is shift-invariant) and is not comparable across assemblies. `--checkpoint` / `--out` make it reusable per r08 rung. |
+| `analysis/ddim200_1024.py` | Generates two 1024x1024x192 volumes at DDIM-200 and audits them by IMPORTING `eval_v3_air_audit.audit_one` unchanged, so the step-count answer is measured on the same instrument as the v3 campaign rather than a re-implementation of it. |
+| `analysis/ply_angle_structure_tensor.py` | Structure-tensor ply-angle reading as a candidate replacement for the T-I estimators. `self_test` reads six synthetic tow bundles back to <0.5 deg before any real volume is touched. Angles are combined in the DOUBLED representation (`atan2(2*jyx, jxx - jyy)`) — averaging raw angles cancels tows at +/-90 deg, which is what an earlier version did. Conclusion: not competitive with `pore_axes` (4.2 deg / 86 %). |
+| `analysis/r08_calibration_probe.py` | Is a rung's dense-panel error calibration or capacity? One forward pass, scored three ways — `argmax`, `deweight` (divide the softmax by the training class weights and renormalise) and a `tau` sweep on p(pore). If de-weighting improves BOTH porosity MAE and pore Dice the loss weighting was mis-calibrated; if it hurts, the residual is capacity. Has a `--device cpu` path so it can overlap the next rung on the GPU. Writes `runs/campaigns/09-r08-latent-sweep/calibration_probe_r08_<variant>/`. |
+| `analysis/r08_rung_report.py` | Per-rung full-split report (`--run`), and the sweep decision table (`--compare`). `--compare` builds ONLY from artefacts that already exist — the run's own final `val_full` / `test_full` in `metrics.jsonl` (which are whole-split evaluations carrying the per-bin table and counts), the CPU calibration probe, the tile-seam and the latent-sanity summary — so the decision costs no GPU. A missing artefact renders as an em-dash and the footnote says a blank means 'not produced', not 'zero'. |
+
+**Orchestration (long unattended chains)**
+
+These exist because a missed process exit cost 3 h 31 m of GPU: rf-8 finished at 09:51 and the next rung was not launched until 13:22. A human or an agent noticing an exit is not a scheduling mechanism.
+
+| Path | What it does |
+|---|---|
+| `r08_queue.sh` | Sequential r08 sweep runner. Starts the next rung the instant the previous process exits, pass or fail; a FAILED rung is logged and the chain continues, and only a rung that cannot be launched at all stops it. GPU end-of-run reports (tile-seam, mask sanity) run in the GAP between rungs with nothing else on the card; the calibration probe has a CPU path and is backgrounded to overlap the next rung. Appends every transition with an rc to `runs/campaigns/09-r08-latent-sweep/queue.log`. NOTE: bash reads a script by file offset, so editing this file while it runs is undefined — replace it by rename and RESTART the runner, then check `/proc/<pid>/fd/255` points at the new inode. |
+| `r08_queue_tail.sh` | The second runner: rf-2 and rf-64, which bracket the sweep for the paper but do not feed the compressor decision, plus the full-split rung reports the first runner logged as OWED. Waits for the GPU to go quiet, so it must be started AFTER ldm06/base is training. `run_dir_for` resolves a rung by `experiment_id` and requires a `best.ckpt` — `base` has three runs (a crash, the untempered attempt, the tempered one) and the run index does not distinguish them. |
+| `ldm06_bringup.sh` | Everything between 'the compressor is chosen' and 'ldm06 is training': latent store -> conditioning -> `LatentDataset` verification -> launch, each stage verified BEFORE the next begins, because every failure mode here is a missing file the next step would happily build around (a half-written store still loads, a stale conditioning sidecar still joins). Sets `ldm06/base`'s `data.latents_root` to the chosen rung's store as one explicit commit of that single file — so which store a run read stays answerable from git — and refuses on any other mismatch. |
 
 **Evaluation**
 
@@ -425,7 +445,11 @@ runs/
     │                             volumes/{dose_response,ddim_probe,layup}/, dose_response/,
     │                             air_audit/, onlypores/, ddim/, comparison/, run.log
     ├── 06-ldm06-probe/           ldm06_probe/ — Part A provisional, Part B superseded by 05
-    └── 07-vae-metric-recompute/  vae_metric_recompute/ — results.json only; report not run
+    ├── 07-vae-metric-recompute/  vae_metric_recompute/ — results.json only; report not run
+    ├── 08-pre-ldm06-diagnostics/ vae_tile_seam/, ddim200_1024/, ply_angle_structure_tensor/
+    └── 09-r08-latent-sweep/      queue.log (every rung transition with an rc),
+                                  r08_<variant>/tile_seam/, calibration_probe_r08_<variant>/,
+                                  decision_table.md, ldm06_bringup.log
 ```
 Every campaign carries a `README.md` (question, exact command, checkpoint and
 settings, headline numbers, caveats, vault note) and a row in `INDEX.md`.
