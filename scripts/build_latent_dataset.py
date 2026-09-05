@@ -20,6 +20,12 @@ second script to fall out of step with the store.
   mask at 100 µm resolution, which it would learn to upsample instead of
   generating pores.
 * ``air.bin`` — float32 ``(N,)``; the fraction of the patch labelled air
+* ``pore.bin`` — uint8 ``(N, 4, 4, 4)``; ``value/255`` is the pore fraction of
+  each 16-voxel block.  **Written but NOT consumed by ldm06**: it is not in the
+  batch contract and no model input reads it.  It exists so that a later rung
+  can add a coarse porosity map as a conditioning channel without re-encoding
+  the whole store, which costs GPU hours.  A reader should treat its presence
+  as storage, not as evidence that the model saw it.
   (label 2), i.e. outside the envelope.  Equal to ``1 - material.mean()`` by
   construction — it is computed from the same pooled cells.
 
@@ -54,6 +60,7 @@ data/split_v3/latents_r08z4/
 │   │                          C..2C-1 = std ("mu_then_std" packing)
 │   ├── material.bin         — uint8 (N, 16, 16, 16) envelope fraction per cell
 │   ├── air.bin              — float32 (N,) air fraction per patch
+│   ├── pore.bin             — uint8 (N, 4, 4, 4) pore fraction per 16³ block (UNUSED)
 │   └── index.parquet        — source_row (row in patch_index.parquet), volume_id,
 │                              source_group, split, z0, y0, x0, ps, stride,
 │                              porosity (from source index), phi
@@ -90,6 +97,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 VOXEL_SIZE_UM = 25.0
 
 logger = logging.getLogger(__name__)
+
+# Coarse pore map: 16-voxel blocks over a 64^3 patch, so a (4, 4, 4) map.
+# Deliberately coarser than the 4^3-voxel material cells — a finer pore map
+# would hand a future model the pore mask at high resolution and let it
+# upsample instead of generate, which is the mistake the material map already
+# had to be corrected for.
+PORE_POOL_VOX = 16
+PORE_MAP_SIDE = 64 // PORE_POOL_VOX
 
 # The r08 run that supplies the ldm06 store.  Filled in when r08 finishes; the
 # glob is resolved at launch and refuses to guess between two matches.
@@ -221,6 +236,7 @@ def main() -> None:
         n_planned += n_split
     est_bytes = n_planned * (2 * int(np.prod(latent_shape)) * 2      # mu + std, float16
                              + latent_size ** 3                       # material.bin, uint8
+                             + PORE_MAP_SIDE ** 3                     # pore.bin, uint8
                              + 4)                                     # air.bin, float32
     free_bytes = shutil.disk_usage(out_root).free
     logger.info(
@@ -280,6 +296,10 @@ def main() -> None:
         air = np.memmap(
             str(split_dir / "air.bin"), dtype=np.float32, mode="w+", shape=(n,),
         )
+        pore = np.memmap(
+            str(split_dir / "pore.bin"), dtype=np.uint8, mode="w+",
+            shape=(n, PORE_MAP_SIDE, PORE_MAP_SIDE, PORE_MAP_SIDE),
+        )
 
         phi_all = np.empty(n, dtype=np.float32)
 
@@ -312,12 +332,16 @@ def main() -> None:
                 cells = pool_material_fractions(label_np != CLASS_AIR, pool_factor)
                 material[i : i + b] = encode_material_u8(cells)
                 air[i : i + b] = air_fraction(cells)
+                # Stored, not served. Pooled from the SAME label tensor as the
+                # material map, so it cannot drift out of alignment with it.
+                pore[i : i + b] = encode_material_u8(
+                    pool_material_fractions(label_np == CLASS_PORE, PORE_POOL_VOX))
                 phi_all[i : i + b] = (label_np == CLASS_PORE).mean(axis=(1, 2, 3),
                                                                    dtype=np.float32)
                 i += b
 
         assert i == n, f"[{split}] wrote {i} rows, expected {n}"
-        for arr in (latents, material, air):
+        for arr in (latents, material, air, pore):
             arr.flush()
         mean_air = float(np.asarray(air).mean()) if n else 0.0
         mean_mat = float(np.asarray(material).mean()) / 255.0 if n else 0.0
@@ -363,8 +387,20 @@ def main() -> None:
         "source_patch_index": str(index_path),
         "patch_size": patch_size,
         "material": {
-            "files": {"material": "material.bin", "air": "air.bin"},
-            "alignment": "row i of material.bin and air.bin is row i of index.parquet",
+            "files": {"material": "material.bin", "air": "air.bin",
+                      "pore": "pore.bin"},
+            "alignment": ("row i of material.bin, air.bin and pore.bin is row i "
+                          "of index.parquet"),
+            "pore_dtype": "uint8",
+            "pore_shape": [PORE_MAP_SIDE] * 3,
+            "pore_pool_voxels": PORE_POOL_VOX,
+            "pore_encoding": (
+                f"value/255 = pore fraction (voxel label == 1) of each "
+                f"{PORE_POOL_VOX}^3-voxel block"),
+            "pore_status": (
+                "UNUSED by ldm06 — not in the batch contract, no model input "
+                "reads it. Stored so a later rung can add a coarse porosity "
+                "conditioning channel without re-encoding the store."),
             "material_dtype": "uint8",
             "material_shape": [latent_size] * 3,
             "material_encoding": (
