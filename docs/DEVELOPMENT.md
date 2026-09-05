@@ -81,6 +81,29 @@ Both symlinks point at the real directories, so a test that writes through one
 writes into the live tree. The suite writes to `tmp_path`, but check any new
 test before adding it.
 
+## torchvision (FID only)
+
+`torchvision` is NOT in `requirements.txt` and nothing but FID needs it —
+`eval_v4.microstructure` uses `inception_v3` for the 2048-d feature. It must be
+installed **from the PyTorch cu130 index, version-matched, and with
+`--no-deps`**, or pip resolves a torchvision whose `Requires-Dist` pins a
+different torch and silently replaces the working build:
+
+```bash
+pip install --no-deps torchvision==0.27.1+cu130 \
+    --index-url https://download.pytorch.org/whl/cu130
+```
+
+0.27.1 declares `torch (==2.12.1)` — exactly what is installed. The version
+pairing steps with torch (0.25 <-> 2.10, 0.26 <-> 2.11, 0.27 <-> 2.12,
+0.28 <-> 2.13, 0.29 <-> 2.14), so the plain `pip install torchvision` that the
+index offers today (0.29.0+cu130, for torch 2.14) is the wrong build. Check the
+wheel's `Requires-Dist: torch` before installing a different one.
+
+The ImageNet weights are fetched on first use and cached in `~/.cache/torch/`;
+prefetch them off the GPU rather than discovering the download inside an eval
+run.
+
 ## Deployment target
 
 **NVIDIA GB10 GPU (DGX Spark, 128 GB unified memory).** Code runs on that
