@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 
@@ -61,6 +62,12 @@ GATES = {
     "dice_air": (">", 0.98),
 }
 BINS = (0.0, 0.01, 0.03, 0.06, float("inf"))
+# A single pore-probability threshold, CALIBRATED ON VAL and applied unchanged
+# to test. argmax is tau = 0.5 by construction, so the grid includes it and a
+# rung is free to come out uncalibrated. The point of fitting on val and never
+# refitting on test is that the test number then measures the model plus a
+# fixed decision rule, not a rule tuned to the thing being measured.
+TAU_GRID = (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9)
 BIN_LABELS = ("phi < 1%", "1-3%", "3-6%", ">= 6%")
 MIN_BIN_N = 500
 _T0 = time.time()
@@ -84,6 +91,7 @@ def evaluate_split(model, loader, device, autocast_dtype=torch.bfloat16) -> dict
     """
     model.eval()
     pred_por, true_por, pred_air, true_air = [], [], [], []
+    tau_por: dict[float, list] = {t: [] for t in TAU_GRID}
     dice_acc = {c: [] for c in ("material", "pore", "air")}
     vol_ids: list[str] = []
 
@@ -102,6 +110,14 @@ def evaluate_split(model, loader, device, autocast_dtype=torch.bfloat16) -> dict
             d = torch.where(card > 0, 2.0 * inter / card, torch.ones_like(card))
             dice_acc[name].append(d.cpu())
 
+        # One softmax, every threshold read off it — the alternative is a
+        # forward pass per tau over 556k patches.
+        probs = torch.softmax(out.class_logits.float(), dim=1)
+        p_pore = probs[:, CLASS_PORE]
+        for t in TAU_GRID:
+            tau_por[t].append((p_pore > t).flatten(1).float().mean(1).cpu())
+        del probs, p_pore
+
         pred_por.append((pred == CLASS_PORE).flatten(1).float().mean(1).cpu())
         true_por.append((label == CLASS_PORE).flatten(1).float().mean(1).cpu())
         pred_air.append((pred == CLASS_AIR).flatten(1).float().mean(1).cpu())
@@ -112,6 +128,7 @@ def evaluate_split(model, loader, device, autocast_dtype=torch.bfloat16) -> dict
 
     cat = lambda xs: torch.cat(xs).numpy()  # noqa: E731
     return {
+        "tau_por": {t: cat(v) for t, v in tau_por.items()},
         "pred_por": cat(pred_por), "true_por": cat(true_por),
         "pred_air": cat(pred_air), "true_air": cat(true_air),
         "dice": {k: cat(v) for k, v in dice_acc.items()},
@@ -165,6 +182,58 @@ def summarise(ev: dict, panel_of: dict[str, str], min_bin_n: int) -> dict:
     out["per_panel"] = _group(np.array([panel_of.get(v, "?")
                                         for v in ev["volume_id"]]))
     return out
+
+
+def binned_worst(pred_por, true_por, min_bin_n: int) -> tuple[float, dict]:
+    """Worst JUDGED-bin porosity MAE, and the per-bin detail.
+
+    "Judged" means the bin holds more than ``min_bin_n`` patches. The gate is
+    per bin, so the worst judged bin is the quantity a threshold should be
+    chosen to minimise — not the overall MAE, which the sparse dense bins
+    barely move.
+    """
+    err = np.abs(pred_por - true_por)
+    b = pd.cut(true_por, bins=BINS, right=False, labels=BIN_LABELS)
+    detail, worst = {}, 0.0
+    for lab in BIN_LABELS:
+        sel = np.asarray(b == lab)
+        n = int(sel.sum())
+        m = float(err[sel].mean()) if n else float("nan")
+        detail[lab] = {"n": n, "porosity_mae": m, "judged": n > min_bin_n}
+        if n > min_bin_n and m > worst:
+            worst = m
+    return worst, detail
+
+
+def calibrate_tau(ev_val: dict, min_bin_n: int) -> dict:
+    """Pick one tau on VAL by minimising the worst judged-bin porosity MAE.
+
+    Fitted on val and never refitted, so the test number measures the model
+    plus a FIXED decision rule rather than a rule tuned to the thing being
+    measured. tau = 0.5 is argmax, so a rung that needs no calibration says so.
+    """
+    rows = []
+    for t, pred in ev_val["tau_por"].items():
+        worst, _ = binned_worst(pred, ev_val["true_por"], min_bin_n)
+        rows.append({"tau": float(t), "worst_bin_mae": worst,
+                     "porosity_mae": float(np.abs(pred - ev_val["true_por"]).mean())})
+    rows.sort(key=lambda r: r["worst_bin_mae"])
+    best = rows[0]
+    return {"tau": best["tau"], "selected_on": "val worst judged-bin porosity MAE",
+            "worst_bin_mae_val": best["worst_bin_mae"],
+            "argmax_worst_bin_mae_val": next(
+                r["worst_bin_mae"] for r in rows if r["tau"] == 0.5),
+            "grid": sorted(rows, key=lambda r: r["tau"])}
+
+
+def apply_tau(ev: dict, tau: float, min_bin_n: int) -> dict:
+    """Score a split at a FIXED tau."""
+    pred = ev["tau_por"][tau]
+    worst, detail = binned_worst(pred, ev["true_por"], min_bin_n)
+    err = pred - ev["true_por"]
+    return {"tau": tau, "porosity_mae": float(np.abs(err).mean()),
+            "porosity_bias": float(err.mean()),
+            "worst_bin_mae": worst, "bins": detail}
 
 
 def gate_status(s: dict) -> dict:
@@ -270,10 +339,11 @@ def run_one(run_dir: Path, batch_size: int, min_bin_n: int) -> dict:
     splits_meta = json.loads(SPLITS_JSON.read_text())
     panel_of = splits_meta["panel_id"]
 
-    per_split = {}
+    per_split, evs = {}, {}
     for name, loader in (("val", val_loader), ("test", test_loader)):
         log(f"evaluating {name} ({len(loader.dataset)} patches)")
         ev = evaluate_split(model, loader, device)
+        evs[name] = ev
         s = summarise(ev, panel_of, min_bin_n)
         s["gates"] = gate_status(s)
         s["_volume_panel"] = {}
@@ -282,6 +352,14 @@ def run_one(run_dir: Path, batch_size: int, min_bin_n: int) -> dict:
         per_split[name] = s
         log(f"  {name}: porosity_mae {s['porosity_mae']:.5f} "
             f"dice_pore {s['dice_pore']:.4f} dice_air {s['dice_air']:.4f}")
+
+    # One tau, fitted on val, applied unchanged to test.
+    cal = calibrate_tau(evs["val"], min_bin_n)
+    for name in ("val", "test"):
+        per_split[name]["tau_calibrated"] = apply_tau(evs[name], cal["tau"], min_bin_n)
+    log(f"tau calibrated on val = {cal['tau']:.2f} "
+        f"(worst judged-bin MAE {cal['argmax_worst_bin_mae_val']:.5f} at argmax "
+        f"-> {cal['worst_bin_mae_val']:.5f})")
 
     meta = {
         "experiment": f"{cfg['experiment']['name']}/{cfg['experiment']['variant']}",
@@ -294,7 +372,7 @@ def run_one(run_dir: Path, batch_size: int, min_bin_n: int) -> dict:
     }
     out_dir = OUT_ROOT / meta["experiment"].replace("/", "_")
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_json({**meta, "splits": per_split}, out_dir)
+    write_json({**meta, "calibration": cal, "splits": per_split}, out_dir)
     write_findings(build_findings(meta, per_split, min_bin_n), out_dir)
     log(f"wrote {out_dir}")
     return {**meta, "splits": per_split}
@@ -339,17 +417,24 @@ def compare() -> None:
          "rung's calibration probe, which samples all 17 panels; the val/test "
          "columns cannot see Na_10 or Pegaso_1 because those are train.", "",
          "| rung | z | reduction | step | porosity_mae | pore Dice | air Dice "
-         "| material Dice | air_mae | params | DENSE pore Dice | rest | gap |",
-         "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+         "| material Dice | air_mae | params | DENSE pore Dice | rest | gap "
+         "| tau | worst bin val | worst bin test |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         v = r["splits"]["val"]
         red = 64 ** 3 / (r["z_channels"] * 16 ** 3)
         dense, rest, gap = dense_cols(r)
+        tau = r.get("calibration", {}).get("tau")
+        tv = v.get("tau_calibrated", {})
+        tt = r["splits"]["test"].get("tau_calibrated", {})
+        tau_s = "—" if tau is None else f"{tau:.2f}"
+        wv = f"{tv['worst_bin_mae']:.5f}" if tv else "—"
+        wt = f"{tt['worst_bin_mae']:.5f}" if tt else "—"
         L.append(f"| {r['experiment']} | {r['z_channels']} | {red:.0f}x "
                  f"| {r['step']} | {v['porosity_mae']:.5f} | {v['dice_pore']:.4f} "
                  f"| {v['dice_air']:.4f} | {v['dice_material']:.4f} "
                  f"| {v['air_mae']:.5f} | {r['n_params']} "
-                 f"| {dense} | {rest} | {gap} |")
+                 f"| {dense} | {rest} | {gap} | {tau_s} | {wv} | {wt} |")
     L += ["", "Selection rule (D31/D33): among rungs with val porosity_mae < "
           "0.005 and air Dice > 0.98, take the SMALLEST z whose pore Dice is "
           "within 0.01 of the best and whose overlapped-decode seam ratio is "
