@@ -237,6 +237,11 @@ def main() -> None:
                          "generation.decode_stride, else 32)")
     ap.add_argument("--window-batch", type=int, default=WINDOW_BATCH,
                     help="Windows per UNet forward per timestep")
+    ap.add_argument("--save-latents", action="store_true",
+                    help="also write latents.npy, the finished latent canvas the decoder "
+                         "consumed. Needed to compare two decoders on the SAME latents "
+                         "(the decoder fine-tune gate); off by default because it costs "
+                         "z*Z*Y*X float16 per volume.")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
                     help="Seed for every random draw of the reverse process. The "
                          "SAME seed is used for every sweep cell on purpose, so two "

@@ -51,6 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="generate only these case names")
     g.add_argument("--dry-run", action="store_true",
                    help="list the cases and what each one asks for, generate nothing")
+    g.add_argument("--save-latents", action="store_true",
+                   help="also write latents.npy per case — the finished latent canvas the "
+                        "decoder consumed. Required by the decoder fine-tune gate, which "
+                        "must compare two decoders on identical latents.")
 
     m = sub.add_parser("measure", help="run the metrics over one assessment")
     m.add_argument("assessment", choices=sorted(ASSESSMENTS))
@@ -106,6 +110,7 @@ def cmd_generate(args) -> int:
     runner = VolumeRunner(
         args.model, args.ckpt, weights=args.weights,
         latents_root=args.latents_root, repo=repo,
+        save_latents=args.save_latents,
     )
     todo = [s for s in specs
             if not (case_dir(args.out, args.assessment, s.name) / "manifest.json").exists()]

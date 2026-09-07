@@ -1,0 +1,58 @@
+experiment:
+  name: r08
+  variant: decoder-ft-refiner
+  description: >-
+    Option 2 of D43 — the MANDATORY FALLBACK, to be run only if
+    r08/decoder-ft fails the GENERATED-sharpness gate. The decoder becomes a
+    pipeline refiner: the adversarial loss is applied to decoded ldm06 latents
+    against real patches, rather than to reconstructions of real patches.
+
+    The engine path exists (training.adversarial_source=ldm_latents, fed by a
+    pre-generated latent bank). It will refuse to start until the bank is
+    there, which is deliberate: without it the discriminator would see
+    reconstructions, i.e. option 1 running under option 2's name.
+
+extends: r08/decoder-ft
+
+overrides:
+  training:
+    # The one line that separates option 2 from option 1: what the
+    # discriminator calls "fake". Everything else — the frozen encoder, the
+    # reconstruction and class losses on real patches — is inherited unchanged.
+    adversarial_source: ldm_latents
+
+    # The bank: every latents.npy the eval-v4 generation saved. Refuses to
+    # start when the campaign holds none, rather than falling back to option 1.
+    latent_bank_root: runs/campaigns/12-eval-v4
+    # One window per 16 cells = no overlap. A smaller stride multiplies the bank
+    # without adding information, since neighbouring windows share latent cells.
+    latent_bank_stride: 16
+
+    # The refiner sees generated latents, whose statistics differ from the
+    # posterior's. Slower and shorter than option 1: it is a correction, and
+    # the guards below bound how far it may drift from the option-1 decoder.
+    lr: 2.0e-5
+    total_steps: 6000
+
+  discriminator:
+    disc_weight: 0.2
+
+# ── What is left to do before this can run ──────────────────────────────────
+#
+# Only one thing: the bank itself. Run the eval-v4 generation with
+# --save-latents (scripts/ldm06_post.sh does this when runs/campaigns/ldm06_go
+# exists), which writes latents.npy per case under runs/campaigns/12-eval-v4.
+#
+# The engine path is implemented and tested:
+#   - poregen.training.latent_bank.LatentBank reads the canvases as 16^3
+#     windows, memory-mapped, and refuses a bank that mixes latent widths.
+#   - engine.train_step takes adv_fake_latents; when given, the discriminator's
+#     fake branch is decoder(z_ldm) instead of the reconstruction. The
+#     reconstruction and class losses stay on the real batch, because a sampled
+#     latent has no ground-truth label to score against.
+#   - train_vae.build_latent_bank refuses a bank whose width differs from the
+#     model's z_channels.
+#
+# The guards the D43 spec names — S2 at small r, PSD, and pore Dice between the
+# original and the refined decoder on the SAME latents — are implemented in
+# scripts/analysis/decoder_ft_redecode.py, which the post-ldm06 runner calls.

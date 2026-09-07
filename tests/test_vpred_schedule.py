@@ -361,8 +361,10 @@ def test_ldm06_base_resolves_to_a_v_schedule():
     assert cfg["noise_schedule"]["objective"] == "v"
     assert cfg["noise_schedule"]["zero_terminal_snr"] is True
     # Everything else is ldm06/base: same store, same denoiser, same budget.
-    assert cfg["data"]["latents_root"] == "data/split_v3/latents_r08z4"
-    assert UNet3DConfig.from_cfg(cfg).in_channels == 127
+    assert cfg["data"]["latents_root"] == (
+        f"data/split_v3/latents_r08z{cfg['model']['z_channels']}")
+    _z = cfg["model"]["z_channels"]
+    assert UNet3DConfig.from_cfg(cfg).in_channels == _z + 2 + 1 + 6 * _z + 48 + 48
     assert cfg["training"]["total_steps"] == 130000
 
     sch = DDPMSchedule.from_cfg(cfg)

@@ -990,6 +990,7 @@ class VolumeGenerator:
         window_batch: int = 32,
         decode_batch_size: int = 64,
         return_class_probs: bool = False,
+        return_latents: bool = False,
         seed: int | None = None,
     ) -> tuple:
         """Generate one volume: chunked joint denoising, then blended decode.
@@ -1012,6 +1013,13 @@ class VolumeGenerator:
         progress          : optional tqdm; counts DDIM steps (chunks × steps)
         window_batch      : windows per UNet forward per timestep
         decode_batch_size : latent windows decoded in one VAE forward
+        return_latents     : also return the finished latent canvas, the
+                             (C, Z, Y, X) float32 array the decoder consumed.
+                             Kept for the decoder fine-tune: comparing two
+                             decoders is only meaningful on the SAME latents,
+                             and regenerating them from a seed re-runs the
+                             whole sampler to get an array the first run
+                             already had.
         return_class_probs: also return the blended per-voxel class
                             probabilities, (3, D, H, W) float32
         seed              : makes the generation reproducible.  Every random
@@ -1125,9 +1133,12 @@ class VolumeGenerator:
             "actual_label_air": actual_air,
             **seam_stats,
         }
+        extra: tuple = ()
         if return_class_probs:
-            return xct_u8, label, stats, probs.astype(np.float32)
-        return xct_u8, label, stats
+            extra = extra + (probs.astype(np.float32),)
+        if return_latents:
+            extra = extra + (np.asarray(z_clean, dtype=np.float32),)
+        return (xct_u8, label, stats) + extra
 
     @staticmethod
     def save_tiff(

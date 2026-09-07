@@ -119,6 +119,16 @@ machine, not locally.
 - Discriminator intentionally runs in `float32` (spectral norm power iteration is
   less accurate in bfloat16) — do not wrap it in autocast
 
+## Running the tests while a job holds the GPU
+
+Hide the card: `CUDA_VISIBLE_DEVICES= python -m pytest tests/ -q`.
+
+Several tests allocate CUDA memory, and with a training run resident they fail
+with `torch.AcceleratorError: CUDA error: out of memory` rather than anything
+about the code. The symptom is confusing because it depends on what else is
+running: a file passes on its own and fails in a group, so it reads as a test
+ordering bug. It is not — those tests do not need the GPU to be meaningful.
+
 ## Running analysis alongside training
 
 The GPU is shared. Analysis and diagnostic scripts must set

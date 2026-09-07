@@ -186,6 +186,7 @@ def train_step(
     discriminator: nn.Module | None = None,
     disc_optimizer: torch.optim.Optimizer | None = None,
     disc_weight: float = 0.01,
+    adv_fake_latents: torch.Tensor | None = None,
 ) -> tuple[dict[str, Any], float, dict[str, Any], dict[str, float]]:
     """Single training step with AMP, optional gradient clipping, and scheduler.
 
@@ -201,6 +202,14 @@ def train_step(
     disc_weight : float
         Scale factor applied to the generator adversarial loss before adding it
         to the VAE total loss.  Typical range: 0.001–0.05.
+    adv_fake_latents : optional (B, C, 16, 16, 16)
+        LDM-sampled latents.  When given, the discriminator's FAKE branch is
+        ``decoder(adv_fake_latents)`` instead of the model's reconstruction of
+        the real batch — D43 option 2, the refiner.  The reconstruction and
+        class losses are untouched and stay on the real batch, because a
+        sampled latent carries no ground-truth label to score against.  This
+        is the whole difference between option 1 and option 2: what the
+        discriminator calls "fake".
 
     Returns
     -------
@@ -233,8 +242,16 @@ def train_step(
     _gen_adv_loss: torch.Tensor | None = None
 
     if discriminator is not None and disc_optimizer is not None and disc_weight > 0.0:
+        if adv_fake_latents is not None:
+            # Refiner: score the decoder on the distribution it meets in
+            # production. Gradients reach the decoder through this forward,
+            # which is why it runs inside autocast like the main pass.
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                fake_xct = model.xct_head(model.decoder(adv_fake_latents.to(device)))
+        else:
+            fake_xct = output.xct_out
         # Cast from AMP dtype (fp16/bf16) to float32 — D runs in float32
-        _fake_slices = extract_multiplane_slices(output.xct_out).float()   # (3B,1,64,64)
+        _fake_slices = extract_multiplane_slices(fake_xct).float()   # (3B,1,64,64)
         _real_slices = extract_multiplane_slices(xct).float()                  # (3B,1,64,64)
 
         # Generator wants D(fake) → 1; gradients flow through D back to the VAE
@@ -616,6 +633,7 @@ def train_loop(
     discriminator: nn.Module | None = None,
     disc_optimizer: torch.optim.Optimizer | None = None,
     disc_weight: float = 0.01,
+    latent_bank: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Training loop with full real-time TensorBoard monitoring.
 
@@ -818,6 +836,28 @@ def train_loop(
     # 3 s/batch is ~3x the measured rate, so a legitimate full eval never
     # trips it, while the failure it exists for (vrrae-run-0001 wedged for
     # 10.5 h) is still caught with hours to spare.
+    # ── refiner latent bank (D43 option 2) ───────────────────────────────
+    # Drawn independently of the real batch: the two branches answer different
+    # questions ("is this reconstruction sharp" vs "is this generation sharp")
+    # and pairing them by index would only correlate the noise.
+    _bank_iter = None
+    if latent_bank is not None:
+        _bank_loader = torch.utils.data.DataLoader(
+            latent_bank, batch_size=train_loader.batch_size, shuffle=True,
+            num_workers=0, drop_last=True,
+        )
+        _bank_iter = iter(_bank_loader)
+
+    def _next_bank_batch():
+        nonlocal _bank_iter
+        if _bank_iter is None:
+            return None
+        try:
+            return next(_bank_iter)
+        except StopIteration:
+            _bank_iter = iter(_bank_loader)
+            return next(_bank_iter)
+
     _max_eval_batches = max(
         len(val_loader) if val_loader is not None else 0,
         len(test_loader) if test_loader is not None else 0,
@@ -847,6 +887,7 @@ def train_loop(
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
+                adv_fake_latents=_next_bank_batch(),
             )
             _step_elapsed = time.perf_counter() - _step_t0
             step_time_ms  = _step_elapsed * 1000.0

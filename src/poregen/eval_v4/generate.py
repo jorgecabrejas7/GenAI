@@ -135,6 +135,7 @@ class VolumeRunner:
         latents_root: str | Path | None = None,
         device: torch.device | None = None,
         repo: str | Path | None = None,
+        save_latents: bool = False,
     ) -> None:
         import yaml  # noqa: PLC0415
 
@@ -150,6 +151,11 @@ class VolumeRunner:
         self.run_dir = Path(run_dir).resolve()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.git_commit = head_commit(self.repo)
+        # Keep the latent canvas beside each case. The decoder fine-tune gate
+        # has to compare two decoders on IDENTICAL latents, and regenerating
+        # them from a seed re-runs the whole sampler to rebuild an array this
+        # run already held in memory.
+        self.save_latents = bool(save_latents)
 
         ckpt_path, step = _ckpt_path(self.run_dir, ckpt)
         self.checkpoint_path = ckpt_path
@@ -257,7 +263,7 @@ class VolumeRunner:
 
         t0 = time.perf_counter()
         with torch.no_grad():
-            xct_u8, label_u8, stats, probs = generator.generate(
+            gen_out = generator.generate(
                 volume_size_mm=size_mm,
                 target_porosity=spec.target_phi,
                 autocast_dtype=self.autocast_dtype,
@@ -268,8 +274,11 @@ class VolumeRunner:
                 window_batch=WINDOW_BATCH,
                 decode_batch_size=DECODE_BATCH,
                 return_class_probs=True,
+                return_latents=self.save_latents,
                 seed=spec.seed,
             )
+        xct_u8, label_u8, stats, probs = gen_out[0], gen_out[1], gen_out[2], gen_out[3]
+        z_clean = gen_out[4] if self.save_latents else None
         wall = time.perf_counter() - t0
         peak = (
             int(torch.cuda.max_memory_allocated(self.device))
@@ -341,6 +350,10 @@ class VolumeRunner:
             requested_field=tile_field,
             requested_material=material_map if voxel_material is not None else None,
         )
+        if z_clean is not None:
+            # float16: the decoder runs under bfloat16 autocast anyway, which
+            # carries FEWER mantissa bits, so this is lossless for re-decoding.
+            np.save(Path(case_dir) / "latents.npy", z_clean.astype(np.float16))
         logger.info(
             "%s/%s  phi=%.4f air=%.4f  %.1f min",
             spec.assessment, spec.name,

@@ -185,6 +185,142 @@ def load_vae_from_checkpoint(
     return model, cfg, cfg_text, run_dir
 
 
+def apply_transfer(
+    cfg: dict[str, Any],
+    model: torch.nn.Module,
+    repo_root: Path,
+    *,
+    init: bool = True,
+) -> dict[str, Any]:
+    """Initialise from another run's weights and freeze part of the model.
+
+    Two optional ``training`` keys, both no-ops when absent, so every existing
+    experiment is unaffected::
+
+        training:
+          init_from_checkpoint: runs/vae/<run>/best.ckpt
+          freeze_modules: [encoder_a, encoder_b, fusion, to_mu, to_logvar]
+
+    This exists for the decoder fine-tune (``r08/decoder-ft``): start from the
+    chosen rung's weights and train only the decoder, so the latent space the
+    LDM was built on cannot move underneath it.
+
+    A frozen name that does not match a real child is an ERROR, not a warning.
+    The whole point is that the encoder does not move, and a typo that silently
+    froze nothing would produce a run that looks right, trains everything, and
+    invalidates the latent store without ever saying so.
+
+    Returns a dict recorded in run metadata, so the run's own provenance says
+    what it started from and what it held fixed.
+    """
+    training_cfg = cfg.get("training", {})
+    info: dict[str, Any] = {}
+
+    # The adversarial signal's source. "recon" is what train_step implements:
+    # the discriminator sees the model's own reconstruction of a real patch.
+    # "ldm_latents" (D43 option 2, the refiner fallback) would instead decode
+    # LDM-sampled latents and score those against real patches, which
+    # train_step cannot do — it never sees an LDM. Refusing here is the point:
+    # a config asking for the refiner would otherwise train option 1 silently
+    # and report it under the fallback's name.
+    adv_source = training_cfg.get("adversarial_source", "recon")
+    if adv_source not in ("recon", "ldm_latents"):
+        raise ValueError(
+            f"training.adversarial_source={adv_source!r} is not a known source. "
+            "Use 'recon' (the discriminator sees the model's reconstruction of a "
+            "real patch) or 'ldm_latents' (it sees decoder(z) for LDM-sampled z)."
+        )
+    if adv_source == "ldm_latents" and not training_cfg.get("latent_bank_root"):
+        # Without a bank there is nothing to decode, and the run would fall
+        # back to the option-1 objective while reporting itself as option 2.
+        raise ValueError(
+            "training.adversarial_source='ldm_latents' needs training.latent_bank_root "
+            "— the campaign holding latents.npy files from "
+            "`eval_v4 generate --save-latents`. Without it the discriminator would "
+            "see reconstructions, i.e. option 1 under option 2's name."
+        )
+    if adv_source != "recon":
+        info["adversarial_source"] = adv_source
+
+    ckpt_ref = training_cfg.get("init_from_checkpoint") if init else None
+    if ckpt_ref:
+        ckpt = Path(ckpt_ref)
+        if not ckpt.is_absolute():
+            ckpt = repo_root / ckpt
+        if not ckpt.exists():
+            raise FileNotFoundError(f"training.init_from_checkpoint does not exist: {ckpt}")
+        # restore_rng=False and no optimizer: this is a fresh run that borrows
+        # weights, not a resume. Restoring the RNG would make the fine-tune
+        # replay the parent's data order.
+        step, _ = load_checkpoint(
+            str(ckpt), model=model, map_location="cpu", restore_rng=False
+        )
+        info["init_from_checkpoint"] = str(ckpt)
+        info["init_from_step"] = int(step)
+        logger.info("Initialised weights from %s (step %s)", ckpt, step)
+
+    freeze = list(training_cfg.get("freeze_modules") or [])
+    if freeze:
+        children = dict(model.named_children())
+        missing = [n for n in freeze if n not in children]
+        if missing:
+            raise ValueError(
+                f"training.freeze_modules names no such submodule: {missing}. "
+                f"Available: {sorted(children)}"
+            )
+        frozen_params = 0
+        for name in freeze:
+            for p in children[name].parameters():
+                p.requires_grad_(False)
+                frozen_params += p.numel()
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        info["freeze_modules"] = freeze
+        info["frozen_params"] = frozen_params
+        info["trainable_params"] = trainable
+        logger.info(
+            "Froze %s: %d params frozen, %d trainable of %d (%.1f%%)",
+            ", ".join(freeze), frozen_params, trainable, total, 100.0 * trainable / total,
+        )
+        if trainable == 0:
+            raise ValueError("freeze_modules left nothing trainable.")
+    return info
+
+
+def build_latent_bank(cfg: dict[str, Any], repo_root: Path):
+    """The LDM latent bank for the refiner fine-tune, or None.
+
+    Only built when ``training.adversarial_source`` is ``ldm_latents``;
+    ``apply_transfer`` has already refused that source without a bank root.
+    """
+    training_cfg = cfg.get("training", {})
+    if training_cfg.get("adversarial_source", "recon") != "ldm_latents":
+        return None
+    from poregen.training.latent_bank import LatentBank, discover_latents
+
+    root = Path(training_cfg["latent_bank_root"])
+    if not root.is_absolute():
+        root = repo_root / root
+    paths = discover_latents(root)
+    if not paths:
+        raise FileNotFoundError(
+            f"no latents.npy under {root}. Generate them first with "
+            "`eval_v4 generate <assessment> --save-latents`."
+        )
+    bank = LatentBank(paths, stride=int(training_cfg.get("latent_bank_stride", 16)))
+    z = int(cfg["model"]["z_channels"])
+    if bank.channels != z:
+        # A width mismatch would surface as a shape error deep in the decoder
+        # thousands of steps in; the bank must come from the VAE being refined.
+        raise ValueError(
+            f"the latent bank is {bank.channels}-channel but the model is z={z}. "
+            "The bank must come from the same VAE this fine-tune is refining."
+        )
+    logger.info("Latent bank: %d windows from %d canvases under %s",
+                len(bank), len(paths), root)
+    return bank
+
+
 def build_discriminator(
     cfg: dict[str, Any],
     device: torch.device,
@@ -240,8 +376,12 @@ def build_optimizer(
 ) -> torch.optim.Optimizer:
     """Construct the configured optimizer."""
     training_cfg = cfg["training"]
+    # Only trainable parameters. AdamW handed a frozen parameter still carries
+    # optimiser state for it, and weight decay would act on it the moment a
+    # grad appeared — a silent way for a "frozen" encoder to drift.
+    params = [p for p in model.parameters() if p.requires_grad]
     return torch.optim.AdamW(
-        model.parameters(),
+        params,
         lr=training_cfg["lr"],
         weight_decay=training_cfg["weight_decay"],
     )
@@ -429,6 +569,10 @@ def run_experiment(
     save_resolved_config(run_ctx.run_dir, cfg)
 
     model = build_model(cfg, device)
+    transfer_info = apply_transfer(cfg, model, resolved.repo_root)
+    if transfer_info:
+        update_run_metadata(run_ctx.run_dir, {"transfer": transfer_info})
+    latent_bank = build_latent_bank(cfg, resolved.repo_root)
     optimizer = build_optimizer(cfg, model)
     scheduler = build_scheduler(cfg, optimizer)
     loss_fn = _make_loss_fn(cfg)
@@ -510,6 +654,7 @@ def run_experiment(
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
+                latent_bank=latent_bank,
             )
         except Exception as exc:
             update_run_metadata(
@@ -565,6 +710,12 @@ def resume_run(
     save_resolved_config(run_dir, cfg)
 
     model = build_model(cfg, device)
+    # init=False: the weights come from this run's own checkpoint below.
+    # The freeze must still be re-applied or the encoder unfreezes on resume.
+    apply_transfer(cfg, model, repo, init=False)
+    # A resumed refiner needs its bank rebuilt too, or the adversarial
+    # branch silently reverts to reconstructions on resume.
+    latent_bank = build_latent_bank(cfg, repo)
     optimizer = build_optimizer(cfg, model)
     scheduler = build_scheduler(cfg, optimizer)
 
@@ -661,6 +812,7 @@ def resume_run(
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
+                latent_bank=latent_bank,
             )
         except Exception as exc:
             update_run_metadata(

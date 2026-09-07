@@ -425,7 +425,8 @@ class TestConfig:
         assert decoded.w_porosity_consistency == 1.0
         assert decoded.w_grey_agreement == 0.5
         # Everything else is ldm06/base — the rung differs by the loss alone.
-        assert cfg["data"]["latents_root"] == "data/split_v3/latents_r08z4"
+        assert cfg["data"]["latents_root"] == (
+            f"data/split_v3/latents_r08z{cfg['model']['z_channels']}")
         assert cfg["training"]["seed"] == 42
         assert cfg["training"]["total_steps"] == 130000
 

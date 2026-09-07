@@ -1,0 +1,63 @@
+experiment:
+  name: r08
+  variant: decoder-ft
+  description: >-
+    Option 1 of D43 — decoder-only fine-tune of the production VAE
+    (r08/reduction-factor-8, run-0004) to recover high-frequency texture the
+    reconstruction loss under-weights. Encoder, fusion, the moment heads and
+    the class head are frozen; only the decoder trunk and the XCT head move.
+    The discriminator weight goes from 0.05 to 0.2. Target ~0.5 GPU-day.
+
+extends: r08/reduction-factor-8
+
+overrides:
+  training:
+    # Start from the chosen rung's weights, not from scratch.
+    init_from_checkpoint: runs/vae/r08-run-0004-20260904-035134-archv2-conv_noattn_dualbranch_cls-z8-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt
+
+    # THE LATENT SPACE MUST NOT MOVE. data/split_v3/latents_r08z8 (272 GB) was
+    # encoded with these exact weights and ldm06 is training on it right now. If
+    # the encoder drifts, every latent in that store becomes stale and both the
+    # store and the LDM run built on it are invalid. Freezing is what makes this
+    # a decoder fine-tune rather than a second VAE.
+    #
+    # class_head is frozen too, per the D43 spec. Note what that does and does
+    # NOT buy — see the loss block below.
+    freeze_modules: [encoder_a, encoder_b, fusion, to_mu, to_logvar, class_head]
+
+    # A fine-tune, not a training run: 2e-4 is the from-scratch rate and would
+    # walk the decoder off a solution that is already good.
+    lr: 5.0e-5
+    total_steps: 12000
+    warmup_steps: 200
+    early_stopping_warmup_steps: 2000
+    early_stopping_patience: 0
+    early_stopping_patience_steps: 3000
+    # val.total is dominated by terms the frozen parts own (KL cannot move at
+    # all). The adversarial run is judged on sharpness against unchanged
+    # segmentation, and that is what the gates in the campaign README check.
+    early_stopping_metric: val.xct_loss
+
+  discriminator:
+    # 0.05 -> 0.2, the low end of the D43 range. The decoder is 208k trainable
+    # parameters against an 83M-parameter LDM downstream of it; an adversarial
+    # term strong enough to visibly sharpen is also strong enough to invent
+    # texture, and 0.5 is available if 0.2 does not move sharpness.
+    disc_weight: 0.2
+
+  loss:
+    # THE CLASS LOSSES STAY ON, AND THIS IS NOT OPTIONAL.
+    #
+    # xct_head and class_head are both 1x1 convs reading the SAME decoder trunk
+    # output (`dec = self.decoder(z)`, then two heads). Freezing class_head
+    # therefore does NOT hold the class predictions still: 99 frozen parameters
+    # sit downstream of 207 936 trainable ones, and anything the adversarial
+    # term does to the trunk changes the class logits too.
+    #
+    # Keeping the class loss active is what actually holds segmentation in
+    # place, by putting a gradient on the trunk that opposes any drift. Setting
+    # these to 0 would make the run look like a clean "decoder-only" fine-tune
+    # while quietly destroying pore Dice — the failure the D43 gates are there
+    # to catch, arrived at deliberately.
+    class_ce_weight: 1.0
+    class_dice_weight: 1.0

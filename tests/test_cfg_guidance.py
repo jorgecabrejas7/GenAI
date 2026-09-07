@@ -138,7 +138,8 @@ def test_ldm06_config_resolves() -> None:
 
     cfg = resolve_experiment("ldm06/base").cfg
 
-    assert UNet3DConfig.from_cfg(cfg).in_channels == 127
+    _z = cfg["model"]["z_channels"]
+    assert UNet3DConfig.from_cfg(cfg).in_channels == _z + 2 + 1 + 6 * _z + 48 + 48
     # Three distinct strides.  sample_stride stays 32 as a training-data
     # multiplier; the tiling grid and the neighbour relation are 64 so that
     # neighbours share no voxel with the target.
@@ -146,7 +147,8 @@ def test_ldm06_config_resolves() -> None:
     assert cfg["data"]["generation_stride"] == 64
     assert cfg["data"]["neighbour_offset"] == 64
     assert cfg["data"]["latent_mode"] == "sampled"
-    assert cfg["data"]["latents_root"] == "data/split_v3/latents_r08z4"
+    assert cfg["data"]["latents_root"] == (
+        f"data/split_v3/latents_r08z{cfg['model']['z_channels']}")
     # The ldm05 switches must not come back through an inherited config.
     for gone in ("use_por_cond", "use_neighbor_cond", "use_orient_cond",
                  "use_pos_cond", "use_por_null", "use_avail_embedding",
