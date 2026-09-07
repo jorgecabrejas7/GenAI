@@ -11,7 +11,8 @@
 # Start it AFTER ldm06/base is training: it waits for the GPU to go quiet, so
 # starting it early would make it jump into ldm06's gap, not wait for it.
 #
-# Usage:  bash scripts/r08_queue_tail.sh
+# Usage:  bash scripts/r08_queue_tail.sh              # rungs, then the owed reports
+#         bash scripts/r08_queue_tail.sh reports-only # only the owed reports
 set -uo pipefail          # deliberately NOT -e: a failing rung must not kill the chain
 
 REPO=/home/jorgecabrejas/Dev/GenAI
@@ -19,6 +20,9 @@ CAMP="$REPO/runs/campaigns/09-r08-latent-sweep"
 SCRATCH=/tmp/claude-1001/-home-jorgecabrejas-Dev-GenAI/ce0b3db0-2aa0-4a97-9bc4-7bb0db078739/scratchpad
 LOG="$CAMP/queue.log"
 RUNGS=(reduction-factor-2 reduction-factor-64)
+# reports-only clears the debt on an idle GPU without committing it to ~26 h of
+# training, so the chosen rung can start its latent store the moment it is picked.
+[ "${1:-}" = "reports-only" ] && RUNGS=()
 # Every rung that should end up in the final paper table, in sweep order.
 ALL_RUNGS=(reduction-factor-2 base reduction-factor-8 reduction-factor-32 reduction-factor-4 reduction-factor-64)
 
@@ -84,8 +88,8 @@ if pgrep -f "scripts/train_(vae|ldm)\.py run " >/dev/null 2>&1; then
     say "WAIT done"
 fi
 
-say "QUEUE start; rungs: ${RUNGS[*]}"
-for exp in "${RUNGS[@]}"; do
+say "QUEUE start; rungs: ${RUNGS[*]:-<none, reports only>}"
+for exp in ${RUNGS[@]+"${RUNGS[@]}"}; do
     say "START r08/$exp"
     python scripts/train_vae.py run "r08/$exp" > "$SCRATCH/r08_${exp}.log" 2>&1
     rc=$?
