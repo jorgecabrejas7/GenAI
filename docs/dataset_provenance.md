@@ -49,8 +49,16 @@ files the memmap backend actually reads, so a root whose `.bin` files are gone
 falls back to the Zarr backend rather than failing on a missing file. Confirm
 with a one-batch load before considering the cleanup done.
 
-**5. Gates.** The `split_v2` memmap removal is gated on the r08 VAE passing its
-acceptance gates AND the r08 latent store being built and verified.
+**5. Gates.** The `split_v2` memmap removal was gated on the r08 VAE passing
+its acceptance gates AND the r08 latent store being built and verified. **That
+second condition turned out to be circular** and was dropped on 2026-09-07: the
+z=8 store needs 291 GB, the build guard wants twice that, and only 340 GB was
+free — so the store could not be built until the memmaps went, and the memmaps
+were not to go until the store was built. What actually gated the deletion was
+the first condition alone: the sweep finished, `reduction-factor-8` was chosen
+on the four-rung table, and the store build was already queued against that
+checkpoint. If you write a gate like this again, check it can be satisfied in
+the order it names.
 `latents_r07z4/` is NOT part of that removal; it goes only after ldm06 is
 evaluated.
 
@@ -269,7 +277,22 @@ rung chosen. Nothing in this root depends on them.
 
 ## `data/split_v2`
 
-Written 2026-09-02, before the memmaps are deleted, so the root can be rebuilt
+> **DONE 2026-09-07 — the memmaps are gone.** `patches_xct.bin` and
+> `patches_mask.bin` (596 GB each, 1.19 TB together) were unlinked on the
+> user's instruction once `r08/reduction-factor-8` was chosen as the production
+> rung. Freed the space the z=8 latent store needed: 340 GB free before,
+> 1.5 TB after. Everything in the survival table below is intact, and
+> `volumes.zarr` is still a symlink resolving to `data/split_v1/volumes.zarr`.
+>
+> **Consequence: no r03–r07 config can run on the memmap backend any more.**
+> `build_patch_dataloaders` checks for the files the memmap backend actually
+> reads and falls back to Zarr when they are absent, so those configs still
+> load — slower, off `volumes.zarr`, not broken. Anything that needs the old
+> binary-mask memmap layout has to rebuild it, and the extractor as it stands
+> emits the 3-class `patches_label.bin` instead, so that layout cannot be
+> recreated from this tree at all.
+
+Written 2026-09-02, before the memmaps were deleted, so the root can be rebuilt
 from raw data without reading the code archaeology again.
 
 **`volumes.zarr` here is a symlink**, not data:
@@ -391,7 +414,9 @@ Steps 2 and 3 are cheap given the zarr.
 | `orientation_field.json` | read at training AND sampling time by `split_v3` too; rebuilding it needs the T-I artefacts |
 | `latents_r07z4/` | campaigns 02–08 and ldm05 all resolve through it |
 
-`patches_xct.bin` and `patches_mask.bin` (596 GB each) are the only entries a
-cleanup should remove. `build_patch_dataloaders` checks for the files it
-actually reads, so once they are gone this root falls back to the Zarr backend
-and still loads.
+`patches_xct.bin` and `patches_mask.bin` (596 GB each) were the only entries
+the cleanup removed, on 2026-09-07. `build_patch_dataloaders` checks for the
+files it actually reads, so this root now falls back to the Zarr backend and
+still loads. Verified after the deletion: both `volumes.zarr` symlinks still
+resolve to `data/split_v1/volumes.zarr` (209 GB) and `latents_r07z4/` (148 GB)
+is untouched.
