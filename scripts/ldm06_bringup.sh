@@ -80,46 +80,64 @@ rc=$?; say "VERIFY rc=$rc"
 [ "$rc" -eq 0 ] || die "LatentDataset verification failed; see $SCRATCH/ldm06_verify.log"
 grep -q "VERIFY OK" "$SCRATCH/ldm06_verify.log" || die "verification did not reach VERIFY OK"
 
-# 4. point ldm06 at the store this rung produced, in one explicit commit.
-#    Editing the config silently would make "which store did ldm06 read?"
-#    unanswerable months later; committing it makes the switch attributable and
-#    revertable. Only this one key, and only to this one value — every other
-#    mismatch is still a refusal.
-say "CONFIG set ldm06/base data.latents_root -> data/split_v3/latents_r08z${Z}"
-python - "$Z" <<'PY'
+# 4. point ldm06 at the rung that was chosen, in one explicit commit.
+#    THREE fields are rung-derived, not one: the latent store, the latent width
+#    the UNet expects, and the frozen VAE checkpoint (train_ldm refuses to start
+#    when that does not match the store's own metadata). Setting only the store
+#    would build for hours and then fail at launch on the REPLACE-ME
+#    placeholder. Committing rather than editing in place keeps which store,
+#    which width and which VAE a run used answerable from git alone.
+say "CONFIG set ldm06/base -> z=${Z}, store latents_r08z${Z}, vae ${CKPT#$REPO/}"
+python - "$Z" "${CKPT#$REPO/}" <<'PY'
 import sys, pathlib, re
-z = sys.argv[1]
+z, ckpt = sys.argv[1], sys.argv[2]
 p = pathlib.Path("/home/jorgecabrejas/Dev/GenAI/configs/experiments/ldm06/base.yaml")
-want = f"data/split_v3/latents_r08z{z}"
 s = p.read_text()
-m = re.search(r"^(\s*latents_root:[ \t]*)(\S+)[ \t]*$", s, re.M)
-if m is None:
-    print("no latents_root key in ldm06/base.yaml — refusing to invent one")
-    sys.exit(3)
-if m.group(2) == want:
-    print(f"latents_root already {want}")
+want = {
+    "latents_root": f"data/split_v3/latents_r08z{z}",
+    "z_channels": z,
+    "checkpoint": ckpt,
+}
+changed = []
+for key, val in want.items():
+    m = re.search(rf"^(\s*{key}:[ \t]*)(\S+)[ \t]*$", s, re.M)
+    if m is None:
+        print(f"no {key} key in ldm06/base.yaml — refusing to invent one")
+        sys.exit(3)
+    if m.group(2) == val:
+        continue
+    s = s[: m.start()] + m.group(1) + val + s[m.end() :]
+    changed.append(f"{key}: {m.group(2)} -> {val}")
+if not changed:
+    print("ldm06/base already points at this rung")
     sys.exit(0)
-p.write_text(s[: m.start()] + m.group(1) + want + s[m.end() :])
-print(f"latents_root {m.group(2)} -> {want}")
+p.write_text(s)
+print("\n".join(changed))
 sys.exit(10)
 PY
 rc=$?
 if [ "$rc" -eq 10 ]; then
-    git -C "$REPO" commit -q -m "config: ldm06/base reads the chosen rung's latent store (z=${Z})
+    git -C "$REPO" commit -q -m "config: ldm06/base reads the chosen r08 rung (z=${Z})
 
-The r08 compression sweep chose z=${Z}, so ldm06 trains on
-data/split_v3/latents_r08z${Z}. Written by scripts/ldm06_bringup.sh as a
-commit rather than an in-place edit: which store a run read is exactly the
-kind of fact that has to survive to the paper.
+The r08 compression sweep chose z=${Z}. Three fields are rung-derived and all
+three move together: data.latents_root -> data/split_v3/latents_r08z${Z},
+model.z_channels -> ${Z} (the UNet input is z + 2 orient + 1 material +
+6*z neighbours + 48 availability + 48 nb_t, so the width follows the latent),
+and vae.checkpoint -> the rung's own best.ckpt, which train_ldm checks against
+the store's recorded encoder before it will start.
+
+Written by scripts/ldm06_bringup.sh as a commit rather than an in-place edit:
+which store, which latent width and which VAE a run read is exactly the kind
+of fact that has to survive to the paper.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>" \
         -- configs/experiments/ldm06/base.yaml \
-        || die "could not commit the latents_root change"
+        || die "could not commit the ldm06/base changes"
     say "CONFIG committed $(git -C "$REPO" rev-parse --short HEAD)"
 elif [ "$rc" -eq 0 ]; then
     say "CONFIG already correct"
 else
-    die "could not set latents_root (rc=$rc)"
+    die "could not point ldm06/base at the chosen rung (rc=$rc)"
 fi
 
 # 5. launch
