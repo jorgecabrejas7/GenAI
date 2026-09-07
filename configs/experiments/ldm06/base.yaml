@@ -37,7 +37,7 @@ loss: {}
 
 model:
   type: unet3d
-  z_channels: 4
+  z_channels: 8
   base_channels: 128
   channel_mult: [1, 2, 4]
   n_res_blocks: 2
@@ -94,7 +94,7 @@ vae:
   # train_ldm._load_vae_decoder compares the two and refuses to start on a
   # mismatch.  Decoding with a different VAE than the encoder that produced the
   # latents is silently wrong, so it must be a hard stop, not a guess.
-  checkpoint: runs/vae/r08-run-REPLACE-ME/best.ckpt
+  checkpoint: runs/vae/r08-run-0004-20260904-035134-archv2-conv_noattn_dualbranch_cls-z8-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt
 
 training:
   seed: 42
@@ -168,7 +168,7 @@ generation:
   window_batch: 32
 
 data:
-  latents_root: data/split_v3/latents_r08z4
+  latents_root: data/split_v3/latents_r08z8
   latent_mode: sampled     # z = μ + σ·ε per batch (normalised space); 'mean' uses μ
   # Three distinct parameters.  sample_stride stays 32: it is only a
   # training-data multiplier.  The store holds eight interleaved copies of the
