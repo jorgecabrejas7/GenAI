@@ -9,6 +9,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import tifffile
 
+#: Required in every export.  A 3-class variant adds ``label_recon`` on top —
+#: :func:`export_patch_sample_split` writes whatever keys it is handed, and
+#: only these four are compulsory.
 PATCH_SAMPLE_KEYS = ("xct_gt", "mask_gt", "xct_recon", "mask_recon")
 
 
@@ -40,7 +43,11 @@ def export_patch_sample_split(
     arrays: Mapping[str, np.ndarray],
     metas: Sequence[dict[str, Any]] | None = None,
 ) -> Path:
-    """Export all saved samples for one split into per-patch TIFF stacks."""
+    """Export all saved samples for one split into per-patch TIFF stacks.
+
+    Every key of *arrays* becomes one TIFF per sample; :data:`PATCH_SAMPLE_KEYS`
+    are the ones that must be present.
+    """
     split_dir = Path(split_dir)
     split_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,7 +68,7 @@ def export_patch_sample_split(
         sample_dir = split_dir / f"sample_{sample_idx:03d}"
         sample_dir.mkdir(parents=True, exist_ok=True)
 
-        for key in PATCH_SAMPLE_KEYS:
+        for key in arrays:
             write_imagej_volume(sample_dir / f"{key}.tiff", arrays[key][sample_idx])
 
         meta = dict(metas[sample_idx])

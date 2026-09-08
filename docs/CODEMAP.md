@@ -98,7 +98,7 @@ companion docs listed under [docs/](#docs).
 | `training/checkpoint.py` | Atomic checkpoint save/load (model, optimizer, scaler, scheduler, EMA, RNG), sync + async variants. |
 | `training/device.py` | Device selection, autocast dtype, GradScaler. |
 | `training/seed.py` | `seed_everything`. |
-| `training/sample_export.py` | Writes saved 3-D patch samples as ImageJ-readable TIFF stacks; migrates legacy `.npz` archives. |
+| `training/sample_export.py` | Writes saved 3-D patch samples as ImageJ-readable TIFF stacks; migrates legacy `.npz` archives. One TIFF per array handed in — `PATCH_SAMPLE_KEYS` are the compulsory four, and a 3-class run adds `label_recon`. |
 
 ### diffusion
 
@@ -169,7 +169,7 @@ real-vs-real floor.
 | Path | What it does |
 |---|---|
 | `build_split_v3.py` | Builds `data/split_v3/` in stages (`holes | splits | index | resplit | weights | report`): detects the drilled registration holes per volume, splits by PANEL (not by coupon — sibling coupons of one panel share microstructure and would leak), writes the patch index with hole-touching patches dropped, applies the manual re-split (`Na_09` -> test, `Na_01` -> val, which keeps 96 % of the high-porosity training patches instead of the 8 % the porosity-bin rule alone would have left), and derives the 3-class loss weights (`sqrt_inverse` by default, normalised so `sum_c f_c w_c = 1`). |
-| `extract_patches_memmap.py` | One-time Zarr → flat `patches_{xct,label}.bin` memmap extraction, row-aligned with `patch_index.parquet`. `patches_label.bin` holds the 3-class voxel label (0 material, 1 pore, 2 air = `sample_mask == 0`); air takes precedence over pore. Refuses to start when the filesystem cannot hold both arrays. |
+| `extract_patches_memmap.py` | One-time Zarr → flat `patches_{xct,label}.bin` memmap extraction, row-aligned with `patch_index.parquet`. `patches_label.bin` holds the 3-class voxel label (0 material, 1 pore, 2 air = `sample_mask == 0`); air takes precedence over pore. Refuses to start when the filesystem cannot hold both arrays. Resumable per volume; on resume the volumes finished earlier are counted again from the written label array, so `patches_meta.json` (and the 3-class weights derived from it) always describes the whole extraction. |
 | `build_latent_dataset.py` | Encodes every patch with a trained VAE (encoder inputs read off the model's `encoder_inputs`) → raw `mu`/`std` memmap + train-split normalisation stats, AND `material.bin`/`air.bin` pooled from the same label tensor in the same pass. Builds the `latents_r08z4` store. |
 | `build_conditioning.py` | Builds the per-split `cond.parquet` sidecar (`cond_depth`, six `cond_dist6_*`, `cond_por_raw`) and the `conditioning` metadata block, reusing `data/split_v2/orientation_field.json` after asserting every store volume has a record and a foreground extent. `--rebuild-orientation` re-derives that field from the T-I fit + expert ground truth — the provenance of the artefact. |
 
@@ -338,10 +338,11 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 | `test_config_loading.py`, `test_train_vae_migration.py` | Config loading, experiment resolution, run naming, cloning. |
 | `test_volume_split_counts.py`, `test_split_dataset_roots.py` | Deterministic and stratified split assignment, split roots. |
 | `test_patch_coords_count.py`, `test_integral_porosity.py`, `test_dataset_loader_shapes.py` | Patch coordinates, integral-volume porosity, dataset tensor shapes/ranges. |
+| `test_extract_patches_resume.py` | `extract_patches_memmap.py` interrupted after one volume and resumed: the metadata label fractions must match a single uninterrupted run, and the patches themselves must be identical. |
 | `test_vae_output_shapes.py`, `test_losses_smoke.py` | VAE forward shapes; loss finiteness. |
 | `test_vrrae_vae.py`, `test_vrrae_linear.py`, `test_vrrae_bottleneck.py`, `test_vrrae_finetune.py` | VRRAE family: shapes, gradients, registry, fixed-basis round-trip. |
 | `test_recon_metrics.py`, `test_latent_metrics.py` | Recon metrics + eval loop wiring; latent moment merging and active units. |
-| `test_early_stopping.py`, `test_patch_sample_export.py` | `train_loop` early-stopping path; TIFF sample export. |
+| `test_early_stopping.py`, `test_patch_sample_export.py` | `train_loop` early-stopping path; TIFF sample export, including the 3-class head exporting `argmax == pore` plus `label_recon` while a binary head exports neither. |
 | `_ldm06_store.py` | Not a test — the miniature ldm06 latent store several test modules build on (patch 16, latent 4³, every patch a crop of one known field). |
 | `test_material_maps.py` | The material-map arithmetic the encoding pass performs: batched block-mean pooling, uint8 round-trip, `material + pore + air = 1`, and `compute_sample_mask`. |
 | `test_ldm06_conditioning.py` | The conditioning data side: orientation encoding/pooling rules, the touching-neighbour leak guard, `cond_dist6` (shared helper AND `build_conditioning.build_scalars` on a synthetic extent), and the `LatentDataset` batch contract. |
