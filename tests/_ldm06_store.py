@@ -30,6 +30,11 @@ DIST6_COLUMNS = ("cond_dist6_zm", "cond_dist6_zp", "cond_dist6_ym",
                  "cond_dist6_yp", "cond_dist6_xm", "cond_dist6_xp")
 
 
+def row_std(row: int) -> float:
+    """Posterior std stored for store row *row* (see ``build_store``)."""
+    return 0.05 * (1 + row % 5)
+
+
 def build_store(root: Path) -> tuple[Path, np.ndarray, int, int]:
     """Write a complete store under *root*.
 
@@ -60,7 +65,11 @@ def build_store(root: Path) -> tuple[Path, np.ndarray, int, int]:
     for i, (z0, y0, x0) in enumerate(coords):
         cz, cy, cx = z0 // ds_factor, y0 // ds_factor, x0 // ds_factor
         data[i, :C] = field[:, cz:cz + L, cy:cy + L, cx:cx + L]
-        data[i, C:] = 0.25
+        # Posterior std varies with the ROW, so a test can tell whether a
+        # neighbour's std was read from the neighbour's row or the target's.
+        # The five values are exact in float16, and the six face neighbours of
+        # any patch all land on a different residue than the patch itself.
+        data[i, C:] = row_std(i)
         cells = mat_field[cz:cz + L, cy:cy + L, cx:cx + L]
         material[i] = np.rint(cells * 255.0).astype(np.uint8)
         # The store's own invariant: air is 1 - the envelope mean, exactly.
