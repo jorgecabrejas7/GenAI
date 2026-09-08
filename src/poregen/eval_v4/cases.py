@@ -263,25 +263,38 @@ POROSITY_TARGETS = (0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10)
 OFF_MANIFOLD_TARGET = 0.15
 
 
+#: Porosity assessments run at BOTH step counts, and the reason is measured,
+#: not precautionary. The ldm06 40k diagnostic shows porosity conditioning is
+#: 5-7x worse at 200 steps than at 50: overall por_mae 0.0011-0.0014 at 50
+#: against 0.0039-0.0043 at 200, and in the fully interior neighbour bucket
+#: 0.0019-0.0021 against 0.0074-0.0075 — over the 0.005 gate. Reporting the
+#: dose response at 200 alone would measure a conditioning error that the
+#: 50-step operating point does not have, and attribute it to the model.
+POROSITY_DDIM_STEPS = (50, 200)
+
+
 def porosity_global_cases(repo=None) -> list[CaseSpec]:
     """2 - the dose response, and one request the model was never trained for."""
     plies, pitch = layup_a(repo)
     out = []
     for target in (*POROSITY_TARGETS, OFF_MANIFOLD_TARGET):
-        for seed in SEEDS:
-            out.append(CaseSpec(
-                name=f"target{target:g}_seed{seed}",
-                assessment="porosity_global",
-                volume_shape=SHAPE_SMALL,
-                seed=seed,
-                layup=plies,
-                ply_thickness_vox=pitch,
-                target_phi=target,
-                notes={
-                    "layup": "A",
-                    "off_manifold": target == OFF_MANIFOLD_TARGET,
-                },
-            ))
+        for steps in POROSITY_DDIM_STEPS:
+            for seed in SEEDS:
+                out.append(CaseSpec(
+                    name=f"target{target:g}_ddim{steps}_seed{seed}",
+                    assessment="porosity_global",
+                    volume_shape=SHAPE_SMALL,
+                    seed=seed,
+                    layup=plies,
+                    ply_thickness_vox=pitch,
+                    target_phi=target,
+                    ddim_steps=steps,
+                    notes={
+                        "layup": "A",
+                        "off_manifold": target == OFF_MANIFOLD_TARGET,
+                        "ddim_steps": steps,
+                    },
+                ))
     return out
 
 
@@ -291,17 +304,19 @@ def porosity_local_cases(repo=None) -> list[CaseSpec]:
     out = []
     for fname, fn in FIELDS.items():
         for seed in SEEDS:
-            out.append(CaseSpec(
-                name=f"{fname}_seed{seed}",
-                assessment="porosity_local",
-                volume_shape=SHAPE_SMALL,
-                seed=seed,
-                layup=plies,
-                ply_thickness_vox=pitch,
-                target_phi=TARGET_DEFAULT,
-                field_fn=fn,
-                notes={"field": fname, "layup": "A"},
-            ))
+            for steps in POROSITY_DDIM_STEPS:
+                out.append(CaseSpec(
+                    name=f"{fname}_ddim{steps}_seed{seed}",
+                    assessment="porosity_local",
+                    volume_shape=SHAPE_SMALL,
+                    seed=seed,
+                    layup=plies,
+                    ply_thickness_vox=pitch,
+                    target_phi=TARGET_DEFAULT,
+                    field_fn=fn,
+                    ddim_steps=steps,
+                    notes={"field": fname, "layup": "A", "ddim_steps": steps},
+                ))
     return out
 
 
