@@ -14,7 +14,12 @@ The four things that can silently go wrong here, and the tests that pin them:
   so, so the next reader does not attribute an ldm06 result to the wrong
   cause;
 * a CFG decomposition that stops telescoping once the network emits v instead
-  of eps, which would make s_por = s_nb = 1 quietly non-neutral.
+  of eps, which would make s_por = s_nb = 1 quietly non-neutral;
+* a DDIM step that lands the state one schedule index away from the noise level
+  the next network call assumes.  An oracle model hides that error — it returns
+  the same x0 whatever level its input is at — so the tests below drive the step
+  with a model whose answer PINS the level (x0 = 1, eps = 0) and read the
+  landing point as a noise level.
 """
 
 from __future__ import annotations
@@ -254,6 +259,97 @@ def test_the_eps_objective_lands_on_x0_too():
         t_prev = torch.full((1,), grid[i + 1], dtype=torch.long)
         x = sch.ddim_step(x, t, t_prev, eps_model(x, t))
     assert torch.allclose(x, x0, atol=1e-3)
+
+
+# ── DDIM lands on the level the next call assumes ────────────────────────────
+#
+# The two tests above cannot see an index offset: their model reconstructs x0
+# exactly from whatever state it is handed, so the chain converges on x0 even
+# if every intermediate state sits at the wrong noise level.  The oracle below
+# does not forgive that.  It answers x0 = 1 and eps = 0 — the pair the forward
+# process holds at EVERY timestep — so the state at index t is fixed to
+# ``sqrt(alpha_bar_t) * 1`` and the step's output can be read directly as the
+# noise level it landed on.
+
+_SHAPE = (1, C, D, D, D)
+
+
+def _oracle_state(sch: DDPMSchedule, t_val: int) -> torch.Tensor:
+    """The state a network call at index *t_val* assumes, for x0 = 1, eps = 0.
+
+    ``q_sample`` builds a training input at index t with ``alphas_cumprod[t]``,
+    so that — and not ``alphas_cumprod_prev[t]`` — is the level the denoiser was
+    taught to read at index t.
+    """
+    return sch.sqrt_alphas_cumprod[t_val].expand(_SHAPE).clone()
+
+
+def _oracle_out(sch: DDPMSchedule, t_val: int) -> torch.Tensor:
+    """The same oracle's output in the schedule's own objective space."""
+    if sch.objective == "eps":
+        return torch.zeros(_SHAPE)
+    # v = sqrt(alpha_bar)*eps - sqrt(1-alpha_bar)*x0 = -sqrt(1-alpha_bar)
+    return -sch.sqrt_one_minus_alphas_cumprod[t_val].expand(_SHAPE).clone()
+
+
+def _thousand_step(objective: str) -> DDPMSchedule:
+    return DDPMSchedule(T=1000, objective=objective,
+                        zero_terminal_snr=(objective == "v"))
+
+
+# The eps arm cannot start at index 999: sqrt(alpha_bar) is 6.12e-17 there and
+# predict_x0 divides by the 1e-8 guard, which is the defect ldm06 answers with
+# the v objective.  Its ladder therefore starts one rung lower.
+_TOPS = [("v", 999), ("eps", 899)]
+
+
+@pytest.mark.parametrize("objective, t_top", _TOPS)
+def test_ddim_lands_on_the_noise_level_of_the_next_network_call(objective, t_top):
+    """A step to t_prev = 499 must land at sqrt(alpha_bar[499]), exactly."""
+    sch = _thousand_step(objective)
+    t      = torch.full((1,), t_top, dtype=torch.long)
+    t_prev = torch.full((1,), 499,   dtype=torch.long)
+
+    out = sch.ddim_step(_oracle_state(sch, t_top), t, t_prev, _oracle_out(sch, t_top))
+
+    assert torch.allclose(out, _oracle_state(sch, 499), atol=1e-6)
+    # And NOT one index away.  alphas_cumprod_prev[499] is alpha_bar_499 while
+    # the call at index 499 reads alpha_bar_500; on this ladder the two differ
+    # by 1.1e-3 in sqrt(alpha_bar), 0.15 % of the level.
+    off_by_one = sch.alphas_cumprod_prev[499].sqrt()
+    assert abs(float(out.flatten()[0]) - float(off_by_one)) > 1e-4
+
+
+@pytest.mark.parametrize("objective, t_top", _TOPS)
+def test_the_terminal_ddim_step_returns_x0_exactly(objective, t_top):
+    """t_prev = 0 closes the chain, so the sample is x0 with no noise left."""
+    sch = _thousand_step(objective)
+    t      = torch.full((1,), t_top, dtype=torch.long)
+    t_prev = torch.zeros(1, dtype=torch.long)
+
+    out = sch.ddim_step(_oracle_state(sch, t_top), t, t_prev, _oracle_out(sch, t_top))
+
+    assert torch.equal(out, torch.ones(_SHAPE))
+
+
+@pytest.mark.parametrize("objective, t_top", _TOPS)
+def test_every_ddim_state_sits_where_the_next_call_expects_it(objective, t_top):
+    """The invariant over a whole ladder, not just one step."""
+    sch = _thousand_step(objective)
+    grid = torch.linspace(0, t_top, 26, dtype=torch.long).flip(0).tolist()
+    assert grid[-1] == 0
+
+    x = _oracle_state(sch, grid[0])
+    for i, t_val in enumerate(grid[:-1]):
+        t      = torch.full((1,), t_val,       dtype=torch.long)
+        t_prev = torch.full((1,), grid[i + 1], dtype=torch.long)
+        x = sch.ddim_step(x, t, t_prev, _oracle_out(sch, t_val))
+        if grid[i + 1] > 0:
+            assert torch.allclose(x, _oracle_state(sch, grid[i + 1]), atol=1e-6), (
+                f"state after the step to t_prev={grid[i + 1]} is not at that "
+                f"step's noise level"
+            )
+    assert torch.allclose(x, torch.ones(_SHAPE), atol=1e-6)
 
 
 # ── the sampler under a v schedule ───────────────────────────────────────────

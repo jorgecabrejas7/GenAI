@@ -157,6 +157,29 @@ The v form recovers `x̂₀ = sqrt(ᾱ)·x_t − sqrt(1−ᾱ)·v̂` with no div
 stays order 1. `DDPMSchedule` therefore refuses `zero_terminal_snr` with
 `objective: eps`: there the division is by exactly zero.
 
+### Where a DDIM step lands
+
+**Index convention.** `alphas_cumprod[t]` is ᾱ_{t+1} and
+`alphas_cumprod_prev[t]` is ᾱ_t. A network call at index `t` reads a state at
+`alphas_cumprod[t]` — that is what `q_sample` builds for index `t` at training
+time, and what `predict_x0` inverts. So the state `ddim_step` produces for the
+call at `t_prev` must sit at `alphas_cumprod[t_prev]`, and the sampler grid's
+final `t_prev = 0` closes the chain (no call follows) with the clean level
+ᾱ = 1, returning x̂₀ exactly.
+
+Until 2026-09-08 the step gathered `alphas_cumprod_prev[t_prev]` instead. That
+is ᾱ_{t_prev}, one index of the 1000-step ladder below the ᾱ_{t_prev+1} the
+next call assumes, so every intermediate state sat at a slightly wrong noise
+level. Size on the ldm06 schedule: up to **1.6e-3 in sqrt(ᾱ)**, and — where it
+hurts most — **3.9 % of sqrt(1−ᾱ) at `t_prev = 19`**, the bottom rung of a
+50-step ladder, because there the remaining noise is small and a fixed absolute
+error is a large relative one. The terminal step was already correct
+(`alphas_cumprod_prev[0] = ᾱ_0 = 1`), which is why the "DDIM reaches x0" tests
+never saw it: an oracle denoiser returns the same x̂₀ whatever level its input
+is at. `tests/test_vpred_schedule.py` now drives the step with an oracle whose
+answer PINS the level (x̂₀ = 1, ε̂ = 0) and reads the landing point back as a
+noise level.
+
 ### Guidance in objective space
 
 `DDIMSampler.predict_out` returns the model's RAW output and the nested CFG
