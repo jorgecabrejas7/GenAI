@@ -73,6 +73,17 @@ from the volumes alone — a metric that needed the model back could not be
 re-run after a checkpoint moved — and the report must be rebuildable after the
 volumes are deleted.
 
+**Which latent store a run is evaluated against** is the run's own
+`data.latents_root`, read from its `resolved_config.yaml`. There is no default
+and no `--latents-root` flag. Before the first model call the suite checks that
+the store's latent width equals the model's `z_channels` and that the store was
+built by the run's `vae.checkpoint`; either disagreement is a hard stop naming
+both values. A store is not interchangeable between runs — it fixes the latent
+width, the normalisation the sampler works in and the decoder — and the wrong
+one produces a plausible volume rather than an error. `measure` takes the same
+store from the manifest, so the memorisation floor compares generated patches
+against the latents the model was actually trained on.
+
 `generate --dry-run` lists every case and what it asks for, without a GPU.
 `generate` skips a case whose `manifest.json` already exists, so an interrupted
 run resumes.

@@ -566,7 +566,6 @@ def measure_microstructure(root, repo) -> dict:
     zero, so without it a generated number cannot be called large or small.
     """
     from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415
-    from poregen.eval_v4.generate import DEFAULT_LATENTS_ROOT  # noqa: PLC0415
 
     cases = load_cases(root, "microstructure")
     if not cases:
@@ -586,10 +585,18 @@ def measure_microstructure(root, repo) -> dict:
             "micro_level", case.manifest.requested_global_phi)
 
     by_level = _group(zip(rows, cases), lambda rc: float(rc[0]["micro_level"]))
-    latents_root = Path(
-        (cases[0].manifest.notes or {}).get("latents_root")
-        or Path(repo) / DEFAULT_LATENTS_ROOT
-    )
+    # The store the volumes were generated from, taken from the manifest and
+    # from nowhere else: the memorisation floor compares generated patches
+    # against the TRAINING latents, so a guessed store would answer a different
+    # question and still print a number.
+    store = (cases[0].manifest.notes or {}).get("latents_root")
+    if not store:
+        raise KeyError(
+            f"{cases[0].manifest.case}: manifest notes carry no latents_root, so the "
+            "store these volumes came from is unknown and the memorisation check "
+            "cannot be run. Regenerate the assessment."
+        )
+    latents_root = Path(store)
 
     levels: dict[str, dict] = {}
     for level in sorted(by_level):

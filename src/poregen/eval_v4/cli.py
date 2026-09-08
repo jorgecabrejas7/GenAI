@@ -44,8 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="training step, or 'best' / 'latest'")
     g.add_argument("--out", required=True, type=Path, help="campaign directory")
     g.add_argument("--weights", choices=("raw", "ema"), default="ema")
-    g.add_argument("--latents-root", type=Path, default=None,
-                   help="latent store (default data/split_v3/latents_r08z4)")
+    # No --latents-root: the store is the run's own data.latents_root, checked
+    # against the run's z_channels and VAE checkpoint before anything is
+    # generated.  A flag here would be a second, unverified answer to the one
+    # question that decides whether the output means anything.
     g.add_argument("--repo", type=Path, default=None)
     g.add_argument("--only", nargs="*", default=None,
                    help="generate only these case names")
@@ -108,8 +110,7 @@ def cmd_generate(args) -> int:
         return 0
 
     runner = VolumeRunner(
-        args.model, args.ckpt, weights=args.weights,
-        latents_root=args.latents_root, repo=repo,
+        args.model, args.ckpt, weights=args.weights, repo=repo,
         save_latents=args.save_latents,
     )
     todo = [s for s in specs
