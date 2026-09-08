@@ -53,16 +53,25 @@ WINDOW_BATCH = 32
 DECODE_BATCH = 64
 
 
-def resolve_latent_store(cfg: dict, repo: str | Path) -> tuple[Path, dict]:
+def resolve_latent_store(
+    cfg: dict,
+    repo: str | Path,
+    override: str | Path | None = None,
+) -> tuple[Path, dict]:
     """The store the run was TRAINED on, checked against the run itself.
 
-    There is no default store and no override.  A run's latent store is not a
-    property of the suite, it is a property of the run: it fixes the latent
-    width the denoiser was built for, the normalisation the sampler works in
-    and the VAE that has to decode the result.  A constant here evaluated
-    every run against one store, so a run trained on a different rung was
-    scored against latents it never saw - and, both stores being valid files,
-    it produced a volume rather than an error.
+    There is no default store.  A run's latent store is not a property of the
+    caller, it is a property of the run: it fixes the latent width the denoiser
+    was built for, the normalisation the sampler works in and the VAE that has
+    to decode the result.  A constant here evaluated every run against one
+    store, so a run trained on a different rung was scored against latents it
+    never saw - and, both stores being valid files, it produced a volume rather
+    than an error.
+
+    ``override`` names a different store by hand, for a diagnostic that has to
+    read one.  It changes only WHICH store is looked at, never whether it is
+    checked: an override that disagrees with the run raises exactly as the run's
+    own store would, so the flag cannot be used to get past a real mismatch.
 
     The two checks below are the ones that cannot be recovered from the output:
 
@@ -72,12 +81,15 @@ def resolve_latent_store(cfg: dict, repo: str | Path) -> tuple[Path, dict]:
       shape error deep in the sampler rather than as the wrong store.
     * **VAE checkpoint.** A decoder that did not produce these latents decodes
       them to a plausible volume that is silently wrong - the same hard stop
-      ``train_ldm._load_vae_decoder`` makes before training.
+      ``train_ldm._load_vae_decoder`` makes before training.  Both sides are
+      resolved to an absolute path before they are compared, because the store
+      records the checkpoint absolutely and a run config records it relative to
+      the repo: comparing the two strings would reject every correct pairing.
     """
     from poregen.models.diffusion import UNet3DConfig  # noqa: PLC0415
 
     repo = Path(repo)
-    ref = (cfg.get("data") or {}).get("latents_root")
+    ref = override or (cfg.get("data") or {}).get("latents_root")
     if not ref:
         raise KeyError(
             "resolved_config.yaml has no data.latents_root: the run does not say "
@@ -88,7 +100,7 @@ def resolve_latent_store(cfg: dict, repo: str | Path) -> tuple[Path, dict]:
     meta_path = root / "metadata.json"
     if not meta_path.exists():
         raise FileNotFoundError(
-            f"{meta_path} does not exist. The run was trained on {ref}; that store "
+            f"{meta_path} does not exist. The store asked for is {ref}; that store "
             "must be present to generate from it."
         )
     meta = json.loads(meta_path.read_text())

@@ -8,7 +8,9 @@ failure names the metric that is wrong rather than the model.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 import types
 from pathlib import Path
 
@@ -641,6 +643,9 @@ class TestLatentStoreResolution:
     an error: both stores are valid files and the sampler never learns which one
     the weights belong to.  These are the two disagreements that cannot be seen
     in the output afterwards.
+
+    Both the eval suite and ``scripts/generate_volumes.py`` go through this one
+    function, so an explicit override has to face the same two checks.
     """
 
     def test_there_is_no_default_store(self):
@@ -699,6 +704,101 @@ class TestLatentStoreResolution:
 
         with pytest.raises(FileNotFoundError, match="data/latents_z8"):
             resolve_latent_store(cfg, tmp_path)
+
+    def test_two_spellings_of_one_checkpoint_are_not_a_mismatch(self, tmp_path):
+        """The check is on the FILE, never on how the path was spelled.
+
+        ``build_latent_dataset`` writes ``vae_checkpoint`` as an absolute path;
+        a run config carries the repo-relative one.  Comparing the two strings
+        rejects every correctly matched store there is, which is worse than no
+        check at all: the one escape hatch left is the override, and it would be
+        used to get past a false alarm.
+        """
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        # The store names the checkpoint absolutely, and through a redundant
+        # ``.`` / ``..`` hop for good measure.  The run names it relatively.
+        store_spelling = tmp_path / "runs" / "vae" / "r08" / ".." / "r08" / "best.ckpt"
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=store_spelling)
+        cfg = _run_cfg(store="./data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+        assert str(store_spelling) != cfg["vae"]["checkpoint"]
+
+        root, meta = resolve_latent_store(cfg, tmp_path)
+
+        assert root == (tmp_path / "data" / "latents_z8").resolve()
+        assert meta["latent_shape"][0] == 8
+
+    def test_an_absolute_store_reference_resolves_unchanged(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        root = _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        cfg = _run_cfg(store=str(root), z=8, vae_ckpt=str(ckpt))
+
+        assert resolve_latent_store(cfg, tmp_path)[0] == root.resolve()
+
+    def test_an_override_replaces_the_store_the_run_names(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        _store(tmp_path, name="latents_z8_probe", z=8, vae_ckpt=ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        root, _ = resolve_latent_store(cfg, tmp_path, override="data/latents_z8_probe")
+
+        assert root == (tmp_path / "data" / "latents_z8_probe").resolve()
+
+    def test_an_override_of_the_wrong_width_raises(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        _store(tmp_path, name="latents_z4", z=4, vae_ckpt=ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="Latent width mismatch"):
+            resolve_latent_store(cfg, tmp_path, override="data/latents_z4")
+
+    def test_an_override_with_the_wrong_vae_raises(self, tmp_path):
+        run_ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        run_ckpt.parent.mkdir(parents=True)
+        run_ckpt.touch()
+        other_ckpt = tmp_path / "runs" / "vae" / "r08-other" / "best.ckpt"
+        other_ckpt.parent.mkdir(parents=True)
+        other_ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=run_ckpt)
+        _store(tmp_path, name="latents_other", z=8, vae_ckpt=other_ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="VAE checkpoint mismatch"):
+            resolve_latent_store(cfg, tmp_path, override="data/latents_other")
+
+
+class TestGenerateVolumesUsesTheRunsStore:
+    """``scripts/generate_volumes.py`` shares the check, and has no default."""
+
+    @staticmethod
+    def _script():
+        path = Path(__file__).resolve().parents[1] / "scripts" / "generate_volumes.py"
+        spec = importlib.util.spec_from_file_location("generate_volumes_store", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_latents_root_has_no_default(self):
+        mod = self._script()
+
+        args = mod._build_parser().parse_args(["--checkpoint", "runs/ldm/x/checkpoints/b.ckpt"])
+
+        assert args.latents_root is None
+
+    def test_the_script_shares_the_one_resolver(self):
+        from poregen.eval_v4.generate import resolve_latent_store as canonical
+
+        assert self._script().resolve_latent_store is canonical
 
 
 # ---------------------------------------------------------------------------

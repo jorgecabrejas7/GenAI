@@ -12,11 +12,14 @@ Usage
 -----
 python scripts/generate_volumes.py \\
     --checkpoint   runs/ldm/ldm06-run-0001-.../checkpoints/best.ckpt \\
-    [--latents-root data/split_v3/latents_r08z4] \\
     [--ddim-steps 50] [--chunk-tiles 3 3 3]
 
-The latent store's metadata.json supplies both the per-channel
-denormalisation stats and the VAE checkpoint the latents were built with.
+The latent store comes from the run's own ``resolved_config.yaml`` and is
+checked against it before the first model call — see
+``poregen.eval_v4.generate.resolve_latent_store``.  Its metadata.json then
+supplies the per-channel denormalisation stats and the VAE checkpoint the
+latents were built with.  ``--latents-root`` names a different store by hand
+for a diagnostic; it faces the same checks.
 
 Output tree (relative to cwd)
 ------------------------------
@@ -48,6 +51,8 @@ import torch
 import tifffile
 import yaml
 from tqdm import tqdm
+
+from poregen.eval_v4.generate import resolve_latent_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -193,14 +198,17 @@ def _load_ldm(checkpoint: str | Path, device: torch.device) -> torch.nn.Module:
     return model, cfg
 
 
-def _load_latent_store_meta(
-    latents_root: Path,
+def _load_vae_and_stats(
+    meta: dict,
     device: torch.device,
-) -> tuple[torch.nn.Module, torch.Tensor, torch.Tensor, dict]:
-    """Load the frozen VAE, per-channel denormalisation stats and the store metadata."""
+) -> tuple[torch.nn.Module, torch.Tensor, torch.Tensor]:
+    """The frozen VAE and per-channel denormalisation stats of a CHECKED store.
+
+    ``meta`` comes from :func:`resolve_latent_store`, which has already agreed
+    the store's latent width and VAE with the run.  Nothing is decided here.
+    """
     from poregen.experiments.train_vae import load_vae_from_checkpoint
 
-    meta = json.loads((latents_root / "metadata.json").read_text())
     norm = meta["normalization"]
     c = len(norm["per_channel_mean"])
     mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
@@ -208,14 +216,17 @@ def _load_latent_store_meta(
 
     vae, _, _, _ = load_vae_from_checkpoint(Path(meta["vae_checkpoint"]), device)
     vae.requires_grad_(False)
-    return vae, mean, std, meta
+    return vae, mean, std
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Generate a sweep of synthetic XCT volumes.")
     ap.add_argument("--checkpoint",  required=True, help="Path to LDM checkpoint (.ckpt)")
-    ap.add_argument("--latents-root", default="data/split_v3/latents_r08z4",
-                    help="Latent store root (metadata.json supplies VAE checkpoint + norm stats)")
+    ap.add_argument("--latents-root", default=None,
+                    help="Diagnostic override: read the normalisation stats and the VAE "
+                         "from THIS store instead of the one the run's resolved_config.yaml "
+                         "names. It is checked against the run exactly like the run's own "
+                         "store, so it can only ever name another path to a compatible one.")
     ap.add_argument("--ddim-steps",  type=int, default=DEFAULT_DDIM_STEPS,
                     help="Number of DDIM steps")
     ap.add_argument("--s-por", type=float, default=None,
@@ -251,7 +262,11 @@ def main() -> None:
                     help="Resume into this existing run directory instead of creating a new "
                          "timestamped one (e.g. inference/<ldm_run>/<run_tag>). Combos whose "
                          "volume.tif + label.tif already exist there are skipped.")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
 
     repo = _find_repo_root()
     sys.path.insert(0, str(repo / "src"))
@@ -267,10 +282,11 @@ def main() -> None:
     from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator, theta_from_layup
 
     ldm, ldm_cfg = _load_ldm(args.checkpoint, device)
-    latents_root = Path(args.latents_root)
-    if not latents_root.is_absolute():
-        latents_root = (repo / latents_root).resolve()
-    vae, latent_mean, latent_std, store_meta = _load_latent_store_meta(latents_root, device)
+    # Which store this checkpoint belongs to, and whether it agrees with the run
+    # about latent width and decoder — before the VAE is even loaded.
+    latents_root, store_meta = resolve_latent_store(ldm_cfg, repo, override=args.latents_root)
+    logger.info("Latent store: %s", latents_root)
+    vae, latent_mean, latent_std = _load_vae_and_stats(store_meta, device)
 
     schedule = DDPMSchedule.from_cfg(ldm_cfg, device)
 
