@@ -1,9 +1,20 @@
 # Create environment and install with:
 #   mamba create -n poregen python=3.11
 #   mamba activate poregen
-#   mamba install pytorch torchvision  
+#   mamba install pytorch
 #   pip install -r requirements.txt
 #   pip install -e ".[dev]"
+#
+# Installed torch/torchvision pair on the DGX Spark box:
+#   torch        2.12.1+cu130
+#   torchvision  0.27.1+cu130
+#
+# torchvision is deliberately NOT a requirement line below. Only FID needs it,
+# and a plain resolve pins a different torch and silently replaces the working
+# build. Install it separately, version-matched, with --no-deps:
+#   pip install --no-deps torchvision==0.27.1+cu130 \
+#       --index-url https://download.pytorch.org/whl/cu130
+# See docs/DEVELOPMENT.md, "torchvision (FID only)", for the pairing table.
 
 # Core data / I/O
 numpy>=1.24
