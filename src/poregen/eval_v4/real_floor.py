@@ -144,11 +144,113 @@ def build_floor_volumes(
             records.append(rec)
             logger.info("%s %s: %s", vid, tag, rec.get("skipped") or "written")
 
+    if SURFACE_TAG in shapes:
+        build_surface_floor(root, g, vol_ids, commit=commit)
+
     if MICRO_TAG in shapes:
         records += build_micro_reference(
             root, g, vol_ids, data_root=data_root, rw=rw, commit=commit
         )
     return records
+
+
+# ---------------------------------------------------------------------------
+# Real surface roughness — the floor for the `surface` assessment
+# ---------------------------------------------------------------------------
+
+SURFACE_TAG = "surface"
+#: Written beside the crops. Not a Manifest-carrying case: a roughness floor is
+#: a statistic over a whole real volume, not a cut volume, and inventing a
+#: manifest for it would claim a provenance the number does not have.
+SURFACE_FLOOR_FILE = "surface_floor.json"
+
+
+def _height_maps_from_mask(zarr_mask, z_chunk: int = 32):
+    """First and last material z per (y, x) column, scanning z in chunks.
+
+    The whole ``sample_mask`` of a test volume is ~1 GB as bool; the answer is
+    two (H, W) arrays, so it is read a slab at a time and never held.
+    """
+    d, h, w = zarr_mask.shape
+    first = np.full((h, w), -1, dtype=np.int32)
+    last = np.full((h, w), -1, dtype=np.int32)
+    for z0 in range(0, d, z_chunk):
+        blk = np.asarray(zarr_mask[z0:z0 + z_chunk]) > 0
+        if not blk.any():
+            continue
+        present = blk.any(axis=0)
+        idx_first = blk.argmax(axis=0).astype(np.int32) + z0
+        idx_last = (blk.shape[0] - 1 - blk[::-1].argmax(axis=0)).astype(np.int32) + z0
+        fresh = present & (first < 0)
+        first[fresh] = idx_first[fresh]
+        last[present] = idx_last[present]
+    return first, last, d
+
+
+def surface_floor_stats(zarr_mask, z_chunk: int = 32) -> dict | None:
+    """Sa and Sq of a real coupon's lower and upper faces, in voxels.
+
+    Columns are excluded when they carry no material (the drilled holes and
+    everything outside the coupon) and when the surface touches the first or
+    last z slice — there the scan cut the specimen off, so what the height map
+    records is the edge of the volume rather than the surface of the part.
+    """
+    first, last, d = _height_maps_from_mask(zarr_mask, z_chunk)
+    have = first >= 0
+    interior = have & (first > 0) & (last < d - 1)
+    if interior.sum() < 100:
+        return None
+    out = {"n_columns": int(interior.sum()),
+           "n_columns_with_material": int(have.sum()),
+           "depth": int(d)}
+    for face, arr in (("lower", first), ("upper", last)):
+        v = arr[interior].astype(np.float64)
+        dev = v - v.mean()
+        out[face] = {
+            "sa": float(np.abs(dev).mean()),
+            "sq": float(np.sqrt((dev ** 2).mean())),
+            "mean_z": float(v.mean()),
+        }
+    return out
+
+
+def build_surface_floor(root, g, vol_ids, *, commit: str) -> dict:
+    """Roughness of every test volume's own top and bottom face."""
+    per_volume = {}
+    for vid in vol_ids:
+        if vid not in g:
+            continue
+        st = surface_floor_stats(g[vid]["sample_mask"])
+        if st is None:
+            logger.warning("%s: too few interior columns for a surface floor", vid)
+            continue
+        per_volume[vid] = st
+        logger.info("%s surface: lower Sa %.3f  upper Sa %.3f  (%d columns)",
+                    vid, st["lower"]["sa"], st["upper"]["sa"], st["n_columns"])
+    sa = [st[f]["sa"] for st in per_volume.values() for f in ("lower", "upper")]
+    sq = [st[f]["sq"] for st in per_volume.values() for f in ("lower", "upper")]
+    out = {
+        "git_commit": commit,
+        "n_volumes": len(per_volume),
+        "n_faces": len(sa),
+        "sa_mean": float(np.mean(sa)) if sa else None,
+        "sa_sd": float(np.std(sa)) if sa else None,
+        "sq_mean": float(np.mean(sq)) if sq else None,
+        "sq_sd": float(np.std(sq)) if sq else None,
+        "per_volume": per_volume,
+        "definition": (
+            "Sa and Sq of the lower and upper sample_mask surfaces of each test "
+            "volume, in voxels, about each face's own mean plane. Columns with "
+            "no material, and columns whose surface touches the first or last z "
+            "slice, are excluded: there the scan cut the specimen off and the "
+            "height map records the edge of the volume, not the part."
+        ),
+    }
+    path = Path(root) / "real_floor" / SURFACE_FLOOR_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2))
+    logger.info("wrote %s", path)
+    return out
 
 
 # ---------------------------------------------------------------------------

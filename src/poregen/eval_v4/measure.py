@@ -12,6 +12,7 @@ standard deviation over the three seeds of one cell.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -562,6 +563,93 @@ def measure_geometry(root, repo) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 9 - the specimen surface
+# ---------------------------------------------------------------------------
+
+def _surface_floor(root) -> dict | None:
+    """Roughness of the REAL top/bottom surfaces, the floor the generated ones are read against.
+
+    Written by ``eval_v4 real-floor --shapes surface``; absent until that has
+    run, in which case the generated roughness is reported with no floor beside
+    it and the summary says so. A roughness number with no floor says only that
+    a surface is not perfectly flat, which no real surface is either.
+    """
+    from poregen.eval_v4.real_floor import SURFACE_FLOOR_FILE  # noqa: PLC0415
+
+    path = Path(root) / "real_floor" / SURFACE_FLOOR_FILE
+    if not path.exists():
+        return None
+    try:
+        d = json.loads(path.read_text())
+    except Exception as exc:                            # noqa: BLE001
+        logger.warning("could not read %s: %s", path, exc)
+        return None
+    if d.get("sa_mean") is None:
+        return None
+    return {k: d[k] for k in
+            ("n_volumes", "n_faces", "sa_mean", "sa_sd", "sq_mean", "sq_sd")}
+
+
+def measure_surface(root, repo) -> dict:
+    cases = load_cases(root, "surface")
+    if not cases:
+        raise FileNotFoundError(f"no surface volumes under {root}")
+    rows = []
+    for case in cases:
+        notes = case.manifest.notes or {}
+        row = measure_core(case)
+        row["ddim_steps"] = case.manifest.ddim_steps
+        row["scale"] = notes.get("scale")
+        row["surface"] = M.surface_agreement(
+            case.label, case.material_voxels(),
+            z_lo=int(notes.get("z_lo", 32)), z_hi=int(notes.get("z_hi", 160)),
+            xct=case.xct,
+        )
+        rows.append(row)
+
+    floor = _surface_floor(root)
+
+    def by_steps(steps):
+        sel = [r for r in rows if r["ddim_steps"] == steps]
+        if not sel:
+            return None
+        return {
+            "n_cases": len(sel),
+            "air_fraction_outside_box": _agg(sel, ("surface", "air_fraction_outside_box")),
+            "air_fraction_inside_box": _agg(sel, ("surface", "air_fraction_inside_box")),
+            "lower_error_abs_mean": _agg(sel, ("surface", "lower", "error_abs_mean")),
+            "upper_error_abs_mean": _agg(sel, ("surface", "upper", "error_abs_mean")),
+            "lower_roughness_sa": _agg(sel, ("surface", "lower", "roughness_sa")),
+            "upper_roughness_sa": _agg(sel, ("surface", "upper", "roughness_sa")),
+            "lower_roughness_sq": _agg(sel, ("surface", "lower", "roughness_sq")),
+            "upper_roughness_sq": _agg(sel, ("surface", "upper", "roughness_sq")),
+            "dark_but_material": _agg(sel, ("surface", "dark_but_material")),
+        }
+
+    return {
+        "assessment": "surface",
+        "question": ("Does the model render air where the material map asks, and "
+                     "does the interface land where it was requested?"),
+        "gates": {
+            "air_fraction_outside_box": "> 0.95",
+            "air_fraction_inside_box": "< 0.02",
+            "surface_error_abs_mean": "< 4 voxels",
+        },
+        "real_surface_floor": floor,
+        "floor_note": (None if floor else
+                       "no real surface floor on disk — run `eval_v4 real-floor`; "
+                       "a roughness number without it says only that the surface "
+                       "is not perfectly flat, which no real surface is either."),
+        "per_case": rows,
+        "summary": {
+            "ddim50": by_steps(50),
+            "ddim200": by_steps(200),
+            **_failure_rate(rows),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # 8 - microstructure statistics
 # ---------------------------------------------------------------------------
 
@@ -715,6 +803,7 @@ MEASURERS = {
     "layup": measure_layup,
     "assembly": measure_assembly,
     "geometry": measure_geometry,
+    "surface": measure_surface,
     "microstructure": measure_microstructure,
 }
 

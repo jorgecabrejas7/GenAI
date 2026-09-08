@@ -841,6 +841,62 @@ def _fig_microstructure(res, root) -> list[str]:
     return savefig(fig, figures_dir(root, "microstructure"), "microstructure")
 
 
+def report_surface(res, root, floor) -> tuple[str, list[str]]:
+    s = res["summary"]
+    g = res["gates"]
+    fl = res.get("real_surface_floor")
+
+    def block(key, title):
+        b = s.get(key)
+        if b is None:
+            return [f"### {title}", "", "Not generated.", ""]
+        rows = [
+            ["air fraction OUTSIDE the box", ms(b["air_fraction_outside_box"], 4),
+             g["air_fraction_outside_box"]],
+            ["air fraction INSIDE the box", ms(b["air_fraction_inside_box"], 4),
+             g["air_fraction_inside_box"]],
+            ["lower face |position error| (voxels)", ms(b["lower_error_abs_mean"], 2),
+             g["surface_error_abs_mean"]],
+            ["upper face |position error| (voxels)", ms(b["upper_error_abs_mean"], 2),
+             g["surface_error_abs_mean"]],
+            ["lower face roughness Sa (voxels)", ms(b["lower_roughness_sa"], 3), "-"],
+            ["upper face roughness Sa (voxels)", ms(b["upper_roughness_sa"], 3), "-"],
+            ["lower face roughness Sq (voxels)", ms(b["lower_roughness_sq"], 3), "-"],
+            ["upper face roughness Sq (voxels)", ms(b["upper_roughness_sq"], 3), "-"],
+            ["dark-but-material", ms(b["dark_but_material"], 4), "-"],
+        ]
+        return [f"### {title} ({b['n_cases']} cases)", "",
+                table(["quantity", "mean +/- sd", "gate"], rows), ""]
+
+    floor_note = res.get("floor_note")
+    if fl:
+        floor_note = (
+            f"Real surface floor, from the top and bottom faces of the test "
+            f"volumes' `sample_mask` over {fl['n_faces']} faces: "
+            f"Sa {fl['sa_mean']:.3f} +/- {fl['sa_sd']:.3f}, "
+            f"Sq {fl['sq_mean']:.3f} +/- {fl['sq_sd']:.3f} voxels. "
+            "A generated surface rougher than this is rougher than the real "
+            "thing; smoother than it is a surface the model has flattened."
+        )
+
+    text = [
+        "## The specimen surface", "",
+        "The material map asks for specimen only in `z = [32, 160)`, air above "
+        "and below. Every other assessment runs on a full-material box, so this "
+        "is the only one that measures whether the model RENDERS air where it is "
+        "asked to and where it puts the interface.", "",
+        "Position error and roughness are separate numbers on purpose: a surface "
+        "can be flat and displaced, or centred and ragged, and one number cannot "
+        "say which. Roughness is taken about the surface's own mean plane.", "",
+        *block("ddim50", "DDIM-50"),
+        *block("ddim200", "DDIM-200"),
+        floor_note or "",
+        "",
+        f"Failure rate: {fmt(s['failure_rate'], 2)}",
+    ]
+    return "\n".join(text) + "\n", []
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -849,6 +905,7 @@ REPORTERS = {
     "layup": report_layup,
     "assembly": report_assembly,
     "geometry": report_geometry,
+    "surface": report_surface,
     "microstructure": report_microstructure,
     "real_floor": report_real_floor,
 }

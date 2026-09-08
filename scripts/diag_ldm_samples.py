@@ -326,6 +326,73 @@ def grid_entries(xct: torch.Tensor, label: torch.Tensor, bucket: str,
     ]
 
 
+# ── inset-box surface sample ─────────────────────────────────────────────────
+
+#: From this step on, each diagnostic also renders one volume whose material map
+#: asks for air. Everything else in this file samples a full-material box, so
+#: until now nothing checked that the model puts air where it is told to, or
+#: where it puts the interface.
+INSET_FROM_STEP = 60000
+
+
+def inset_surface_sample(run_dir: Path, step: int, out_dir: Path) -> dict | None:
+    """One 192-cubed EMA/DDIM-50 volume with the specimen box inset in z.
+
+    Built through eval_v4's own VolumeRunner rather than a second generation
+    path: the sampler setup (VAE, schedule, normalisation, orientation, the
+    material request conversion) is intricate and a private copy of it here
+    would drift from the one the campaign actually measures, so the number
+    would stop describing the same thing.
+    """
+    try:
+        from poregen.eval_v4.cases import (       # noqa: PLC0415
+            SHAPE_SMALL, SURFACE_Z_HI, SURFACE_Z_LO, TARGET_DEFAULT,
+            CaseSpec, layup_a, material_inset_z,
+        )
+        from poregen.eval_v4.generate import VolumeRunner   # noqa: PLC0415
+        from poregen.eval_v4.metrics import surface_agreement  # noqa: PLC0415
+        from poregen.eval_v4.io import load_label, load_u8      # noqa: PLC0415
+    except Exception as exc:                                # noqa: BLE001
+        logger.warning("inset sample unavailable: %s", exc)
+        return None
+
+    repo = find_repo_root(__file__)
+    plies, pitch = layup_a(repo)
+    spec = CaseSpec(
+        name=f"inset_step{step}",
+        assessment="surface",
+        volume_shape=SHAPE_SMALL,
+        seed=SEED,
+        layup=plies,
+        ply_thickness_vox=pitch,
+        target_phi=TARGET_DEFAULT,
+        ddim_steps=50,
+        material_fn=material_inset_z,
+        notes={"layup": "A", "z_lo": SURFACE_Z_LO, "z_hi": SURFACE_Z_HI,
+               "source": "diag_ldm_samples", "step": step},
+    )
+    case_path = out_dir / f"inset_step{step}"
+    runner = VolumeRunner(run_dir, "latest", weights="ema", repo=repo)
+    runner.run(spec, case_path)
+
+    label = load_label(case_path / "label.tif")
+    xct = load_u8(case_path / "volume.tif")
+    material = material_inset_z(label.shape)
+    res = surface_agreement(label, material,
+                            z_lo=SURFACE_Z_LO, z_hi=SURFACE_Z_HI, xct=xct)
+    res["case_dir"] = str(case_path)
+    # The paper's gate, evaluated here so a failing run says so in its own log.
+    res["gate"] = {
+        "outside_air_gt_0.95": (res["air_fraction_outside_box"] or 0) > 0.95,
+        "inside_air_lt_0.02": (res["air_fraction_inside_box"] or 1) < 0.02,
+        "surface_error_lt_4vox": max(
+            res["lower"]["error_abs_mean"] or 99.0,
+            res["upper"]["error_abs_mean"] or 99.0) < 4.0,
+    }
+    res["gate"]["all_pass"] = all(res["gate"].values())
+    return res
+
+
 # ── conditioning-alive check ─────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -662,6 +729,27 @@ def main() -> None:
                   f"direction_ok={k['direction_ok']}")
 
     # ── trend tracking ──────────────────────────────────────────────────────
+    # ── inset-box surface sample (from 60k) ─────────────────────────────────
+    inset = None
+    if step >= INSET_FROM_STEP:
+        logger.info("inset-box surface sample (192^3, EMA, DDIM-50)")
+        try:
+            inset = inset_surface_sample(run_dir, step, out_dir)
+        except Exception as exc:                        # noqa: BLE001
+            logger.exception("inset sample failed: %s", exc)
+            inset = {"error": repr(exc)}
+        if inset and "error" not in inset:
+            g = inset["gate"]
+            logger.info("inset: outside-air %.4f  inside-air %.4f  "
+                        "lower |err| %.2f  upper |err| %.2f  -> %s",
+                        inset["air_fraction_outside_box"],
+                        inset["air_fraction_inside_box"],
+                        inset["lower"]["error_abs_mean"],
+                        inset["upper"]["error_abs_mean"],
+                        "PASS" if g["all_pass"] else "FAIL")
+    else:
+        logger.info("step %d < %d — no inset sample yet", step, INSET_FROM_STEP)
+
     trend_path = Path(args.out_jsonl) if args.out_jsonl else run_dir / TREND_FILE
     entry = {
         "step": step,
@@ -675,6 +763,7 @@ def main() -> None:
         "variants": dict(variant_results),
         "alive": alive,
         "alive_boundary": alive_boundary,
+        "inset_surface": inset,
         "killswitch": killswitch,
     }
     history = read_trend(trend_path)

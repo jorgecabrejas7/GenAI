@@ -185,6 +185,66 @@ def material_notch_and_hole(shape: tuple[int, int, int]) -> np.ndarray:
     return m
 
 
+#: The inset specimen box: material for z in [32, 160), air above and below.
+#: 32 voxels of air is half a tile, so each face sits INSIDE a tile rather than
+#: on a tile boundary — a surface that landed on a 64-plane could be produced by
+#: the assembly rather than by the model obeying the map.
+SURFACE_Z_LO = 32
+SURFACE_Z_HI = 160
+
+
+def material_inset_z(shape: tuple[int, int, int]) -> np.ndarray:
+    """Material only for ``z in [SURFACE_Z_LO, SURFACE_Z_HI)``; air above and below.
+
+    Every gate before this one was measured on a full-material box, so none of
+    them could tell whether the model RENDERS air where the material map asks
+    for it, or where it puts the interface. This is the simplest geometry that
+    asks both questions and has an exact answer: two flat surfaces at known z.
+    """
+    d, h, w = shape
+    if not 0 < SURFACE_Z_LO < SURFACE_Z_HI < d:
+        raise ValueError(
+            f"the inset box [{SURFACE_Z_LO}, {SURFACE_Z_HI}) does not fit in depth {d}"
+        )
+    m = np.zeros(shape, dtype=bool)
+    m[SURFACE_Z_LO:SURFACE_Z_HI] = True
+    return m
+
+
+def surface_cases(repo=None) -> list[CaseSpec]:
+    """9 - does the model put air, and the interface, where the map asks?
+
+    Both step counts, because the 40k diagnostic showed the sampler behaves
+    differently at 200 than at 50 (porosity conditioning 5-7x worse, latent
+    std wider on the high-sigma channels). If the surface also depends on step
+    count, the paper needs to say so rather than quote one number.
+
+    The 1024-wide cases carry one seed each: they cost ~40x the volume of a
+    192-cubed case, and what the large scale adds is whether the interface stays
+    flat across a full panel width, which one seed answers.
+    """
+    plies, pitch = layup_a(repo)
+    out = []
+    for shape, tag, seeds in ((SHAPE_SMALL, "192", SEEDS),
+                              (SHAPE_LARGE, "1024", SEEDS[:1])):
+        for steps in (50, 200):
+            for seed in seeds:
+                out.append(CaseSpec(
+                    name=f"{tag}_ddim{steps}_seed{seed}",
+                    assessment="surface",
+                    volume_shape=shape,
+                    seed=seed,
+                    layup=plies,
+                    ply_thickness_vox=pitch,
+                    target_phi=TARGET_DEFAULT,
+                    ddim_steps=steps,
+                    material_fn=material_inset_z,
+                    notes={"layup": "A", "scale": tag, "ddim_steps": steps,
+                           "z_lo": SURFACE_Z_LO, "z_hi": SURFACE_Z_HI},
+                ))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Layups
 # ---------------------------------------------------------------------------
@@ -529,6 +589,7 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "layup": layup_cases,
     "assembly": assembly_cases,
     "geometry": geometry_cases,
+    "surface": surface_cases,
     "microstructure": microstructure_cases,
 }
 

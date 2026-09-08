@@ -28,7 +28,7 @@ FT_CAMP="$REPO/runs/campaigns/11-decoder-ft"
 SCRATCH=/tmp/claude-1001/-home-jorgecabrejas-Dev-GenAI/ce0b3db0-2aa0-4a97-9bc4-7bb0db078739/scratchpad
 LOG="$CAMP/post_ldm06.log"
 GO="$REPO/runs/campaigns/ldm06_go"
-ASSESSMENTS=(sampler microstructure porosity_global porosity_local geometry layup assembly cfg)
+ASSESSMENTS=(sampler microstructure porosity_global porosity_local geometry surface layup assembly cfg)
 OWED=(base reduction-factor-8 reduction-factor-32 reduction-factor-4)
 TAIL_RUNGS=(reduction-factor-2 reduction-factor-64)
 
@@ -77,6 +77,15 @@ say "STDREF refresh done rc=$?"
 # generation in front of the fine-tune that is already running.
 if [ -e "$GO" ]; then
     say "GO present -> eval v4 generation on $LDM_RUN (original r08 decoder, --save-latents)"
+    # The real floor first, and on CPU. Every generated table is read against
+    # it, and a table with no floor row says only that a number exists — the
+    # surface roughness in particular is meaningless without the real one,
+    # since no real surface is perfectly flat either.
+    say "EVALV4 real-floor start (CPU; small, large, micro, surface)"
+    python -m poregen.eval_v4.cli real-floor --root "$EVAL_CAMP" \
+        --shapes small large micro surface \
+        > "$SCRATCH/evalv4_real_floor.log" 2>&1
+    say "EVALV4 real-floor done rc=$?"
     for a in "${ASSESSMENTS[@]}"; do
         say "EVALV4 generate $a start"
         python -m poregen.eval_v4.cli generate "$a" \

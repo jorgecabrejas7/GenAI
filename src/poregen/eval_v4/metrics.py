@@ -738,3 +738,110 @@ def vae_tile_decode_control(repo: str | Path | None = None) -> dict:
             for name, v in rows.items()
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# 9 - the specimen surface
+# ---------------------------------------------------------------------------
+
+def height_map(material: np.ndarray, *, face: str) -> np.ndarray:
+    """Per-(y, x) column, the z of the outermost material voxel of one face.
+
+    ``face="lower"`` returns the FIRST material z, ``"upper"`` the LAST plus one,
+    so both are the position of the interface itself rather than of the last
+    solid voxel. Columns with no material at all are NaN — they carry no
+    surface, and averaging a sentinel into the height would bend the roughness
+    toward whatever the sentinel was.
+    """
+    if face not in ("lower", "upper"):
+        raise ValueError(f"face must be 'lower' or 'upper', got {face!r}")
+    any_mat = material.any(axis=0)
+    if face == "lower":
+        idx = material.argmax(axis=0).astype(np.float64)
+    else:
+        # argmax on the reversed axis finds the last True.
+        idx = (material.shape[0] - material[::-1].argmax(axis=0)).astype(np.float64)
+    idx[~any_mat] = np.nan
+    return idx
+
+
+def surface_roughness(h: np.ndarray) -> dict:
+    """Sa and Sq of a height map, in voxels, about its own mean plane.
+
+    Sa is the mean absolute deviation and Sq the RMS deviation — the two
+    standard areal roughness parameters. Both are taken about the MEAN of the
+    map, not about the requested plane, so they measure how rough the surface is
+    independently of whether it landed in the right place. Position error is
+    reported separately; a surface can be flat and displaced, or centred and
+    ragged, and one number cannot say which.
+    """
+    v = h[np.isfinite(h)]
+    if v.size == 0:
+        return {"sa": None, "sq": None, "n_columns": 0, "mean_z": None}
+    dev = v - v.mean()
+    return {
+        "sa": float(np.abs(dev).mean()),
+        "sq": float(np.sqrt((dev ** 2).mean())),
+        "n_columns": int(v.size),
+        "mean_z": float(v.mean()),
+    }
+
+
+def surface_agreement(
+    label: np.ndarray,
+    material: np.ndarray,
+    *,
+    z_lo: int,
+    z_hi: int,
+    xct: np.ndarray | None = None,
+    dark_threshold: int = 182,
+) -> dict:
+    """Does the model render air where the map asks, and where is the interface?
+
+    ``material`` is the REQUESTED map. ``z_lo`` / ``z_hi`` are the requested
+    interface positions, so the position error is signed against a known truth
+    rather than against the model's own output.
+
+    The predicted specimen is ``label != LABEL_AIR`` — pores count as specimen,
+    which is what the material map means (it says where the coupon is, not how
+    solid it is). Scoring against ``label == LABEL_MATERIAL`` instead would read
+    every pore near the surface as a hole in the surface.
+    """
+    pred_specimen = label != LABEL_AIR
+    pred_air = label == LABEL_AIR
+    req_air = ~material
+
+    out: dict = {
+        "requested_z_lo": int(z_lo),
+        "requested_z_hi": int(z_hi),
+        "air_fraction_outside_box": (float(pred_air[req_air].mean())
+                                     if req_air.any() else None),
+        "air_fraction_inside_box": (float(pred_air[material].mean())
+                                    if material.any() else None),
+    }
+
+    for face, requested in (("lower", z_lo), ("upper", z_hi)):
+        h = height_map(pred_specimen, face=face)
+        rough = surface_roughness(h)
+        finite = h[np.isfinite(h)]
+        err = finite - float(requested)
+        out[face] = {
+            "requested_z": int(requested),
+            "position_mean": (float(finite.mean()) if finite.size else None),
+            "position_sd": (float(finite.std()) if finite.size else None),
+            "error_mean": (float(err.mean()) if err.size else None),
+            "error_abs_mean": (float(np.abs(err).mean()) if err.size else None),
+            "error_max_abs": (float(np.abs(err).max()) if err.size else None),
+            "columns_without_material": int(np.isnan(h).sum()),
+            **{f"roughness_{k}": v for k, v in rough.items()},
+        }
+
+    if xct is not None:
+        # Dark-but-material: voxels the map says are specimen and the label
+        # calls specimen, yet whose grey level is as dark as air. It catches a
+        # decoder that renders the void correctly but does not label it.
+        inside = material & pred_specimen
+        out["dark_but_material"] = (float((xct[inside] < dark_threshold).mean())
+                                    if inside.any() else None)
+        out["dark_threshold"] = int(dark_threshold)
+    return out
