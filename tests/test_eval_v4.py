@@ -8,7 +8,9 @@ failure names the metric that is wrong rather than the model.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 import types
 from pathlib import Path
 
@@ -22,7 +24,11 @@ from poregen.eval_v4.cases import (
     field_two_halves,
     material_notch_and_hole,
 )
-from poregen.eval_v4.generate import latent_material_map, theta_for_canvas
+from poregen.eval_v4.generate import (
+    latent_material_map,
+    resolve_latent_store,
+    theta_for_canvas,
+)
 from poregen.eval_v4.io import (
     LABEL_AIR,
     LABEL_MATERIAL,
@@ -574,6 +580,38 @@ class TestRequests:
         assert len(layups["B16"]["plies"]) == 16
         assert layups["B16"]["ply_vox"] == pytest.approx(10.0)
 
+    @needs_layup_truth
+    def test_the_assembly_offsets_separate_chunk_alignment_from_window_phase(self):
+        """One offset confounds the two things an offset can move.
+
+        32 voxels is a WHOLE window stride, so it keeps the window phase and
+        moves only the chunk alignment; 16 is half a stride, so it moves the
+        phase as well.  Both are whole latent cells, because the noise frame
+        the sampler rolls lives on the latent grid.
+        """
+        from poregen.eval_v4.cases import (
+            ASSEMBLY_OFFSETS,
+            ASSEMBLY_REGION,
+            LATENT_DOWNSAMPLE,
+            WINDOW_STRIDE,
+        )
+
+        assert ASSEMBLY_OFFSETS[0] == 0            # the reference
+        assert set(ASSEMBLY_OFFSETS) == {0, 16, 32}
+        assert 32 % WINDOW_STRIDE == 0             # same phase, new chunk plane
+        assert 16 % WINDOW_STRIDE == WINDOW_STRIDE // 2      # half-window phase
+        specs = build_cases("assembly")
+        by_offset = {s.notes["offset"] for s in specs}
+        assert by_offset == set(ASSEMBLY_OFFSETS)
+        for s in specs:
+            off = s.notes["offset"]
+            assert s.request_offset == (off,) * 3
+            assert s.specimen_box == ((off,) * 3, tuple(off + r for r in ASSEMBLY_REGION))
+            assert s.region_offset == (off,) * 3
+            assert all(o % LATENT_DOWNSAMPLE == 0 for o in s.request_offset), s.name
+            assert all(o + r <= v for o, r, v in
+                       zip(s.region_offset, s.region_shape, s.volume_shape)), s.name
+
     def test_the_orientation_profile_moves_with_the_request(self):
         layup, pitch = (45, -45, 90, 0), 10.0
         base = theta_for_canvas(64, layup, pitch, 0)
@@ -599,6 +637,200 @@ class TestRequests:
         half = np.zeros((4, 4, 4), bool)
         half[:2] = True
         assert latent_material_map(half)[0, 0, 0] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Which latent store a run is evaluated against
+# ---------------------------------------------------------------------------
+
+
+def _store(tmp_path: Path, *, name: str, z: int, vae_ckpt: Path) -> Path:
+    """A latent store that is only its metadata - no arrays are needed here."""
+    root = tmp_path / "data" / name
+    root.mkdir(parents=True)
+    (root / "metadata.json").write_text(json.dumps({
+        "vae_checkpoint": str(vae_ckpt),
+        "latent_shape": [z, 16, 16, 16],
+        "normalization": {
+            "per_channel_mean": [0.0] * z,
+            "per_channel_std": [1.0] * z,
+        },
+        "conditioning": {"por_standardisation": {"mean": -3.5, "std": 0.5}},
+    }))
+    return root
+
+
+def _run_cfg(*, store: str, z: int, vae_ckpt: str) -> dict:
+    return {
+        "model": {"type": "unet3d", "z_channels": z, "channel_mult": [1, 2, 4]},
+        "data": {"latents_root": store},
+        "vae": {"checkpoint": vae_ckpt},
+    }
+
+
+class TestLatentStoreResolution:
+    """The store comes from the run, and has to agree with it.
+
+    A run trained on one rung and scored against another produces a volume, not
+    an error: both stores are valid files and the sampler never learns which one
+    the weights belong to.  These are the two disagreements that cannot be seen
+    in the output afterwards.
+
+    Both the eval suite and ``scripts/generate_volumes.py`` go through this one
+    function, so an explicit override has to face the same two checks.
+    """
+
+    def test_there_is_no_default_store(self):
+        from poregen.eval_v4 import generate as G
+
+        assert not hasattr(G, "DEFAULT_LATENTS_ROOT")
+
+    def test_matching_store_resolves_relative_to_the_repo(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        root, meta = resolve_latent_store(cfg, tmp_path)
+
+        assert root == (tmp_path / "data" / "latents_z8").resolve()
+        assert meta["latent_shape"][0] == 8
+
+    def test_latent_width_mismatch_raises(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z4", z=4, vae_ckpt=ckpt)
+        # The run trained on z=8; the store it is pointed at holds z=4.
+        cfg = _run_cfg(store="data/latents_z4", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="Latent width mismatch") as e:
+            resolve_latent_store(cfg, tmp_path)
+        assert "8" in str(e.value) and "4" in str(e.value)
+
+    def test_vae_checkpoint_mismatch_raises(self, tmp_path):
+        store_ckpt = tmp_path / "runs" / "vae" / "r08-other" / "best.ckpt"
+        store_ckpt.parent.mkdir(parents=True)
+        store_ckpt.touch()
+        run_ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        run_ckpt.parent.mkdir(parents=True)
+        run_ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=store_ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="VAE checkpoint mismatch") as e:
+            resolve_latent_store(cfg, tmp_path)
+        assert str(run_ckpt) in str(e.value)
+        assert str(store_ckpt) in str(e.value)
+
+    def test_a_run_that_names_no_store_raises(self, tmp_path):
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+        cfg["data"] = {}
+
+        with pytest.raises(KeyError, match="data.latents_root"):
+            resolve_latent_store(cfg, tmp_path)
+
+    def test_a_missing_store_names_what_the_run_asked_for(self, tmp_path):
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(FileNotFoundError, match="data/latents_z8"):
+            resolve_latent_store(cfg, tmp_path)
+
+    def test_two_spellings_of_one_checkpoint_are_not_a_mismatch(self, tmp_path):
+        """The check is on the FILE, never on how the path was spelled.
+
+        ``build_latent_dataset`` writes ``vae_checkpoint`` as an absolute path;
+        a run config carries the repo-relative one.  Comparing the two strings
+        rejects every correctly matched store there is, which is worse than no
+        check at all: the one escape hatch left is the override, and it would be
+        used to get past a false alarm.
+        """
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        # The store names the checkpoint absolutely, and through a redundant
+        # ``.`` / ``..`` hop for good measure.  The run names it relatively.
+        store_spelling = tmp_path / "runs" / "vae" / "r08" / ".." / "r08" / "best.ckpt"
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=store_spelling)
+        cfg = _run_cfg(store="./data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+        assert str(store_spelling) != cfg["vae"]["checkpoint"]
+
+        root, meta = resolve_latent_store(cfg, tmp_path)
+
+        assert root == (tmp_path / "data" / "latents_z8").resolve()
+        assert meta["latent_shape"][0] == 8
+
+    def test_an_absolute_store_reference_resolves_unchanged(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        root = _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        cfg = _run_cfg(store=str(root), z=8, vae_ckpt=str(ckpt))
+
+        assert resolve_latent_store(cfg, tmp_path)[0] == root.resolve()
+
+    def test_an_override_replaces_the_store_the_run_names(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        _store(tmp_path, name="latents_z8_probe", z=8, vae_ckpt=ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        root, _ = resolve_latent_store(cfg, tmp_path, override="data/latents_z8_probe")
+
+        assert root == (tmp_path / "data" / "latents_z8_probe").resolve()
+
+    def test_an_override_of_the_wrong_width_raises(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        _store(tmp_path, name="latents_z4", z=4, vae_ckpt=ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="Latent width mismatch"):
+            resolve_latent_store(cfg, tmp_path, override="data/latents_z4")
+
+    def test_an_override_with_the_wrong_vae_raises(self, tmp_path):
+        run_ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        run_ckpt.parent.mkdir(parents=True)
+        run_ckpt.touch()
+        other_ckpt = tmp_path / "runs" / "vae" / "r08-other" / "best.ckpt"
+        other_ckpt.parent.mkdir(parents=True)
+        other_ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=run_ckpt)
+        _store(tmp_path, name="latents_other", z=8, vae_ckpt=other_ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="VAE checkpoint mismatch"):
+            resolve_latent_store(cfg, tmp_path, override="data/latents_other")
+
+
+class TestGenerateVolumesUsesTheRunsStore:
+    """``scripts/generate_volumes.py`` shares the check, and has no default."""
+
+    @staticmethod
+    def _script():
+        path = Path(__file__).resolve().parents[1] / "scripts" / "generate_volumes.py"
+        spec = importlib.util.spec_from_file_location("generate_volumes_store", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_latents_root_has_no_default(self):
+        mod = self._script()
+
+        args = mod._build_parser().parse_args(["--checkpoint", "runs/ldm/x/checkpoints/b.ckpt"])
+
+        assert args.latents_root is None
+
+    def test_the_script_shares_the_one_resolver(self):
+        from poregen.eval_v4.generate import resolve_latent_store as canonical
+
+        assert self._script().resolve_latent_store is canonical
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from poregen.training.ldm_engine import (
     ldm_eval_step,
     ldm_train_step,
     noise_neighbours,
+    sample_neighbours,
 )
 
 T = 1000
@@ -149,6 +150,57 @@ class TestUNetInputs:
         assert float(m.null_por.grad.abs().sum()) > 0.0
 
 
+# ── neighbour posterior draw ─────────────────────────────────────────────────
+
+class TestSampleNeighbours:
+    """The training target is a posterior DRAW, so the neighbours must be too.
+
+    Conditioning on posterior MEANS while regressing a SAMPLE hands the model
+    an input whose per-cell variance is short by E[sigma^2] — a mismatch that
+    does not exist at generation time, where every neighbour is a real latent.
+    """
+
+    @staticmethod
+    def _fixture(b: int = 64, std: float = 0.0, seed: int = 0):
+        torch.manual_seed(seed)
+        nb = torch.randn(b, N_NEIGHBOURS, Z, 4, 4, 4)
+        nb_std = torch.full_like(nb, std)
+        avail = torch.full((b, N_NEIGHBOURS), NB_EXISTS)
+        avail[:, 1] = NB_OOB
+        return nb, nb_std, avail
+
+    def test_zero_std_reproduces_the_stored_mean_exactly(self):
+        """A degenerate posterior must be bit-identical to the mean it is."""
+        nb, nb_std, avail = self._fixture(std=0.0)
+        out = sample_neighbours(nb, nb_std, avail)
+        assert torch.equal(out, nb)
+
+    def test_variance_is_the_mean_variance_plus_the_expected_square_std(self):
+        """Var[mu + sigma*eps] = Var[mu] + E[sigma^2] — the missing term."""
+        sigma = 0.4
+        nb, nb_std, avail = self._fixture(b=128, std=sigma, seed=3)
+        mu_var = float(nb[:, 0].var(unbiased=False))
+        draws = torch.stack([
+            sample_neighbours(nb, nb_std, avail)[:, 0] for _ in range(16)
+        ])
+        assert float(draws.var(unbiased=False)) == pytest.approx(
+            mu_var + sigma ** 2, rel=0.02
+        )
+
+    def test_non_exists_neighbours_are_left_untouched(self):
+        """OOB carries no posterior; noise_neighbours zeroes it anyway."""
+        nb, nb_std, avail = self._fixture(std=0.5)
+        out = sample_neighbours(nb, nb_std, avail)
+        assert torch.equal(out[:, 1], nb[:, 1])
+        assert not torch.allclose(out[:, 0], nb[:, 0])
+
+    def test_the_draw_is_fresh_on_every_call(self):
+        nb, nb_std, avail = self._fixture(std=0.5)
+        a = sample_neighbours(nb, nb_std, avail)
+        b = sample_neighbours(nb, nb_std, avail)
+        assert not torch.allclose(a, b)
+
+
 # ── neighbour noising ────────────────────────────────────────────────────────
 
 class TestNoiseNeighbours:
@@ -244,7 +296,7 @@ def batch(tmp_path_factory):
     ds = LatentDataset(root, "train", normalize=True, **dataset_kwargs())
     items = [ds[i] for i in range(0, 4 * 37, 37)]
     keys = ("z", "std", "cond_por", "cond_depth", "cond_dist6", "cond_orient",
-            "cond_material", "nb_latents", "nb_avail")
+            "cond_material", "nb_latents", "nb_std", "nb_avail")
     return {k: torch.stack([it[k] for it in items]) for k in keys}
 
 
@@ -288,3 +340,48 @@ class TestSteps:
         with pytest.raises(KeyError, match="cond_material"):
             ldm_eval_step(model, broken, DDPMSchedule(T=T),
                           torch.device("cpu"), autocast_dtype=torch.float32)
+
+    def test_a_batch_missing_neighbour_std_is_rejected(self, batch):
+        """Without it the step would silently fall back to mean neighbours."""
+        model = _model_for(batch)
+        broken = {k: v for k, v in batch.items() if k != "nb_std"}
+        with pytest.raises(KeyError, match="nb_std"):
+            ldm_eval_step(model, broken, DDPMSchedule(T=T),
+                          torch.device("cpu"), autocast_dtype=torch.float32)
+
+    @pytest.mark.parametrize("step_fn", ["train", "eval"])
+    def test_both_steps_noise_a_posterior_draw_not_the_stored_mean(
+        self, batch, step_fn, monkeypatch
+    ):
+        """The defect this guards: mean neighbours reaching ``noise_neighbours``."""
+        import poregen.training.ldm_engine as engine
+
+        seen: list[torch.Tensor] = []
+        real = engine.noise_neighbours
+
+        def spy(schedule, nb_latents, nb_avail, t, **kw):
+            seen.append(nb_latents.clone())
+            return real(schedule, nb_latents, nb_avail, t, **kw)
+
+        monkeypatch.setattr(engine, "noise_neighbours", spy)
+        model = _model_for(batch)
+        if step_fn == "train":
+            engine.ldm_train_step(
+                model, batch, torch.optim.AdamW(model.parameters(), lr=1e-4),
+                torch.amp.GradScaler(enabled=False), DDPMSchedule(T=T), step=0,
+                device=torch.device("cpu"), autocast_dtype=torch.float32,
+                nb_t_mix=1.0,
+            )
+        else:
+            engine.ldm_eval_step(model, batch, DDPMSchedule(T=T),
+                                 torch.device("cpu"), autocast_dtype=torch.float32)
+
+        assert len(seen) == 1
+        exists = batch["nb_avail"] == NB_EXISTS
+        assert bool(exists.any())
+        drawn, mu = seen[0][exists], batch["nb_latents"][exists]
+        assert not torch.allclose(drawn, mu)
+        # The draw is mu shifted by sigma*eps, so it stays close to mu.
+        spread = float((drawn - mu).std())
+        rms_sigma = float((batch["nb_std"][exists] ** 2).mean().sqrt())
+        assert spread == pytest.approx(rms_sigma, rel=0.1)

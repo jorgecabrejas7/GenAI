@@ -789,7 +789,7 @@ Logueadas cada `image_log_every=62` steps bajo `val/` y en cada evaluación de t
 | `log.jsonl` | Un JSON por step: todas las pérdidas train + val | Cada step + cada eval |
 | `metrics.jsonl` | Solo registros val y test | Cada eval\_every / test\_every |
 | `{name}_step{N:08d}.ckpt` | Checkpoint completo (model, optimizer, scaler, scheduler) | Cada save\_every=1000 steps |
-| `samples/step_{N:08d}/{split}/` | Arrays 3D: xct\_gt, mask\_gt, xct\_recon, mask\_recon | Cada sample\_every=12500 steps |
+| `samples/step_{N:08d}/{split}/` | Arrays 3D: xct\_gt, mask\_gt, xct\_recon, mask\_recon (+ label\_recon con cabeza de 3 clases; ahí mask\_recon es `argmax == poro`) | Cada sample\_every=12500 steps |
 | `eval_step{N:08d}.json` | Resultado completo de eval\_checkpoint.py | Por checkpoint evaluado |
 
 ---

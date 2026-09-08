@@ -185,6 +185,39 @@ def load_vae_from_checkpoint(
     return model, cfg, cfg_text, run_dir
 
 
+def _keep_frozen_subtrees_in_eval(
+    model: torch.nn.Module, frozen: list[torch.nn.Module]
+) -> None:
+    """Make every later ``model.train()`` leave *frozen* in eval mode.
+
+    ``requires_grad_(False)`` stops gradients, not buffer updates. The r08 VAE
+    normalises with ``BatchNorm3d``, whose ``running_mean`` / ``running_var``
+    are recomputed on every train-mode forward pass, outside autograd. A frozen
+    encoder would therefore keep drifting through a decoder fine-tune, its
+    eval-mode ``mu`` would move, and the 272 GB latent store the LDM was built
+    on would go stale — the exact failure the freeze exists to prevent.
+
+    Overriding ``train`` on the model instance is the one place that covers
+    every caller: ``train_step`` calls ``model.train()`` on every step,
+    ``_export_reconstructions`` calls it again after each sample export, the
+    resume path re-applies the freeze, and ``torch.compile`` wraps the model
+    afterwards and forwards ``train()`` down to it as a child. Fixing each call
+    site instead would put the same rule in several places, and the next
+    ``model.train()`` added would silently miss it.
+    """
+    module_train = model.train
+
+    def train(mode: bool = True) -> torch.nn.Module:
+        module_train(mode)
+        if mode:
+            for submodule in frozen:
+                submodule.eval()
+        return model
+
+    model.train = train  # type: ignore[method-assign]
+    model.train(model.training)
+
+
 def apply_transfer(
     cfg: dict[str, Any],
     model: torch.nn.Module,
@@ -209,6 +242,11 @@ def apply_transfer(
     The whole point is that the encoder does not move, and a typo that silently
     froze nothing would produce a run that looks right, trains everything, and
     invalidates the latent store without ever saying so.
+
+    Freezing means frozen in both senses: parameters get ``requires_grad_(False)``
+    AND the subtree is held in eval mode for the rest of the run, so its
+    BatchNorm running statistics stop moving too (see
+    :func:`_keep_frozen_subtrees_in_eval`).
 
     Returns a dict recorded in run metadata, so the run's own provenance says
     what it started from and what it held fixed.
@@ -273,6 +311,7 @@ def apply_transfer(
             for p in children[name].parameters():
                 p.requires_grad_(False)
                 frozen_params += p.numel()
+        _keep_frozen_subtrees_in_eval(model, [children[n] for n in freeze])
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         info["freeze_modules"] = freeze
@@ -449,6 +488,8 @@ def _prepare_resume_state(
     scaler: torch.amp.GradScaler,
     scheduler: Any | None,
     device: torch.device,
+    discriminator: torch.nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[int, int]:
     checkpoint_step, _ = load_checkpoint(
         checkpoint_path,
@@ -457,6 +498,8 @@ def _prepare_resume_state(
         scaler=scaler,
         scheduler=scheduler,
         map_location=device,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
     )
     remaining_steps = int(cfg["training"]["total_steps"]) - checkpoint_step
     if remaining_steps <= 0:
@@ -725,6 +768,10 @@ def resume_run(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
+    # Built before the load: the checkpoint carries the discriminator weights
+    # and its optimizer moments, and a fresh pair would restart the GAN.
+    discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
+
     start_step, remaining_steps = _prepare_resume_state(
         cfg=cfg,
         run_dir=run_dir,
@@ -734,11 +781,10 @@ def resume_run(
         scaler=scaler,
         scheduler=scheduler,
         device=device,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
     )
     loss_fn = _make_loss_fn(cfg)
-    # Discriminator is not checkpointed; it restarts from scratch on resume.
-    # This causes a short instability window but is acceptable for R04.
-    discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
 
     try:
         from torch.utils.tensorboard import SummaryWriter

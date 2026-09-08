@@ -22,14 +22,22 @@ both. Both steps need a trained r08 checkpoint.
 #    index.parquet, material.bin and air.bin per split, in one pass.
 python scripts/build_latent_dataset.py \
     --checkpoint runs/vae/<r08 run>/best.ckpt \
-    --output data/split_v3/latents_r08z4 \
+    --output data/split_v3/latents_r08z8 \
     --batch-size 256
 
 # 2. Per-patch conditioning: cond.parquet (cond_depth, six cond_dist6_*,
 #    cond_por_raw) + the `conditioning` metadata block.  Reuses
 #    data/split_v2/orientation_field.json and checks every volume has a record.
-python scripts/build_conditioning.py --store data/split_v3/latents_r08z4
+python scripts/build_conditioning.py --store data/split_v3/latents_r08z8
+```
 
+The store name follows the CHOSEN RUNG — `latents_<vae>z<z_channels>`,
+so the z=8 rung ldm06 trains on is `latents_r08z8`. Nothing should hard-code
+it: every entry point resolves the store from the run's own
+`data.latents_root` through `resolve_latent_store`, which refuses a store
+whose latent width or VAE checkpoint disagrees with the run.
+
+```bash
 # 3. Point the experiment at that exact checkpoint.  ldm06/base ships a
 #    placeholder; the launcher compares it with the store's own record and
 #    refuses to start on a mismatch, because decoding with a different VAE than
@@ -153,10 +161,16 @@ ls runs/ldm/
 ```bash
 python scripts/generate_volumes.py \
     --checkpoint runs/ldm/<run>/checkpoints/best.ckpt \
-    --latents-root data/split_v3/latents_r08z4 \
     --ddim-steps 50 \
     --chunk-tiles 3 3 3
 ```
+
+The latent store is NOT a flag. It comes from the run's own
+`resolved_config.yaml` (`data.latents_root`), and the script stops before the
+first model call if that store's latent width or VAE checkpoint disagrees with
+the run — a store from another rung decodes to a plausible volume that is
+silently wrong. `--latents-root` exists only to point a diagnostic at another
+copy of the store, and it faces the same two checks.
 
 Omitted sampler flags fall back to the run's own `generation` block, so a
 generation run reproduces the geometry the run was babysat with. Output is

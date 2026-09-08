@@ -392,25 +392,41 @@ def layup_cases(repo=None) -> list[CaseSpec]:
 
 #: The window grid is anchored at the chunk origin, so the only way to move it
 #: relative to the requested content is to translate the request inside a bigger
-#: canvas.  32 voxels is one window stride.
-ASSEMBLY_OFFSETS = (0, 32)
+#: canvas.  Offset 0 is the reference every other offset is read against.
+#: 32 voxels is a WHOLE window stride and 16 is half of one, which is what
+#: separates the two things an offset can move - see :func:`assembly_cases`.
+ASSEMBLY_OFFSETS = (0, 16, 32)
 ASSEMBLY_REGION = (192, 192, 192)
 
 
 def assembly_cases(repo=None) -> list[CaseSpec]:
     """6 - does the answer depend on where the assembly grid happens to fall?
 
-    The same 192-cubed request, generated twice with the same seed, at two
-    positions in a 256-cubed canvas.  At offset 0 the region is exactly chunk
-    zero; at offset 32 the chunk plane at voxel 192 runs through it at region
-    coordinate 160.
+    The same 192-cubed request, generated three times with the same seed, at
+    three positions in a 256-cubed canvas.  An offset moves TWO independent
+    things and one offset cannot tell them apart, so there are two non-zero
+    offsets:
+
+    ``0``   the region is exactly chunk zero: no chunk plane crosses it, and
+            the window grid starts on the region origin.  The reference.
+    ``32``  one whole window stride, so the window grid keeps the same phase
+            relative to the requested content - every window origin is still a
+            multiple of 32 in region coordinates.  What changes is the CHUNK
+            alignment: the chunk plane at canvas voxel 192 now runs through the
+            region at region coordinate 160.
+    ``16``  half a window stride, so the window grid falls in a different PHASE
+            relative to the content (region-relative origins are 16, 48, 80 …),
+            with a chunk plane at region coordinate 176 as well.
+
+    Read 0 against 32 for chunk alignment and 32 against 16 for window phase.
 
     Everything the region is asked for is translated with it: the specimen box
     is the region itself, so ``cond_depth`` and ``cond_dist6`` at a given
-    region-relative position are identical in the two runs; the porosity
-    request is uniform, so it is translation-invariant; and the orientation
-    profile is shifted by the same offset.  What is left to differ is the grid
-    the volume is assembled on.
+    region-relative position are identical in every run; the porosity request
+    is uniform, so it is translation-invariant; the orientation profile is
+    shifted by the same offset; and ``request_offset`` puts the sampler's noise
+    draws in the region's frame, so the noise realisation is held too.  What is
+    left to differ is the grid the volume is assembled on.
     """
     plies, pitch = layup_a(repo)
     out = []

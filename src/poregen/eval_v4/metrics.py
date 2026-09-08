@@ -173,6 +173,12 @@ def crop_region(arr: np.ndarray, manifest: Manifest) -> np.ndarray:
 def phase_fractions(label: np.ndarray, material: np.ndarray, *, manifest: Manifest) -> dict:
     """Pore and air fraction, over the whole volume and inside the request.
 
+    ``phi_pore`` is MATERIAL porosity: pore / material, air excluded from the
+    denominator.  ``phi_pore_all`` is pore / whole volume, air included, and is
+    reported beside it so the two can never be read for each other.  The LDM is
+    conditioned on the second definition (the store's phi is pore / 64**3); the
+    sampler converts a material-porosity request into it per window.
+
     Needs no request of its own, so a real volume goes through it unchanged -
     this is the row every table is floored against.
     """
@@ -194,7 +200,11 @@ def phase_fractions(label: np.ndarray, material: np.ndarray, *, manifest: Manife
 
 @requires("requested_global_phi")
 def porosity_error(label: np.ndarray, material: np.ndarray, *, manifest: Manifest) -> dict:
-    """Delivered minus requested global porosity, inside the requested material."""
+    """Delivered minus requested global porosity, BOTH as pore / material.
+
+    The request is a material porosity and it is scored as one: air outside the
+    specimen envelope is in neither numerator nor denominator.
+    """
     delivered = float((label[material] == LABEL_PORE).mean())
     requested = float(manifest.requested_global_phi)
     err = delivered - requested
@@ -278,6 +288,12 @@ def local_obedience(
     ``requested_tiles`` is the requested phi per 64-voxel tile.  Pass ``None``
     for a real volume: there is no request, so only the cell-to-cell spread is
     returned, and that spread is the noise floor the slope must beat.
+
+    Both sides are MATERIAL porosity, pore / material: ``delivered[c]`` divides
+    a tile's pore count by its material count, not by 64**3, and the requested
+    field is a material porosity too.  A tile holding less than
+    ``min_material_frac`` material is dropped rather than measured against a
+    denominator that is mostly air.
     """
     pore = block_sum((label == LABEL_PORE) & material)
     mat = block_sum(material)

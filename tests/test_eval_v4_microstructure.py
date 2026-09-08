@@ -263,6 +263,70 @@ class TestFid:
         assert feats.shape[1] == 2048
         assert MS.frechet_distance(feats, feats) == pytest.approx(0.0, abs=1e-3)
 
+    def test_preprocessing_lands_on_the_pytorch_fid_input_range(self):
+        """ImageNet-normalise, then let transform_input finish: exactly 2v - 1.
+
+        Built with ``weights=None`` on purpose — this checks the arithmetic
+        against torchvision's own ``_transform_input``, and needs no download.
+        """
+        torch = pytest.importorskip("torch")
+        tvm = pytest.importorskip("torchvision.models",
+                                  reason="FID needs the torchvision Inception")
+        rng = np.random.default_rng(0)
+        crops = rng.random((3, MS.FID_CROP, MS.FID_CROP)).astype(np.float32)
+
+        pre = MS.fid_preprocess(crops)
+        assert pre.shape == (3, 3, MS.FID_INPUT, MS.FID_INPUT)
+        assert pre.min() < 0.0                       # it really is normalised
+
+        net = tvm.inception_v3(weights=None, transform_input=True,
+                               init_weights=False)
+        resized = torch.nn.functional.interpolate(
+            torch.from_numpy(crops).unsqueeze(1), size=(MS.FID_INPUT, MS.FID_INPUT),
+            mode="bilinear", align_corners=False).expand(-1, 3, -1, -1)
+        torch.testing.assert_close(net._transform_input(pre), 2.0 * resized - 1.0,
+                                   rtol=1e-4, atol=1e-5)
+
+    def test_the_features_move_because_the_preprocessing_is_applied(self, monkeypatch):
+        """``inception_features`` feeds the normalised tensor, not the raw crops."""
+        torch = pytest.importorskip("torch")
+        tvm = pytest.importorskip("torchvision.models",
+                                  reason="FID needs the torchvision Inception")
+
+        class Stub(torch.nn.Module):
+            """Records its input and pools it, so the hook on avgpool fires."""
+
+            def __init__(self):
+                super().__init__()
+                torch.manual_seed(0)
+                self.conv = torch.nn.Conv2d(3, 8, 3, stride=8)
+                self.avgpool = torch.nn.AdaptiveAvgPool2d(1)
+                self.seen: list = []
+
+            def forward(self, x):
+                self.seen.append(x.detach().clone())
+                return self.avgpool(torch.relu(self.conv(x)))
+
+        stub = Stub()
+        monkeypatch.setattr(tvm, "inception_v3", lambda **kw: stub)
+
+        rng = np.random.default_rng(0)
+        crops = rng.random((4, MS.FID_CROP, MS.FID_CROP)).astype(np.float32)
+        feats = MS.inception_features(crops, device=torch.device("cpu"))
+
+        fed = stub.seen[-1]
+        assert fed.shape == (4, 3, MS.FID_INPUT, MS.FID_INPUT)
+        torch.testing.assert_close(fed, MS.fid_preprocess(crops))
+
+        # The same stub on the unnormalised input the old code fed gives a
+        # different feature: the preprocessing is not a no-op.
+        raw = torch.nn.functional.interpolate(
+            torch.from_numpy(crops).unsqueeze(1), size=(MS.FID_INPUT, MS.FID_INPUT),
+            mode="bilinear", align_corners=False).expand(-1, 3, -1, -1)
+        with torch.no_grad():
+            raw_feats = stub(raw).flatten(1).numpy().astype(np.float64)
+        assert np.abs(feats - raw_feats).max() > 1e-3
+
     def test_crops_come_only_from_inside_the_requested_material(self):
         shape = (64, 192, 192)
         xct = np.full(shape, 200, np.uint8)

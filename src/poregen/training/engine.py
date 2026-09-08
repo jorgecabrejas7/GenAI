@@ -16,7 +16,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from poregen.models.vae.base import CLASS_PORE, VAEOutput, decode_xct
+from poregen.models.vae.base import (
+    CLASS_PORE, VAEOutput, decode_label, decode_mask, decode_xct,
+)
 from poregen.models.discriminator import (
     extract_multiplane_slices,
     lsgan_gen_loss,
@@ -226,6 +228,9 @@ def train_step(
         Per-module gradient norms (encoder / encoder_a / encoder_b / decoder /
         mask_head) computed after unscaling and before global clipping.
     """
+    # Subtrees frozen by training.freeze_modules stay in eval mode through this:
+    # apply_transfer overrides the model's train() so their BatchNorm running
+    # statistics cannot drift. See train_vae._keep_frozen_subtrees_in_eval.
     model.train()
     batch_dev, model_args = to_device_inputs(model, batch, device)
     xct = batch_dev["xct"]
@@ -789,6 +794,8 @@ def train_loop(
                 "best_split": record.get("split"),
             },
             scheduler=scheduler,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
         )
 
     def _update_early_stopping(record: dict[str, Any]) -> bool:
@@ -1065,6 +1072,8 @@ def train_loop(
                     scheduler=scheduler,
                     latest_path=run_dir / "latest.ckpt" if save_latest else None,
                     thread_holder=_ckpt_thread_holder,
+                    discriminator=discriminator,
+                    disc_optimizer=disc_optimizer,
                 )
 
             # ── 3-D patch samples ─────────────────────────────────────
@@ -1140,6 +1149,8 @@ def train_loop(
                 "actual_final_step": final_step,
             },
             scheduler=scheduler,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
         )
         if save_latest:
             copy_checkpoint(final_ckpt_path, run_dir / "latest.ckpt")
@@ -1230,6 +1241,7 @@ def _save_patch_samples(
 
         data_iter = iter(loader)
         xct_gts, mask_gts, xct_recons, mask_recons, metas = [], [], [], [], []
+        label_recons: list[np.ndarray] = []
         collected = 0
 
         while collected < n_samples:
@@ -1248,8 +1260,18 @@ def _save_patch_samples(
             xct_gts.append(xct.cpu().float().numpy())
             mask_gts.append(mask.cpu().float().numpy())
             xct_recons.append(decode_xct(output.xct_out).cpu().float().numpy()[:n_take])
+            # A variant emits mask_logits OR class_logits, never both (see the
+            # decoder output contract in docs/ARCHITECTURE.md).  The 3-class
+            # head's pore mask is `argmax == pore`; the label carries the
+            # material/air split a binary mask cannot express, so export both.
             if output.mask_logits is not None:
-                mask_recons.append(torch.sigmoid(output.mask_logits).cpu().float().numpy()[:n_take])
+                mask_recons.append(decode_mask(output.mask_logits).cpu().float().numpy()[:n_take])
+            elif output.class_logits is not None:
+                label = decode_label(output.class_logits.float()).unsqueeze(1)   # (B, 1, D, H, W)
+                label_recons.append(label.cpu().float().numpy()[:n_take])
+                mask_recons.append(
+                    (label == CLASS_PORE).cpu().float().numpy()[:n_take]
+                )
 
             coords = batch["coords"]
             for i in range(n_take):
@@ -1265,20 +1287,21 @@ def _save_patch_samples(
 
         xct_recon_arr = np.concatenate(xct_recons)
         # export_patch_sample_split requires a mask_recon array for every variant;
-        # models with no mask head (e.g. VRRAE) have nothing to put there, so
-        # export zeros rather than change the shared export contract.
+        # models with no segmentation head at all (e.g. VRRAE) have nothing to
+        # put there, so export zeros rather than change the shared export
+        # contract.
         mask_recon_arr = np.concatenate(mask_recons) if mask_recons else np.zeros_like(xct_recon_arr)
-        export_patch_sample_split(
-            samples_dir / split,
-            {
-                "xct_gt":    np.concatenate(xct_gts),
-                "mask_gt":   np.concatenate(mask_gts),
-                "xct_recon": xct_recon_arr,
-                "mask_recon": mask_recon_arr,
-            },
-            metas,
-        )
+        arrays = {
+            "xct_gt":    np.concatenate(xct_gts),
+            "mask_gt":   np.concatenate(mask_gts),
+            "xct_recon": xct_recon_arr,
+            "mask_recon": mask_recon_arr,
+        }
+        if label_recons:
+            arrays["label_recon"] = np.concatenate(label_recons)
+        export_patch_sample_split(samples_dir / split, arrays, metas)
 
+    # Frozen subtrees stay in eval — the override installed by apply_transfer.
     model.train()
 
 

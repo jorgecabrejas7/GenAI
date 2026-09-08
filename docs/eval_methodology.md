@@ -73,6 +73,17 @@ from the volumes alone — a metric that needed the model back could not be
 re-run after a checkpoint moved — and the report must be rebuildable after the
 volumes are deleted.
 
+**Which latent store a run is evaluated against** is the run's own
+`data.latents_root`, read from its `resolved_config.yaml`. There is no default
+and no `--latents-root` flag. Before the first model call the suite checks that
+the store's latent width equals the model's `z_channels` and that the store was
+built by the run's `vae.checkpoint`; either disagreement is a hard stop naming
+both values. A store is not interchangeable between runs — it fixes the latent
+width, the normalisation the sampler works in and the decoder — and the wrong
+one produces a plausible volume rather than an error. `measure` takes the same
+store from the manifest, so the memorisation floor compares generated patches
+against the latents the model was actually trained on.
+
 `generate --dry-run` lists every case and what it asks for, without a GPU.
 `generate` skips a case whose `manifest.json` already exists, so an interrupted
 run resumes.
@@ -154,14 +165,27 @@ they still agree, so a v3 and a v4 interior number mean the same thing.
 **tile** — 64 voxels, the patch the model was trained on, the unit the requested
 porosity field is defined on, and the period of the window seam.
 
+**φ — porosity is always `pore / material`.** Every requested and every
+delivered φ in this document is the pore fraction of the *specimen envelope*:
+`pore voxels / material voxels`, air excluded from the denominator. A request is
+a material porosity, and `phi_pore`, `delivered_phi` and `delivered[c]` are all
+measured that way, over the whole volume and per tile alike. This is **not** the
+number the LDM is conditioned on. The latent store carries
+`phi = pore / 64³` — the full patch, with any air outside the specimen counted in
+the denominator — because a training patch's conditioning must describe the patch
+the encoder saw. The two agree only for a patch that is entirely material. See
+`ARCHITECTURE.md`, "Material porosity in, full-patch φ out", for the conversion
+the sampler applies.
+
 **requested φ of a window** — the sampler's denoising windows are tile-sized but
 step 32 voxels, so a window straddles up to eight tiles of the requested field.
 Its request is the RAW tile φ averaged over the window's voxel footprint,
-weighted by the volume each tile covers, then clamped to `[0.002, 0.107]` and
-log-standardised into `cond_por`. So a painted step in the field is asked for as
-a ramp one window wide, not as a step: assessment 3 measures how well the model
-follows the field it was actually given, and the field it is given is the
-footprint mean.
+weighted by the volume each tile covers; that material porosity is then
+multiplied by the window's own material fraction to get the full-patch φ the
+model was trained on, clamped to `[0.002, 0.107]`, and log-standardised into
+`cond_por`. So a painted step in the field is asked for as a ramp one window
+wide, not as a step: assessment 3 measures how well the model follows the field
+it was actually given, and the field it is given is the footprint mean.
 
 **mean ± sd** — always over the three seeds (101, 202, 303) of one cell, sample
 standard deviation.
@@ -173,11 +197,14 @@ standard deviation.
 ### Porosity and air
 
 ```
-phi_pore      = mean(label == PORE)  inside the material
+phi_pore      = mean(label == PORE)  inside the material   # pore / material
 air_fraction  = mean(label == AIR)   inside the material
 air_interior  = mean(label == AIR)   inside the material and the interior
-error         = phi_pore - requested_global_phi
+error         = phi_pore - requested_global_phi            # both pore / material
 ```
+
+`phi_pore_all` and `air_fraction_all` are the same counts over the WHOLE volume,
+air included — reported beside the material fractions, never in place of them.
 
 Gate: `|error| < 0.005` (decision D39, carried over from v3).
 
@@ -323,13 +350,42 @@ of 1.79 voxels, 26-connectivity fuses voids that meet at a single corner.
 
 **The FID feature extractor** is torchvision's `inception_v3` with
 `Inception_V3_Weights.DEFAULT` (ImageNet IMAGENET1K_V1), 2048-d pool3
-(`avgpool`) features. Crops go in on [0, 1], replicated to three channels and
-bilinearly resized 64 → 299. A full slice resized to 299 would be a ~10×
-downscale, which shrinks a 1.79-voxel pore to 0.18 pixels — the structure the
-metric exists to see would be gone before Inception saw it. 5000 crops per axis
-per set, because a 2048-dimensional covariance estimated from fewer samples
-than that is singular. FID values are comparable **within this
-implementation only**.
+(`avgpool`) features. A full slice resized to 299 would be a ~10× downscale,
+which shrinks a 1.79-voxel pore to 0.18 pixels — the structure the metric
+exists to see would be gone before Inception saw it — so the crops are 64×64
+native. 5000 crops per axis per set, because a 2048-dimensional covariance
+estimated from fewer samples than that is singular.
+
+**The preprocessing convention is `pytorch-fid`'s**, which is the one every
+published FID number uses: replicate the grey crop to three channels,
+bilinearly resize to 299×299 (no centre crop — a crop would throw away part of
+the field of view), and put the network's input on the TF range **[-1, 1]**.
+The range is reached the way torchvision wants it. torchvision's `inception_v3`
+carries `transform_input=True` with the pretrained weights, and that flag
+remaps an **ImageNet-normalised** input to [-1, 1] itself:
+
+```
+transform_input((v - mean) / std) == 2v - 1        # per channel, for the
+                                                   # preset's mean/std
+```
+
+So `fid_preprocess` normalises with the weights' own preset `mean`/`std`
+(read from `Inception_V3_Weights.DEFAULT.transforms()`, not retyped) and lets
+`transform_input` finish the job. Normalising *and* scaling to [-1, 1] by hand
+would apply the remap twice.
+
+Before 2026-09-08 the crops went in on [0, 1] with no normalisation at all.
+`transform_input` then mapped them to about [-0.19, 0.43] — under a third of
+the range the network was trained on — so the 2048-d features were
+off-distribution and the FID was comparable to nothing. **Any FID recorded
+before that date is void.**
+
+One difference from `pytorch-fid` remains and is deliberate: `pytorch-fid`
+loads the TF-ported *FID Inception* weights, this suite loads torchvision's
+`IMAGENET1K_V1`. The two networks give different absolute values on the same
+images. FID here is therefore comparable **within this implementation only**,
+which is why every table carries the real-vs-real floor beside it —
+`results.json` records the exact extractor string in `fid.extractor`.
 
 **Ripley's K is border-corrected** (reduced-sample): only pores further than r
 from every face contribute, so the estimate is unbiased and converges to the
@@ -344,9 +400,16 @@ other statistics are still measured.
 
 ---
 
+The same defect was in the eval-v3 VAE reconstruction FID
+(`poregen.eval.metrics`), which fed Inception unnormalised grey the same
+way. It now calls the one shared `fid_input_from_grey`, so there is a single
+convention rather than two that can drift. **Every eval-v3 VAE FID recorded
+before 2026-09-08 is void** for the same reason the eval-v4 ones are: the
+features were off-distribution, so the number was comparable to nothing.
+
 ## The eight assessments
 
-Seeds 101 / 202 / 303 throughout; 102 cases in total. `chunk_tiles = (3, 3, 3)`,
+Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
 `window_stride = 32` and `decode_stride = 32` unless a case says otherwise.
 
 | # | Assessment | Cases | Asks |
@@ -356,7 +419,7 @@ Seeds 101 / 202 / 303 throughout; 102 cases in total. `chunk_tiles = (3, 3, 3)`,
 | 3 | `porosity_local` | 9 | three painted fields on the 3×3×3 tile grid — two halves 0.01/0.05, checkerboard 0.01/0.05, and the coherent field from `poregen.diffusion.porosity_field`. Within-volume slope and R². |
 | 4 | `cfg` | 24 | `s_por` {1.0, 1.5, 2.0} × targets {0.02, 0.05}; plus `s_nb` {0, 1} at target 0.03. |
 | 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
-| 6 | `assembly` | 6 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the window-phase pair generated here, and the campaign-08 VAE control row. |
+| 6 | `assembly` | 9 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the offset triple generated here (offsets 0 / 16 / 32 in a 256³ canvas), and the campaign-08 VAE control row. |
 | 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
 | 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K, FID on 2-D slices and the memorisation check, each against the matched real-vs-real floor. |
 
@@ -382,13 +445,42 @@ same seed, and a 192³ volume with 3×3×3-tile chunks has no chunk plane at all
 A Dice near 1 means turning the neighbour arm off changed nothing where it
 could first act, so the arm is inert.
 
-**The window-phase pair (assessment 6)** asks for the same 192³ region twice,
-same seed, at two positions in a 256³ canvas. The specimen box, the orientation
-profile and the uniform porosity request all move with the region, so the two
-runs ask for the same thing and differ only in the grid they are assembled on;
-at offset 32 the chunk plane at canvas voxel 192 runs through the region at
-region coordinate 160. The seam columns of this assessment come from the
-`sampler` volumes, whose grid is in canvas coordinates.
+**The offset triple (assessment 6)** asks for the same 192³ region three times,
+same seed, at three positions in a 256³ canvas. The specimen box, the
+orientation profile, the uniform porosity request and the frame every noise
+draw is taken in all move with the region, so the runs ask for the same thing
+from the same noise and differ only in the grid they are assembled on. Offset 0
+is the reference and every other offset is scored against it; the seam columns
+of this assessment come from the `sampler` volumes, whose grid is in canvas
+coordinates.
+
+*The region-relative noise frame.* An offset only isolates the assembly grid if
+the noise moves with the request. The sampler therefore takes every random draw
+of the reverse process — the canvas the chunks start from, and the fresh noise
+that re-noises each finished chunk at every timestep — as ONE canvas-sized field
+per draw, rolled by `request_offset` before use
+(`poregen.diffusion.sampler.region_noise_field`). The value used at canvas cell
+`p` is the value the request sees at region cell `p − offset`, so translating
+the request translates its noise with it. `torch.roll` is a permutation of one
+draw, so the field is still exactly iid standard normal and the wrap reaches
+only canvas cells outside the requested region. With the draw anchored to the
+canvas instead — which is what the sampler did until this fix — the two runs of
+a pair differed in the noise realisation as well as in the grid, and the pore
+Dice across them could not attribute the difference to either. `request_offset`
+must be a whole number of latent cells; the sampler refuses anything else.
+
+*What each offset isolates.* An offset moves two independent things, and one
+offset cannot tell them apart:
+
+| offset | window phase | chunk alignment |
+|---:|---|---|
+| 0 | window origins start on the region origin | the region IS chunk zero: no chunk plane crosses it |
+| 32 | unchanged — 32 is a whole window stride, so region-relative window origins are still 0, 32, 64 … | the chunk plane at canvas voxel 192 crosses the region at region coordinate 160 |
+| 16 | half a stride out: region-relative window origins are 16, 48, 80 … | a chunk plane at region coordinate 176 |
+
+Read 0 against 32 for chunk alignment and 32 against 16 for window phase. The
+report gives the pore Dice and the φ difference per offset and never pools
+them: the two offsets answer different questions.
 
 ---
 
@@ -472,9 +564,13 @@ what turns a porosity gap into a reported texture gap.
   deviations, so part of every residual is the truth's own error.
 * **Three seeds** bound the sd loosely. A cell whose sd matters should be
   re-run with more.
-* **The window-phase pair changes the chunk boundary as well as the window
-  phase**, because the sampler anchors windows at the chunk origin. A Dice below
-  1 there says the assembly grid matters; it does not separate the two causes.
+* **Every non-zero offset moves the chunk boundary**, because the sampler
+  anchors windows at the chunk origin and the only shift available is a
+  translation of the request. Offset 32 therefore isolates chunk alignment
+  cleanly (it keeps the window phase), but offset 16 carries a chunk plane as
+  well as the half-window phase, at a different region coordinate than 32 does.
+  A Dice below 1 at 16 that is not matched at 32 points at the window phase; it
+  does not prove it on its own.
 * **The microstructure floor is two crops per panel per level.** A distance
   between two samples that small is itself noisy, so a ratio near 1 means
   "indistinguishable at this sample size" and not "identical".

@@ -1105,8 +1105,9 @@ def compute_fid_slices(
     """
     try:
         import torchvision.models as tvm
-        import torch.nn.functional as F
         from scipy.linalg import sqrtm
+
+        from poregen.eval_v4.microstructure import fid_input_from_grey
     except ImportError:
         logger.warning("torchvision or scipy.linalg not available — skipping FID")
         return {"axial": float("nan"), "coronal": float("nan"), "sagittal": float("nan")}
@@ -1115,7 +1116,11 @@ def compute_fid_slices(
     from torch.utils.data import DataLoader
 
     # Load InceptionV3, hook pool3 features
-    inception = tvm.inception_v3(weights=tvm.Inception_V3_Weights.DEFAULT)
+    # transform_input is stated explicitly because fid_input_from_grey depends
+    # on it: it hands over an ImageNet-NORMALISED tensor, which this flag then
+    # remaps to the TF range [-1, 1] that Inception was trained on.
+    inception = tvm.inception_v3(weights=tvm.Inception_V3_Weights.DEFAULT,
+                                 transform_input=True)
     inception.eval()
 
     # Replace the final FC so we get 2048-dim pool3 features
@@ -1164,9 +1169,11 @@ def compute_fid_slices(
                 # Ensure (B, 1, H, W)
                 if sl.dim() == 3:
                     sl = sl.unsqueeze(1)
-                rgb = sl.expand(-1, 3, -1, -1)    # (B,3,H,W)
-                rgb = F.interpolate(rgb, size=(299, 299), mode="bilinear",
-                                    align_corners=False)
+                # ONE preprocessing convention, shared with eval_v4 (pytorch-fid:
+                # resize 299, ImageNet-normalise, transform_input -> [-1, 1]).
+                # Feeding [0, 1] straight in left the input spanning about
+                # [-0.19, 0.43] and the features off-distribution.
+                rgb = fid_input_from_grey(sl)
                 features_hook.clear()
                 with torch.no_grad():
                     inception(rgb)

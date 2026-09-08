@@ -110,7 +110,7 @@ def _batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, A
 # ── single-step helpers ───────────────────────────────────────────────────────
 
 _COND_KEYS = ("cond_por", "cond_depth", "cond_dist6", "cond_orient",
-              "cond_material", "nb_latents", "nb_avail")
+              "cond_material", "nb_latents", "nb_std", "nb_avail")
 
 
 def _unpack_cond(b: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -125,6 +125,33 @@ def _unpack_cond(b: dict[str, Any]) -> dict[str, torch.Tensor]:
     return {k: b[k] for k in _COND_KEYS}
 
 
+def sample_neighbours(
+    nb_latents: torch.Tensor,
+    nb_std: torch.Tensor,
+    nb_avail: torch.Tensor,
+) -> torch.Tensor:
+    """Draw each EXISTS neighbour from its posterior: ``mu + sigma*eps``.
+
+    The store serves a neighbour as a posterior mean and std, but the training
+    TARGET is a posterior DRAW (``data.latent_mode: sampled``).  Conditioning
+    on mean-valued neighbours would teach the denoiser to predict a sample
+    from inputs whose per-cell variance is short by ``E[sigma^2]`` — a gap
+    that does not exist at generation time, where every neighbour is a real
+    latent.  The eps is fresh on every call, exactly like the target's.
+
+    OOB and UNKNOWN neighbours are left untouched: they carry no posterior,
+    and ``noise_neighbours`` zeroes them anyway.
+
+    Parameters
+    ----------
+    nb_latents : (B, 6, C, D, H, W) neighbour posterior means
+    nb_std     : (B, 6, C, D, H, W) neighbour posterior stds, same store rows
+    nb_avail   : (B, 6) long — EXISTS / OOB as served by the store
+    """
+    exists = (nb_avail == NB_EXISTS).view(*nb_avail.shape, 1, 1, 1, 1)
+    return nb_latents + torch.randn_like(nb_latents) * nb_std * exists
+
+
 def noise_neighbours(
     schedule: Any,
     nb_latents: torch.Tensor,
@@ -134,13 +161,14 @@ def noise_neighbours(
     nb_t_mix: float,
     drop_nb_p: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Noise each stored neighbour to its own timestep (ldm06 training).
+    """Noise each neighbour to its own timestep (ldm06 training).
 
-    The store serves CLEAN neighbour posterior means, but at generation time a
-    neighbour is never clean: inside a chunk it is the canvas at the current
-    timestep, and in a finished chunk it is a clean latent re-noised to that
-    same timestep.  A denoiser trained only on clean neighbours would meet an
-    input distribution it has never seen on its very first sampling step.
+    The neighbours arriving here are clean latents — posterior draws from
+    :func:`sample_neighbours` — but at generation time a neighbour is never
+    clean: inside a chunk it is the canvas at the current timestep, and in a
+    finished chunk it is a clean latent re-noised to that same timestep.  A
+    denoiser trained only on clean neighbours would meet an input
+    distribution it has never seen on its very first sampling step.
 
     Per item and per neighbour::
 
@@ -155,7 +183,7 @@ def noise_neighbours(
 
     Parameters
     ----------
-    nb_latents : (B, 6, C, D, H, W) clean neighbour latents
+    nb_latents : (B, 6, C, D, H, W) clean neighbour latents (posterior draws)
     nb_avail   : (B, 6) long — EXISTS / OOB as served by the store
     t          : (B,) long — the target's timestep
 
@@ -207,9 +235,11 @@ def ldm_train_step(
     Batch keys: ``z`` (normalised posterior mean), ``std`` (posterior std under
     the same affine map), ``cond_por`` / ``cond_depth`` scalars, ``cond_dist6``
     (6,), ``cond_orient`` (2,16,16,16), ``cond_material`` (1,16,16,16),
-    ``nb_latents`` (6,C,16,16,16) CLEAN, ``nb_avail`` (6,).  With
-    ``sample_posterior=True`` the training target is a fresh posterior draw
-    z = mu + sigma*eps (stochastic encoding).
+    ``nb_latents`` / ``nb_std`` (6,C,16,16,16) the neighbours' clean posterior,
+    ``nb_avail`` (6,).  With ``sample_posterior=True`` the training target is a
+    fresh posterior draw z = mu + sigma*eps (stochastic encoding), and every
+    EXISTS neighbour is drawn the same way before it is noised — target and
+    conditioning then live in the same distribution.
 
     ``drop_por_p`` is the CFG porosity dropout rate and ``drop_nb_p`` the CFG
     neighbour dropout rate; ``nb_t_mix`` is the probability that a neighbour is
@@ -245,8 +275,11 @@ def ldm_train_step(
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
     z_t    = schedule.q_sample(z, t, noise)
+    nb = c["nb_latents"]
+    if sample_posterior:
+        nb = sample_neighbours(nb, c["nb_std"], c["nb_avail"])
     nb_latents, nb_avail, nb_t = noise_neighbours(
-        schedule, c["nb_latents"], c["nb_avail"], t,
+        schedule, nb, c["nb_avail"], t,
         nb_t_mix=nb_t_mix, drop_nb_p=drop_nb_p,
     )
 
@@ -299,7 +332,7 @@ def ldm_eval_step(
     autocast_dtype: torch.dtype = torch.bfloat16,
     sample_posterior: bool = True,
 ) -> dict[str, float]:
-    """Single LDM eval step (no grad): neighbours at t, no dropout."""
+    """Single LDM eval step (no grad): sampled neighbours at t, no dropout."""
     model.eval()
     b = _batch_to_device(batch, device)
     z = b["z"]
@@ -313,11 +346,14 @@ def ldm_eval_step(
     t      = torch.randint(0, schedule.T, (B,), device=device)
     noise  = torch.randn_like(z)
     z_t    = schedule.q_sample(z, t, noise)
-    # Eval pins the sampler's own case: every neighbour at the target timestep,
-    # no dropout — so val loss measures the situation generation actually runs
-    # in and is comparable across steps.
+    # Eval pins the sampler's own case: every neighbour a posterior draw at the
+    # target timestep, no dropout — so val loss measures the situation
+    # generation actually runs in and is comparable across steps.
+    nb = c["nb_latents"]
+    if sample_posterior:
+        nb = sample_neighbours(nb, c["nb_std"], c["nb_avail"])
     nb_latents, nb_avail, nb_t = noise_neighbours(
-        schedule, c["nb_latents"], c["nb_avail"], t, nb_t_mix=1.0, drop_nb_p=0.0,
+        schedule, nb, c["nb_avail"], t, nb_t_mix=1.0, drop_nb_p=0.0,
     )
 
     target = schedule.training_target(z, noise, t)

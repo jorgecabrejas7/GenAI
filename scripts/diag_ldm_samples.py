@@ -56,6 +56,7 @@ from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, decode_label, decode_
 from poregen.diffusion.sampler import DDIMSampler
 from poregen.experiments.base import find_repo_root
 from poregen.experiments.train_vae import load_vae_from_checkpoint
+from poregen.training.ldm_engine import sample_neighbours
 from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
 
 logger = logging.getLogger("diag_ldm_samples")
@@ -152,14 +153,25 @@ def find_boundary_rows(ds: LatentDataset, n: int,
 def build_bucket_cond(ds: LatentDataset, rows: list[int], device: torch.device) -> dict:
     """Stack the real conditioning of *rows* onto the device (ldm06 contract).
 
-    ``nb_t`` is zero: the neighbours are handed over as the clean posterior
-    means the store holds, which is the ``t_nb = 0`` end of the training draw.
+    ``nb_t`` is zero: the neighbours are handed over at the ``t_nb = 0`` end of
+    the training draw, i.e. not noised.
+
+    They are DRAWN, not averaged.  The store serves each neighbour as a
+    posterior mean and std, and training samples every EXISTS neighbour as
+    ``mu + sigma*eps`` before noising it.  Handing over mean-valued neighbours
+    would make this diagnostic condition on inputs the denoiser never sees in
+    training — per-cell variance short by ``E[sigma^2]`` — so its numbers would
+    describe a distribution nobody trains or samples on.  One draw, the same
+    definition training uses.
     """
     items = [ds[r] for r in rows]
     out = {
         k: torch.stack([it[k] for it in items]).to(device)
-        for k in (*_COND_KEYS, "nb_latents", "nb_avail", "z")
+        for k in (*_COND_KEYS, "nb_latents", "nb_std", "nb_avail", "z")
     }
+    out["nb_latents"] = sample_neighbours(
+        out["nb_latents"], out.pop("nb_std"), out["nb_avail"]
+    )
     out["nb_t"] = torch.zeros_like(out["nb_avail"])
     out["phi"] = np.array([float(it["phi"]) for it in items], dtype=np.float64)
     return out

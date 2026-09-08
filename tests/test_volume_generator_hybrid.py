@@ -26,6 +26,7 @@ from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.diffusion.sampler import (
     DDIMSampler,
     VolumeGenerator,
+    region_noise_field,
     seam_discontinuity,
     theta_from_layup,
     window_origins,
@@ -424,6 +425,86 @@ class TestWindowPorosityFootprint:
         assert window_tile_mean((0, 0, P), P, field, 0.0) == pytest.approx(0.05)
 
 
+# ── the request is MATERIAL porosity, the model was trained on FULL-patch phi ─
+
+class TestMaterialPorosityRescaling:
+    """A request of phi is pore/material; ``cond_por`` is pore/64³.
+
+    Training conditions on ``phi = pore / 64**3`` — the whole patch, air
+    included — while eval measures ``pore / material``.  A window that is half
+    outside the specimen must therefore be asked for half the requested
+    material porosity, or the delivered volume is scored against a target that
+    was never requested.
+    """
+
+    TILES = (2, 2, 2)
+    CELLS = (TILES[0] * P // DS,) * 3
+
+    def _cond_por(self, material_map, g_origin=(0, 0, 0), por_default=0.03,
+                  por_map=None):
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), tiles=self.TILES)
+        cond = gen._window_conditioning(
+            [g_origin], DS, por_default, por_map,
+            np.asarray(material_map, dtype=np.float32),
+            (0, 0, 0), (self.TILES[0] * P,) * 3,
+        )
+        return float(cond["por"][0])
+
+    @staticmethod
+    def _expected(phi):
+        from poregen.diffusion.conditioning import porosity_to_cond
+        return float(porosity_to_cond(phi, (-3.0, 1.0)))
+
+    def _half_material(self):
+        m = np.zeros(self.CELLS, dtype=np.float32)
+        m[: LAT // 2] = 1.0            # the low-z half of every window is solid
+        return m
+
+    def test_a_half_material_window_asks_for_half_the_requested_phi(self):
+        """Material fraction 0.5, request 0.03 -> full-patch phi 0.015."""
+        got = self._cond_por(self._half_material(), por_default=0.03)
+        assert got == pytest.approx(self._expected(0.015), rel=1e-6)
+
+    def test_a_full_material_window_is_unchanged(self):
+        got = self._cond_por(np.ones(self.CELLS, dtype=np.float32),
+                             por_default=0.03)
+        assert got == pytest.approx(self._expected(0.03), rel=1e-6)
+
+    def test_partial_cells_count_by_volume(self):
+        """The envelope fraction per cell is a volume, so 0.25 everywhere is 0.25."""
+        got = self._cond_por(np.full(self.CELLS, 0.25, dtype=np.float32),
+                             por_default=0.04)
+        assert got == pytest.approx(self._expected(0.01), rel=1e-6)
+
+    def test_the_scaling_is_applied_to_the_footprint_mean_of_the_field(self):
+        """It multiplies the tile-field mean, not the per-tile values."""
+        por_map = {(iz, iy, ix): (0.01 if ix == 0 else 0.05)
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        got = self._cond_por(self._half_material(), g_origin=(0, 0, P // 2 // DS),
+                             por_map=por_map)
+        assert got == pytest.approx(self._expected(0.5 * 0.03), rel=1e-6)
+
+    def test_the_scaling_comes_before_the_clip(self):
+        """0.2 * 0.5 = 0.1 is inside the training range; clipping first is not."""
+        from poregen.diffusion.conditioning import POR_MAX
+
+        got = self._cond_por(self._half_material(), por_default=0.2)
+        assert got == pytest.approx(self._expected(0.1), rel=1e-6)
+        assert got != pytest.approx(self._expected(0.5 * POR_MAX), rel=1e-3)
+
+    def test_the_scaling_comes_before_the_log_transform(self):
+        """`porosity_to_cond` is a log, so scaling after it is a different number."""
+        got = self._cond_por(self._half_material(), por_default=0.03)
+        assert got != pytest.approx(0.5 * self._expected(0.03), rel=1e-3)
+
+    def test_an_all_air_window_falls_to_the_bottom_of_the_training_range(self):
+        from poregen.diffusion.conditioning import POR_MIN
+
+        got = self._cond_por(np.zeros(self.CELLS, dtype=np.float32),
+                             por_default=0.03)
+        assert got == pytest.approx(self._expected(POR_MIN), rel=1e-6)
+
+
 # ── CFG ──────────────────────────────────────────────────────────────────────
 
 class TestGuidance:
@@ -681,3 +762,189 @@ def test_sample_batch_takes_the_same_generator():
 
     torch.testing.assert_close(draw(11), draw(11), rtol=0, atol=0)
     assert not torch.equal(draw(11), draw(12))
+
+
+# ── the region-relative noise frame ──────────────────────────────────────────
+
+def _denoise_canvas(gen, offset_vox, seed, tiles):
+    """Run the latent side only, with the request translated by ``offset_vox``."""
+    shape = tuple(t * P for t in tiles)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+    gen._generate_latents(
+        shape,
+        target_porosity=0.03,
+        local_por_map=None,
+        material_map=None,
+        specimen_box=((0, 0, 0), shape),
+        autocast_dtype=torch.float32,
+        window_batch=8,
+        offset_cells=tuple(o // DS for o in offset_vox),
+        generator=g,
+    )
+
+
+def _initial_canvas_noise(offset_vox, seed, tiles=(2, 2, 2), n_steps=2):
+    """The noise every chunk started from, reassembled onto the canvas.
+
+    ``chunk_tiles`` is one tile, so a chunk holds exactly one window and the
+    latent the model sees at the first timestep of chunk *k* IS that chunk's
+    initial noise.  Chunks run in raster order.
+    """
+    model = _SpyModel()
+    gen, _ = _generator(model, _ConstVAE(), (1, 1, 1), n_steps=n_steps, tiles=tiles)
+    _denoise_canvas(gen, offset_vox, seed, tiles)
+    cells = tuple(t * P // DS for t in tiles)
+    canvas = torch.zeros(C, *cells)
+    origins = [(z, y, x)
+               for z in range(0, cells[0], LAT)
+               for y in range(0, cells[1], LAT)
+               for x in range(0, cells[2], LAT)]
+    for k, o in enumerate(origins):
+        canvas[:, o[0]:o[0] + LAT, o[1]:o[1] + LAT, o[2]:o[2] + LAT] = (
+            model.calls[k * n_steps]["z_t"][0]
+        )
+    return canvas
+
+
+def _renoise_draws(offset_vox, seed, tiles=(2, 2, 2), n_steps=2):
+    """Every noise tensor the finished-chunk re-noising handed to `q_sample`."""
+    model = _SpyModel()
+    gen, _ = _generator(model, _ConstVAE(), (1, 1, 1), n_steps=n_steps, tiles=tiles)
+    schedule = gen.sampler.schedule
+    original = schedule.q_sample
+    drawn: list[torch.Tensor] = []
+
+    def spy(x0, t, noise=None):
+        drawn.append(noise.detach().clone())
+        return original(x0, t, noise=noise)
+
+    schedule.q_sample = spy      # `.to()` returns self, so the patch survives
+    _denoise_canvas(gen, offset_vox, seed, tiles)
+    return drawn
+
+
+class TestRegionRelativeNoiseFrame:
+    """Translating the request must translate its noise with it.
+
+    The assembly-offset assessment generates one region twice at two places in
+    a bigger canvas and asks whether the answer moved.  With the noise anchored
+    to the CANVAS the two runs differ in the assembly geometry AND in the noise
+    realisation, so the pore Dice across the pair cannot attribute the
+    difference to either — it is not measuring what it claims to.
+    """
+
+    def test_the_field_is_one_draw_translated(self):
+        def field(off):
+            g = torch.Generator(device="cpu")
+            g.manual_seed(5)
+            return region_noise_field(C, (12, 12, 12), off, torch.device("cpu"), g)
+
+        base = field((0, 0, 0))
+        for d in (2, 3):
+            moved = field((d, d, d))
+            assert torch.equal(moved[:, d:, d:, d:], base[:, :-d, :-d, :-d])
+            assert not torch.equal(moved, base)
+            # A roll is a permutation, so the field is still the same draw and
+            # therefore still exactly iid standard normal.
+            assert torch.equal(torch.sort(moved.flatten()).values,
+                               torch.sort(base.flatten()).values)
+
+    @pytest.mark.parametrize("offset", [16, 32])
+    def test_two_offsets_start_the_region_from_identical_noise(self, offset):
+        """A 64-voxel region placed at 0 and at ``offset`` in a 128-voxel canvas."""
+        a = _initial_canvas_noise((0, 0, 0), 101)
+        b = _initial_canvas_noise((offset,) * 3, 101)
+        d, r = offset // DS, P // DS
+        assert torch.equal(a[:, :r, :r, :r], b[:, d:d + r, d:d + r, d:d + r])
+        # Guard: the canvas-anchored draw makes the two runs bit-identical, and
+        # then the check above passes for the wrong reason.
+        assert not torch.equal(a, b)
+
+    def test_the_re_noising_draws_use_the_same_frame(self):
+        """The fresh noise for finished chunks is in the request's frame too.
+
+        Both runs re-noise the SAME context blocks in canvas coordinates, so a
+        region-relative draw makes one recorded field the shifted copy of the
+        other; a canvas-relative draw makes them equal.
+        """
+        a = _renoise_draws((0, 0, 0), 202)
+        b = _renoise_draws((32, 32, 32), 202)
+        d = 32 // DS
+        assert a and len(a) == len(b)
+        for na, nb in zip(a, b):
+            assert na.shape == nb.shape
+            assert torch.equal(nb[..., d:, d:, d:], na[..., :-d, :-d, :-d])
+        assert not torch.equal(a[0], b[0])
+
+    def test_the_request_offset_reaches_the_sampler(self):
+        def run(offset):
+            gen, size_mm = _generator(_EchoModel(), _LatentVAE(), (1, 1, 1),
+                                      n_steps=2, tiles=(1, 1, 1))
+            return gen.generate(
+                volume_size_mm=size_mm, target_porosity=0.03,
+                autocast_dtype=torch.float32, window_batch=8,
+                return_class_probs=True, seed=99, request_offset=offset,
+            )[3]
+
+        assert not np.array_equal(run((0, 0, 0)), run((32, 32, 32)))
+        np.testing.assert_array_equal(run((32, 32, 32)), run((32, 32, 32)))
+
+    def test_an_offset_off_the_latent_grid_is_refused(self):
+        gen, size_mm = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2))
+        with pytest.raises(ValueError, match="request_offset"):
+            gen.generate(volume_size_mm=size_mm, autocast_dtype=torch.float32,
+                         window_batch=64, request_offset=(2, 0, 0))
+
+
+# ── the default specimen envelope ────────────────────────────────────────────
+
+class TestDefaultMaterialMap:
+    """``cond_material`` is the envelope FRACTION per latent cell.
+
+    A cell the box crosses is partly specimen and partly air.  Rounding the box
+    to whole cells would tell the model the surface cells are entirely one or
+    the other, which is exactly the edge it was asked to render.  The fraction
+    is the cell-box intersection volume over the cell volume, in closed form.
+    """
+
+    def _gen(self):
+        return _generator(_SpyModel(), _ConstVAE(), (2, 2, 2))[0]
+
+    def test_a_box_flush_with_the_cell_grid_is_binary(self):
+        m = self._gen()._default_material_map((4, 4, 4), (0, 0, 0), (8, 16, 16))
+        assert m[:2].min() == 1.0
+        assert m[2:].max() == 0.0
+
+    def test_a_box_starting_mid_cell_gives_the_exact_near_edge_fraction(self):
+        m = self._gen()._default_material_map((4, 4, 4), (1, 0, 0), (16, 16, 16))
+        assert m[0].min() == pytest.approx(0.75)     # 3 of the 4 voxels
+        assert m[1:].min() == 1.0
+
+    def test_a_box_ending_mid_cell_gives_the_exact_far_edge_fraction(self):
+        m = self._gen()._default_material_map((4, 4, 4), (0, 0, 0), (16, 16, 15))
+        assert m[..., 3].max() == pytest.approx(0.75)
+        assert m[..., :3].min() == 1.0
+
+    def test_a_box_narrower_than_one_cell_is_not_lost(self):
+        m = self._gen()._default_material_map((4, 4, 4), (1, 0, 0), (3, 16, 16))
+        assert m[0].min() == pytest.approx(0.5)      # voxels 1 and 2 of 4
+        assert m[1:].max() == 0.0
+
+    def test_the_fraction_is_the_product_over_the_three_axes(self):
+        m = self._gen()._default_material_map((4, 4, 4), (1, 2, 0), (16, 16, 15))
+        assert m[0, 0, 3] == pytest.approx(0.75 * 0.5 * 0.75)
+
+    def test_it_matches_the_block_mean_of_the_voxel_envelope(self):
+        """The same quantity ``latent_material_map`` pools from a voxel mask."""
+        from poregen.eval_v4.generate import latent_material_map
+        lo, hi = (1, 5, 2), (13, 16, 15)
+        vox = np.zeros((16, 16, 16), dtype=np.float32)
+        vox[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 1.0
+        m = self._gen()._default_material_map((4, 4, 4), lo, hi)
+        np.testing.assert_allclose(m, latent_material_map(vox), atol=1e-6)
+
+    def test_every_value_stays_a_fraction(self):
+        m = self._gen()._default_material_map((4, 4, 4), (3, 0, 7), (14, 16, 9))
+        assert m.dtype == np.float32
+        assert float(m.min()) >= 0.0 and float(m.max()) <= 1.0

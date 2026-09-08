@@ -63,7 +63,7 @@ differ:
   losses consume.
 
 Latents for the LDM stack live in a memmap binary store
-(`data/split_v3/latents_r08z4/`) with sibling arrays for the material map and
+(`data/split_v3/latents_r08z8/`) with sibling arrays for the material map and
 air fraction, all written by one pass of `scripts/build_latent_dataset.py`; see
 `src/poregen/dataset/material.py`.
 
@@ -73,7 +73,7 @@ The denoiser is `UNet3DDenoiser`. Nothing in it is switchable: every signal
 below is always present. An ldm05-era switch that no config ever flipped was
 only a way for training and generation to disagree.
 
-**Concatenated at the input** (127 channels at `z_channels = 4`):
+**Concatenated at the input** (155 channels at the live `z_channels = 8`; the rows below are in terms of `C`, so the total follows the chosen rung):
 
 | Input | Channels | Meaning |
 |---|---|---|
@@ -85,7 +85,9 @@ only a way for training and generation to disagree.
 | `nb_t` | `6·8` | sinusoidal embedding of each neighbour's own noise level |
 
 **FiLM / AdaGN scalars**, summed with the timestep embedding: `cond_por`
-(standardised `log(φ + 1e-3)`, with a learned null token for CFG),
+(standardised `log(φ + 1e-3)` of the FULL-PATCH `φ = pore / patch_size³`, air
+included — see "Material porosity in, full-patch φ out"; with a learned null
+token for CFG),
 `cond_depth`, `cond_dist6` through one MLP over the whole 6-vector, and the
 availability-masked pool of the neighbour latents. There is no global-porosity
 input — the per-patch porosity field carries volume-level control.
@@ -101,12 +103,25 @@ under the top surface and a patch against a side wall asked for the same thing.
 `conditioning.dist6_from_box` is the one definition; the training builder and
 the sampler both call it.
 
-### Neighbours arrive noised
+### Neighbours are sampled, then noised
 
-The store serves the neighbours' CLEAN posterior means. The training step
-(`ldm_engine.noise_neighbours`) draws a timestep per item and per face — with
-probability `nb_t_mix` the target's own `t`, otherwise `Uniform{0..t}` — and
-`q_sample`s each neighbour to it, passing `nb_t` to the denoiser. Separately,
+The store serves each neighbour's CLEAN posterior — the mean AND the std, both
+read from the neighbour's own store row and put through the same per-channel
+affine map as the target. The batch therefore carries `nb_latents` (6,C,…) and
+`nb_std` (6,C,…) next to `z` and `std`.
+
+The training step draws each EXISTS neighbour before it noises it
+(`ldm_engine.sample_neighbours`): `mu + sigma*eps`, fresh eps, exactly how the
+target is drawn under `data.latent_mode: sampled`. Conditioning on posterior
+MEANS while regressing a posterior SAMPLE was a real defect — the neighbour
+input was short of `E[sigma^2]` per cell, a gap that does not exist at
+generation time, where every neighbour is a real latent. OOB and UNKNOWN
+neighbours carry no posterior and are left alone; `noise_neighbours` zeroes
+them anyway.
+
+Then `ldm_engine.noise_neighbours` draws a timestep per item and per face —
+with probability `nb_t_mix` the target's own `t`, otherwise `Uniform{0..t}` —
+and `q_sample`s each neighbour to it, passing `nb_t` to the denoiser. Separately,
 with probability `drop_nb` an item loses all six at once: availability UNKNOWN,
 latents zero, `nb_t` zero. That is exactly the neighbour null arm of the nested
 CFG, so training and `DDIMSampler` share one definition of "no neighbour
@@ -156,6 +171,29 @@ step of every ldm06 chain started from a clamp artefact, not a prediction.
 The v form recovers `x̂₀ = sqrt(ᾱ)·x_t − sqrt(1−ᾱ)·v̂` with no division and
 stays order 1. `DDPMSchedule` therefore refuses `zero_terminal_snr` with
 `objective: eps`: there the division is by exactly zero.
+
+### Where a DDIM step lands
+
+**Index convention.** `alphas_cumprod[t]` is ᾱ_{t+1} and
+`alphas_cumprod_prev[t]` is ᾱ_t. A network call at index `t` reads a state at
+`alphas_cumprod[t]` — that is what `q_sample` builds for index `t` at training
+time, and what `predict_x0` inverts. So the state `ddim_step` produces for the
+call at `t_prev` must sit at `alphas_cumprod[t_prev]`, and the sampler grid's
+final `t_prev = 0` closes the chain (no call follows) with the clean level
+ᾱ = 1, returning x̂₀ exactly.
+
+Until 2026-09-08 the step gathered `alphas_cumprod_prev[t_prev]` instead. That
+is ᾱ_{t_prev}, one index of the 1000-step ladder below the ᾱ_{t_prev+1} the
+next call assumes, so every intermediate state sat at a slightly wrong noise
+level. Size on the ldm06 schedule: up to **1.6e-3 in sqrt(ᾱ)**, and — where it
+hurts most — **3.9 % of sqrt(1−ᾱ) at `t_prev = 19`**, the bottom rung of a
+50-step ladder, because there the remaining noise is small and a fixed absolute
+error is a large relative one. The terminal step was already correct
+(`alphas_cumprod_prev[0] = ᾱ_0 = 1`), which is why the "DDIM reaches x0" tests
+never saw it: an oracle denoiser returns the same x̂₀ whatever level its input
+is at. `tests/test_vpred_schedule.py` now drives the step with an oracle whose
+answer PINS the level (x̂₀ = 1, ε̂ = 0) and reads the landing point back as a
+noise level.
 
 ### Guidance in objective space
 
@@ -238,6 +276,15 @@ One path: **hybrid chunked joint denoising** (`diffusion/sampler.py`).
   current chunk and a finished one is still coherent.
 - `chunk_tiles = (1, 1, 1)` is patch-at-a-time sequential generation; one chunk
   covering the volume is pure joint denoising.
+- Every random draw is taken in the frame of the REQUEST, not of the canvas: one
+  canvas-sized field per draw (the initial canvas once, the re-noising field at
+  every timestep of every chunk), rolled by `request_offset` before use
+  (`region_noise_field`). The value used at canvas cell `p` is the one the
+  request sees at `p − offset`, so translating a request inside a bigger canvas
+  translates its noise with it. That is what lets the assembly assessment hold
+  the noise realisation fixed while the assembly grid moves; a canvas-anchored
+  draw changed both at once. `request_offset` must be a whole number of latent
+  cells.
 
 Decoding is overlapped too: latent windows at `decode_stride` voxels, with the
 decoded grey level and the raw 3-class logits blended under a tapered window
@@ -261,10 +308,72 @@ window spanning a 0.01 tile and a 0.05 tile one of the two extremes, so the
 50 %-overlap windows on either side of a field step both asked for the wrong
 thing and the requested step was reproduced as a wider, offset one.
 
+### Material porosity in, full-patch φ out
+
+There are two porosities, and they are not the same number.
+
+| | Definition | Where |
+|---|---|---|
+| **full-patch φ** | `pore / patch_size³` — the whole 64³ patch, air outside the specimen counted in the denominator | what the latent store records and what `cond_por` means |
+| **material porosity** | `pore / material` — the specimen envelope only | what a user asks for, and what `eval_v4` measures |
+
+`scripts/build_latent_dataset.py` stores `phi = (label == CLASS_PORE).mean()`
+over the whole patch, so a patch half outside the specimen carries a φ about half
+its material porosity. That is the right thing for training: the conditioning has
+to describe the patch the encoder actually saw. It is the wrong thing to hand a
+sampler a user's request in, and until this fix the sampler passed the request
+straight through — a surface window asked for 0.03 got the full-patch 0.03 it
+asked for, which is 0.06 material porosity, and eval scored the miss against a
+target nobody requested.
+
+`VolumeGenerator._window_conditioning` converts. Per window,
+
+```
+cond_phi = phi_request × (material fraction of the window)
+```
+
+where the material fraction is the mean of `material_map` over the window's
+latent cells — every cell covers the same `downsample³` voxels, so that mean IS
+the volume fraction of the window inside the specimen. The scale is applied to
+the value `window_tile_mean` returns, **before** the `[POR_MIN, POR_MAX]` clip
+and **before** `porosity_to_cond`: clipping first would turn a legal request
+(0.2 material porosity at half material = 0.1 full-patch) into a clipped one, and
+`porosity_to_cond` is a log, where a scale becomes an offset. A fully interior
+window has fraction 1.0 and is untouched, so nothing changes for a volume with no
+material map.
+
+Nothing about training or the latent store moves: the store keeps full-patch φ,
+and only the sampling-time request is converted.
+
 ## VAE model & training pipeline
 
 See [vae_architecture.md](vae_architecture.md) for the encoder/decoder data flow
 and the `train_step` / `eval_step` / `train_loop` internals.
+
+### `training.freeze_modules` — frozen in both senses
+
+The decoder fine-tune (`r08/decoder-ft`) names the encoder-side children in
+`training.freeze_modules`, so the latent space the LDM was built on cannot move
+underneath it. `apply_transfer` in `experiments/train_vae.py` applies it, and it
+does **two** things per named child:
+
+- `requires_grad_(False)` on its parameters, so no gradient reaches them, and
+  `build_optimizer` never sees them.
+- Holds the subtree in `eval()` for the rest of the run, by overriding `train()`
+  on the model instance.
+
+The second is not hygiene, for the same reason as the decoded auxiliary loss
+above: the r08 VAE is BatchNorm3d, `train_step` calls `model.train()` on **every**
+step, and a train-mode forward recomputes `running_mean` / `running_var` outside
+autograd. `requires_grad_(False)` does **not** stop that. Without the eval hold
+a "frozen" encoder's eval-mode `mu` drifts across the fine-tune and silently
+invalidates the latent store.
+
+The override sits on the model instance, so it covers every caller at once —
+`train_step`, the `model.train()` after each sample export, the resume path
+(which re-applies the freeze), and `torch.compile`, which wraps the model
+afterwards and forwards `train()` down to it as a child. Do not "fix" this at
+the call sites; there is more than one, and the next one added would miss it.
 
 ### Decoder output contract
 
@@ -284,6 +393,9 @@ site must use them so the behaviour cannot drift apart again.
   label — 0 material, 1 pore, 2 air — trained with class-weighted cross-entropy
   plus soft Dice. Decode it with `decode_label()` (argmax) or
   `decode_class_probs()` (softmax). Emitted by the `*_cls` variants from r08 on.
+  It carries the pore mask too: the qualitative sample export writes
+  `decode_label(...) == CLASS_PORE` as `mask_recon`, next to the 3-class
+  `label_recon`. Reaching for `mask_logits` there exports an empty volume.
 
 **A variant emits `mask_logits` or `class_logits`, never both.** A two-valued
 head and a three-valued one are different contracts; emitting both would let a
@@ -325,6 +437,12 @@ for diffusion runs), each containing `log.jsonl`, `metrics.jsonl`,
 `checkpoints/latest.ckpt` + `best.ckpt`. On resume, `run_metadata.json` is
 updated and `log.jsonl` is pruned to the resume step to prevent duplicates.
 
+A checkpoint carries the model, the optimizer, the scaler, the scheduler, the
+RNG states, and — when the run has one — the discriminator with its own
+optimizer. The resume path builds the discriminator *before* the load and
+restores it: a fresh one would restart the GAN at every interruption, and
+nothing in the loss curves would show it.
+
 Analysis outputs live in `runs/campaigns/<NN>-<name>/`, one campaign per
 question, each with a `README.md` and a vault note; see
 `runs/campaigns/INDEX.md`.
@@ -334,6 +452,10 @@ question, each with a `README.md` and a vault note; see
 - **Porosity-MAE < 0.005** is the primary success metric (`val/porosity_mae`).
 - `kl_collapsed_fraction` should stay low — a spike means the latent is collapsing.
 - The **discriminator always runs in float32** — intentional, do not change.
+- The **async checkpoint writer never sees a live tensor**. `save_checkpoint_async`
+  copies the whole state to CPU on the calling thread. Passing the live state
+  dicts lets the steps taken during serialisation land in a file labelled with
+  an earlier step.
 - `latent_channel_moments` returns GPU tensors — `merge_latent_channel_moments`/
   `active_units_from_moments` handle them correctly as-is.
 - `eval_step` returns `(losses, output, xct_dev, mask_dev)` — reuse those device
@@ -345,3 +467,15 @@ question, each with a `README.md` and a vault note; see
   campaign once.
 - `neighbour_offset >= patch_size` — face neighbours must TOUCH, never overlap.
   There is no flag to disable the guard.
+- **A frozen module is in `eval()`, not only `requires_grad_(False)`.** BatchNorm
+  running statistics are not gradients, and a train-mode forward moves them.
+  This applies to `training.freeze_modules` and to any VAE put in a training
+  graph (the decoded auxiliary loss).
+- The specimen box in `material_mask` is the **largest** component of the
+  Otsu max-projection, never the first-labelled one. Label ids follow raster
+  order, so a bright dust speck above and left of the coupon is numbered first
+  and used to become "the specimen", collapsing `sample_mask` to the speck's
+  bounding box. A scan whose second-largest component exceeds
+  `AMBIGUOUS_COMPONENT_RATIO` (10 %) of the largest raises `ValueError` — two
+  comparable objects mean no single box is the specimen, and the scan must be
+  inspected instead of silently segmented against half of itself.

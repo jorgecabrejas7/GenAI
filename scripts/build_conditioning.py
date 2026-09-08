@@ -27,7 +27,11 @@ capped at 64 voxels and normalised, ordered
 ``poregen.diffusion.conditioning.dist6_from_box_array`` is the single
 implementation; the sampler calls its scalar twin for generated volumes.
 
-Run:  python scripts/build_conditioning.py [--store data/split_v3/latents_r08z4]
+Run:  python scripts/build_conditioning.py --store data/split_v3/latents_<rung>
+
+``--store`` is required and has no default: the store name follows the chosen
+rung, so a default here silently annotates whichever rung was current when the
+line was written.
 """
 
 from __future__ import annotations
@@ -406,13 +410,27 @@ def build_scalars(store: Path, field: dict) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--store", default=str(DATA_ROOT / "latents_r08z4"))
+    ap.add_argument("--store", required=True,
+                    help="Latent store to annotate, e.g. "
+                         "data/split_v3/latents_r08z8. Required and never "
+                         "defaulted: the store name follows the rung, so a "
+                         "default annotates the wrong store as soon as the "
+                         "rung changes.")
     ap.add_argument("--rebuild-orientation", action="store_true",
                     help="Re-derive data/split_v2/orientation_field.json from the "
                          "T-I fit and the expert ground truth before building the "
                          "sidecar.  Only needed when those inputs change.")
     args = ap.parse_args()
     store = Path(args.store)
+    if not store.is_absolute():
+        store = (REPO / store).resolve()
+    # This writes cond.parquet INTO the store, so prove it is one first. A
+    # mistyped path would otherwise scatter sidecars into an unrelated directory.
+    if not (store / "metadata.json").is_file():
+        raise SystemExit(
+            f"--store {store} is not a latent store: no metadata.json there.\n"
+            "Pass the store the run actually uses (see its data.latents_root)."
+        )
 
     if args.rebuild_orientation or not ORIENT_OUT.exists():
         print("[1/4] rebuilding orientation field ...", flush=True)
