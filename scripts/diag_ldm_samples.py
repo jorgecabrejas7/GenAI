@@ -114,6 +114,41 @@ def collect_bucket_rows(
     return rows, freq
 
 
+def find_boundary_rows(ds: LatentDataset, n: int,
+                       lo: float = 0.2, hi: float = 0.8) -> list[int]:
+    """Val rows whose window STRADDLES the specimen boundary.
+
+    The material probe is meaningless on an interior window: the map is already
+    all ones, so MATERIAL_ONE is a no-op by construction and reports 0.0%
+    whether the conditioning works or not.
+
+    Selected on the material fraction itself, read straight from material.bin,
+    rather than on ``cond_dist6``. Two reasons. It is exact — cond_dist6 near
+    zero only means a face is near the surface, and the most extreme such
+    windows turn out to be ~92% exterior air, which is as uninformative as an
+    all-ones map in the other direction. And it is cheap: material.bin is one
+    byte per latent cell, so scoring all 266k val rows costs one pass.
+
+    A window that is half in and half out is where replacing the real map with
+    all-ones is the largest honest change, so it is where the probe has the
+    most power.
+    """
+    # Chunked: np.asarray on the memmap would copy all 266k x 4096 bytes into
+    # RAM to compute 266k scalars, and this runs beside a training job.
+    mat = ds._material
+    n_rows = mat.shape[0]          # NOT `n` — that is the caller's row budget
+    frac = np.empty(n_rows, dtype=np.float64)
+    for i in range(0, n_rows, 8192):
+        blk = np.asarray(mat[i:i + 8192], dtype=np.float32)
+        frac[i:i + blk.shape[0]] = blk.reshape(blk.shape[0], -1).mean(axis=1) / 255.0
+    cand = np.flatnonzero((frac > lo) & (frac < hi))
+    if cand.size == 0:
+        return []
+    # Closest to half in, half out.
+    order = cand[np.argsort(np.abs(frac[cand] - 0.5))]
+    return [int(i) for i in order[:n]]
+
+
 def build_bucket_cond(ds: LatentDataset, rows: list[int], device: torch.device) -> dict:
     """Stack the real conditioning of *rows* onto the device (ldm06 contract).
 
@@ -158,12 +193,72 @@ def sample_bucket(
     )
 
 
+#: Per-channel std of the SAMPLED training latents, loaded once from
+#: latent_std_reference.json. See ``load_std_reference``.
+_STD_REF: np.ndarray | None = None
+
+
+def load_std_reference(store: Path) -> np.ndarray | None:
+    """Per-channel std of z = mu + sigma*eps over the train split, or None.
+
+    ``std_ratio`` divides by 1.0, which is the std of the MU-normalised latent:
+    the store's stats normalise mu, so mu-normalised latents have std 1 by
+    construction. But ldm06 trains on ``latent_mode: sampled`` — the target is
+    mu + sigma*eps in that same space, whose per-channel std is
+    sqrt(1 + rms(sigma/std_c)^2) and is strictly greater than 1.
+
+    Scoring generated latents against 1.0 therefore charges the model for the
+    posterior width it was trained to reproduce. Both references are reported;
+    the sampled one is the one a gate should use.
+
+    Produced by scripts/analysis/latent_std_reference.py.
+    """
+    # The store's own metadata is authoritative: it travels with the latents,
+    # so a reference can never be silently paired with the wrong store.
+    meta = store / "metadata.json"
+    if meta.exists():
+        try:
+            cs = json.loads(meta.read_text()).get("channel_stats") or {}
+            if cs.get("sampled_std"):
+                return np.asarray(cs["sampled_std"], dtype=np.float64)
+        except Exception as exc:                        # noqa: BLE001
+            logger.warning("could not read channel_stats from %s: %s", meta, exc)
+    # Fallback: the standalone measurement, only if it names THIS store.
+    repo = find_repo_root(__file__)
+    cand = repo / "runs/campaigns/09-r08-latent-sweep/latent_std_reference.json"
+    if cand.exists():
+        try:
+            d = json.loads(cand.read_text())
+            if Path(d.get("store", "")).name == Path(store).name:
+                return np.asarray(d["sampled_std"], dtype=np.float64)
+            logger.warning("%s is for store %s, not %s — ignored",
+                           cand, d.get("store"), store)
+        except Exception as exc:                        # noqa: BLE001
+            logger.warning("could not read %s: %s", cand, exc)
+    return None
+
+
 def bucket_metrics(z: torch.Tensor, sat: float, por: torch.Tensor,
                    air: torch.Tensor, phi: np.ndarray) -> dict:
     ch_std = z.std(dim=(0, 2, 3, 4))
+    ch = np.asarray([float(v) for v in ch_std], dtype=np.float64)
+    # Against the MU-normalised reference (implicitly 1.0) and, when it is
+    # known, against the SAMPLED reference the model was actually trained on.
+    per_ch = (ch / _STD_REF) if _STD_REF is not None and _STD_REF.shape == ch.shape else None
+    sampled = float(per_ch.mean()) if per_ch is not None else None
+    # Name the channels outside the band. At 20k the MEAN passed for
+    # ema_ddim50 (0.9015) and raw_ddim200 (1.081) while channels 3, 5 and 6
+    # were outside it in both — a mean over eight channels hides exactly the
+    # per-channel drift this gate exists to catch.
+    off_band = ([int(i) for i, v in enumerate(per_ch) if v < 0.90 or v > 1.10]
+                if per_ch is not None else None)
     return {
         "n": int(z.shape[0]),
         "std_ratio": float(ch_std.mean()),
+        "std_ratio_vs_sampled": sampled,
+        "std_ratio_vs_sampled_per_ch": ([round(float(v), 4) for v in per_ch]
+                                        if per_ch is not None else None),
+        "channels_outside_10pct": off_band,
         "ch_std": [round(float(v), 3) for v in ch_std],
         "mean_abs_max": float(z.mean(dim=(0, 2, 3, 4)).abs().max()),
         "x0_sat": float(sat),
@@ -443,6 +538,17 @@ def main() -> None:
             save_grid(entries, f"{vname}  step={step}", out_dir / f"{vname}.png")
             logger.info("%s done", vname)
 
+    global _STD_REF
+    _STD_REF = load_std_reference(Path(val_ds.root))
+    if _STD_REF is None:
+        logger.warning("no sampled-latent std reference; std_ratio is reported only "
+                       "against the mu-normalised reference of 1.0, which OVERSTATES "
+                       "the ratio for a latent_mode='sampled' run. Produce it with "
+                       "scripts/analysis/latent_std_reference.py.")
+    else:
+        logger.info("sampled-latent std reference: %s",
+                    [round(float(v), 4) for v in _STD_REF])
+
     # ── conditioning-alive check (raw weights, richest bucket) ──────────────
     model.load_state_dict(raw_state)
     richest = list(conds)[-1]
@@ -450,6 +556,28 @@ def main() -> None:
     alive_cond = build_bucket_cond(val_ds, alive_rows, device)
     alive = conditioning_alive_check(samplers[50], val_ds, alive_cond)
     alive["bucket"] = richest
+    alive["window"] = "interior (richest bucket)"
+    alive["material_probe_valid"] = False   # see find_boundary_rows
+
+    # The same probe on a BOUNDARY window, where the material map is not all
+    # ones and MATERIAL_ONE is therefore a real change. Without this the
+    # material row of the interior probe is structurally 0.0% and says nothing.
+    boundary_rows = find_boundary_rows(val_ds, ALIVE_N)
+    alive_boundary = None
+    if boundary_rows:
+        b_cond = build_bucket_cond(val_ds, boundary_rows, device)
+        mat = b_cond["cond_material"]
+        alive_boundary = conditioning_alive_check(samplers[50], val_ds, b_cond)
+        alive_boundary["window"] = "boundary (material fraction in [0.2, 0.8])"
+        alive_boundary["n_rows"] = len(boundary_rows)
+        alive_boundary["material_min"] = float(mat.min())
+        alive_boundary["material_mean"] = float(mat.mean())
+        # If the map is still saturated the probe cannot answer, and saying so
+        # is the whole point of adding it.
+        alive_boundary["material_probe_valid"] = bool(float(mat.min()) < 0.99)
+    else:
+        logger.warning("no val window straddles the specimen boundary; "
+                       "material conditioning cannot be probed")
 
     # ── kill-switch (raw + EMA, richest bucket) ─────────────────────────────
     killswitch = None
@@ -488,11 +616,27 @@ def main() -> None:
         print(f"\n-- conditioning-alive check (raw weights, DDIM-50, n={ALIVE_N}, "
               f"bucket {alive['bucket']}, seed {SEED}) --")
         print(f"total-noise scale (FULL vs different seed): MAD {alive['noise_mad']:.4f}")
+        print("  (interior window: the material row is a no-op here by "
+              "construction — see the boundary probe below)")
         for key, what in (("por_neutral", "porosity"), ("orient_zero", "orientation"),
                           ("material_one", "material map"), ("nb_unknown", "neighbours")):
             a = alive[key]
             print(f"{what:<14} input changes the output by {a['pct_of_noise']:5.1f}% "
                   f"of the total-noise scale (MAD {a['mad']:.4f})")
+
+    if alive_boundary is not None:
+        b = alive_boundary
+        print(f"\n-- conditioning-alive on a BOUNDARY window (n={b['n_rows']}, "
+              f"material min {b['material_min']:.3f}, mean {b['material_mean']:.3f}) --")
+        if not b["material_probe_valid"]:
+            print("  material map is still ~all-ones here; the probe still cannot "
+                  "answer whether material conditioning is used")
+        print(f"total-noise scale: MAD {b['noise_mad']:.4f}")
+        for key, what in (("por_neutral", "porosity"), ("orient_zero", "orientation"),
+                          ("material_one", "material map"), ("nb_unknown", "neighbours")):
+            a2 = b[key]
+            print(f"  {what:<14} MAD {a2['mad']:.4f}  ({a2['pct_of_noise']:.2f}% of noise)")
+
 
     if killswitch is not None:
         print(f"\n-- kill-switch (DDIM-50, n={killswitch['n']}, "
@@ -518,6 +662,7 @@ def main() -> None:
         # stdout — while the D43 gate is written in DDIM-200 numbers.
         "variants": dict(variant_results),
         "alive": alive,
+        "alive_boundary": alive_boundary,
         "killswitch": killswitch,
     }
     history = read_trend(trend_path)

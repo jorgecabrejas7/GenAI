@@ -61,6 +61,17 @@ while pgrep -f "scripts/train_ldm\.py run " >/dev/null 2>&1; do sleep 60; done
 say "ldm06/base has exited"
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 
+# ── 0b. refresh the sampled-latent std reference ──────────────────────────────
+# Deferred to here on purpose. The store's channel_stats.sampled_std is
+# PROVISIONAL at 4000 rows, and a 50k random-read pass over latents.bin
+# competes with the training dataloader — doing it live slowed ldm06 from 1.74
+# to 2.43 s/step. With training finished the read is free.
+say "STDREF refresh start (50k rows, CPU)"
+python scripts/analysis/latent_std_reference.py \
+    --store "$REPO/data/split_v3/latents_r08z8" --n 50000 \
+    > "$SCRATCH/latent_std_reference.log" 2>&1
+say "STDREF refresh done rc=$?"
+
 # ── 1. eval v4 generation, gated ──────────────────────────────────────────────
 # Read the gate ONCE, here, so a file touched later cannot push hours of
 # generation in front of the fine-tune that is already running.
