@@ -33,7 +33,6 @@ seam at every patch face; blending removes it.
 from __future__ import annotations
 
 import logging
-import math
 from pathlib import Path
 from typing import Any
 
@@ -825,15 +824,25 @@ class VolumeGenerator:
         box_lo: tuple[int, int, int],
         box_hi: tuple[int, int, int],
     ) -> np.ndarray:
-        """Inside the specimen box the envelope is 1; outside it is 0 (air)."""
-        ds = self.downsample
-        m = np.zeros(canvas_cells, dtype=np.float32)
-        sl = tuple(
-            slice(int(math.ceil(box_lo[a] / ds)), int(box_hi[a] // ds))
-            for a in range(3)
-        )
-        m[sl] = 1.0
-        return m
+        """The EXACT fraction of every latent cell the specimen box covers.
+
+        ``cond_material`` is the envelope fraction per cell, so a cell the box
+        crosses is neither 1 nor 0 — rounding the box to whole cells would tell
+        the model the surface cells are solid specimen or pure air, which is
+        the one place the map carries information.  The box is axis aligned, so
+        the intersection volume factorises: the fraction is the product of the
+        three per-axis overlaps, in closed form.
+        """
+        ds = float(self.downsample)
+        axis: list[np.ndarray] = []
+        for a in range(3):
+            edge = np.arange(canvas_cells[a] + 1, dtype=np.float64) * ds
+            lo = np.clip(edge[:-1], box_lo[a], box_hi[a])
+            hi = np.clip(edge[1:], box_lo[a], box_hi[a])
+            axis.append((hi - lo) / ds)
+        m = (axis[0][:, None, None] * axis[1][None, :, None]
+             * axis[2][None, None, :])
+        return m.astype(np.float32)
 
     def _neighbour_plan(
         self,

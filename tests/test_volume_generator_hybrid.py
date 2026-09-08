@@ -595,3 +595,56 @@ def test_sample_batch_takes_the_same_generator():
 
     torch.testing.assert_close(draw(11), draw(11), rtol=0, atol=0)
     assert not torch.equal(draw(11), draw(12))
+
+
+# ── the default specimen envelope ────────────────────────────────────────────
+
+class TestDefaultMaterialMap:
+    """``cond_material`` is the envelope FRACTION per latent cell.
+
+    A cell the box crosses is partly specimen and partly air.  Rounding the box
+    to whole cells would tell the model the surface cells are entirely one or
+    the other, which is exactly the edge it was asked to render.  The fraction
+    is the cell-box intersection volume over the cell volume, in closed form.
+    """
+
+    def _gen(self):
+        return _generator(_SpyModel(), _ConstVAE(), (2, 2, 2))[0]
+
+    def test_a_box_flush_with_the_cell_grid_is_binary(self):
+        m = self._gen()._default_material_map((4, 4, 4), (0, 0, 0), (8, 16, 16))
+        assert m[:2].min() == 1.0
+        assert m[2:].max() == 0.0
+
+    def test_a_box_starting_mid_cell_gives_the_exact_near_edge_fraction(self):
+        m = self._gen()._default_material_map((4, 4, 4), (1, 0, 0), (16, 16, 16))
+        assert m[0].min() == pytest.approx(0.75)     # 3 of the 4 voxels
+        assert m[1:].min() == 1.0
+
+    def test_a_box_ending_mid_cell_gives_the_exact_far_edge_fraction(self):
+        m = self._gen()._default_material_map((4, 4, 4), (0, 0, 0), (16, 16, 15))
+        assert m[..., 3].max() == pytest.approx(0.75)
+        assert m[..., :3].min() == 1.0
+
+    def test_a_box_narrower_than_one_cell_is_not_lost(self):
+        m = self._gen()._default_material_map((4, 4, 4), (1, 0, 0), (3, 16, 16))
+        assert m[0].min() == pytest.approx(0.5)      # voxels 1 and 2 of 4
+        assert m[1:].max() == 0.0
+
+    def test_the_fraction_is_the_product_over_the_three_axes(self):
+        m = self._gen()._default_material_map((4, 4, 4), (1, 2, 0), (16, 16, 15))
+        assert m[0, 0, 3] == pytest.approx(0.75 * 0.5 * 0.75)
+
+    def test_it_matches_the_block_mean_of_the_voxel_envelope(self):
+        """The same quantity ``latent_material_map`` pools from a voxel mask."""
+        from poregen.eval_v4.generate import latent_material_map
+        lo, hi = (1, 5, 2), (13, 16, 15)
+        vox = np.zeros((16, 16, 16), dtype=np.float32)
+        vox[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 1.0
+        m = self._gen()._default_material_map((4, 4, 4), lo, hi)
+        np.testing.assert_allclose(m, latent_material_map(vox), atol=1e-6)
+
+    def test_every_value_stays_a_fraction(self):
+        m = self._gen()._default_material_map((4, 4, 4), (3, 0, 7), (14, 16, 9))
+        assert m.dtype == np.float32
+        assert float(m.min()) >= 0.0 and float(m.max()) <= 1.0
