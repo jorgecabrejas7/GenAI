@@ -330,3 +330,11 @@ question, each with a `README.md` and a vault note; see
   campaign once.
 - `neighbour_offset >= patch_size` — face neighbours must TOUCH, never overlap.
   There is no flag to disable the guard.
+- The specimen box in `material_mask` is the **largest** component of the
+  Otsu max-projection, never the first-labelled one. Label ids follow raster
+  order, so a bright dust speck above and left of the coupon is numbered first
+  and used to become "the specimen", collapsing `sample_mask` to the speck's
+  bounding box. A scan whose second-largest component exceeds
+  `AMBIGUOUS_COMPONENT_RATIO` (10 %) of the largest raises `ValueError` — two
+  comparable objects mean no single box is the specimen, and the scan must be
+  inspected instead of silently segmented against half of itself.
