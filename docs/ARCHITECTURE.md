@@ -423,3 +423,11 @@ question, each with a `README.md` and a vault note; see
   running statistics are not gradients, and a train-mode forward moves them.
   This applies to `training.freeze_modules` and to any VAE put in a training
   graph (the decoded auxiliary loss).
+- The specimen box in `material_mask` is the **largest** component of the
+  Otsu max-projection, never the first-labelled one. Label ids follow raster
+  order, so a bright dust speck above and left of the coupon is numbered first
+  and used to become "the specimen", collapsing `sample_mask` to the speck's
+  bounding box. A scan whose second-largest component exceeds
+  `AMBIGUOUS_COMPONENT_RATIO` (10 %) of the largest raises `ValueError` — two
+  comparable objects mean no single box is the specimen, and the scan must be
+  inspected instead of silently segmented against half of itself.

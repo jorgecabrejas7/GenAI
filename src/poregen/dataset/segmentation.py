@@ -28,6 +28,12 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+#: A scan is ambiguous when the second-largest max-projection component exceeds
+#: this fraction of the largest.  One coupon fills the field of view; anything
+#: comparable beside it means the field of view holds two objects, and no single
+#: bounding box describes "the specimen".
+AMBIGUOUS_COMPONENT_RATIO = 0.10
+
 
 # ── Sauvola thresholding ──────────────────────────────────────────────────────
 
@@ -97,7 +103,21 @@ def slice_cleaning(img: np.ndarray, min_size: int = 2) -> np.ndarray:
 # ── Material mask ─────────────────────────────────────────────────────────────
 
 def material_mask(xct: np.ndarray) -> np.ndarray:
-    """Generate a binary material mask via Otsu + max-projection + void-filling."""
+    """Generate a binary material mask via Otsu + max-projection + void-filling.
+
+    The specimen box is the bounding box of the LARGEST component of the
+    max-projection.  Component label ids follow raster order, so a bright dust
+    speck in a corner is numbered before the coupon and would otherwise be taken
+    for the specimen.
+
+    Raises
+    ------
+    ValueError
+        If the second-largest component exceeds ``AMBIGUOUS_COMPONENT_RATIO`` of
+        the largest.  The projection then shows two comparable objects and no
+        single bounding box is the specimen; the scan must be inspected rather
+        than segmented against an arbitrary half of itself.
+    """
     logger.info("Computing material mask...")
     threshold_value = filters.threshold_otsu(xct)
     binary = xct > threshold_value
@@ -107,7 +127,24 @@ def material_mask(xct: np.ndarray) -> np.ndarray:
     props = regionprops(labels)
 
     if props:
-        minr, minc, maxr, maxc = props[0].bbox
+        by_area = sorted(props, key=lambda p: p.area, reverse=True)
+        largest = by_area[0]
+        if len(by_area) > 1:
+            runner_up = by_area[1]
+            if runner_up.area > AMBIGUOUS_COMPONENT_RATIO * largest.area:
+                raise ValueError(
+                    "Specimen selection is ambiguous: the max-projection holds "
+                    f"{len(by_area)} components, the largest of {int(largest.area)} px "
+                    f"and the next of {int(runner_up.area)} px "
+                    f"({runner_up.area / largest.area:.1%} of it, over the "
+                    f"{AMBIGUOUS_COMPONENT_RATIO:.0%} limit). No single bounding box "
+                    "is the specimen — inspect the scan."
+                )
+        logger.info(
+            "Specimen component: %d px of %d components; bbox %s",
+            int(largest.area), len(by_area), largest.bbox,
+        )
+        minr, minc, maxr, maxc = largest.bbox
         binary_cropped = binary[:, minr:maxr, minc:maxc]
         logger.info("Filling internal voids...")
         filled = fill_voids.fill(binary_cropped, in_place=False)
