@@ -153,10 +153,16 @@ ls runs/ldm/
 ```bash
 python scripts/generate_volumes.py \
     --checkpoint runs/ldm/<run>/checkpoints/best.ckpt \
-    --latents-root data/split_v3/latents_r08z4 \
     --ddim-steps 50 \
     --chunk-tiles 3 3 3
 ```
+
+The latent store is NOT a flag. It comes from the run's own
+`resolved_config.yaml` (`data.latents_root`), and the script stops before the
+first model call if that store's latent width or VAE checkpoint disagrees with
+the run — a store from another rung decodes to a plausible volume that is
+silently wrong. `--latents-root` exists only to point a diagnostic at another
+copy of the store, and it faces the same two checks.
 
 Omitted sampler flags fall back to the run's own `generation` block, so a
 generation run reproduces the geometry the run was babysat with. Output is
