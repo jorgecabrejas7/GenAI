@@ -226,6 +226,9 @@ def train_step(
         Per-module gradient norms (encoder / encoder_a / encoder_b / decoder /
         mask_head) computed after unscaling and before global clipping.
     """
+    # Subtrees frozen by training.freeze_modules stay in eval mode through this:
+    # apply_transfer overrides the model's train() so their BatchNorm running
+    # statistics cannot drift. See train_vae._keep_frozen_subtrees_in_eval.
     model.train()
     batch_dev, model_args = to_device_inputs(model, batch, device)
     xct = batch_dev["xct"]
@@ -1279,6 +1282,7 @@ def _save_patch_samples(
             metas,
         )
 
+    # Frozen subtrees stay in eval — the override installed by apply_transfer.
     model.train()
 
 

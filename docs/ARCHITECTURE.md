@@ -251,6 +251,31 @@ log-odds, against one shared interior baseline.
 See [vae_architecture.md](vae_architecture.md) for the encoder/decoder data flow
 and the `train_step` / `eval_step` / `train_loop` internals.
 
+### `training.freeze_modules` — frozen in both senses
+
+The decoder fine-tune (`r08/decoder-ft`) names the encoder-side children in
+`training.freeze_modules`, so the latent space the LDM was built on cannot move
+underneath it. `apply_transfer` in `experiments/train_vae.py` applies it, and it
+does **two** things per named child:
+
+- `requires_grad_(False)` on its parameters, so no gradient reaches them, and
+  `build_optimizer` never sees them.
+- Holds the subtree in `eval()` for the rest of the run, by overriding `train()`
+  on the model instance.
+
+The second is not hygiene, for the same reason as the decoded auxiliary loss
+above: the r08 VAE is BatchNorm3d, `train_step` calls `model.train()` on **every**
+step, and a train-mode forward recomputes `running_mean` / `running_var` outside
+autograd. `requires_grad_(False)` does **not** stop that. Without the eval hold
+a "frozen" encoder's eval-mode `mu` drifts across the fine-tune and silently
+invalidates the latent store.
+
+The override sits on the model instance, so it covers every caller at once —
+`train_step`, the `model.train()` after each sample export, the resume path
+(which re-applies the freeze), and `torch.compile`, which wraps the model
+afterwards and forwards `train()` down to it as a child. Do not "fix" this at
+the call sites; there is more than one, and the next one added would miss it.
+
 ### Decoder output contract
 
 The decoder heads are **not** symmetric, despite all being called "heads". Each
@@ -330,3 +355,7 @@ question, each with a `README.md` and a vault note; see
   campaign once.
 - `neighbour_offset >= patch_size` — face neighbours must TOUCH, never overlap.
   There is no flag to disable the guard.
+- **A frozen module is in `eval()`, not only `requires_grad_(False)`.** BatchNorm
+  running statistics are not gradients, and a train-mode forward moves them.
+  This applies to `training.freeze_modules` and to any VAE put in a training
+  graph (the decoded auxiliary loss).
