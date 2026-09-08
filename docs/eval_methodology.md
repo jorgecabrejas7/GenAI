@@ -400,6 +400,13 @@ other statistics are still measured.
 
 ---
 
+The same defect was in the eval-v3 VAE reconstruction FID
+(`poregen.eval.metrics`), which fed Inception unnormalised grey the same
+way. It now calls the one shared `fid_input_from_grey`, so there is a single
+convention rather than two that can drift. **Every eval-v3 VAE FID recorded
+before 2026-09-08 is void** for the same reason the eval-v4 ones are: the
+features were off-distribution, so the number was comparable to nothing.
+
 ## The eight assessments
 
 Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,

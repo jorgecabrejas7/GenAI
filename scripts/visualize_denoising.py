@@ -14,7 +14,7 @@ Usage
 python scripts/visualize_denoising.py \\
     --checkpoint runs/ldm/.../checkpoints/best.ckpt \\
     --vae-run    runs/vae/r08-run-... \\
-    [--latents-root data/split_v3/latents_r08z4]
+    [--latents-root <store>]        # diagnostic override; still checked
 
 Output
 ------
@@ -277,8 +277,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Visualise DDIM denoising progression per step count.")
     ap.add_argument("--checkpoint",  required=True)
     ap.add_argument("--vae-run",     required=True)
-    ap.add_argument("--latents-root", default="data/split_v3/latents_r08z4",
-                    help="Latent store root (metadata.json supplies per-channel norm stats)")
+    ap.add_argument("--latents-root", default=None,
+                    help="Diagnostic override naming another latent store by hand. It faces "
+                         "the same width/VAE checks as the store the run itself names; "
+                         "without it the store comes from the run's data.latents_root.")
     args = ap.parse_args()
 
     repo = _find_repo_root()
@@ -295,9 +297,13 @@ def main() -> None:
 
     model, ldm_cfg = _load_ldm(args.checkpoint, device)
     vae = _load_vae(args.vae_run, device)
-    latents_root = Path(args.latents_root)
-    if not latents_root.is_absolute():
-        latents_root = (repo / latents_root).resolve()
+    # One resolver for every entry point: the store comes from the run's own
+    # resolved_config.yaml, and a width or VAE disagreement raises here rather
+    # than decoding silently against the wrong encoder.
+    from poregen.eval_v4.generate import resolve_latent_store
+    latents_root, _store_meta_checked = resolve_latent_store(
+        ldm_cfg, repo, override=args.latents_root
+    )
     latent_mean, latent_std = _load_latent_stats(latents_root)
 
     # Raw phi levels must be mapped through the store's porosity transform

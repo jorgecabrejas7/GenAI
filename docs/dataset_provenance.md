@@ -93,8 +93,8 @@ Then, once an r08 VAE exists, the LDM store on top of it:
 ```bash
 python scripts/build_latent_dataset.py \
     --checkpoint runs/vae/<r08 run>/best.ckpt \
-    --output data/split_v3/latents_r08z4
-python scripts/build_conditioning.py --store data/split_v3/latents_r08z4
+    --output data/split_v3/latents_r08z8
+python scripts/build_conditioning.py --store data/split_v3/latents_r08z8
 ```
 
 `build_latent_dataset.py` writes `latents.bin`, `index.parquet`,
@@ -385,7 +385,7 @@ a3f3f2f7cc65f90f772c4f8a62d66d07d429fdb5395c98b95c762f3724eda1d1`.
   `runs/vae/r07-run-0006-…-z4-c32-…/best.ckpt` (experiment
   `r07/reduction-factor-16`). 🕰 the ldm05 store; the current loader cannot read
   it (one `cond_dist`, no material sidecar). Superseded by
-  `data/split_v3/latents_r08z4`.
+  `data/split_v3/latents_r08z8`.
 
 ---
 

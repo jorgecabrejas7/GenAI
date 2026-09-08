@@ -523,13 +523,29 @@ def fid_preprocess(crops: np.ndarray):
     import torch.nn.functional as F  # noqa: PLC0415
     import torchvision.models as tvm  # noqa: PLC0415
 
-    preset = tvm.Inception_V3_Weights.DEFAULT.transforms()
     t = torch.from_numpy(np.ascontiguousarray(crops, np.float32)).unsqueeze(1)
+    return fid_input_from_grey(t)
+
+
+def fid_input_from_grey(t):
+    """``(n, 1, H, W)`` grey in [0, 1] -> ``(n, 3, 299, 299)`` Inception input.
+
+    The one definition of the preprocessing convention documented on
+    :func:`fid_preprocess`.  It takes a tensor rather than an array so a caller
+    that already has grey slices on a device — the eval-v3 reconstruction FID
+    in ``poregen.eval.metrics`` — reuses this instead of keeping a second,
+    silently divergent copy of the same convention.
+    """
+    import torch  # noqa: PLC0415
+    import torch.nn.functional as F  # noqa: PLC0415
+    import torchvision.models as tvm  # noqa: PLC0415
+
+    preset = tvm.Inception_V3_Weights.DEFAULT.transforms()
     t = F.interpolate(t, size=(FID_INPUT, FID_INPUT),
                       mode="bilinear", align_corners=False)
     t = t.expand(-1, 3, -1, -1)
-    mean = torch.tensor(preset.mean, dtype=t.dtype).view(1, 3, 1, 1)
-    std = torch.tensor(preset.std, dtype=t.dtype).view(1, 3, 1, 1)
+    mean = torch.tensor(preset.mean, dtype=t.dtype, device=t.device).view(1, 3, 1, 1)
+    std = torch.tensor(preset.std, dtype=t.dtype, device=t.device).view(1, 3, 1, 1)
     return (t - mean) / std
 
 

@@ -63,7 +63,7 @@ differ:
   losses consume.
 
 Latents for the LDM stack live in a memmap binary store
-(`data/split_v3/latents_r08z4/`) with sibling arrays for the material map and
+(`data/split_v3/latents_r08z8/`) with sibling arrays for the material map and
 air fraction, all written by one pass of `scripts/build_latent_dataset.py`; see
 `src/poregen/dataset/material.py`.
 
@@ -73,7 +73,7 @@ The denoiser is `UNet3DDenoiser`. Nothing in it is switchable: every signal
 below is always present. An ldm05-era switch that no config ever flipped was
 only a way for training and generation to disagree.
 
-**Concatenated at the input** (127 channels at `z_channels = 4`):
+**Concatenated at the input** (155 channels at the live `z_channels = 8`; the rows below are in terms of `C`, so the total follows the chosen rung):
 
 | Input | Channels | Meaning |
 |---|---|---|
