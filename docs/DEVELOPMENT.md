@@ -44,14 +44,41 @@ tensorboard --logdir runs/vae/
 
 ## Known pre-existing test failures
 
-Do not fix unless explicitly asked:
+Exactly these five tests fail. **Everything else must pass.**
 
-- `tests/test_losses_smoke.py::TestLossesSmoke::test_all_components_present`
-- `tests/test_latent_metrics.py::test_active_units_counts_collapsed_channels`
-- `tests/test_recon_metrics.py` (3 failures)
+```
+tests/test_losses_smoke.py::TestLossesSmoke::test_all_components_present
+tests/test_latent_metrics.py::test_active_units_counts_collapsed_channels
+tests/test_recon_metrics.py::test_run_eval_logs_sharpness_on_post_sigmoid_xct
+tests/test_recon_metrics.py::test_run_eval_aggregates_active_units_across_eval_window
+tests/test_recon_metrics.py::test_train_loop_runs_final_full_eval_for_val_and_test
+```
 
-A clean run is therefore **448 passed, 1 skipped, 5 failed**. The skip is the
-end-to-end FID test, which needs torchvision.
+Do not fix them unless explicitly asked. The gate is this list of ids, not a
+total count — the count moves every time a branch adds a test, so it is a
+liability rather than a baseline. A new failure outside this list is a
+regression, whatever the totals say.
+
+Check the five cheaply, without running the whole suite:
+
+```bash
+CUDA_VISIBLE_DEVICES= PYTHONPATH="$PWD/src" python -m pytest \
+    tests/test_losses_smoke.py tests/test_latent_metrics.py \
+    tests/test_recon_metrics.py -q
+```
+
+Nothing is expected to skip. The end-to-end FID test
+(`tests/test_eval_v4_microstructure.py::TestFid::test_identical_crop_sets_have_zero_fid`)
+used to skip for want of `torchvision`; it no longer does. `torchvision` is
+installed on this machine and the Inception weights are cached, so the test
+**runs** — see [torchvision (FID only)](#torchvision-fid-only) for the exact
+version pair. It is now the slowest test in the suite: a real Inception forward
+pass on CPU, about 3 minutes with `CUDA_VISIBLE_DEVICES=` set.
+
+**FID numbers are only valid after fix F11** (Inception input normalisation,
+merged). Before F11 the features came from unnormalised input, so every FID
+value recorded earlier is void. Do not compare a new FID against one from an
+older campaign report unless that report post-dates F11.
 
 ## Testing inside a git worktree
 
@@ -83,7 +110,20 @@ test before adding it.
 
 ## torchvision (FID only)
 
-`torchvision` is NOT in `requirements.txt` and nothing but FID needs it —
+**Installed pair on this machine: `torch 2.12.1+cu130` with
+`torchvision 0.27.1+cu130`.** Confirm before an eval run:
+
+```bash
+CUDA_VISIBLE_DEVICES= python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__)"
+# 2.12.1+cu130 0.27.1+cu130
+```
+
+If `torch` reports anything else, a `torchvision` install has replaced the
+working build — stop and repair it before trusting any result.
+
+`torchvision` is NOT an installable line in `requirements.txt` (only a
+recorded comment there, so `pip install -r requirements.txt` cannot pull a
+torch with it) and nothing but FID needs it —
 `eval_v4.microstructure` uses `inception_v3` for the 2048-d feature. It must be
 installed **from the PyTorch cu130 index, version-matched, and with
 `--no-deps`**, or pip resolves a torchvision whose `Requires-Dist` pins a
@@ -102,7 +142,9 @@ wheel's `Requires-Dist: torch` before installing a different one.
 
 The ImageNet weights are fetched on first use and cached in `~/.cache/torch/`;
 prefetch them off the GPU rather than discovering the download inside an eval
-run.
+run. On this machine they are already cached
+(`~/.cache/torch/hub/checkpoints/inception_v3_google-0cc3c7bd.pth`), which is
+why the end-to-end FID test runs instead of skipping.
 
 ## Deployment target
 
