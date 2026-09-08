@@ -154,6 +154,15 @@ they still agree, so a v3 and a v4 interior number mean the same thing.
 **tile** — 64 voxels, the patch the model was trained on, the unit the requested
 porosity field is defined on, and the period of the window seam.
 
+**requested φ of a window** — the sampler's denoising windows are tile-sized but
+step 32 voxels, so a window straddles up to eight tiles of the requested field.
+Its request is the RAW tile φ averaged over the window's voxel footprint,
+weighted by the volume each tile covers, then clamped to `[0.002, 0.107]` and
+log-standardised into `cond_por`. So a painted step in the field is asked for as
+a ramp one window wide, not as a step: assessment 3 measures how well the model
+follows the field it was actually given, and the field it is given is the
+footprint mean.
+
 **mean ± sd** — always over the three seeds (101, 202, 303) of one cell, sample
 standard deviation.
 

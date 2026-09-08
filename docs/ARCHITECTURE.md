@@ -246,6 +246,21 @@ patch face. `seam_discontinuity` is reported at BOTH the window period (64) and
 the chunk period (`64 · chunk_tiles`), on the grey level and on the pore
 log-odds, against one shared interior baseline.
 
+### The requested porosity field over a window
+
+`local_por_map` is defined on the TILE grid — one φ per 64-voxel tile — but a
+window is placed every `window_stride` voxels, so at the default stride 32 it
+straddles up to eight tiles. A window's requested φ is the tile field averaged
+over the window's own voxel footprint, each tile weighted by the VOLUME of the
+window it covers (`sampler.window_tile_mean`); the mean is then clamped to
+`[POR_MIN, POR_MAX]` and transformed by `porosity_to_cond`. The average is on
+RAW pore fractions and never on `cond_por`: that transform is a log, and the
+mean of the transform is not the transform of the mean. Sampling the tile that
+holds the window CENTRE instead — what the sampler did until this fix — handed a
+window spanning a 0.01 tile and a 0.05 tile one of the two extremes, so the
+50 %-overlap windows on either side of a field step both asked for the wrong
+thing and the requested step was reproduced as a wider, offset one.
+
 ## VAE model & training pipeline
 
 See [vae_architecture.md](vae_architecture.md) for the encoder/decoder data flow
