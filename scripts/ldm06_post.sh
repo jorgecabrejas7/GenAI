@@ -97,6 +97,60 @@ else
     say "GO absent -> skipping eval v4 generation; supervisor triggers it separately"
 fi
 
+# ── 1b. wait for the decoder-ft go-ahead ──────────────────────────────────────
+# The user wants to see the fine-tune setup before it starts, so the runner
+# stops here until runs/campaigns/decoder_ft_go appears. No timeout: an
+# unattended chain that gave up and started anyway would defeat the point of
+# the gate.
+#
+# The wait is not idle. The OWED full-split rung reports and the eval-v4
+# measure/report stages are queued here rather than after the fine-tune,
+# because they are needed either way and the card would otherwise sit still.
+# rf-2 and rf-64 are NOT: each holds the GPU for ~26 h, so a go-ahead arriving
+# a minute later would still wait a day.
+FT_GO="$REPO/runs/campaigns/decoder_ft_go"
+
+say "GATE waiting for $FT_GO — clearing the owed reports meanwhile"
+# -- the owed full-split rung reports (GPU) --------------------------------
+for exp in "${OWED[@]}"; do
+    d=$(run_dir_for "$exp")
+    if [ -z "$d" ]; then say "OWED $exp skipped: no run directory"; continue; fi
+    say "OWED $exp report start"
+    python scripts/analysis/r08_rung_report.py --run "$d" > "$SCRATCH/report_${exp}.log" 2>&1
+    say "OWED $exp report done rc=$?"
+done
+say "COMPARE start (final paper table)"
+python scripts/analysis/r08_rung_report.py --compare > "$SCRATCH/r08_compare_final.log" 2>&1
+say "COMPARE done rc=$?"
+
+
+# -- eval v4 measure and report (CPU) --------------------------------------
+# Only for assessments whose volumes exist; measure refuses on an empty one,
+# which is the right behaviour and not an error worth stopping the chain for.
+if [ -d "$EVAL_CAMP" ]; then
+    for a in "${ASSESSMENTS[@]}"; do
+        if [ -d "$EVAL_CAMP/volumes/$a" ]; then
+            say "EVALV4 measure $a start (CPU)"
+            python -m poregen.eval_v4.cli measure "$a" --root "$EVAL_CAMP" \
+                > "$SCRATCH/evalv4_measure_${a}.log" 2>&1
+            say "EVALV4 measure $a done rc=$?"
+        else
+            say "EVALV4 measure $a skipped: no volumes"
+        fi
+    done
+    say "EVALV4 report start (CPU)"
+    python -m poregen.eval_v4.cli report --root "$EVAL_CAMP" \
+        > "$SCRATCH/evalv4_report.log" 2>&1
+    say "EVALV4 report done rc=$?"
+fi
+
+# -- now block until the go-ahead ------------------------------------------
+if [ ! -e "$FT_GO" ]; then
+    say "GATE blocked: waiting for $FT_GO (polling 60 s, no timeout)"
+    while [ ! -e "$FT_GO" ]; do sleep 60; done
+fi
+say "GATE released: $FT_GO present"
+
 # ── 2. decoder fine-tune, option 1 ────────────────────────────────────────────
 say "DECODER-FT start (r08/decoder-ft)"
 python scripts/train_vae.py run r08/decoder-ft > "$SCRATCH/decoder_ft.log" 2>&1
@@ -122,18 +176,6 @@ if [ "$ft_rc" -eq 0 ] && [ -n "$FT_RUN" ] && [ -f "${FT_RUN}best.ckpt" ]; then
 else
     say "REDECODE skipped: fine-tune rc=$ft_rc, run=${FT_RUN:-<none>}"
 fi
-
-# ── 4. the owed full-split rung reports ───────────────────────────────────────
-for exp in "${OWED[@]}"; do
-    d=$(run_dir_for "$exp")
-    if [ -z "$d" ]; then say "OWED $exp skipped: no run directory"; continue; fi
-    say "OWED $exp report start"
-    python scripts/analysis/r08_rung_report.py --run "$d" > "$SCRATCH/report_${exp}.log" 2>&1
-    say "OWED $exp report done rc=$?"
-done
-say "COMPARE start (final paper table)"
-python scripts/analysis/r08_rung_report.py --compare > "$SCRATCH/r08_compare_final.log" 2>&1
-say "COMPARE done rc=$?"
 
 # ── 5. the bracket rungs, last ────────────────────────────────────────────────
 for exp in "${TAIL_RUNGS[@]}"; do
