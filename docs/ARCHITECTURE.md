@@ -85,7 +85,9 @@ only a way for training and generation to disagree.
 | `nb_t` | `6·8` | sinusoidal embedding of each neighbour's own noise level |
 
 **FiLM / AdaGN scalars**, summed with the timestep embedding: `cond_por`
-(standardised `log(φ + 1e-3)`, with a learned null token for CFG),
+(standardised `log(φ + 1e-3)` of the FULL-PATCH `φ = pore / patch_size³`, air
+included — see "Material porosity in, full-patch φ out"; with a learned null
+token for CFG),
 `cond_depth`, `cond_dist6` through one MLP over the whole 6-vector, and the
 availability-masked pool of the neighbour latents. There is no global-porosity
 input — the per-patch porosity field carries volume-level control.
@@ -296,6 +298,43 @@ holds the window CENTRE instead — what the sampler did until this fix — hand
 window spanning a 0.01 tile and a 0.05 tile one of the two extremes, so the
 50 %-overlap windows on either side of a field step both asked for the wrong
 thing and the requested step was reproduced as a wider, offset one.
+
+### Material porosity in, full-patch φ out
+
+There are two porosities, and they are not the same number.
+
+| | Definition | Where |
+|---|---|---|
+| **full-patch φ** | `pore / patch_size³` — the whole 64³ patch, air outside the specimen counted in the denominator | what the latent store records and what `cond_por` means |
+| **material porosity** | `pore / material` — the specimen envelope only | what a user asks for, and what `eval_v4` measures |
+
+`scripts/build_latent_dataset.py` stores `phi = (label == CLASS_PORE).mean()`
+over the whole patch, so a patch half outside the specimen carries a φ about half
+its material porosity. That is the right thing for training: the conditioning has
+to describe the patch the encoder actually saw. It is the wrong thing to hand a
+sampler a user's request in, and until this fix the sampler passed the request
+straight through — a surface window asked for 0.03 got the full-patch 0.03 it
+asked for, which is 0.06 material porosity, and eval scored the miss against a
+target nobody requested.
+
+`VolumeGenerator._window_conditioning` converts. Per window,
+
+```
+cond_phi = phi_request × (material fraction of the window)
+```
+
+where the material fraction is the mean of `material_map` over the window's
+latent cells — every cell covers the same `downsample³` voxels, so that mean IS
+the volume fraction of the window inside the specimen. The scale is applied to
+the value `window_tile_mean` returns, **before** the `[POR_MIN, POR_MAX]` clip
+and **before** `porosity_to_cond`: clipping first would turn a legal request
+(0.2 material porosity at half material = 0.1 full-patch) into a clipped one, and
+`porosity_to_cond` is a log, where a scale becomes an offset. A fully interior
+window has fraction 1.0 and is untouched, so nothing changes for a volume with no
+material map.
+
+Nothing about training or the latent store moves: the store keeps full-patch φ,
+and only the sampling-time request is converted.
 
 ## VAE model & training pipeline
 

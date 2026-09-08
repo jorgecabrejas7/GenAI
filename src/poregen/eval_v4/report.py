@@ -233,7 +233,11 @@ def report_porosity_global(res, root, floor) -> tuple[str, list[str]]:
     body = [
         "## Dose response",
         "",
-        table(["level", "requested", "delivered", "|error|", "within gate", "fail"], rows),
+        "Every phi here is MATERIAL porosity: pore voxels / material voxels, air "
+        "outside the specimen envelope excluded from both.",
+        "",
+        table(["level", "requested phi (pore/material)", "delivered phi (pore/material)",
+               "|error|", "within gate", "fail"], rows),
         "",
         f"OLS over every in-range volume: slope {fmt(dose['slope'], 3)}, "
         f"intercept {fmt(dose['intercept'], 4)}, R2 {fmt(dose['r2'], 3)}, "
@@ -278,8 +282,8 @@ def _fig_dose(res, root) -> list[str]:
                 label=f"OLS slope {fit['slope']:.2f}")
     ax.set_xlim(0, lim)
     ax.set_ylim(0, lim)
-    ax.set_xlabel("requested phi")
-    ax.set_ylabel("delivered phi")
+    ax.set_xlabel("requested phi (pore / material)")
+    ax.set_ylabel("delivered phi (pore / material)")
     ax.legend(frameon=False, loc="upper left")
     fig.tight_layout()
     return savefig(fig, figures_dir(root, "porosity_global"), "dose_response")
@@ -301,6 +305,9 @@ def report_porosity_local(res, root, floor) -> tuple[str, list[str]]:
                            "--", ms(fl["cell_phi_sd"]), "--"])
     body = [
         "## Local obedience, within volume",
+        "",
+        "Per-tile phi is MATERIAL porosity: a tile's pore voxels over its material "
+        "voxels. Tiles holding less than half material are not measured.",
         "",
         table(["field", "n", "slope", "R2", "per-cell |err|", "cells in gate",
                "requested cell sd", "delivered cell sd", "pooled R2 (not obedience)"],
@@ -332,9 +339,9 @@ def _fig_local(res, root, floor) -> list[str]:
         lim = max(abs(np.asarray(ax.get_xlim())).max(), 1e-3)
         ax.plot([-lim, lim], [-lim, lim], color=FLOOR_COLOR, ls="--", lw=0.9)
         ax.set_title(name)
-        ax.set_xlabel("requested - volume mean")
+        ax.set_xlabel("requested phi (pore/material) - volume mean")
         if i == 0:
-            ax.set_ylabel("delivered - volume mean")
+            ax.set_ylabel("delivered phi (pore/material) - volume mean")
         ax.legend(frameon=False)
     ax = axes[-1]
     xs = np.arange(len(names))
@@ -367,7 +374,8 @@ def report_cfg(res, root, floor) -> tuple[str, list[str]]:
     body = [
         "## Porosity guidance",
         "",
-        table(["cell", "s_por", "requested", "delivered", "|error|", "air (interior)",
+        table(["cell", "s_por", "requested phi (pore/material)",
+               "delivered phi (pore/material)", "|error|", "air (interior)",
                "degenerate cells", "seam xct", "fail"], rows),
         "",
         "## Neighbour guidance - do the neighbours act?",
@@ -593,7 +601,8 @@ def report_geometry(res, root, floor) -> tuple[str, list[str]]:
         ["recall", ms(s["recall_air"], 3)],
         ["air fraction inside the requested material", ms(s["air_fraction_inside_material"])],
         ["air fraction outside it", ms(s["air_fraction_outside_material"], 3)],
-        ["pore fraction inside the material", ms(s["phi_pore_inside_material"])],
+        ["pore fraction inside the material (pore / material)",
+         ms(s["phi_pore_inside_material"])],
         ["failure rate", fmt(s["failure_rate"], 2)],
     ]
     floor_note = ""
@@ -665,8 +674,8 @@ def report_real_floor(res, root, floor) -> tuple[str, list[str]]:
     text = [
         "## The floor row of every table",
         "",
-        table(["shape", "n", "voxels", "phi", "air", "air (interior)", "seam xct",
-               "cell phi sd", "cross-head"], rows),
+        table(["shape", "n", "voxels", "phi (pore/material)", "air", "air (interior)",
+               "seam xct", "cell phi sd", "cross-head"], rows),
         "",
         res["note"],
         "",

@@ -165,14 +165,27 @@ they still agree, so a v3 and a v4 interior number mean the same thing.
 **tile** — 64 voxels, the patch the model was trained on, the unit the requested
 porosity field is defined on, and the period of the window seam.
 
+**φ — porosity is always `pore / material`.** Every requested and every
+delivered φ in this document is the pore fraction of the *specimen envelope*:
+`pore voxels / material voxels`, air excluded from the denominator. A request is
+a material porosity, and `phi_pore`, `delivered_phi` and `delivered[c]` are all
+measured that way, over the whole volume and per tile alike. This is **not** the
+number the LDM is conditioned on. The latent store carries
+`phi = pore / 64³` — the full patch, with any air outside the specimen counted in
+the denominator — because a training patch's conditioning must describe the patch
+the encoder saw. The two agree only for a patch that is entirely material. See
+`ARCHITECTURE.md`, "Material porosity in, full-patch φ out", for the conversion
+the sampler applies.
+
 **requested φ of a window** — the sampler's denoising windows are tile-sized but
 step 32 voxels, so a window straddles up to eight tiles of the requested field.
 Its request is the RAW tile φ averaged over the window's voxel footprint,
-weighted by the volume each tile covers, then clamped to `[0.002, 0.107]` and
-log-standardised into `cond_por`. So a painted step in the field is asked for as
-a ramp one window wide, not as a step: assessment 3 measures how well the model
-follows the field it was actually given, and the field it is given is the
-footprint mean.
+weighted by the volume each tile covers; that material porosity is then
+multiplied by the window's own material fraction to get the full-patch φ the
+model was trained on, clamped to `[0.002, 0.107]`, and log-standardised into
+`cond_por`. So a painted step in the field is asked for as a ramp one window
+wide, not as a step: assessment 3 measures how well the model follows the field
+it was actually given, and the field it is given is the footprint mean.
 
 **mean ± sd** — always over the three seeds (101, 202, 303) of one cell, sample
 standard deviation.
@@ -184,11 +197,14 @@ standard deviation.
 ### Porosity and air
 
 ```
-phi_pore      = mean(label == PORE)  inside the material
+phi_pore      = mean(label == PORE)  inside the material   # pore / material
 air_fraction  = mean(label == AIR)   inside the material
 air_interior  = mean(label == AIR)   inside the material and the interior
-error         = phi_pore - requested_global_phi
+error         = phi_pore - requested_global_phi            # both pore / material
 ```
+
+`phi_pore_all` and `air_fraction_all` are the same counts over the WHOLE volume,
+air included — reported beside the material fractions, never in place of them.
 
 Gate: `|error| < 0.005` (decision D39, carried over from v3).
 
