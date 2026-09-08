@@ -166,6 +166,64 @@ def _label_planes(label: torch.Tensor) -> torch.Tensor:
     return label_to_channels(label)
 
 
+def _ddim_steps_of(path: Path) -> int | None:
+    """The step count the canvas beside this file was generated at.
+
+    Read from the case's own manifest, not from its directory name: the name is
+    a convenience and the manifest is the record.
+    """
+    mf = path.parent / "manifest.json"
+    if not mf.exists():
+        return None
+    try:
+        return json.loads(mf.read_text()).get("ddim_steps")
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _group_by_steps(rows: list[dict]) -> dict:
+    """Summarise the generated arm separately for each DDIM step count.
+
+    Both are reported because the two are not interchangeable on this model: the
+    ldm06 40k diagnostic has porosity conditioning 5-7x worse at 200 steps than
+    at 50 and the latent std ~8% wide on the high-sigma channels, so judging a
+    decoder only on 200-step volumes would charge it for the sampler's weaker
+    operating point. The verdict is taken at whichever step count the sampler
+    assessment identifies as the operating point; the other stands beside it.
+    """
+    out: dict = {}
+    for steps in sorted({r.get("ddim_steps") for r in rows if r.get("ddim_steps")}):
+        sel = [r for r in rows if r.get("ddim_steps") == steps]
+
+        def mean(key):
+            v = [r[key] for r in sel if r.get(key) is not None]
+            return float(np.mean(v)) if v else None
+
+        out[f"ddim{steps}"] = {
+            "n_volumes": len(sel),
+            "sharpness_ratio_base": mean("sharpness_ratio_base"),
+            "sharpness_ratio_ft": mean("sharpness_ratio_ft"),
+            "agree_pore": mean("agree_pore"),
+            "agree_air": mean("agree_air"),
+            "porosity_base": mean("porosity_base"),
+            "porosity_ft": mean("porosity_ft"),
+            "s2_small_r_max_abs_diff": mean("s2_small_r_max_abs_diff"),
+            "s2_w1_base_vs_ft": mean("s2_w1_base_vs_ft"),
+            "psd_w1_base_vs_ft": mean("psd_w1_base_vs_ft"),
+            # Gate 2 as such, evaluated per step count rather than pooled.
+            "gate2_sharpness_ratio_ft_ge_0.95": (
+                (mean("sharpness_ratio_ft") or 0.0) >= 0.95),
+        }
+    ungrouped = [r for r in rows if not r.get("ddim_steps")]
+    if ungrouped:
+        out["unknown_step_count"] = {
+            "n_volumes": len(ungrouped),
+            "note": ("these canvases carry no manifest, so their step count is "
+                     "unknown and they are excluded from the per-step verdict"),
+        }
+    return out
+
+
 def generated_arm(base, ft, device, latent_files: list[Path], real_sharp: float) -> dict:
     """ldm06 latents decoded both ways; no ground truth, so compare to each other."""
     rows = []
@@ -208,6 +266,8 @@ def generated_arm(base, ft, device, latent_files: list[Path], real_sharp: float)
 
         row = {
             "latents": str(f),
+            "ddim_steps": _ddim_steps_of(f),
+            "case": f.parent.name,
             "volume_shape": list(vol_shape),
             "n_windows": len(origins),
             "sharp_base": float(sharpness_proxy(torch.from_numpy(g_b)[None, None])),
@@ -262,7 +322,7 @@ def generated_arm(base, ft, device, latent_files: list[Path], real_sharp: float)
         logger.info("%s  sharp %.4f -> %.4f  pore agree %.4f  s2 small-r max diff %s",
                     f.name, row["sharp_base"], row["sharp_ft"], row["agree_pore"],
                     row.get("s2_small_r_max_abs_diff", "n/a"))
-    return {"per_volume": rows}
+    return {"per_volume": rows, "by_ddim_steps": _group_by_steps(rows)}
 
 
 def main() -> int:
@@ -333,6 +393,22 @@ def main() -> int:
                 v["sharpness_ratio_base"], v["sharpness_ratio_ft"],
                 v["dice_pore_base"], v["dice_pore_ft"],
                 v["dice_air_base"], v["dice_air_ft"])
+    g = results.get("generated", {}).get("by_ddim_steps") or {}
+    for key, b in g.items():
+        if "n_volumes" not in b or b.get("sharpness_ratio_ft") is None:
+            continue
+        logger.info("GEN %-8s (%d vols)  sharpness %.4f -> %.4f   gate2 %s   "
+                    "pore agree %.4f   S2 small-r max diff %s",
+                    key, b["n_volumes"], b["sharpness_ratio_base"],
+                    b["sharpness_ratio_ft"],
+                    "PASS" if b["gate2_sharpness_ratio_ft_ge_0.95"] else "FAIL",
+                    b["agree_pore"],
+                    (f"{b['s2_small_r_max_abs_diff']:.4f}"
+                     if b.get("s2_small_r_max_abs_diff") is not None else "n/a"))
+    if len(g) > 1:
+        logger.info("Gate 2 verdict is taken at the step count the sampler "
+                    "assessment identifies as the operating point; the other is "
+                    "reported beside it.")
     logger.info("wrote %s", out_dir / "results.json")
     return 0
 
