@@ -116,7 +116,7 @@ companion docs listed under [docs/](#docs).
 
 | Path | What it does |
 |---|---|
-| `experiments/train_vae.py` | Config-driven VAE run: build model, dataloaders, run dir, `train_loop`; `run_experiment` and `resume_run`. |
+| `experiments/train_vae.py` | Config-driven VAE run: build model, dataloaders, run dir, `train_loop`; `run_experiment` and `resume_run`. `apply_transfer` is the transfer/freeze entry point — it holds every `training.freeze_modules` subtree in `eval()` as well as `requires_grad_(False)`, by overriding `train()` on the model, so a frozen encoder's BatchNorm cannot drift through a fine-tune. |
 | `experiments/train_ldm.py` | Same for the LDM. Also pulls the porosity standardisation stats out of the latent store metadata and refuses to start when the store's VAE checkpoint is not the one the config names. |
 | `experiments/base.py` | `ExperimentRuntime` (`from_checkpoint` factory), `build_patch_loader`, `find_repo_root`. |
 | `experiments/r03.py` | R03 notebook import surface: auxiliary XCT decoder, its train/eval helpers, latent analyses. |
