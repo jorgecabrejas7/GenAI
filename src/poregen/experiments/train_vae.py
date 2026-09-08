@@ -449,6 +449,8 @@ def _prepare_resume_state(
     scaler: torch.amp.GradScaler,
     scheduler: Any | None,
     device: torch.device,
+    discriminator: torch.nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[int, int]:
     checkpoint_step, _ = load_checkpoint(
         checkpoint_path,
@@ -457,6 +459,8 @@ def _prepare_resume_state(
         scaler=scaler,
         scheduler=scheduler,
         map_location=device,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
     )
     remaining_steps = int(cfg["training"]["total_steps"]) - checkpoint_step
     if remaining_steps <= 0:
@@ -725,6 +729,10 @@ def resume_run(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
+    # Built before the load: the checkpoint carries the discriminator weights
+    # and its optimizer moments, and a fresh pair would restart the GAN.
+    discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
+
     start_step, remaining_steps = _prepare_resume_state(
         cfg=cfg,
         run_dir=run_dir,
@@ -734,11 +742,10 @@ def resume_run(
         scaler=scaler,
         scheduler=scheduler,
         device=device,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
     )
     loss_fn = _make_loss_fn(cfg)
-    # Discriminator is not checkpointed; it restarts from scratch on resume.
-    # This causes a short instability window but is acceptable for R04.
-    discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
 
     try:
         from torch.utils.tensorboard import SummaryWriter

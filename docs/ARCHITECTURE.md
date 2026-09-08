@@ -310,6 +310,12 @@ for diffusion runs), each containing `log.jsonl`, `metrics.jsonl`,
 `checkpoints/latest.ckpt` + `best.ckpt`. On resume, `run_metadata.json` is
 updated and `log.jsonl` is pruned to the resume step to prevent duplicates.
 
+A checkpoint carries the model, the optimizer, the scaler, the scheduler, the
+RNG states, and — when the run has one — the discriminator with its own
+optimizer. The resume path builds the discriminator *before* the load and
+restores it: a fresh one would restart the GAN at every interruption, and
+nothing in the loss curves would show it.
+
 Analysis outputs live in `runs/campaigns/<NN>-<name>/`, one campaign per
 question, each with a `README.md` and a vault note; see
 `runs/campaigns/INDEX.md`.
@@ -319,6 +325,10 @@ question, each with a `README.md` and a vault note; see
 - **Porosity-MAE < 0.005** is the primary success metric (`val/porosity_mae`).
 - `kl_collapsed_fraction` should stay low — a spike means the latent is collapsing.
 - The **discriminator always runs in float32** — intentional, do not change.
+- The **async checkpoint writer never sees a live tensor**. `save_checkpoint_async`
+  copies the whole state to CPU on the calling thread. Passing the live state
+  dicts lets the steps taken during serialisation land in a file labelled with
+  an earlier step.
 - `latent_channel_moments` returns GPU tensors — `merge_latent_channel_moments`/
   `active_units_from_moments` handle them correctly as-is.
 - `eval_step` returns `(losses, output, xct_dev, mask_dev)` — reuse those device
