@@ -3,7 +3,7 @@
 Reads the layout produced by ``scripts/build_latent_dataset.py`` plus the
 conditioning sidecar produced by ``scripts/build_conditioning.py``::
 
-    <root>/                      e.g. data/split_v3/latents_r08z4/
+    <root>/                      e.g. data/split_v3/latents_r08z8/
     ├── metadata.json            — latent shape, storage record, per-channel
     │                              train-split normalisation stats, VAE
     │                              provenance, `conditioning` block

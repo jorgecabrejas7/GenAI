@@ -38,7 +38,7 @@ Usage
 -----
 python scripts/build_latent_dataset.py \\
     [--checkpoint runs/vae/<r08 run>/best.ckpt] \\
-    [--output data/split_v3/latents_r08z4] \\
+    [--output data/split_v3/latents_r08z8] \\
     [--data-root data/split_v3] \\
     [--batch-size 256] \\
     [--num-workers 4] \\
@@ -49,7 +49,7 @@ if the output filesystem has less than 2x that estimate free.
 
 On-disk layout produced (default output: <data_root>/latents_<exp>z<z>/)
 -----------------------
-data/split_v3/latents_r08z4/
+data/split_v3/latents_r08z8/
 ├── metadata.json            — VAE checkpoint + resolved config copy & sha256,
 │                              latent shape, storage record, per-channel
 │                              train-split norm stats, the `material` block,
@@ -180,7 +180,7 @@ def main() -> None:
     ap.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     ap.add_argument(
         "--output", default=None,
-        help="Output directory (default: <data_root>/latents_<exp>z<z>, e.g. data/split_v3/latents_r08z4)",
+        help="Output directory (default: <data_root>/latents_<exp>z<z>, e.g. data/split_v3/latents_r08z8)",
     )
     ap.add_argument("--data-root", default=None, help="Override patch data root (default: from VAE config)")
     ap.add_argument("--batch-size", type=int, default=256)
