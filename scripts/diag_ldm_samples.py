@@ -512,8 +512,11 @@ def main() -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_per_bucket": {b: len(r) for b, r in bucket_rows.items()},
         "bucket_frequency": bucket_freq,
-        "variants": {v: variant_results[v]
-                     for v in ("raw_ddim50", "ema_ddim50")},
+        # EVERY variant that was computed, not a hardcoded pair. --ddim200
+        # spends the GPU time on raw_ddim200 / ema_ddim200 and the old literal
+        # then dropped them from the durable record, leaving them only in
+        # stdout — while the D43 gate is written in DDIM-200 numbers.
+        "variants": dict(variant_results),
         "alive": alive,
         "killswitch": killswitch,
     }
