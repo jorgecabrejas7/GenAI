@@ -110,6 +110,15 @@ fi
 # a minute later would still wait a day.
 FT_GO="$REPO/runs/campaigns/decoder_ft_go"
 
+# -- inspection pack (CPU) FIRST, before anything touches the GPU ----------
+# The user inspects the volumes personally before the fine-tune, so this must
+# exist before the card is committed to ~4.7 h of rung reports. It reads three
+# slices per case, not the volumes, so it costs seconds.
+say "INSPECT pack start (CPU)"
+python scripts/analysis/eval_v4_inspection_pack.py --root "$EVAL_CAMP" \
+    > "$SCRATCH/evalv4_inspection.log" 2>&1
+say "INSPECT pack done rc=$? -> $EVAL_CAMP/inspection — SEND PATH TO SUPERVISOR"
+
 say "GATE waiting for $FT_GO — clearing the owed reports meanwhile"
 # -- the owed full-split rung reports (GPU) --------------------------------
 for exp in "${OWED[@]}"; do
