@@ -276,6 +276,15 @@ One path: **hybrid chunked joint denoising** (`diffusion/sampler.py`).
   current chunk and a finished one is still coherent.
 - `chunk_tiles = (1, 1, 1)` is patch-at-a-time sequential generation; one chunk
   covering the volume is pure joint denoising.
+- Every random draw is taken in the frame of the REQUEST, not of the canvas: one
+  canvas-sized field per draw (the initial canvas once, the re-noising field at
+  every timestep of every chunk), rolled by `request_offset` before use
+  (`region_noise_field`). The value used at canvas cell `p` is the one the
+  request sees at `p − offset`, so translating a request inside a bigger canvas
+  translates its noise with it. That is what lets the assembly assessment hold
+  the noise realisation fixed while the assembly grid moves; a canvas-anchored
+  draw changed both at once. `request_offset` must be a whole number of latent
+  cells.
 
 Decoding is overlapped too: latent windows at `decode_stride` voxels, with the
 decoded grey level and the raw 3-class logits blended under a tapered window

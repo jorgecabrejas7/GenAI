@@ -402,7 +402,7 @@ other statistics are still measured.
 
 ## The eight assessments
 
-Seeds 101 / 202 / 303 throughout; 102 cases in total. `chunk_tiles = (3, 3, 3)`,
+Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
 `window_stride = 32` and `decode_stride = 32` unless a case says otherwise.
 
 | # | Assessment | Cases | Asks |
@@ -412,7 +412,7 @@ Seeds 101 / 202 / 303 throughout; 102 cases in total. `chunk_tiles = (3, 3, 3)`,
 | 3 | `porosity_local` | 9 | three painted fields on the 3×3×3 tile grid — two halves 0.01/0.05, checkerboard 0.01/0.05, and the coherent field from `poregen.diffusion.porosity_field`. Within-volume slope and R². |
 | 4 | `cfg` | 24 | `s_por` {1.0, 1.5, 2.0} × targets {0.02, 0.05}; plus `s_nb` {0, 1} at target 0.03. |
 | 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
-| 6 | `assembly` | 6 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the window-phase pair generated here, and the campaign-08 VAE control row. |
+| 6 | `assembly` | 9 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the offset triple generated here (offsets 0 / 16 / 32 in a 256³ canvas), and the campaign-08 VAE control row. |
 | 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
 | 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K, FID on 2-D slices and the memorisation check, each against the matched real-vs-real floor. |
 
@@ -438,13 +438,42 @@ same seed, and a 192³ volume with 3×3×3-tile chunks has no chunk plane at all
 A Dice near 1 means turning the neighbour arm off changed nothing where it
 could first act, so the arm is inert.
 
-**The window-phase pair (assessment 6)** asks for the same 192³ region twice,
-same seed, at two positions in a 256³ canvas. The specimen box, the orientation
-profile and the uniform porosity request all move with the region, so the two
-runs ask for the same thing and differ only in the grid they are assembled on;
-at offset 32 the chunk plane at canvas voxel 192 runs through the region at
-region coordinate 160. The seam columns of this assessment come from the
-`sampler` volumes, whose grid is in canvas coordinates.
+**The offset triple (assessment 6)** asks for the same 192³ region three times,
+same seed, at three positions in a 256³ canvas. The specimen box, the
+orientation profile, the uniform porosity request and the frame every noise
+draw is taken in all move with the region, so the runs ask for the same thing
+from the same noise and differ only in the grid they are assembled on. Offset 0
+is the reference and every other offset is scored against it; the seam columns
+of this assessment come from the `sampler` volumes, whose grid is in canvas
+coordinates.
+
+*The region-relative noise frame.* An offset only isolates the assembly grid if
+the noise moves with the request. The sampler therefore takes every random draw
+of the reverse process — the canvas the chunks start from, and the fresh noise
+that re-noises each finished chunk at every timestep — as ONE canvas-sized field
+per draw, rolled by `request_offset` before use
+(`poregen.diffusion.sampler.region_noise_field`). The value used at canvas cell
+`p` is the value the request sees at region cell `p − offset`, so translating
+the request translates its noise with it. `torch.roll` is a permutation of one
+draw, so the field is still exactly iid standard normal and the wrap reaches
+only canvas cells outside the requested region. With the draw anchored to the
+canvas instead — which is what the sampler did until this fix — the two runs of
+a pair differed in the noise realisation as well as in the grid, and the pore
+Dice across them could not attribute the difference to either. `request_offset`
+must be a whole number of latent cells; the sampler refuses anything else.
+
+*What each offset isolates.* An offset moves two independent things, and one
+offset cannot tell them apart:
+
+| offset | window phase | chunk alignment |
+|---:|---|---|
+| 0 | window origins start on the region origin | the region IS chunk zero: no chunk plane crosses it |
+| 32 | unchanged — 32 is a whole window stride, so region-relative window origins are still 0, 32, 64 … | the chunk plane at canvas voxel 192 crosses the region at region coordinate 160 |
+| 16 | half a stride out: region-relative window origins are 16, 48, 80 … | a chunk plane at region coordinate 176 |
+
+Read 0 against 32 for chunk alignment and 32 against 16 for window phase. The
+report gives the pore Dice and the φ difference per offset and never pools
+them: the two offsets answer different questions.
 
 ---
 
@@ -528,9 +557,13 @@ what turns a porosity gap into a reported texture gap.
   deviations, so part of every residual is the truth's own error.
 * **Three seeds** bound the sd loosely. A cell whose sd matters should be
   re-run with more.
-* **The window-phase pair changes the chunk boundary as well as the window
-  phase**, because the sampler anchors windows at the chunk origin. A Dice below
-  1 there says the assembly grid matters; it does not separate the two causes.
+* **Every non-zero offset moves the chunk boundary**, because the sampler
+  anchors windows at the chunk origin and the only shift available is a
+  translation of the request. Offset 32 therefore isolates chunk alignment
+  cleanly (it keeps the window phase), but offset 16 carries a chunk plane as
+  well as the half-window phase, at a different region coordinate than 32 does.
+  A Dice below 1 at 16 that is not matched at 32 points at the window phase; it
+  does not prove it on its own.
 * **The microstructure floor is two crops per panel per level.** A distance
   between two samples that small is itself noisy, so a ratio near 1 means
   "indistinguishable at this sample size" and not "identical".

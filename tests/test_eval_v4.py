@@ -580,6 +580,38 @@ class TestRequests:
         assert len(layups["B16"]["plies"]) == 16
         assert layups["B16"]["ply_vox"] == pytest.approx(10.0)
 
+    @needs_layup_truth
+    def test_the_assembly_offsets_separate_chunk_alignment_from_window_phase(self):
+        """One offset confounds the two things an offset can move.
+
+        32 voxels is a WHOLE window stride, so it keeps the window phase and
+        moves only the chunk alignment; 16 is half a stride, so it moves the
+        phase as well.  Both are whole latent cells, because the noise frame
+        the sampler rolls lives on the latent grid.
+        """
+        from poregen.eval_v4.cases import (
+            ASSEMBLY_OFFSETS,
+            ASSEMBLY_REGION,
+            LATENT_DOWNSAMPLE,
+            WINDOW_STRIDE,
+        )
+
+        assert ASSEMBLY_OFFSETS[0] == 0            # the reference
+        assert set(ASSEMBLY_OFFSETS) == {0, 16, 32}
+        assert 32 % WINDOW_STRIDE == 0             # same phase, new chunk plane
+        assert 16 % WINDOW_STRIDE == WINDOW_STRIDE // 2      # half-window phase
+        specs = build_cases("assembly")
+        by_offset = {s.notes["offset"] for s in specs}
+        assert by_offset == set(ASSEMBLY_OFFSETS)
+        for s in specs:
+            off = s.notes["offset"]
+            assert s.request_offset == (off,) * 3
+            assert s.specimen_box == ((off,) * 3, tuple(off + r for r in ASSEMBLY_REGION))
+            assert s.region_offset == (off,) * 3
+            assert all(o % LATENT_DOWNSAMPLE == 0 for o in s.request_offset), s.name
+            assert all(o + r <= v for o, r, v in
+                       zip(s.region_offset, s.region_shape, s.volume_shape)), s.name
+
     def test_the_orientation_profile_moves_with_the_request(self):
         layup, pitch = (45, -45, 90, 0), 10.0
         base = theta_for_canvas(64, layup, pitch, 0)

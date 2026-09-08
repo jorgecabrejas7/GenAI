@@ -28,6 +28,12 @@ Decoding is overlapped too: the finished latent canvas is decoded in windows at
 blended with a tapered window (the fix validated on the VAE tile seams —
 see ``poregen.eval.blended``).  Direct stride-64 tiling put a decoder-side
 seam at every patch face; blending removes it.
+
+Every random draw is taken in the frame of the REQUEST, not of the canvas: one
+canvas-sized noise field per draw, rolled by ``request_offset`` before use
+(:func:`region_noise_field`).  Translating a request inside a bigger canvas
+therefore translates its noise with it, which is the only way an assembly-offset
+comparison can hold the noise realisation fixed while the grid moves.
 """
 
 from __future__ import annotations
@@ -69,6 +75,7 @@ __all__ = [
     "DDIMSampler",
     "VolumeGenerator",
     "porosity_to_cond",
+    "region_noise_field",
     "rescale_guidance",
     "theta_from_layup",
     "window_origins",
@@ -203,6 +210,39 @@ def window_tile_mean(
             for ix, wx in spans[2]:
                 total += float(tile_field.get((iz, iy, ix), default)) * wz * wy * wx
     return total / float(P ** 3)
+
+
+def region_noise_field(
+    channels: int,
+    canvas_cells: tuple[int, int, int],
+    offset_cells: tuple[int, int, int],
+    device: torch.device,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """(C, Z, Y, X) standard normal noise in the REGION-RELATIVE frame.
+
+    Every random draw of the reverse process is anchored to the REQUEST, not to
+    the canvas: the field is drawn once in the frame of the requested region and
+    then rolled onto the canvas, so the value used at canvas cell ``p`` is the
+    value the request sees at region cell ``p - offset``.  Translating the
+    request therefore translates its noise with it.
+
+    This is what makes the assembly-offset comparison mean anything.  With the
+    draw anchored to the canvas, the same region generated at two offsets
+    differs in the assembly geometry AND in the noise realisation, and no metric
+    over the pair can say which of the two moved the answer.  With the draw
+    anchored to the region, the noise is held and the geometry is the only
+    thing left that differs.
+
+    ``torch.roll`` is a permutation of one draw, so the field is still exactly
+    iid standard normal, and the wrap only reaches canvas cells outside the
+    requested region.
+    """
+    n = torch.randn(int(channels), *canvas_cells, device=device, generator=generator)
+    shifts = tuple(int(o) for o in offset_cells)
+    if any(shifts):
+        n = torch.roll(n, shifts=shifts, dims=(1, 2, 3))
+    return n
 
 
 def window_weight(win_cells: int) -> torch.Tensor:
@@ -708,16 +748,20 @@ class VolumeGenerator:
         specimen_box: tuple[tuple[int, int, int], tuple[int, int, int]],
         autocast_dtype: torch.dtype,
         window_batch: int,
+        offset_cells: tuple[int, int, int] = (0, 0, 0),
         progress=None,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Denoise the whole latent canvas chunk by chunk.  Returns (C, Z, Y, X).
 
         Two random draws happen here and nowhere else in generation: the noise
-        each chunk's canvas starts from, and the fresh noise that re-noises the
+        the canvas starts from, and the fresh noise that re-noises the
         already-finished chunks to the current timestep.  Both take
         ``generator``, so a seeded call is reproducible without disturbing the
-        global torch generator.
+        global torch generator, and both are drawn in the region-relative frame
+        ``offset_cells`` names (see :func:`region_noise_field`) — the initial
+        field once for the whole canvas, the re-noising field afresh at every
+        timestep of every chunk.
         """
         sampler  = self.sampler
         schedule = sampler.schedule.to(self.device)
@@ -752,6 +796,14 @@ class VolumeGenerator:
         chunks = [(cz, cy, cx) for cz in chunk_grid[0]
                   for cy in chunk_grid[1] for cx in chunk_grid[2]]
         timesteps = sampler.timesteps
+
+        # ONE canvas-sized draw for the whole volume, in the request's frame:
+        # every chunk starts from its own block of it.  Drawing per chunk would
+        # be the same distribution but would tie the realisation to the chunk
+        # grid, which is exactly what the assembly offset moves.
+        init_noise = region_noise_field(
+            C, canvas_cells, offset_cells, self.device, generator
+        )
 
         logger.info(
             "VolumeGenerator: %s voxels = %s tiles, %d chunk(s) of %s tiles, "
@@ -796,7 +848,7 @@ class VolumeGenerator:
             for sl in win_sl:
                 weight_sum[0, 0, sl[0], sl[1], sl[2]] += weight
 
-            x = torch.randn(1, C, *chunk_cells, device=self.device, generator=generator)
+            x = init_noise[(slice(None), *chunk_sl)].unsqueeze(0).clone()
             B_max = max(1, min(int(window_batch), n_win))
 
             for i, t_val in enumerate(timesteps[:-1]):
@@ -805,13 +857,19 @@ class VolumeGenerator:
                 # t with FRESH noise, the current chunk at its live state.
                 t_one = torch.full((1,), t_val, dtype=torch.long, device=self.device)
                 ctx_clean = z_clean[(slice(None), *ctx_sl)].unsqueeze(0)
+                # The re-noising draw runs in the same frame as the initial one:
+                # a canvas-sized field, of which this chunk's context block is a
+                # slice.  Drawing the context block on its own would anchor it
+                # to the chunk again.  The field is drawn even when nothing is
+                # finished yet (``done_mask`` is all zero there), so the draw
+                # order does not depend on where the request sits.
+                ctx_noise = region_noise_field(
+                    C, canvas_cells, offset_cells, self.device, generator
+                )
                 ctx = schedule.q_sample(
                     ctx_clean,
                     t_one,
-                    noise=torch.randn(
-                        ctx_clean.shape, device=self.device,
-                        dtype=ctx_clean.dtype, generator=generator,
-                    ),
+                    noise=ctx_noise[(slice(None), *ctx_sl)].unsqueeze(0),
                 ) * done_mask
                 ctx[(0, slice(None), *cur_sl)] = x[0]
 
@@ -1045,6 +1103,7 @@ class VolumeGenerator:
         local_por_map: dict | None = None,
         material_map: np.ndarray | None = None,
         specimen_box: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None,
+        request_offset: tuple[int, int, int] = (0, 0, 0),
         progress=None,
         window_batch: int = 32,
         decode_batch_size: int = 64,
@@ -1069,6 +1128,14 @@ class VolumeGenerator:
                             voxels.  None → the whole generated volume, i.e.
                             "this volume IS the specimen".  Drives cond_depth
                             and cond_dist6.
+        request_offset    : (z, y, x) voxels the REQUEST is translated by inside
+                            the canvas.  It does not move any conditioning —
+                            the caller has already placed the specimen box, the
+                            material map, the porosity field and θ(z) where it
+                            wants them — it names the frame every noise draw is
+                            taken in, so translating a request translates its
+                            noise with it (:func:`region_noise_field`).  Each
+                            component must be a whole number of latent cells.
         progress          : optional tqdm; counts DDIM steps (chunks × steps)
         window_batch      : windows per UNet forward per timestep
         decode_batch_size : latent windows decoded in one VAE forward
@@ -1082,8 +1149,8 @@ class VolumeGenerator:
         return_class_probs: also return the blended per-voxel class
                             probabilities, (3, D, H, W) float32
         seed              : makes the generation reproducible.  Every random
-                            draw in the reverse process — each chunk's initial
-                            canvas noise and the fresh noise that re-noises the
+                            draw in the reverse process — the canvas the chunks
+                            start from and the fresh noise that re-noises the
                             finished chunks at every timestep — is taken from a
                             LOCAL ``torch.Generator`` on this generator's own
                             device.  Two calls with the same seed and the same
@@ -1103,6 +1170,13 @@ class VolumeGenerator:
         """
         volume_shape = self._volume_shape(volume_size_mm)
         P = self.patch_size
+        if any(int(o) % self.downsample for o in request_offset):
+            raise ValueError(
+                f"request_offset={tuple(request_offset)} must be a whole number of "
+                f"latent cells, i.e. a multiple of the VAE downsampling factor "
+                f"{self.downsample}: the noise frame lives on the latent grid."
+            )
+        offset_cells = tuple(int(o) // self.downsample for o in request_offset)
         if specimen_box is None:
             specimen_box = ((0, 0, 0), volume_shape)
         box_lo, box_hi = tuple(specimen_box[0]), tuple(specimen_box[1])
@@ -1120,6 +1194,7 @@ class VolumeGenerator:
             specimen_box=(box_lo, box_hi),
             autocast_dtype=autocast_dtype,
             window_batch=window_batch,
+            offset_cells=offset_cells,
             progress=progress,
             generator=generator,
         )
