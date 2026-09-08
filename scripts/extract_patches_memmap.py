@@ -55,6 +55,11 @@ Resumability
 Progress is tracked per volume in patches_progress.json.
 Interrupt at any time; the script skips already-finished volumes on re-run.
 Final files are written only when all volumes are done (atomic rename).
+
+The label class counts in patches_meta.json describe the whole extraction, not
+just the last run: the skipped volumes are counted again from the label array
+the earlier run already wrote.  The 3-class weights come from those counts, so
+a count that stopped at the resume point is a wrong weight.
 """
 
 from __future__ import annotations
@@ -228,14 +233,19 @@ def main() -> None:
     # ------------------------------------------------------------------
     volume_ids = df["volume_id"].unique().tolist()
     class_counts = np.zeros(3, dtype=np.int64)
+    # Rows of the volumes an EARLIER run finished. This run never sees their
+    # voxels, so their class counts have to be read back from the label array
+    # that earlier run already wrote — see the recount below.
+    resumed_rows: list[np.ndarray] = []
     volumes_done = 0
     t0 = time.perf_counter()
 
     with tqdm(total=N, unit="patches", desc="Extracting") as pbar:
         for vid in sorted(volume_ids):
             if progress.get(vid, False):
-                n_vid = int((df["volume_id"] == vid).sum())
-                pbar.update(n_vid)
+                rows_vid = np.where((df["volume_id"] == vid).values)[0]
+                resumed_rows.append(rows_vid)
+                pbar.update(len(rows_vid))
                 volumes_done += 1
                 continue
 
@@ -275,6 +285,23 @@ def main() -> None:
             progress[vid] = True
             with open(progress_path, "w") as fh:
                 json.dump(progress, fh)
+
+    # ------------------------------------------------------------------
+    # Recount the volumes an earlier run extracted
+    # ------------------------------------------------------------------
+    # patches_meta.json describes the WHOLE extraction, however many times it
+    # was resumed. class_counts only saw this run's volumes, so read the rest
+    # straight out of the label array. The counts drive the 3-class weights
+    # (scripts/build_split_v3.py --stage weights), so a partial count is a
+    # wrong weight, not just a cosmetic error.
+    if resumed_rows:
+        rows = np.sort(np.concatenate(resumed_rows))    # sorted → sequential reads
+        log.info("Recounting %d patches from %d volume(s) extracted before "
+                 "the resume …", len(rows), len(resumed_rows))
+        for start in tqdm(range(0, len(rows), args.chunk_size),
+                          unit="chunks", desc="Recounting"):
+            block = mmap_label[rows[start:start + args.chunk_size]]
+            class_counts += np.bincount(block.ravel(), minlength=3)
 
     elapsed = time.perf_counter() - t0
     del mmap_xct, mmap_label

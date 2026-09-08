@@ -345,6 +345,9 @@ site must use them so the behaviour cannot drift apart again.
   label — 0 material, 1 pore, 2 air — trained with class-weighted cross-entropy
   plus soft Dice. Decode it with `decode_label()` (argmax) or
   `decode_class_probs()` (softmax). Emitted by the `*_cls` variants from r08 on.
+  It carries the pore mask too: the qualitative sample export writes
+  `decode_label(...) == CLASS_PORE` as `mask_recon`, next to the 3-class
+  `label_recon`. Reaching for `mask_logits` there exports an empty volume.
 
 **A variant emits `mask_logits` or `class_logits`, never both.** A two-valued
 head and a three-valued one are different contracts; emitting both would let a
