@@ -341,6 +341,8 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 | `test_volume_split_counts.py`, `test_split_dataset_roots.py` | Deterministic and stratified split assignment, split roots. |
 | `test_patch_coords_count.py`, `test_integral_porosity.py`, `test_dataset_loader_shapes.py` | Patch coordinates, integral-volume porosity, dataset tensor shapes/ranges. |
 | `test_extract_patches_resume.py` | `extract_patches_memmap.py` interrupted after one volume and resumed: the metadata label fractions must match a single uninterrupted run, and the patches themselves must be identical. |
+| `test_checkpoint_async.py` | The async checkpoint writer and the discriminator round trip: a weight mutated after `save_async` returns must NOT reach the file (the writer gets a CPU clone taken on the calling thread), a failed background write re-raises on the next join, and resume restores the discriminator plus its optimizer state. A checkpoint predating that state WARNS rather than raises, so the running run stays resumable. |
+| `test_segmentation_material_mask.py` | `material_mask` picks the LARGEST projected component, not the first-labelled one — a corner speck must not become the specimen — and raises when the second-largest exceeds `AMBIGUOUS_COMPONENT_RATIO` (10 %), because two comparable objects mean no single box is the specimen. |
 | `test_vae_output_shapes.py`, `test_losses_smoke.py` | VAE forward shapes; loss finiteness. |
 | `test_vrrae_vae.py`, `test_vrrae_linear.py`, `test_vrrae_bottleneck.py`, `test_vrrae_finetune.py` | VRRAE family: shapes, gradients, registry, fixed-basis round-trip. |
 | `test_recon_metrics.py`, `test_latent_metrics.py` | Recon metrics + eval loop wiring; latent moment merging and active units. |
