@@ -424,6 +424,86 @@ class TestWindowPorosityFootprint:
         assert window_tile_mean((0, 0, P), P, field, 0.0) == pytest.approx(0.05)
 
 
+# ── the request is MATERIAL porosity, the model was trained on FULL-patch phi ─
+
+class TestMaterialPorosityRescaling:
+    """A request of phi is pore/material; ``cond_por`` is pore/64³.
+
+    Training conditions on ``phi = pore / 64**3`` — the whole patch, air
+    included — while eval measures ``pore / material``.  A window that is half
+    outside the specimen must therefore be asked for half the requested
+    material porosity, or the delivered volume is scored against a target that
+    was never requested.
+    """
+
+    TILES = (2, 2, 2)
+    CELLS = (TILES[0] * P // DS,) * 3
+
+    def _cond_por(self, material_map, g_origin=(0, 0, 0), por_default=0.03,
+                  por_map=None):
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), tiles=self.TILES)
+        cond = gen._window_conditioning(
+            [g_origin], DS, por_default, por_map,
+            np.asarray(material_map, dtype=np.float32),
+            (0, 0, 0), (self.TILES[0] * P,) * 3,
+        )
+        return float(cond["por"][0])
+
+    @staticmethod
+    def _expected(phi):
+        from poregen.diffusion.conditioning import porosity_to_cond
+        return float(porosity_to_cond(phi, (-3.0, 1.0)))
+
+    def _half_material(self):
+        m = np.zeros(self.CELLS, dtype=np.float32)
+        m[: LAT // 2] = 1.0            # the low-z half of every window is solid
+        return m
+
+    def test_a_half_material_window_asks_for_half_the_requested_phi(self):
+        """Material fraction 0.5, request 0.03 -> full-patch phi 0.015."""
+        got = self._cond_por(self._half_material(), por_default=0.03)
+        assert got == pytest.approx(self._expected(0.015), rel=1e-6)
+
+    def test_a_full_material_window_is_unchanged(self):
+        got = self._cond_por(np.ones(self.CELLS, dtype=np.float32),
+                             por_default=0.03)
+        assert got == pytest.approx(self._expected(0.03), rel=1e-6)
+
+    def test_partial_cells_count_by_volume(self):
+        """The envelope fraction per cell is a volume, so 0.25 everywhere is 0.25."""
+        got = self._cond_por(np.full(self.CELLS, 0.25, dtype=np.float32),
+                             por_default=0.04)
+        assert got == pytest.approx(self._expected(0.01), rel=1e-6)
+
+    def test_the_scaling_is_applied_to_the_footprint_mean_of_the_field(self):
+        """It multiplies the tile-field mean, not the per-tile values."""
+        por_map = {(iz, iy, ix): (0.01 if ix == 0 else 0.05)
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        got = self._cond_por(self._half_material(), g_origin=(0, 0, P // 2 // DS),
+                             por_map=por_map)
+        assert got == pytest.approx(self._expected(0.5 * 0.03), rel=1e-6)
+
+    def test_the_scaling_comes_before_the_clip(self):
+        """0.2 * 0.5 = 0.1 is inside the training range; clipping first is not."""
+        from poregen.diffusion.conditioning import POR_MAX
+
+        got = self._cond_por(self._half_material(), por_default=0.2)
+        assert got == pytest.approx(self._expected(0.1), rel=1e-6)
+        assert got != pytest.approx(self._expected(0.5 * POR_MAX), rel=1e-3)
+
+    def test_the_scaling_comes_before_the_log_transform(self):
+        """`porosity_to_cond` is a log, so scaling after it is a different number."""
+        got = self._cond_por(self._half_material(), por_default=0.03)
+        assert got != pytest.approx(0.5 * self._expected(0.03), rel=1e-3)
+
+    def test_an_all_air_window_falls_to_the_bottom_of_the_training_range(self):
+        from poregen.diffusion.conditioning import POR_MIN
+
+        got = self._cond_por(np.zeros(self.CELLS, dtype=np.float32),
+                             por_default=0.03)
+        assert got == pytest.approx(self._expected(POR_MIN), rel=1e-6)
+
+
 # ── CFG ──────────────────────────────────────────────────────────────────────
 
 class TestGuidance:

@@ -926,28 +926,41 @@ class VolumeGenerator:
         box_lo: tuple[int, int, int],
         box_hi: tuple[int, int, int],
     ) -> dict[str, torch.Tensor]:
-        """Stack every window's scalar and spatial conditioning onto the device."""
+        """Stack every window's scalar and spatial conditioning onto the device.
+
+        ``por_default`` and ``local_por_map`` carry MATERIAL porosity — pore
+        over specimen, the number eval_v4 measures and the number a user asks
+        for.  ``cond_por`` is not that: the store conditions on
+        ``phi = pore / patch_size**3``, the FULL patch with any air outside the
+        specimen counted in the denominator.  The two agree only where a window
+        is entirely inside the specimen, so each window's request is rescaled by
+        its own material fraction before it is clipped and transformed.
+        """
         L, P = self.latent_size, self.patch_size
         por, depth, dist6, orient, material = [], [], [], [], []
         for g in g_origins:
             ov = tuple(int(c) * ds for c in g)          # voxel origin
+            block = material_map[g[0]:g[0] + L, g[1]:g[1] + L, g[2]:g[2] + L]
             phi = por_default
             if local_por_map is not None:
                 # The requested porosity field is defined on the TILE grid but a
                 # window steps by window_stride, so it straddles up to eight
                 # tiles: its request is the field over its own footprint.
                 phi = window_tile_mean(ov, P, local_por_map, por_default)
+            # Material porosity -> full-patch phi.  Every latent cell covers the
+            # same ds**3 voxels, so the mean envelope fraction over the window's
+            # cells IS the material fraction of its voxel footprint.  This has
+            # to happen before the clip (0.2 material porosity at half material
+            # is a legal 0.1, not a clipped 0.107) and before porosity_to_cond,
+            # which is a log — scaling after it would be an offset, not a scale.
+            phi *= float(block.mean())
             phi = float(np.clip(phi, POR_MIN, POR_MAX))
             por.append(float(porosity_to_cond(phi, self.por_log_stats)))
             d, d6 = self._window_position(ov, box_lo, box_hi)
             depth.append(d)
             dist6.append(d6)
             orient.append(self._window_orient(ov[0]))
-            material.append(
-                torch.from_numpy(
-                    material_map[g[0]:g[0] + L, g[1]:g[1] + L, g[2]:g[2] + L].copy()
-                ).unsqueeze(0)
-            )
+            material.append(torch.from_numpy(block.copy()).unsqueeze(0))
         return {
             "por":   torch.tensor(por,   dtype=torch.float32, device=self.device),
             "depth": torch.tensor(depth, dtype=torch.float32, device=self.device),
