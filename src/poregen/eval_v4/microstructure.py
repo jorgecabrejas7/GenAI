@@ -119,9 +119,11 @@ FID_CROPS_PER_AXIS = 5000
 FID_BATCH = 32
 #: Named in the report, because an FID number means nothing without it.
 FID_EXTRACTOR = (
-    "torchvision.models.inception_v3(weights=Inception_V3_Weights.DEFAULT), "
-    "ImageNet IMAGENET1K_V1, 2048-d pool3 (avgpool) features; 64x64 native "
-    "crops in [0,1] replicated to 3 channels and bilinearly resized to 299x299"
+    "torchvision.models.inception_v3(weights=Inception_V3_Weights.DEFAULT, "
+    "transform_input=True), ImageNet IMAGENET1K_V1, 2048-d pool3 (avgpool) "
+    "features; 64x64 native crops replicated to 3 channels, bilinearly resized "
+    "to 299x299, ImageNet-normalised with the weights' own preset mean/std, "
+    "which transform_input then maps to the pytorch-fid input range [-1,1]"
 )
 
 # -- memorisation -----------------------------------------------------------
@@ -498,6 +500,39 @@ def fid_crops(
     return out
 
 
+def fid_preprocess(crops: np.ndarray):
+    """``(n, 64, 64)`` crops in [0, 1] -> ``(n, 3, 299, 299)`` Inception input.
+
+    This is the ``pytorch-fid`` convention, expressed the way torchvision wants
+    it.  ``pytorch-fid`` bilinearly resizes to 299x299 and then scales [0, 1] to
+    the TF range [-1, 1]; torchvision's ``inception_v3`` carries the pretrained
+    flag ``transform_input=True``, which does that last scaling *itself* — but
+    from an ImageNet-normalised input, not from [0, 1].  So the input this
+    function must hand over is the ImageNet-normalised one, taken from the
+    weights' own preset rather than retyped:
+
+        transform_input((v - mean) / std) == 2 * v - 1   for the preset's
+        mean = 0.485 and std = 0.229 on channel 0, and likewise per channel.
+
+    Feeding [0, 1] straight in — what this code did before — left
+    ``transform_input`` to map it to about [-0.19, 0.43], under a third of the
+    range the network was trained on, so the 2048-d features were
+    off-distribution and the FID was comparable to nothing.
+    """
+    import torch  # noqa: PLC0415
+    import torch.nn.functional as F  # noqa: PLC0415
+    import torchvision.models as tvm  # noqa: PLC0415
+
+    preset = tvm.Inception_V3_Weights.DEFAULT.transforms()
+    t = torch.from_numpy(np.ascontiguousarray(crops, np.float32)).unsqueeze(1)
+    t = F.interpolate(t, size=(FID_INPUT, FID_INPUT),
+                      mode="bilinear", align_corners=False)
+    t = t.expand(-1, 3, -1, -1)
+    mean = torch.tensor(preset.mean, dtype=t.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(preset.std, dtype=t.dtype).view(1, 3, 1, 1)
+    return (t - mean) / std
+
+
 def inception_features(crops: np.ndarray, device=None) -> np.ndarray:
     """2048-d pool3 features for ``(n, 64, 64)`` crops.  See :data:`FID_EXTRACTOR`.
 
@@ -507,11 +542,13 @@ def inception_features(crops: np.ndarray, device=None) -> np.ndarray:
     need it.
     """
     import torch  # noqa: PLC0415
-    import torch.nn.functional as F  # noqa: PLC0415
     import torchvision.models as tvm  # noqa: PLC0415
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    net = tvm.inception_v3(weights=tvm.Inception_V3_Weights.DEFAULT)
+    # transform_input is passed explicitly because fid_preprocess depends on it:
+    # the pretrained weights force it on, and this states the contract here.
+    net = tvm.inception_v3(weights=tvm.Inception_V3_Weights.DEFAULT,
+                           transform_input=True)
     net.eval().to(device)
 
     pool: list = []
@@ -522,11 +559,8 @@ def inception_features(crops: np.ndarray, device=None) -> np.ndarray:
     try:
         with torch.no_grad():
             for s in range(0, len(crops), FID_BATCH):
-                t = torch.from_numpy(crops[s:s + FID_BATCH]).unsqueeze(1)
-                t = F.interpolate(t, size=(FID_INPUT, FID_INPUT),
-                                  mode="bilinear", align_corners=False)
                 pool.clear()
-                net(t.expand(-1, 3, -1, -1).to(device))
+                net(fid_preprocess(crops[s:s + FID_BATCH]).to(device))
                 feats.append(pool[-1])
     finally:
         handle.remove()
