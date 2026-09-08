@@ -22,7 +22,11 @@ from poregen.eval_v4.cases import (
     field_two_halves,
     material_notch_and_hole,
 )
-from poregen.eval_v4.generate import latent_material_map, theta_for_canvas
+from poregen.eval_v4.generate import (
+    latent_material_map,
+    resolve_latent_store,
+    theta_for_canvas,
+)
 from poregen.eval_v4.io import (
     LABEL_AIR,
     LABEL_MATERIAL,
@@ -599,6 +603,102 @@ class TestRequests:
         half = np.zeros((4, 4, 4), bool)
         half[:2] = True
         assert latent_material_map(half)[0, 0, 0] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Which latent store a run is evaluated against
+# ---------------------------------------------------------------------------
+
+
+def _store(tmp_path: Path, *, name: str, z: int, vae_ckpt: Path) -> Path:
+    """A latent store that is only its metadata - no arrays are needed here."""
+    root = tmp_path / "data" / name
+    root.mkdir(parents=True)
+    (root / "metadata.json").write_text(json.dumps({
+        "vae_checkpoint": str(vae_ckpt),
+        "latent_shape": [z, 16, 16, 16],
+        "normalization": {
+            "per_channel_mean": [0.0] * z,
+            "per_channel_std": [1.0] * z,
+        },
+        "conditioning": {"por_standardisation": {"mean": -3.5, "std": 0.5}},
+    }))
+    return root
+
+
+def _run_cfg(*, store: str, z: int, vae_ckpt: str) -> dict:
+    return {
+        "model": {"type": "unet3d", "z_channels": z, "channel_mult": [1, 2, 4]},
+        "data": {"latents_root": store},
+        "vae": {"checkpoint": vae_ckpt},
+    }
+
+
+class TestLatentStoreResolution:
+    """The store comes from the run, and has to agree with it.
+
+    A run trained on one rung and scored against another produces a volume, not
+    an error: both stores are valid files and the sampler never learns which one
+    the weights belong to.  These are the two disagreements that cannot be seen
+    in the output afterwards.
+    """
+
+    def test_there_is_no_default_store(self):
+        from poregen.eval_v4 import generate as G
+
+        assert not hasattr(G, "DEFAULT_LATENTS_ROOT")
+
+    def test_matching_store_resolves_relative_to_the_repo(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        root, meta = resolve_latent_store(cfg, tmp_path)
+
+        assert root == (tmp_path / "data" / "latents_z8").resolve()
+        assert meta["latent_shape"][0] == 8
+
+    def test_latent_width_mismatch_raises(self, tmp_path):
+        ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        ckpt.parent.mkdir(parents=True)
+        ckpt.touch()
+        _store(tmp_path, name="latents_z4", z=4, vae_ckpt=ckpt)
+        # The run trained on z=8; the store it is pointed at holds z=4.
+        cfg = _run_cfg(store="data/latents_z4", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="Latent width mismatch") as e:
+            resolve_latent_store(cfg, tmp_path)
+        assert "8" in str(e.value) and "4" in str(e.value)
+
+    def test_vae_checkpoint_mismatch_raises(self, tmp_path):
+        store_ckpt = tmp_path / "runs" / "vae" / "r08-other" / "best.ckpt"
+        store_ckpt.parent.mkdir(parents=True)
+        store_ckpt.touch()
+        run_ckpt = tmp_path / "runs" / "vae" / "r08" / "best.ckpt"
+        run_ckpt.parent.mkdir(parents=True)
+        run_ckpt.touch()
+        _store(tmp_path, name="latents_z8", z=8, vae_ckpt=store_ckpt)
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(ValueError, match="VAE checkpoint mismatch") as e:
+            resolve_latent_store(cfg, tmp_path)
+        assert str(run_ckpt) in str(e.value)
+        assert str(store_ckpt) in str(e.value)
+
+    def test_a_run_that_names_no_store_raises(self, tmp_path):
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+        cfg["data"] = {}
+
+        with pytest.raises(KeyError, match="data.latents_root"):
+            resolve_latent_store(cfg, tmp_path)
+
+    def test_a_missing_store_names_what_the_run_asked_for(self, tmp_path):
+        cfg = _run_cfg(store="data/latents_z8", z=8, vae_ckpt="runs/vae/r08/best.ckpt")
+
+        with pytest.raises(FileNotFoundError, match="data/latents_z8"):
+            resolve_latent_store(cfg, tmp_path)
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,80 @@ PATCH_SIZE = 64
 LATENT_SIZE = PATCH_SIZE // LATENT_DOWNSAMPLE
 WINDOW_BATCH = 32
 DECODE_BATCH = 64
-DEFAULT_LATENTS_ROOT = "data/split_v3/latents_r08z4"
+
+
+def resolve_latent_store(cfg: dict, repo: str | Path) -> tuple[Path, dict]:
+    """The store the run was TRAINED on, checked against the run itself.
+
+    There is no default store and no override.  A run's latent store is not a
+    property of the suite, it is a property of the run: it fixes the latent
+    width the denoiser was built for, the normalisation the sampler works in
+    and the VAE that has to decode the result.  A constant here evaluated
+    every run against one store, so a run trained on a different rung was
+    scored against latents it never saw - and, both stores being valid files,
+    it produced a volume rather than an error.
+
+    The two checks below are the ones that cannot be recovered from the output:
+
+    * **Latent width.** A store whose channel count differs from the model's
+      ``z_channels`` cannot even be sampled, but the normalisation vectors are
+      read before the first model call, so the failure would surface as a
+      shape error deep in the sampler rather than as the wrong store.
+    * **VAE checkpoint.** A decoder that did not produce these latents decodes
+      them to a plausible volume that is silently wrong - the same hard stop
+      ``train_ldm._load_vae_decoder`` makes before training.
+    """
+    from poregen.models.diffusion import UNet3DConfig  # noqa: PLC0415
+
+    repo = Path(repo)
+    ref = (cfg.get("data") or {}).get("latents_root")
+    if not ref:
+        raise KeyError(
+            "resolved_config.yaml has no data.latents_root: the run does not say "
+            "which latent store it was trained on, and there is no default."
+        )
+    root = Path(ref)
+    root = root.resolve() if root.is_absolute() else (repo / root).resolve()
+    meta_path = root / "metadata.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"{meta_path} does not exist. The run was trained on {ref}; that store "
+            "must be present to generate from it."
+        )
+    meta = json.loads(meta_path.read_text())
+
+    model_z = int(UNet3DConfig.from_cfg(cfg).z_channels)
+    store_z = int(meta["latent_shape"][0])
+    norm_z = len(meta["normalization"]["per_channel_mean"])
+    if store_z != model_z or norm_z != model_z:
+        raise ValueError(
+            "Latent width mismatch between the model and its latent store:\n"
+            f"  model z_channels:             {model_z}\n"
+            f"  store latent_shape[0]:        {store_z}\n"
+            f"  store normalisation channels: {norm_z}\n"
+            f"  store: {root}\n"
+            "The run cannot be evaluated against this store."
+        )
+
+    ckpt_ref = (cfg.get("vae") or {}).get("checkpoint")
+    if not ckpt_ref:
+        raise KeyError(
+            "resolved_config.yaml has no vae.checkpoint: nothing says which decoder "
+            "belongs to this run."
+        )
+    run_ckpt = Path(ckpt_ref)
+    run_ckpt = run_ckpt.resolve() if run_ckpt.is_absolute() else (repo / run_ckpt).resolve()
+    store_ckpt = Path(meta["vae_checkpoint"]).resolve()
+    if run_ckpt != store_ckpt:
+        raise ValueError(
+            "VAE checkpoint mismatch between the run and its latent store:\n"
+            f"  run vae.checkpoint: {run_ckpt}\n"
+            f"  store built by:     {store_ckpt}\n"
+            f"  store: {root}\n"
+            "Decoding with a different VAE than the encoder that produced the "
+            "latents is silently wrong."
+        )
+    return root, meta
 
 
 def theta_for_canvas(
@@ -124,6 +197,10 @@ class VolumeRunner:
     per case - both are thin objects - so a case can change the step count, the
     guidance scales, the chunk geometry and the layup without any state
     surviving from the previous one.
+
+    Everything the runner needs beyond the checkpoint comes from the run's own
+    ``resolved_config.yaml``, the latent store included; see
+    :func:`resolve_latent_store`.
     """
 
     def __init__(
@@ -132,7 +209,6 @@ class VolumeRunner:
         ckpt: str,
         *,
         weights: str = "ema",
-        latents_root: str | Path | None = None,
         device: torch.device | None = None,
         repo: str | Path | None = None,
         save_latents: bool = False,
@@ -163,6 +239,11 @@ class VolumeRunner:
 
         cfg = yaml.safe_load((self.run_dir / "resolved_config.yaml").read_text())
         self.model_cfg = cfg
+        # Before the first model call: which store this run belongs to, and
+        # whether it agrees with the run about latent width and decoder.
+        root, meta = resolve_latent_store(cfg, self.repo)
+        self.latents_root = root
+
         model = UNet3DDenoiser(UNet3DConfig.from_cfg(cfg)).to(self.device)
         state = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         if weights == "ema":
@@ -180,10 +261,6 @@ class VolumeRunner:
         self.model = model
         self.weights = weights
 
-        root = Path(latents_root or (self.repo / DEFAULT_LATENTS_ROOT))
-        if not root.is_absolute():
-            root = (self.repo / root).resolve()
-        meta = json.loads((root / "metadata.json").read_text())
         norm = meta["normalization"]
         c = len(norm["per_channel_mean"])
         self.latent_mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
@@ -195,7 +272,6 @@ class VolumeRunner:
                 "scripts/build_conditioning.py before generating."
             )
         self.por_log_stats = (float(stand["mean"]), float(stand["std"]))
-        self.latents_root = root
 
         vae, _, _, _ = load_vae_from_checkpoint(Path(meta["vae_checkpoint"]), self.device)
         vae.requires_grad_(False)
