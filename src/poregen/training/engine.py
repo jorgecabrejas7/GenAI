@@ -794,6 +794,8 @@ def train_loop(
                 "best_split": record.get("split"),
             },
             scheduler=scheduler,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
         )
 
     def _update_early_stopping(record: dict[str, Any]) -> bool:
@@ -1070,6 +1072,8 @@ def train_loop(
                     scheduler=scheduler,
                     latest_path=run_dir / "latest.ckpt" if save_latest else None,
                     thread_holder=_ckpt_thread_holder,
+                    discriminator=discriminator,
+                    disc_optimizer=disc_optimizer,
                 )
 
             # ── 3-D patch samples ─────────────────────────────────────
@@ -1145,6 +1149,8 @@ def train_loop(
                 "actual_final_step": final_step,
             },
             scheduler=scheduler,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
         )
         if save_latest:
             copy_checkpoint(final_ckpt_path, run_dir / "latest.ckpt")

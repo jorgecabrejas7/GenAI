@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import shutil
 import threading
@@ -12,25 +13,69 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+logger = logging.getLogger(__name__)
 
-def save_checkpoint(
-    path: str | Path,
+
+def _snapshot(obj: Any) -> Any:
+    """Return a private CPU copy of *obj*, recursing through containers.
+
+    A state dict holds references to the LIVE parameter and optimizer tensors.
+    Anything that keeps such a dict past the current training step sees the
+    tensors the next step writes into. Copying every tensor detaches the
+    snapshot from training; rebuilding the containers stops a later step from
+    adding or replacing entries inside them.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().to("cpu", copy=True)
+    if isinstance(obj, dict):
+        return {key: _snapshot(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_snapshot(value) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(_snapshot(value) for value in obj)
+    return obj
+
+
+class _CheckpointWriter(threading.Thread):
+    """Background checkpoint writer that re-raises its failure on ``join()``.
+
+    A thread that dies inside ``run()`` prints a traceback and is otherwise
+    silent: training continues and the checkpoint it was told to write simply
+    never appears. Holding the exception and raising it from ``join()`` makes
+    the next save — or the end of the training loop — fail loudly instead.
+    """
+
+    def __init__(self, work: Any) -> None:
+        super().__init__(daemon=True, name="poregen-ckpt-writer")
+        self._work = work
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            self._work()
+        except BaseException as exc:  # noqa: BLE001 — re-raised by join()
+            self.error = exc
+
+    def join(self, timeout: float | None = None) -> None:
+        super().join(timeout)
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+
+
+def _build_state(
+    *,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     step: int,
-    metadata: dict[str, Any] | None = None,
-    scheduler: Any | None = None,
-    ema_state_dict: dict | None = None,
-) -> Path:
-    """Save model + optimizer + scaler + scheduler state atomically.
-
-    Writes to a temporary file first, then renames, so a crash mid-write
-    won't corrupt the checkpoint.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
+    metadata: dict[str, Any] | None,
+    scheduler: Any | None,
+    ema_state_dict: dict | None,
+    discriminator: nn.Module | None,
+    disc_optimizer: torch.optim.Optimizer | None,
+) -> dict[str, Any]:
+    """Collect every piece of state a checkpoint carries."""
     state: dict[str, Any] = {
         "step": step,
         "model": model.state_dict(),
@@ -48,6 +93,48 @@ def save_checkpoint(
         state["scheduler"] = scheduler.state_dict()
     if ema_state_dict is not None:
         state["ema"] = ema_state_dict
+    if discriminator is not None:
+        state["discriminator"] = discriminator.state_dict()
+    if disc_optimizer is not None:
+        state["disc_optimizer"] = disc_optimizer.state_dict()
+    return state
+
+
+def save_checkpoint(
+    path: str | Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    step: int,
+    metadata: dict[str, Any] | None = None,
+    scheduler: Any | None = None,
+    ema_state_dict: dict | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
+) -> Path:
+    """Save model + optimizer + scaler + scheduler state atomically.
+
+    Writes to a temporary file first, then renames, so a crash mid-write
+    won't corrupt the checkpoint.
+
+    The discriminator and its optimizer are stored when given. Without them a
+    resume rebuilds the adversarial branch from random weights, and the GAN
+    restarts from scratch every time the run is interrupted.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    state = _build_state(
+        model=model,
+        optimizer=optimizer,
+        scaler=scaler,
+        step=step,
+        metadata=metadata,
+        scheduler=scheduler,
+        ema_state_dict=ema_state_dict,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
+    )
 
     tmp = path.with_suffix(".tmp")
     torch.save(state, tmp)
@@ -67,13 +154,19 @@ def save_checkpoint_async(
     *,
     thread_holder: list | None = None,
     ema_state_dict: dict | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
 ) -> None:
-    """Collect state dicts synchronously, then write to disk in a background thread.
+    """Snapshot the state synchronously, then write to disk in a background thread.
 
     This eliminates training stalls caused by large checkpoint I/O:
 
-    * ``model.state_dict()`` and friends are called on the **calling thread**
-      (a GPU→CPU copy — unavoidable but fast compared to disk I/O).
+    * The state dicts are collected **and copied to CPU on the calling thread**,
+      so the writer only ever sees a private snapshot. Handing the writer the
+      live tensors instead lets the optimizer steps that run while it
+      serialises leak into a file labelled with the earlier step — the
+      checkpoint is then a mix of two training states, and neither of them is
+      the one it claims to hold.
     * Only the ``torch.save()`` + atomic rename are offloaded to a daemon thread.
 
     Parameters
@@ -81,38 +174,34 @@ def save_checkpoint_async(
     thread_holder : list, optional
         A single-element mutable ``[thread_or_None]`` list shared across calls.
         The previous thread is ``join()``-ed before a new one starts, ensuring
-        at most one background write is in flight at any time.  If ``None``,
-        no joining is done (fire-and-forget — use only for one-shot saves).
+        at most one background write is in flight at any time.  A write that
+        failed raises out of that join.  If ``None``, no joining is done
+        (fire-and-forget — use only for one-shot saves).
     latest_path : optional
         If given, atomically copy the written checkpoint to this path in the
         same background thread (implements the ``save_latest`` pattern without
         blocking the training loop).
-
-    Notes
-    -----
-    The discriminator is not included in this checkpoint.  If discriminator
-    state is needed for exact resumption, save it separately via a second call.
+    discriminator, disc_optimizer : optional
+        Adversarial branch state, stored so a resume continues the GAN instead
+        of restarting it from random weights.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ── Collect state on the calling thread (may do GPU→CPU transfers) ────────
-    state: dict[str, Any] = {
-        "step":       step,
-        "model":      model.state_dict(),
-        "optimizer":  optimizer.state_dict(),
-        "scaler":     scaler.state_dict(),
-        "metadata":   metadata or {},
-        "rng_python": random.getstate(),
-        "rng_numpy":  np.random.get_state(),
-        "rng_torch":  torch.get_rng_state(),
-    }
-    if torch.cuda.is_available():
-        state["rng_cuda"] = torch.cuda.get_rng_state_all()
-    if scheduler is not None:
-        state["scheduler"] = scheduler.state_dict()
-    if ema_state_dict is not None:
-        state["ema"] = ema_state_dict
+    # ── Snapshot state on the calling thread (does the GPU→CPU transfers) ─────
+    state = _snapshot(
+        _build_state(
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            step=step,
+            metadata=metadata,
+            scheduler=scheduler,
+            ema_state_dict=ema_state_dict,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
+        )
+    )
 
     # ── Join previous background save if one is tracked ───────────────────────
     if thread_holder is not None and thread_holder and thread_holder[0] is not None:
@@ -130,7 +219,7 @@ def save_checkpoint_async(
             shutil.copy2(path, tmp2)
             tmp2.replace(lp)
 
-    t = threading.Thread(target=_write, daemon=True, name="poregen-ckpt-writer")
+    t = _CheckpointWriter(_write)
     t.start()
 
     if thread_holder is not None:
@@ -148,6 +237,8 @@ def load_checkpoint(
     scheduler: Any | None = None,
     map_location: str | torch.device = "cpu",
     restore_rng: bool = True,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Load checkpoint into *model* (and optionally *optimizer* / *scaler* / *scheduler*).
 
@@ -155,6 +246,11 @@ def load_checkpoint(
     ----------
     restore_rng : bool
         If True, restore Python/NumPy/CUDA RNG states for exact resumability.
+    discriminator, disc_optimizer : optional
+        Restored from the checkpoint when given.  A discriminator that the
+        checkpoint does not carry is reported at WARNING level: the run then
+        continues with random adversarial weights, which is invisible in the
+        loss curves and must not pass unannounced.
 
     Returns
     -------
@@ -183,6 +279,23 @@ def load_checkpoint(
         scaler.load_state_dict(state["scaler"])
     if scheduler is not None and "scheduler" in state:
         scheduler.load_state_dict(state["scheduler"])
+
+    if discriminator is not None:
+        if "discriminator" in state:
+            discriminator.load_state_dict(state["discriminator"])
+        else:
+            logger.warning(
+                "Checkpoint %s carries no discriminator state. The adversarial "
+                "branch starts from random weights.", path,
+            )
+    if disc_optimizer is not None:
+        if "disc_optimizer" in state:
+            disc_optimizer.load_state_dict(state["disc_optimizer"])
+        else:
+            logger.warning(
+                "Checkpoint %s carries no discriminator optimizer state. The "
+                "adversarial optimizer starts from zero moments.", path,
+            )
 
     if restore_rng:
         if "rng_python" in state:
