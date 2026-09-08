@@ -73,6 +73,7 @@ __all__ = [
     "rescale_guidance",
     "theta_from_layup",
     "window_origins",
+    "window_tile_mean",
     "window_weight",
     "seam_discontinuity",
 ]
@@ -166,6 +167,43 @@ def window_origins(
             )
         axes.append(list(range(0, n - w + 1, s)))
     return [(z, y, x) for z in axes[0] for y in axes[1] for x in axes[2]]
+
+
+def window_tile_mean(
+    origin: tuple[int, int, int],
+    patch_size: int,
+    tile_field: dict,
+    default: float,
+) -> float:
+    """Mean of a TILE-grid field over one window's voxel footprint.
+
+    ``origin`` is the window's voxel origin and the window spans
+    ``patch_size`` voxels on each axis — exactly one tile's worth, but placed
+    every ``window_stride`` voxels, so it generally straddles up to eight
+    tiles.  Each tile is weighted by the VOLUME of the window it covers, and
+    tiles the field does not name contribute ``default``.
+
+    The average is on RAW values.  Averaging ``cond_por`` instead would be
+    wrong: ``porosity_to_cond`` is a log, and the mean of the transform is not
+    the transform of the mean.
+    """
+    P = int(patch_size)
+    spans: list[list[tuple[int, int]]] = []
+    for a in range(3):
+        o = int(origin[a])
+        axis: list[tuple[int, int]] = []
+        v = o
+        while v < o + P:
+            end = min((v // P + 1) * P, o + P)
+            axis.append((v // P, end - v))
+            v = end
+        spans.append(axis)
+    total = 0.0
+    for iz, wz in spans[0]:
+        for iy, wy in spans[1]:
+            for ix, wx in spans[2]:
+                total += float(tile_field.get((iz, iy, ix), default)) * wz * wy * wx
+    return total / float(P ** 3)
 
 
 def window_weight(win_cells: int) -> torch.Tensor:
@@ -746,7 +784,7 @@ class VolumeGenerator:
             states, nb_slices = self._neighbour_plan(g_origins, visible, canvas_cells, ctx_lo)
             cond = self._window_conditioning(
                 g_origins, ds, por_default, local_por_map, material_map,
-                box_lo, box_hi, n_tiles,
+                box_lo, box_hi,
             )
             avail_t = torch.from_numpy(states).to(self.device)              # (n_win, 6)
 
@@ -878,7 +916,6 @@ class VolumeGenerator:
         material_map: np.ndarray,
         box_lo: tuple[int, int, int],
         box_hi: tuple[int, int, int],
-        n_tiles: tuple[int, int, int],
     ) -> dict[str, torch.Tensor]:
         """Stack every window's scalar and spatial conditioning onto the device."""
         L, P = self.latent_size, self.patch_size
@@ -887,10 +924,10 @@ class VolumeGenerator:
             ov = tuple(int(c) * ds for c in g)          # voxel origin
             phi = por_default
             if local_por_map is not None:
-                # The requested porosity field is defined on the TILE grid;
-                # a window takes the tile that holds its centre.
-                ti = tuple(min((ov[a] + P // 2) // P, n_tiles[a] - 1) for a in range(3))
-                phi = local_por_map.get(ti, por_default)
+                # The requested porosity field is defined on the TILE grid but a
+                # window steps by window_stride, so it straddles up to eight
+                # tiles: its request is the field over its own footprint.
+                phi = window_tile_mean(ov, P, local_por_map, por_default)
             phi = float(np.clip(phi, POR_MIN, POR_MAX))
             por.append(float(porosity_to_cond(phi, self.por_log_stats)))
             d, d6 = self._window_position(ov, box_lo, box_hi)
