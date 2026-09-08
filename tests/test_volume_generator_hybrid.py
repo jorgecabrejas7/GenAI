@@ -338,6 +338,92 @@ class TestWindowConditioning:
                          autocast_dtype=torch.float32)
 
 
+# ── the requested porosity field over a window's footprint ───────────────────
+
+class TestWindowPorosityFootprint:
+    """A window steps by 32 voxels but the field is defined on 64-voxel tiles.
+
+    A window therefore straddles up to eight tiles, and its request is the RAW
+    tile field averaged over its own footprint, weighted by the volume each
+    tile covers.  Taking the tile under the window CENTRE instead handed a
+    window that spans 0.01 and 0.05 material one of the two extremes.
+    """
+
+    TILES = (2, 2, 2)
+    CELLS = (TILES[0] * P // DS,) * 3
+
+    def _cond_por(self, por_map, g_origin, por_default=0.03):
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2), tiles=self.TILES)
+        cond = gen._window_conditioning(
+            [g_origin], DS, por_default, por_map,
+            np.ones(self.CELLS, dtype=np.float32),
+            (0, 0, 0), (self.TILES[0] * P,) * 3,
+        )
+        return float(cond["por"][0])
+
+    @staticmethod
+    def _expected(phi):
+        from poregen.diffusion.conditioning import porosity_to_cond
+        return float(porosity_to_cond(phi, (-3.0, 1.0)))
+
+    def test_a_window_straddling_two_tiles_takes_their_footprint_mean(self):
+        """Half in a 0.01 tile and half in a 0.05 tile is a request for 0.03."""
+        por_map = {(iz, iy, ix): (0.01 if ix == 0 else 0.05)
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        # Voxel origin (0, 0, 32): x 32..63 is tile 0, x 64..95 is tile 1.
+        got = self._cond_por(por_map, (0, 0, P // 2 // DS))
+        assert got == pytest.approx(self._expected(0.03), rel=1e-6)
+
+    def test_a_window_inside_one_tile_is_that_tile(self):
+        """The aligned case must not move: it is one tile, so it is its value."""
+        por_map = {(iz, iy, ix): (0.01 if ix == 0 else 0.05)
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        assert self._cond_por(por_map, (0, 0, 0)) == pytest.approx(
+            self._expected(0.01), rel=1e-6)
+        assert self._cond_por(por_map, (0, 0, P // DS)) == pytest.approx(
+            self._expected(0.05), rel=1e-6)
+
+    def test_the_weights_are_volumes_not_lengths(self):
+        """Straddling in y AND x covers four tiles at a quarter each."""
+        vals = {(0, 0): 0.01, (0, 1): 0.03, (1, 0): 0.05, (1, 1): 0.07}
+        por_map = {(iz, iy, ix): vals[(iy, ix)]
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        got = self._cond_por(por_map, (0, P // 2 // DS, P // 2 // DS))
+        assert got == pytest.approx(self._expected(0.04), rel=1e-6)
+
+    def test_the_mean_is_taken_on_raw_porosity_not_on_the_transform(self):
+        """`porosity_to_cond` is a log: averaging after it is a different number."""
+        por_map = {(iz, iy, ix): (0.01 if ix == 0 else 0.05)
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        got = self._cond_por(por_map, (0, 0, P // 2 // DS))
+        mean_of_transform = 0.5 * (self._expected(0.01) + self._expected(0.05))
+        assert got != pytest.approx(mean_of_transform, rel=1e-3)
+
+    def test_a_footprint_mean_outside_the_training_range_is_still_clamped(self):
+        from poregen.diffusion.conditioning import POR_MAX
+
+        por_map = {(iz, iy, ix): 0.5
+                   for iz in range(2) for iy in range(2) for ix in range(2)}
+        got = self._cond_por(por_map, (0, 0, P // 2 // DS))
+        assert got == pytest.approx(self._expected(POR_MAX), rel=1e-6)
+
+    def test_a_tile_missing_from_the_field_falls_back_per_tile(self):
+        por_map = {(0, 0, 0): 0.01}          # tile (0,0,1) is not requested
+        got = self._cond_por(por_map, (0, 0, P // 2 // DS), por_default=0.05)
+        assert got == pytest.approx(self._expected(0.03), rel=1e-6)
+
+    def test_the_footprint_mean_helper_weights_partial_tiles(self):
+        """Unaligned origins are weighted by overlap, not counted equally."""
+        from poregen.diffusion.sampler import window_tile_mean
+
+        field = {(0, 0, 0): 0.01, (0, 0, 1): 0.05}
+        # x 16..79: 48 voxels in tile 0, 16 voxels in tile 1.
+        got = window_tile_mean((0, 0, 16), P, field, 0.0)
+        assert got == pytest.approx(0.75 * 0.01 + 0.25 * 0.05)
+        assert window_tile_mean((0, 0, 0), P, field, 0.0) == pytest.approx(0.01)
+        assert window_tile_mean((0, 0, P), P, field, 0.0) == pytest.approx(0.05)
+
+
 # ── CFG ──────────────────────────────────────────────────────────────────────
 
 class TestGuidance:
