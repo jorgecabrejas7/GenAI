@@ -334,13 +334,42 @@ of 1.79 voxels, 26-connectivity fuses voids that meet at a single corner.
 
 **The FID feature extractor** is torchvision's `inception_v3` with
 `Inception_V3_Weights.DEFAULT` (ImageNet IMAGENET1K_V1), 2048-d pool3
-(`avgpool`) features. Crops go in on [0, 1], replicated to three channels and
-bilinearly resized 64 → 299. A full slice resized to 299 would be a ~10×
-downscale, which shrinks a 1.79-voxel pore to 0.18 pixels — the structure the
-metric exists to see would be gone before Inception saw it. 5000 crops per axis
-per set, because a 2048-dimensional covariance estimated from fewer samples
-than that is singular. FID values are comparable **within this
-implementation only**.
+(`avgpool`) features. A full slice resized to 299 would be a ~10× downscale,
+which shrinks a 1.79-voxel pore to 0.18 pixels — the structure the metric
+exists to see would be gone before Inception saw it — so the crops are 64×64
+native. 5000 crops per axis per set, because a 2048-dimensional covariance
+estimated from fewer samples than that is singular.
+
+**The preprocessing convention is `pytorch-fid`'s**, which is the one every
+published FID number uses: replicate the grey crop to three channels,
+bilinearly resize to 299×299 (no centre crop — a crop would throw away part of
+the field of view), and put the network's input on the TF range **[-1, 1]**.
+The range is reached the way torchvision wants it. torchvision's `inception_v3`
+carries `transform_input=True` with the pretrained weights, and that flag
+remaps an **ImageNet-normalised** input to [-1, 1] itself:
+
+```
+transform_input((v - mean) / std) == 2v - 1        # per channel, for the
+                                                   # preset's mean/std
+```
+
+So `fid_preprocess` normalises with the weights' own preset `mean`/`std`
+(read from `Inception_V3_Weights.DEFAULT.transforms()`, not retyped) and lets
+`transform_input` finish the job. Normalising *and* scaling to [-1, 1] by hand
+would apply the remap twice.
+
+Before 2026-09-08 the crops went in on [0, 1] with no normalisation at all.
+`transform_input` then mapped them to about [-0.19, 0.43] — under a third of
+the range the network was trained on — so the 2048-d features were
+off-distribution and the FID was comparable to nothing. **Any FID recorded
+before that date is void.**
+
+One difference from `pytorch-fid` remains and is deliberate: `pytorch-fid`
+loads the TF-ported *FID Inception* weights, this suite loads torchvision's
+`IMAGENET1K_V1`. The two networks give different absolute values on the same
+images. FID here is therefore comparable **within this implementation only**,
+which is why every table carries the real-vs-real floor beside it —
+`results.json` records the exact extractor string in `fid.extractor`.
 
 **Ripley's K is border-corrected** (reduced-sample): only pores further than r
 from every face contribute, so the estimate is unbiased and converges to the
