@@ -52,11 +52,13 @@ Three distinct strides (conflating them was a documented bug):
     (see ``poregen.diffusion.conditioning``).
 
 Neighbours are fed WHOLE and UNSHIFTED — touching patches share no cell, so
-the entire neighbour latent is honest face-adjacent context.  The latents this
-dataset serves are the CLEAN posterior means of the stored neighbours; the
-training step is what noises them to their own timestep, and the sampler is
-what replaces them with canvas state.  Availability here is only ever EXISTS
-(the store holds a patch there) or OOB (it does not — the specimen ends).
+the entire neighbour latent is honest face-adjacent context.  What this
+dataset serves is the stored neighbours' CLEAN posterior — mean AND std, from
+the neighbour's own store row.  The training step is what draws
+``mu + sigma*eps`` from it and noises the draw to its own timestep, and the
+sampler is what replaces them with canvas state.  Availability here is only
+ever EXISTS (the store holds a patch there) or OOB (it does not — the
+specimen ends).
 UNKNOWN is produced by the training step's neighbour dropout and by the
 sampler, never by the store.
 
@@ -448,30 +450,41 @@ class LatentDataset(Dataset):
         coords = origin[None, :] + self._nb_dir_offsets
         return self._lookup(int(self._vol_index[idx]), coords)
 
-    def _neighbours(self, idx: int, rows: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(nb_latents, nb_avail)`` for one row.
+    def _neighbours(
+        self, idx: int, rows: np.ndarray
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(nb_latents, nb_std, nb_avail)`` for one row.
 
         A neighbour is EXISTS when the store holds a patch at that position
         and OOB when it does not — the specimen ends there, which is exactly
         what the sampler means by OOB at the edge of the requested volume.
-        The latent handed over is the CLEAN posterior mean of the whole
-        neighbour: at ``neighbour_offset == patch_size`` the two patches only
-        touch, so there is nothing to shift and no voxel of the target inside
-        it.  Noising it to its own timestep is the training step's job.
+        The posterior handed over is the CLEAN mean AND std of the whole
+        neighbour, read from the one store row the neighbour lives in: at
+        ``neighbour_offset == patch_size`` the two patches only touch, so
+        there is nothing to shift and no voxel of the target inside it.
+        Drawing ``mu + sigma*eps`` and noising the draw to its own timestep is
+        the training step's job — the target is a posterior DRAW, so a
+        mean-valued neighbour would be a distribution the sampler never
+        produces.  OOB neighbours keep zero mean and zero std.
         """
         c = self.latent_shape[0]
         L = self.latent_size
         nb = torch.zeros((N_NEIGHBOURS, c, L, L, L), dtype=torch.float32)
+        nb_std = torch.zeros_like(nb)
         avail = torch.full((N_NEIGHBOURS,), NB_OOB, dtype=torch.int64)
         for i in range(N_NEIGHBOURS):
             if rows[i] < 0:
                 continue
             avail[i] = NB_EXISTS
-            raw = torch.from_numpy(
-                np.asarray(self._latents[int(rows[i]), :c], dtype=np.float32)
+            packed = torch.from_numpy(
+                np.asarray(self._latents[int(rows[i])], dtype=np.float32)
             )
-            nb[i] = self.normalize_latent(raw) if self.normalize else raw
-        return nb, avail
+            mu, sd = packed[:c], packed[c:]
+            if self.normalize:
+                mu = self.normalize_latent(mu)
+                sd = sd / self.channel_std
+            nb[i], nb_std[i] = mu, sd
+        return nb, nb_std, avail
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         """The fixed ldm06 batch contract.
@@ -486,7 +499,8 @@ class LatentDataset(Dataset):
         cond_dist6     (6,)                        float32    per-face distance
         cond_orient    (2, 16, 16, 16)             float32    (cos2θ, sin2θ)
         cond_material  (1, 16, 16, 16)             float32    envelope fraction
-        nb_latents     (6, C, 16, 16, 16)          float32    CLEAN neighbours
+        nb_latents     (6, C, 16, 16, 16)          float32    neighbour mu
+        nb_std         (6, C, 16, 16, 16)          float32    neighbour std
         nb_avail       (6,)                        int64      EXISTS / OOB
         air_fraction   ()                          float32    air voxels / patch
         phi            (1,)                        float32    raw porosity
@@ -504,8 +518,10 @@ class LatentDataset(Dataset):
         throughout the interior and drops only at the outer surface and the
         drilled holes; it deliberately says nothing about where the pores are,
         which the model has to generate.
-        ``nb_latents`` are the neighbours' clean posterior means; nothing in
-        this dataset noises them.
+        ``nb_latents`` / ``nb_std`` are the neighbours' clean posterior mean
+        and std, both read from the neighbour's own store row and put through
+        the same affine map as ``z`` / ``std``.  Nothing in this dataset draws
+        from that posterior or noises it; the training step does both.
 
         ``label`` (the starred row) is present ONLY when the dataset was built with
         ``with_label=True`` (the decoded auxiliary loss).  It is the source
@@ -530,7 +546,9 @@ class LatentDataset(Dataset):
                 vid, int(self._z0[idx]), self.patch_size, self.latent_size
             )
         )
-        nb_latents, nb_avail = self._neighbours(idx, self.neighbour_rows(idx))
+        nb_latents, nb_std, nb_avail = self._neighbours(
+            idx, self.neighbour_rows(idx)
+        )
 
         item: dict[str, Any] = {
             "z": z,                                                      # (C, d, h, w)
@@ -543,6 +561,7 @@ class LatentDataset(Dataset):
                 np.asarray(self._material[idx], dtype=np.float32) / 255.0
             ).unsqueeze(0),                                              # (1, d, h, w)
             "nb_latents": nb_latents,                                    # (6, C, d, h, w)
+            "nb_std": nb_std,                                            # (6, C, d, h, w)
             "nb_avail": nb_avail,                                        # (6,)
             "air_fraction": torch.tensor(float(self._air[idx]), dtype=torch.float32),
             "phi": torch.tensor([float(self._phi[idx])], dtype=torch.float32),

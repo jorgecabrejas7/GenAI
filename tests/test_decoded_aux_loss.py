@@ -543,7 +543,7 @@ class TestTrainStepIntegration:
                            **dataset_kwargs())
         items = [ds[i] for i in range(4)]
         keys = ("z", "std", "cond_por", "cond_depth", "cond_dist6", "cond_orient",
-                "cond_material", "nb_latents", "nb_avail", "phi", "label")
+                "cond_material", "nb_latents", "nb_std", "nb_avail", "phi", "label")
         batch = {k: torch.stack([it[k] for it in items]) for k in keys}
 
         cfg = UNet3DConfig(z_channels=batch["z"].shape[1], base_channels=8,

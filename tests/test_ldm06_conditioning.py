@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 import torch
 
-from _ldm06_store import DIST6_COLUMNS, SYN, build_store, dataset_kwargs
+from _ldm06_store import DIST6_COLUMNS, SYN, build_store, dataset_kwargs, row_std
 from poregen.diffusion.conditioning import (
     DIST6_DIRS,
     DIST6_NAMES,
@@ -289,6 +289,8 @@ class TestLatentDatasetContract:
         assert b["cond_orient"].shape == (2, L, L, L)
         assert b["cond_material"].shape == (1, L, L, L)
         assert b["nb_latents"].shape == (N_NEIGHBOURS, C, L, L, L)
+        assert b["nb_std"].shape == (N_NEIGHBOURS, C, L, L, L)
+        assert b["nb_std"].dtype == torch.float32
         assert b["nb_avail"].shape == (N_NEIGHBOURS,)
         assert b["nb_avail"].dtype == torch.int64
         assert b["air_fraction"].shape == ()
@@ -366,6 +368,29 @@ class TestLatentDatasetContract:
             c = tuple(v // ds_factor for v in n0)
             expected = field[:, c[0]:c[0] + L, c[1]:c[1] + L, c[2]:c[2] + L]
             assert np.allclose(b["nb_latents"][i].numpy(), expected, atol=2e-3)
+
+    def test_neighbour_std_comes_from_the_neighbour_row(self, synthetic_store):
+        """The store serves mu AND std, and both come from the SAME row.
+
+        The training step draws ``mu + sigma*eps`` per neighbour, so a std
+        taken from the target's row — or left at zero — would silently make
+        every neighbour a mean-valued latent again.
+        """
+        ds = _ds(synthetic_store)
+        idx = len(ds) // 2
+        b = ds[idx]
+        rows = ds.neighbour_rows(idx)
+        assert float(b["nb_std"].max()) > 0.0
+        for i in range(N_NEIGHBOURS):
+            if int(b["nb_avail"][i]) != NB_EXISTS:
+                assert float(b["nb_std"][i].abs().max()) == 0.0
+                continue
+            # Row-dependent by construction, and the six faces sit on other
+            # residues than the target — so this cannot pass on the target's.
+            assert float(b["nb_std"][i].mean()) == pytest.approx(
+                row_std(int(rows[i])), abs=1e-3)
+            assert row_std(int(rows[i])) != pytest.approx(
+                row_std(int(b["source_row"])), abs=1e-3)
 
     def test_no_neighbour_cell_belongs_to_the_target(self, synthetic_store):
         """The whole point of neighbour_offset == patch_size."""

@@ -101,12 +101,25 @@ under the top surface and a patch against a side wall asked for the same thing.
 `conditioning.dist6_from_box` is the one definition; the training builder and
 the sampler both call it.
 
-### Neighbours arrive noised
+### Neighbours are sampled, then noised
 
-The store serves the neighbours' CLEAN posterior means. The training step
-(`ldm_engine.noise_neighbours`) draws a timestep per item and per face — with
-probability `nb_t_mix` the target's own `t`, otherwise `Uniform{0..t}` — and
-`q_sample`s each neighbour to it, passing `nb_t` to the denoiser. Separately,
+The store serves each neighbour's CLEAN posterior — the mean AND the std, both
+read from the neighbour's own store row and put through the same per-channel
+affine map as the target. The batch therefore carries `nb_latents` (6,C,…) and
+`nb_std` (6,C,…) next to `z` and `std`.
+
+The training step draws each EXISTS neighbour before it noises it
+(`ldm_engine.sample_neighbours`): `mu + sigma*eps`, fresh eps, exactly how the
+target is drawn under `data.latent_mode: sampled`. Conditioning on posterior
+MEANS while regressing a posterior SAMPLE was a real defect — the neighbour
+input was short of `E[sigma^2]` per cell, a gap that does not exist at
+generation time, where every neighbour is a real latent. OOB and UNKNOWN
+neighbours carry no posterior and are left alone; `noise_neighbours` zeroes
+them anyway.
+
+Then `ldm_engine.noise_neighbours` draws a timestep per item and per face —
+with probability `nb_t_mix` the target's own `t`, otherwise `Uniform{0..t}` —
+and `q_sample`s each neighbour to it, passing `nb_t` to the denoiser. Separately,
 with probability `drop_nb` an item loses all six at once: availability UNKNOWN,
 latents zero, `nb_t` zero. That is exactly the neighbour null arm of the nested
 CFG, so training and `DDIMSampler` share one definition of "no neighbour
