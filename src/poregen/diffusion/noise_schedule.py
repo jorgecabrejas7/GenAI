@@ -356,10 +356,24 @@ class DDPMSchedule:
         The step is written on (x̂₀, ε̂), which both objectives can produce, so
         there is one reverse process and not one per parameterisation.
 
-        When t_prev=0, alphas_cumprod_prev[0]=ᾱ_0=1 so the formula collapses
-        to x̂_0 directly — no noise, clean final sample.
+        The state this returns is the state the NEXT network call reads, so it
+        must sit at the noise level that call assumes.  A call at index k reads
+        ``alphas_cumprod[k]``: that is the level ``q_sample`` builds for index k
+        at training time, and the level ``predict_x0`` inverts.  The step
+        therefore targets ``alphas_cumprod[t_prev]``, not
+        ``alphas_cumprod_prev[t_prev]`` — the latter is ᾱ_{t_prev}, one index
+        of the 1000-step ladder below ᾱ_{t_prev+1}, so it left every state at a
+        slightly wrong noise level (up to 1.6e-3 in sqrt(ᾱ), and 3.9 % of
+        sqrt(1−ᾱ) at the bottom rung of a 50-step ladder, where the remaining
+        noise is small and the error is therefore largest in relative terms).
+
+        ``t_prev = 0`` closes the chain — the sampler grid ends there and no
+        call follows — so the target is the clean level ᾱ = 1 and the step
+        returns x̂₀ itself.
         """
         x0_pred = self.predict_x0(x_t, t, model_out).clamp(-X0_CLAMP, X0_CLAMP)
         eps_pred = self.predict_eps(x_t, t, model_out)
-        at_m1 = self._gather(self.alphas_cumprod_prev, t_prev).to(x_t.device)
-        return at_m1.sqrt() * x0_pred + (1.0 - at_m1).clamp(min=0.0).sqrt() * eps_pred
+        a_next = self._gather(self.alphas_cumprod, t_prev).to(x_t.device)
+        terminal = (t_prev == 0).view(-1, 1, 1, 1, 1).to(x_t.device)
+        a_next = torch.where(terminal, torch.ones_like(a_next), a_next)
+        return a_next.sqrt() * x0_pred + (1.0 - a_next).clamp(min=0.0).sqrt() * eps_pred
