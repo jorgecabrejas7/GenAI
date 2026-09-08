@@ -541,15 +541,19 @@ def report_assembly(res, root, floor) -> tuple[str, list[str]]:
         "",
     ]
     if phase.get("available"):
+        ref = phase["reference_offset"]
         text += [
-            table(["seed", "pore Dice", "phi at offset 0", "phi at offset 32",
-                   "phi difference"],
-                  [[str(p["seed"]), fmt(p["pore_dice"], 3), fmt(p["phi_offset0"]),
-                    fmt(p["phi_offset32"]), fmt(p["phi_difference"])]
+            table(["offset", "seed", "pore Dice", f"phi at offset {ref}",
+                   "phi at offset", "phi difference"],
+                  [[str(p["offset"]), str(p["seed"]), fmt(p["pore_dice"], 3),
+                    fmt(p["phi_reference"]), fmt(p["phi_offset"]),
+                    fmt(p["phi_difference"])]
                    for p in phase["pairs"]]),
             "",
-            f"Mean pore Dice {ms(phase['pore_dice'], 3)}, "
-            f"phi difference {ms(phase['phi_difference'])}.",
+            table(["offset", "seeds", "pore Dice", "phi difference"],
+                  [[off, str(v["n_seeds"]), ms(v["pore_dice"], 3),
+                    ms(v["phi_difference"])]
+                   for off, v in sorted(phase["by_offset"].items(), key=lambda kv: int(kv[0]))]),
             "",
             phase["note"],
         ]

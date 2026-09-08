@@ -458,49 +458,75 @@ def measure_assembly(root, repo) -> dict:
 
 
 def _measure_window_phase(root) -> dict:
-    """Pore Dice for the same region assembled on two window grids."""
+    """Pore Dice for the same region assembled on the offset grids.
+
+    Offset 0 is the reference and every other offset is read against it, so a
+    row is one (seed, offset) pair.  The offsets isolate different things -
+    32 is a whole window stride and moves only the chunk alignment, 16 is half
+    a stride and moves the window phase as well - and mixing them into one mean
+    would hide exactly the separation they were added for.
+    """
     cases = {c.manifest.case: c for c in load_cases(root, "assembly")}
     if not cases:
         return {"available": False,
-                "note": "run `eval_v4 generate assembly` for the window-phase pair"}
-    lo, hi = ASSEMBLY_OFFSETS
+                "note": "run `eval_v4 generate assembly` for the offset triple"}
+    ref, others = ASSEMBLY_OFFSETS[0], ASSEMBLY_OFFSETS[1:]
     pairs = []
     for seed in sorted({c.manifest.seed for c in cases.values()}):
-        a, b = cases.get(f"offset{lo}_seed{seed}"), cases.get(f"offset{hi}_seed{seed}")
-        if a is None or b is None:
+        a = cases.get(f"offset{ref}_seed{seed}")
+        if a is None:
             continue
         ra = M.crop_region(a.label, a.manifest)
-        rb = M.crop_region(b.label, b.manifest)
-        if ra.shape != rb.shape:
-            raise ValueError(
-                f"window-phase seed {seed}: the two regions are {ra.shape} and "
-                f"{rb.shape}. The pair must be the SAME region assembled two ways, "
-                "or the Dice compares two different pieces of material."
-            )
-        pairs.append({
-            "seed": seed,
-            "offsets": [lo, hi],
-            "region_shape": list(ra.shape),
-            "pore_dice": M.pore_dice(ra, rb),
-            "phi_offset0": float((ra == 1).mean()),
-            "phi_offset32": float((rb == 1).mean()),
-            "phi_difference": float((ra == 1).mean() - (rb == 1).mean()),
-        })
+        for off in others:
+            b = cases.get(f"offset{off}_seed{seed}")
+            if b is None:
+                continue
+            rb = M.crop_region(b.label, b.manifest)
+            if ra.shape != rb.shape:
+                raise ValueError(
+                    f"window-phase seed {seed}, offset {off}: the two regions are "
+                    f"{ra.shape} and {rb.shape}. The pair must be the SAME region "
+                    "assembled two ways, or the Dice compares two different pieces "
+                    "of material."
+                )
+            pairs.append({
+                "seed": seed,
+                "offset": off,
+                "offsets": [ref, off],
+                "region_shape": list(ra.shape),
+                "pore_dice": M.pore_dice(ra, rb),
+                "phi_reference": float((ra == 1).mean()),
+                "phi_offset": float((rb == 1).mean()),
+                "phi_difference": float((ra == 1).mean() - (rb == 1).mean()),
+            })
+    by_offset = {}
+    for off in others:
+        rows = [p for p in pairs if p["offset"] == off]
+        if rows:
+            by_offset[str(off)] = {
+                "n_seeds": len(rows),
+                "pore_dice": M.mean_sd([p["pore_dice"] for p in rows]),
+                "phi_difference": M.mean_sd([p["phi_difference"] for p in rows]),
+            }
     return {
         "available": bool(pairs),
         "region_shape": pairs[0]["region_shape"] if pairs else list(ASSEMBLY_REGION),
+        "reference_offset": ref,
         "offsets": list(ASSEMBLY_OFFSETS),
         "note": (
             "The sampler anchors window origins at the chunk origin, so the shift "
             "is realised by translating the REQUEST inside a 256-cubed canvas: the "
-            "specimen box, the orientation profile and the uniform porosity request "
-            "all move with the region, and only the assembly grid stays put. At "
-            "offset 32 the chunk plane at canvas voxel 192 runs through the region "
-            "at region coordinate 160."
+            "specimen box, the orientation profile, the uniform porosity request "
+            "and the frame every noise draw is taken in all move with the region, "
+            "and only the assembly grid stays put. Offset 32 is a whole window "
+            "stride, so it keeps the window phase and moves only the chunk "
+            "alignment - the chunk plane at canvas voxel 192 runs through the "
+            "region at region coordinate 160. Offset 16 is half a stride, so it "
+            "moves the window phase too (region-relative window origins 16, 48, "
+            "80 ...) with a chunk plane at region coordinate 176."
         ),
         "pairs": pairs,
-        "pore_dice": M.mean_sd([p["pore_dice"] for p in pairs]),
-        "phi_difference": M.mean_sd([p["phi_difference"] for p in pairs]),
+        "by_offset": by_offset,
     }
 
 

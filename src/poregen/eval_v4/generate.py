@@ -13,9 +13,13 @@ recorded here rather than worked around silently:
   checks that the generator snapped back to exactly the shape that was asked
   for, so a rounding error cannot quietly change the volume.
 * **Window phase.** Window origins are anchored at the chunk origin and there
-  is no phase parameter.  Assessment 6 gets its 32-voxel shift by translating
-  the REQUEST inside a larger canvas (``CaseSpec.request_offset``), which moves
-  the assembly grid relative to the content without touching the sampler.
+  is no phase parameter.  Assessment 6 gets its shift by translating the
+  REQUEST inside a larger canvas (``CaseSpec.request_offset``), which moves the
+  assembly grid relative to the content without touching the sampler.  The
+  offset is handed to the sampler as well, because every noise draw is taken in
+  the request's own frame: without it the two runs of a pair would differ in
+  the noise realisation as well as in the grid, and the pair would measure
+  neither.
 
 Seeding is the sampler's own: ``generate(seed=...)`` drives every random draw
 of the reverse process from a local generator, so a case is reproducible from
@@ -346,6 +350,7 @@ class VolumeRunner:
                 local_por_map=por_map,
                 material_map=material_map,
                 specimen_box=spec.specimen_box,
+                request_offset=spec.request_offset,
                 progress=progress,
                 window_batch=WINDOW_BATCH,
                 decode_batch_size=DECODE_BATCH,
