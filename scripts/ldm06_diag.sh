@@ -93,7 +93,7 @@ while true; do
         next_target=$((next_target + DIAG_EVERY))
     fi
     # Training exited and we are past the last target: nothing more will come.
-    if ! pgrep -f "scripts/train_ldm\.py run " >/dev/null 2>&1; then
+    if ! pgrep -f "scripts/train_ldm\.py (run|resume) " >/dev/null 2>&1; then
         say "training has exited at step ${step:-?}; final diag"
         python scripts/diag_ldm_samples.py --run-dir "$RUN_DIR" --ddim200 \
             > "$SCRATCH/ldm06_diag_final.log" 2>&1

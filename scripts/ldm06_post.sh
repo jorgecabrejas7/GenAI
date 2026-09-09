@@ -57,7 +57,11 @@ PY
 # ── 0. wait for ldm06/base ────────────────────────────────────────────────────
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 say "armed; watching ${LDM_RUN:-<no ldm06 run>}"
-while pgrep -f "scripts/train_ldm\.py run " >/dev/null 2>&1; do sleep 60; done
+# Matches BOTH `run` and `resume`. The original pattern was `run ` only, and
+# when ldm06-run-0001 was resumed after its spurious early stop the runner saw
+# no training process, declared the run finished and started the exit
+# diagnostic on a card that was busy training.
+while pgrep -f "scripts/train_ldm\.py (run|resume) " >/dev/null 2>&1; do sleep 60; done
 say "ldm06/base has exited"
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 
