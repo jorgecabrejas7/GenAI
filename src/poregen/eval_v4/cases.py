@@ -738,12 +738,14 @@ def sphere_cases(repo=None) -> list[CaseSpec]:
     return out
 
 
-#: Cubic canvas for the multi-chunk set. 384 = 6 tiles a side, so with 2-tile
-#: chunks the canvas is 3 chunks on EVERY axis — the 1024x1024x192 cases only
-#: cross chunk planes in x and y, because 192 is a single chunk in z.
+#: Cubic canvas for the multi-chunk set. 384 = 6 tiles a side, so at the
+#: PRODUCTION chunk size of 3 tiles the canvas is 2 chunks on EVERY axis, with
+#: the planes at 192 — the same chunk size the sampler and the trainer's own
+#: [6,3,3] sample use. The 1024x1024x192 cases cross chunk planes only in x and
+#: y, because 192 is a single chunk deep.
 MULTICHUNK_SHAPE = (384, 384, 384)
 MULTICHUNK_SLAB = (192, 384, 384)
-MULTICHUNK_CHUNK_TILES = (2, 2, 2)
+MULTICHUNK_CHUNK_TILES = (3, 3, 3)
 #: Radius for the multi-chunk sphere: 160 voxels puts the curved surface across
 #: the chunk planes rather than inside one chunk, with a 32-voxel margin.
 MULTICHUNK_SPHERE_RADIUS = 160

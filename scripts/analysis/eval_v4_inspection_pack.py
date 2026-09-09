@@ -47,6 +47,8 @@ SELECTION: tuple[tuple[str, str, str], ...] = (
     ("surface", "rough_192_ddim50_seed101", "a ROUGH surface request"),
     ("geometry", "sphere_192_ddim50_seed101", "a curved specimen it never saw"),
     ("geometry", "sphere_256_ddim50_seed101", "the same sphere at 256 cubed"),
+    ("multichunk", "box384_ddim50_seed101", "384 cubed: chunk planes on ALL axes"),
+    ("multichunk", "sphere384_ddim50_seed101", "a sphere crossing chunk planes"),
 )
 
 #: material / pore / air. Grey, red, blue — the pore class is the one a reader
@@ -54,7 +56,32 @@ SELECTION: tuple[tuple[str, str, str], ...] = (
 LABEL_CMAP = ListedColormap([(0.75, 0.75, 0.75), (0.85, 0.10, 0.10), (0.20, 0.40, 0.85)])
 
 
-def _mid_slices(path: Path, is_label: bool) -> dict[str, np.ndarray] | None:
+def slice_indices(shape, manifest: dict) -> dict[str, tuple[int, bool]]:
+    """Which slice to show per axis, and whether it sits on a chunk plane.
+
+    For a multi-chunk case the interesting plane is where two independent chunk
+    solves meet, not the arbitrary centre of the canvas, so each axis shows the
+    chunk plane nearest the middle when one exists. At 384 with production
+    3-tile chunks the two coincide — the plane IS at 192 — but relying on that
+    coincidence would quietly stop being true the moment a shape or chunk size
+    changed.
+    """
+    ct = manifest.get("chunk_tiles") or []
+    out: dict[str, tuple[int, bool]] = {}
+    for axis, name in enumerate(("z", "y", "x")):
+        n = int(shape[axis])
+        centre = n // 2
+        span = int(ct[axis]) * 64 if axis < len(ct) and ct[axis] else 0
+        planes = list(range(span, n, span)) if span else []
+        if planes:
+            best = min(planes, key=lambda v: abs(v - centre))
+            out[name] = (int(best), True)
+        else:
+            out[name] = (int(centre), False)
+    return out
+
+
+def _mid_slices(path: Path, is_label: bool, idx: dict | None = None) -> dict[str, np.ndarray] | None:
     """The middle z, y and x slice of one TIFF, read without loading the volume."""
     import tifffile                                      # noqa: PLC0415
 
@@ -63,14 +90,18 @@ def _mid_slices(path: Path, is_label: bool) -> dict[str, np.ndarray] | None:
     with tifffile.TiffFile(str(path)) as tf:
         series = tf.series[0]
         d, h, w = series.shape
+        iz, iy, ix = ((idx or {}).get("z", (d // 2, False))[0],
+                      (idx or {}).get("y", (h // 2, False))[0],
+                      (idx or {}).get("x", (w // 2, False))[0])
+        iz, iy, ix = min(iz, d - 1), min(iy, h - 1), min(ix, w - 1)
         # z is one page; y and x need a column through every page, so they are
         # read page by page rather than by materialising the volume.
-        z = series.asarray(key=d // 2)
+        z = series.asarray(key=iz)
         ys, xs = [], []
         for k in range(d):
             page = series.asarray(key=k)
-            ys.append(page[h // 2, :])
-            xs.append(page[:, w // 2])
+            ys.append(page[iy, :])
+            xs.append(page[:, ix])
     return {"z": np.asarray(z), "y": np.asarray(ys), "x": np.asarray(xs)}
 
 
@@ -102,8 +133,10 @@ def render_case(case_dir: Path, assessment: str, case: str, why: str,
         logger.warning("%s: no manifest — not generated", case_dir)
         return None
     manifest = json.loads(mf_path.read_text())
-    grey = _mid_slices(case_dir / "volume.tif", is_label=False)
-    label = _mid_slices(case_dir / "label.tif", is_label=True)
+    shape = manifest.get("volume_shape") or []
+    idx = slice_indices(shape, manifest) if shape else None
+    grey = _mid_slices(case_dir / "volume.tif", is_label=False, idx=idx)
+    label = _mid_slices(case_dir / "label.tif", is_label=True, idx=idx)
     if grey is None or label is None:
         logger.warning("%s: volume.tif or label.tif missing", case_dir)
         return None
@@ -117,10 +150,12 @@ def render_case(case_dir: Path, assessment: str, case: str, why: str,
         # that is the honest shape of the data, not a defect in the figure.
         axes[0, col].imshow(grey[ax_name], cmap="gray", vmin=0, vmax=255,
                             interpolation="nearest", aspect="equal")
-        axes[0, col].set_title(f"grey, mid-{ax_name}")
+        pos, on_plane = (idx or {}).get(ax_name, (None, False))
+        where = f"{ax_name}={pos}" + (" (CHUNK PLANE)" if on_plane else "")
+        axes[0, col].set_title(f"grey, {where}")
         axes[1, col].imshow(label[ax_name], cmap=LABEL_CMAP, vmin=0, vmax=2,
                             interpolation="nearest", aspect="equal")
-        axes[1, col].set_title(f"label, mid-{ax_name}")
+        axes[1, col].set_title(f"label, {where}")
         for r in (0, 1):
             axes[r, col].set_xticks([]); axes[r, col].set_yticks([])
     fig.suptitle(_title(assessment, case, why, manifest), fontsize=11)
@@ -140,6 +175,8 @@ def render_case(case_dir: Path, assessment: str, case: str, why: str,
         "volume_shape": manifest.get("volume_shape"),
         "seed": manifest.get("seed"),
         "requested_global_phi": manifest.get("requested_global_phi"),
+        "slice_indices": {k: {"index": v[0], "on_chunk_plane": v[1]}
+                          for k, v in (idx or {}).items()},
         "mid_z_pore_fraction": float((lab_z == 1).mean()),
         "mid_z_air_fraction": float((lab_z == 2).mean()),
         "tiffs": {"grey": str(case_dir / "volume.tif"),
