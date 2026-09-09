@@ -959,3 +959,91 @@ def surface_agreement(
         out["dark_but_material_excluding_rim"] = dbm["excluding_face_rim"]
         out["dark_threshold"] = int(dark_threshold)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The spherical specimen (exploratory - no gate)
+# ---------------------------------------------------------------------------
+
+#: Shell width for the radial profile, in voxels.
+SPHERE_SHELL_VOX = 2
+
+
+def sphere_agreement(
+    label: np.ndarray,
+    material: np.ndarray,
+    *,
+    radius: float,
+    requested_phi: float | None = None,
+) -> dict:
+    """What the model does with a curved specimen it has never been shown.
+
+    EXPLORATORY. There is no real spherical coupon, so there is no floor and no
+    gate — every number here is descriptive, and a threshold would be invented.
+
+    The radial profile is the point: a model that has learned "specimen" as a
+    slab between two z planes will not carve a sphere, and where it fails will
+    show as air appearing before the requested radius or material persisting
+    past it. A single Dice cannot say which.
+    """
+    pred_air = label == LABEL_AIR
+    pred_specimen = ~pred_air
+    req_air = ~material
+
+    inter = float(np.logical_and(pred_air, req_air).sum())
+    n_pred, n_req = float(pred_air.sum()), float(req_air.sum())
+    out: dict = {
+        "requested_radius_vox": float(radius),
+        "dice_air": (2.0 * inter / (n_pred + n_req)) if (n_pred + n_req) else None,
+        "air_fraction_inside_sphere": (float(pred_air[material].mean())
+                                       if material.any() else None),
+        "air_fraction_outside_sphere": (float(pred_air[req_air].mean())
+                                        if req_air.any() else None),
+        "requested_material_fraction": float(material.mean()),
+        "predicted_specimen_fraction": float(pred_specimen.mean()),
+    }
+
+    # Pore porosity INSIDE the requested sphere, against what was asked.
+    inside = material
+    out["phi_pore_inside_sphere"] = (float((label[inside] == LABEL_PORE).mean())
+                                     if inside.any() else None)
+    out["requested_phi"] = (float(requested_phi) if requested_phi is not None else None)
+    if requested_phi:
+        out["phi_error"] = out["phi_pore_inside_sphere"] - float(requested_phi)
+
+    d, h, w = label.shape
+    zz = (np.arange(d) - (d - 1) / 2.0)[:, None, None]
+    yy = (np.arange(h) - (h - 1) / 2.0)[None, :, None]
+    xx = (np.arange(w) - (w - 1) / 2.0)[None, None, :]
+    r = np.sqrt(zz ** 2 + yy ** 2 + xx ** 2)
+
+    r_max = float(min(d, h, w) / 2.0)
+    edges = np.arange(0.0, r_max + SPHERE_SHELL_VOX, SPHERE_SHELL_VOX)
+    idx = np.digitize(r.ravel(), edges) - 1
+    air_flat = pred_air.ravel()
+    pore_flat = (label == LABEL_PORE).ravel()
+    n_shell = np.bincount(idx[idx >= 0], minlength=len(edges))
+    n_air = np.bincount(idx[idx >= 0], weights=air_flat[idx >= 0], minlength=len(edges))
+    n_pore = np.bincount(idx[idx >= 0], weights=pore_flat[idx >= 0], minlength=len(edges))
+    keep = n_shell > 0
+    out["radial_profile"] = {
+        "shell_vox": SPHERE_SHELL_VOX,
+        "r_centre": ((edges[:-1] + SPHERE_SHELL_VOX / 2.0)[keep[:-1]]).tolist(),
+        "air_fraction": (n_air[:-1][keep[:-1]] / n_shell[:-1][keep[:-1]]).tolist(),
+        "pore_fraction": (n_pore[:-1][keep[:-1]] / n_shell[:-1][keep[:-1]]).tolist(),
+        "n_voxels": n_shell[:-1][keep[:-1]].astype(int).tolist(),
+    }
+
+    # Where the predicted surface actually sits, radially: the radius at which
+    # the shell air fraction first crosses one half.
+    rc = np.asarray(out["radial_profile"]["r_centre"])
+    af = np.asarray(out["radial_profile"]["air_fraction"])
+    cross = np.flatnonzero(af >= 0.5)
+    r50 = float(rc[cross[0]]) if cross.size else None
+    out["radial_surface"] = {
+        "r_at_air_half": r50,
+        "error_vox": (r50 - float(radius)) if r50 is not None else None,
+        "definition": ("radius where the shell air fraction first reaches 0.5; "
+                       "the radial analogue of the flat cases' surface position"),
+    }
+    return out

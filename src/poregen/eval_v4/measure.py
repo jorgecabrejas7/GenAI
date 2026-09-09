@@ -539,15 +539,53 @@ def measure_geometry(root, repo) -> dict:
     cases = load_cases(root, "geometry")
     if not cases:
         raise FileNotFoundError(f"no geometry volumes under {root}")
-    rows = []
+    rows, sphere_rows = [], []
     for case in cases:
+        notes = case.manifest.notes or {}
         material = case.material_voxels()
         row = measure_core(case)
+        row["request"] = notes.get("request", "notch_hole")
+        if row["request"] == "sphere":
+            # Exploratory: descriptive numbers only, kept apart from the gated
+            # notch/hole rows so a reader cannot mistake one for the other.
+            row["sphere"] = M.sphere_agreement(
+                case.label, material,
+                radius=float(notes.get("radius_vox", 80)),
+                requested_phi=case.manifest.requested_global_phi)
+            row["ddim_steps"] = case.manifest.ddim_steps
+            row["scale"] = notes.get("scale")
+            sphere_rows.append(row)
+            continue
         row["geometry"] = M.geometry_agreement(case.label, material, manifest=case.manifest)
         rows.append(row)
+    sphere_block = None
+    if sphere_rows:
+        sphere_block = {
+            "exploratory": True,
+            "no_gate_because": (
+                "there is no real spherical coupon, so there is no floor to read "
+                "these against and any threshold would be invented"
+            ),
+            "cond_dist6_note": (
+                "the six face distances are computed from the sphere's BOUNDING "
+                "BOX, as for every case, so they describe a cube rather than the "
+                "curved surface — part of what this probes"
+            ),
+            "n_cases": len(sphere_rows),
+            "dice_air": _agg(sphere_rows, ("sphere", "dice_air")),
+            "air_fraction_inside_sphere": _agg(sphere_rows, ("sphere", "air_fraction_inside_sphere")),
+            "air_fraction_outside_sphere": _agg(sphere_rows, ("sphere", "air_fraction_outside_sphere")),
+            "phi_pore_inside_sphere": _agg(sphere_rows, ("sphere", "phi_pore_inside_sphere")),
+            "phi_error": _agg(sphere_rows, ("sphere", "phi_error")),
+            "radial_surface_error_vox": _agg(sphere_rows, ("sphere", "radial_surface", "error_vox")),
+            "per_case": sphere_rows,
+        }
+    if not rows:
+        raise FileNotFoundError(f"no gated geometry volumes under {root}")
     return {
         "assessment": "geometry",
         "question": "Does the model carve air where the material map asks for it?",
+        "sphere_exploratory": sphere_block,
         "per_case": rows,
         "summary": {
             "n_seeds": len(rows),

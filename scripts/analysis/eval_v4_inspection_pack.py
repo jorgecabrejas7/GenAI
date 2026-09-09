@@ -41,9 +41,12 @@ SELECTION: tuple[tuple[str, str, str], ...] = (
     ("sampler", "192_ddim200_seed101", "step count: 200"),
     ("sampler", "1024_ddim50_seed101", "full panel width at 50 steps"),
     ("sampler", "1024_ddim200_seed101", "full panel width at 200 steps"),
-    ("surface", "192_ddim50_seed101", "air above and below a requested box"),
+    ("surface", "flat_192_ddim50_seed101", "air above and below a requested box"),
     ("geometry", "notch_hole_seed101", "a notch and a drilled hole"),
     ("porosity_local", "checkerboard_ddim50_seed101", "painted porosity field"),
+    ("surface", "rough_192_ddim50_seed101", "a ROUGH surface request"),
+    ("geometry", "sphere_192_ddim50_seed101", "a curved specimen it never saw"),
+    ("geometry", "sphere_256_ddim50_seed101", "the same sphere at 256 cubed"),
 )
 
 #: material / pore / air. Grey, red, blue — the pore class is the one a reader

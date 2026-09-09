@@ -641,6 +641,103 @@ def _box_material(box) -> Callable[[tuple[int, int, int]], np.ndarray]:
     return build
 
 
+#: Sphere radius in voxels. 80 leaves a 16-voxel margin in a 192-cubed canvas
+#: and 48 in a 256-cubed one, so the curved surface is fully interior in both
+#: and never coincides with the canvas edge.
+SPHERE_RADIUS_VOX = 80
+
+
+def material_sphere(shape, radius: float = SPHERE_RADIUS_VOX) -> np.ndarray:
+    """A centred solid sphere: material inside, air outside.
+
+    Every requested geometry so far has been axis-aligned — boxes, a notch, a
+    cylindrical hole through z — so every requested surface has been flat or
+    normal to an axis. A sphere is the first CURVED request, and after pooling
+    to the 4-voxel cells its rim is fractional everywhere rather than only in
+    the two z bands of the inset box.
+
+    It is deliberately off-manifold: the training coupons are plates, so the
+    model has never seen a specimen shaped like this.
+    """
+    d, h, w = shape
+    zz = (np.arange(d) - (d - 1) / 2.0)[:, None, None]
+    yy = (np.arange(h) - (h - 1) / 2.0)[None, :, None]
+    xx = (np.arange(w) - (w - 1) / 2.0)[None, None, :]
+    if radius >= min(d, h, w) / 2.0:
+        raise ValueError(
+            f"a radius-{radius} sphere does not fit inside {shape} with a margin"
+        )
+    return (zz ** 2 + yy ** 2 + xx ** 2) <= radius ** 2
+
+
+def real_global_phi(repo=None, seed: int = 0) -> float:
+    """A global porosity target drawn from the REAL distribution.
+
+    The T-E marginal is the measured distribution of local porosity in the test
+    material, so a draw from it is a request the model could plausibly be given
+    in use, rather than a round number chosen for the table. Falls back to the
+    default target if the T-E artefact is missing, and the case records which.
+    """
+    try:
+        from poregen.diffusion.porosity_field import (  # noqa: PLC0415
+            DEFAULT_TE_RESULTS, load_sampler)
+        sampler = load_sampler((Path(repo) if repo else repo_root()) / DEFAULT_TE_RESULTS)
+        # bin_centres_global_phi ARE the observed global-porosity bins of the
+        # real material, so drawing one is drawing a request the model could
+        # actually be given, rather than a round number chosen for the table.
+        bins = np.asarray(sampler["bin_centres_global_phi"], dtype=np.float64)
+        bins = bins[(bins > 0.004) & (bins < 0.12)]
+        if bins.size == 0:
+            return float(TARGET_DEFAULT)
+        return float(np.random.default_rng(seed).choice(bins))
+    except Exception:                                   # noqa: BLE001
+        return float(TARGET_DEFAULT)
+
+
+def sphere_cases(repo=None) -> list[CaseSpec]:
+    """A curved, off-manifold specimen. EXPLORATORY — no gate.
+
+    The user asked to see what the model does with a shape it has never been
+    shown. There is no pass/fail here on purpose: there is no real spherical
+    coupon to compare against, so any threshold would be invented.
+
+    One property of the request is worth stating because it is part of what is
+    being probed: ``cond_dist6`` is computed from the specimen BOUNDING BOX, as
+    it is for every case, so the six face distances describe a cube around the
+    sphere and not the curved surface. The model is therefore given geometry
+    information that is correct for a box and misleading for a sphere, and how
+    much that matters is one of the things this shows.
+    """
+    plies, pitch = layup_a(repo)
+    out = []
+    for shape, tag in (((192, 192, 192), "192"), ((256, 256, 256), "256")):
+        for steps, seeds in ((50, SEEDS), (200, SEEDS[:1])):
+            if tag == "256" and steps == 200:
+                continue                    # one 256 case is enough to see scale
+            for seed in seeds:
+                if tag == "256" and seed != SEEDS[0]:
+                    continue
+                target = real_global_phi(repo, seed=seed)
+                out.append(CaseSpec(
+                    name=f"sphere_{tag}_ddim{steps}_seed{seed}",
+                    assessment="geometry",
+                    volume_shape=shape, seed=seed,
+                    layup=plies, ply_thickness_vox=pitch,
+                    target_phi=target, ddim_steps=steps,
+                    material_fn=material_sphere,
+                    field_fn=partial(field_coherent, target=target),
+                    notes={"layup": "A", "scale": tag, "ddim_steps": steps,
+                           "request": "sphere", "radius_vox": SPHERE_RADIUS_VOX,
+                           "exploratory": True,
+                           "global_phi_source": "T-E marginal median (real distribution)",
+                           "cond_dist6_note": (
+                               "computed from the sphere's BOUNDING BOX, as for any "
+                               "case; the six face distances describe a cube, not the "
+                               "curved surface. Part of what this case probes.")},
+                ))
+    return out
+
+
 def geometry_cases(repo=None) -> list[CaseSpec]:
     """7 - a material map the model must carve air into."""
     plies, pitch = layup_a(repo)
@@ -654,10 +751,11 @@ def geometry_cases(repo=None) -> list[CaseSpec]:
             ply_thickness_vox=pitch,
             target_phi=TARGET_DEFAULT,
             material_fn=material_notch_and_hole,
-            notes={"layup": "A", "features": "64-voxel notch + 200-voxel hole"},
+            notes={"layup": "A", "request": "notch_hole",
+                   "features": "64-voxel notch + 200-voxel hole"},
         )
         for seed in SEEDS
-    ]
+    ] + sphere_cases(repo)
 
 
 #: Porosity levels the microstructure statistics are compared at.  Three, not
