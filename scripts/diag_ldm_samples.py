@@ -733,6 +733,25 @@ def main() -> None:
     inset = None
     if step >= INSET_FROM_STEP:
         logger.info("inset-box surface sample (192^3, EMA, DDIM-50)")
+        # RELEASE this script's own model and samplers first. The inset sample
+        # goes through eval_v4's VolumeRunner, which loads its OWN UNet (83M
+        # params) and VAE; holding both stacks at once is what made the 60k run
+        # OOM at the second model load and then wedge at 100% CPU for 46
+        # minutes with a corrupted CUDA context. Nothing after this point needs
+        # them — the alive probe, the kill-switch and every variant are done.
+        try:
+            del samplers
+        except NameError:
+            pass
+        model.to("cpu")
+        del model
+        import gc                                     # noqa: PLC0415
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            free, total = torch.cuda.mem_get_info()
+            logger.info("released the diagnostic's model; CUDA free %.1f of %.1f GiB",
+                        free / 2**30, total / 2**30)
         try:
             inset = inset_surface_sample(run_dir, step, out_dir)
         except Exception as exc:                        # noqa: BLE001
