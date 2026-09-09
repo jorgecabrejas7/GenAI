@@ -975,6 +975,7 @@ def sphere_agreement(
     *,
     radius: float,
     requested_phi: float | None = None,
+    by_octant: bool = False,
 ) -> dict:
     """What the model does with a curved specimen it has never been shown.
 
@@ -1046,4 +1047,73 @@ def sphere_agreement(
         "definition": ("radius where the shell air fraction first reaches 0.5; "
                        "the radial analogue of the flat cases' surface position"),
     }
+
+    if by_octant:
+        # The radial profile in each octant separately. A chunk-boundary
+        # artefact is not radially symmetric — it follows the chunk planes — so
+        # it shows up as octants disagreeing with each other while the pooled
+        # profile looks clean.
+        oct_r50: dict[str, float | None] = {}
+        for oz in (0, 1):
+            for oy in (0, 1):
+                for ox in (0, 1):
+                    sl = (slice(d // 2, None) if oz else slice(0, d // 2),
+                          slice(h // 2, None) if oy else slice(0, h // 2),
+                          slice(w // 2, None) if ox else slice(0, w // 2))
+                    ro = r[sl].ravel()
+                    ao = pred_air[sl].ravel()
+                    io = np.digitize(ro, edges) - 1
+                    ns = np.bincount(io[io >= 0], minlength=len(edges))
+                    na = np.bincount(io[io >= 0], weights=ao[io >= 0], minlength=len(edges))
+                    k = ns[:-1] > 0
+                    afo = na[:-1][k] / ns[:-1][k]
+                    rco = (edges[:-1] + SPHERE_SHELL_VOX / 2.0)[k]
+                    c = np.flatnonzero(afo >= 0.5)
+                    oct_r50[f"z{oz}y{oy}x{ox}"] = float(rco[c[0]]) if c.size else None
+        vals = [v for v in oct_r50.values() if v is not None]
+        out["radial_surface_by_octant"] = {
+            "r_at_air_half": oct_r50,
+            "spread_vox": (float(max(vals) - min(vals)) if len(vals) > 1 else None),
+            "n_octants_without_crossing": int(8 - len(vals)),
+            "why": ("a chunk-boundary artefact follows the chunk planes rather "
+                    "than the radius, so it appears as octant disagreement while "
+                    "the pooled profile still looks clean"),
+        }
     return out
+
+
+def pore_dice_across_planes(label: np.ndarray, period) -> dict:
+    """Pore agreement between the slabs either side of each chunk plane.
+
+    The two slabs are produced by different chunk solves, so a pore structure
+    that stops dead at the plane is an assembly failure rather than texture.
+    Compared as the Dice between the last slice before the plane and the first
+    slice after it, per axis, which is the cheapest statement of "does the
+    structure continue".
+    """
+    per = period if isinstance(period, (tuple, list)) else (period,) * 3
+    pore = label == LABEL_PORE
+    vals: list[float] = []
+    detail: dict[str, list[float]] = {}
+    for axis, p_ in enumerate(per):
+        if not p_:
+            continue
+        axis_vals = []
+        for idx in range(int(p_), label.shape[axis], int(p_)):
+            a = np.take(pore, idx - 1, axis=axis)
+            b = np.take(pore, idx, axis=axis)
+            n = float(a.sum() + b.sum())
+            if n == 0:
+                continue
+            axis_vals.append(2.0 * float((a & b).sum()) / n)
+        if axis_vals:
+            detail[f"axis{axis}"] = axis_vals
+            vals.extend(axis_vals)
+    return {
+        "mean": float(np.mean(vals)) if vals else None,
+        "min": float(np.min(vals)) if vals else None,
+        "n_planes": len(vals),
+        "per_axis": detail,
+        "definition": ("Dice between the slices either side of each chunk plane; "
+                       "low means pore structure stops at the plane"),
+    }

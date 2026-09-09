@@ -744,6 +744,97 @@ def measure_surface(root, repo) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 10 - assembly when the volume spans chunks on every axis
+# ---------------------------------------------------------------------------
+
+def measure_multichunk(root, repo) -> dict:
+    """Does the answer hold where three chunk planes cross?
+
+    measure_core already separates the two seam families — window planes at
+    period 64 and chunk planes at the case's own chunk period, both judged
+    against the same interior baseline — so they are reported side by side
+    here rather than recomputed.
+
+    The chunk period is DERIVED from each case's chunk_tiles, not assumed. With
+    the 2-tile chunks these cases use it is 128 voxels, so the planes fall at
+    128 and 256 in a 384 canvas; a 3-tile chunk would put a single plane at 192.
+    Hard-coding either would silently measure the wrong planes if the chunking
+    ever changed.
+    """
+    cases = load_cases(root, "multichunk")
+    if not cases:
+        raise FileNotFoundError(f"no multichunk volumes under {root}")
+    rows = []
+    for case in cases:
+        notes = case.manifest.notes or {}
+        material = case.material_voxels()
+        row = measure_core(case)
+        row["request"] = notes.get("request")
+        row["ddim_steps"] = case.manifest.ddim_steps
+        row["scale"] = notes.get("scale")
+        row["chunk_tiles"] = list(case.manifest.chunk_tiles or ())
+        # Pore agreement ACROSS each chunk plane: the slabs either side are
+        # produced by different chunk solves, so a mismatch here is assembly,
+        # not texture.
+        row["pore_dice_across_chunk_planes"] = M.pore_dice_across_planes(
+            case.label, M.chunk_period(case.manifest))
+        if row["request"] == "sphere":
+            row["sphere"] = M.sphere_agreement(
+                case.label, material,
+                radius=float(notes.get("radius_vox", 160)),
+                requested_phi=case.manifest.requested_global_phi,
+                by_octant=True)
+        if row["request"] == "rough":
+            lo = M.height_map(material, face="lower")
+            hi = M.height_map(material, face="upper")
+            row["surface"] = M.surface_agreement(
+                case.label, material, z_lo=lo, z_hi=hi, xct=case.xct)
+        rows.append(row)
+
+    def by_request(kind):
+        sel = [r for r in rows if r["request"] == kind]
+        if not sel:
+            return None
+        out = {
+            "n_cases": len(sel),
+            "window_plane_seam_xct": _agg(sel, ("seams", "seam_xct_ratio")),
+            "chunk_plane_seam_xct": _agg(sel, ("seams", "seam_chunk_xct_ratio")),
+            "window_plane_seam_pore": _agg(sel, ("seams", "seam_pore_ratio")),
+            "chunk_plane_seam_pore": _agg(sel, ("seams", "seam_chunk_pore_ratio")),
+            "pore_dice_across_chunk_planes": _agg(sel, ("pore_dice_across_chunk_planes", "mean")),
+            **_failure_rate(sel),
+        }
+        if kind == "sphere":
+            out["radial_surface_error_vox"] = _agg(sel, ("sphere", "radial_surface", "error_vox"))
+            out["octant_spread_vox"] = _agg(sel, ("sphere", "radial_surface_by_octant", "spread_vox"))
+        if kind == "rough":
+            for face in ("lower", "upper"):
+                out[f"{face}_roughness_ratio_to_requested"] = _agg(
+                    sel, ("surface", face, "roughness_ratio_to_requested"))
+        return out
+
+    return {
+        "assessment": "multichunk",
+        "question": ("Does the assembly hold where the volume spans chunks on "
+                     "ALL THREE axes, not only in x and y?"),
+        "not_physics": (
+            "No specimen in the dataset is thicker than about 330 voxels, so a "
+            "384-voxel-deep volume asks for material that does not exist. These "
+            "cases test ASSEMBLY across chunk planes in z; nothing here is "
+            "evidence about thick-specimen microstructure."
+        ),
+        "chunk_plane_note": (
+            "The chunk period is derived per case from chunk_tiles. With the "
+            "2-tile chunks used here it is 128 voxels, so the planes fall at 128 "
+            "and 256 in a 384 canvas — not at 192, which would be the 3-tile "
+            "chunk the production sampler defaults to."
+        ),
+        "per_case": rows,
+        "summary": {k: by_request(k) for k in ("box", "sphere", "rough")},
+    }
+
+
+# ---------------------------------------------------------------------------
 # 8 - microstructure statistics
 # ---------------------------------------------------------------------------
 
@@ -898,6 +989,7 @@ MEASURERS = {
     "assembly": measure_assembly,
     "geometry": measure_geometry,
     "surface": measure_surface,
+    "multichunk": measure_multichunk,
     "microstructure": measure_microstructure,
 }
 

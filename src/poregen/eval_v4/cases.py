@@ -738,6 +738,67 @@ def sphere_cases(repo=None) -> list[CaseSpec]:
     return out
 
 
+#: Cubic canvas for the multi-chunk set. 384 = 6 tiles a side, so with 2-tile
+#: chunks the canvas is 3 chunks on EVERY axis — the 1024x1024x192 cases only
+#: cross chunk planes in x and y, because 192 is a single chunk in z.
+MULTICHUNK_SHAPE = (384, 384, 384)
+MULTICHUNK_SLAB = (192, 384, 384)
+MULTICHUNK_CHUNK_TILES = (2, 2, 2)
+#: Radius for the multi-chunk sphere: 160 voxels puts the curved surface across
+#: the chunk planes rather than inside one chunk, with a 32-voxel margin.
+MULTICHUNK_SPHERE_RADIUS = 160
+
+
+def multichunk_cases(repo=None) -> list[CaseSpec]:
+    """10 - assembly when the volume does not fit in one chunk, on ALL axes.
+
+    Every existing large case is 1024x1024x192, which is a single chunk deep:
+    the z axis never crosses a chunk plane. These do, on all three.
+
+    A NOTE ON PHYSICS, not assembly. No specimen in the dataset is thicker than
+    about 330 voxels, so a 384-voxel-deep volume is asking for material that
+    does not exist. That is deliberate and it bounds what these cases can show:
+    they test whether the ASSEMBLY holds across chunk planes in z, not whether
+    the result is a physically plausible laminate. Nothing here should be read
+    as evidence about thick-specimen microstructure.
+    """
+    plies, pitch = layup_a(repo)
+    common = dict(assessment="multichunk", layup=plies, ply_thickness_vox=pitch,
+                  chunk_tiles=MULTICHUNK_CHUNK_TILES)
+    out = []
+    for steps, seeds in ((50, SEEDS[:2]), (200, SEEDS[:1])):
+        for seed in seeds:
+            out.append(CaseSpec(
+                name=f"box384_ddim{steps}_seed{seed}",
+                volume_shape=MULTICHUNK_SHAPE, seed=seed,
+                target_phi=TARGET_DEFAULT, ddim_steps=steps,
+                field_fn=field_coherent,
+                notes={"layup": "A", "request": "box", "scale": "384",
+                       "ddim_steps": steps}, **common))
+    out.append(CaseSpec(
+        name="sphere384_ddim50_seed101",
+        volume_shape=MULTICHUNK_SHAPE, seed=SEEDS[0],
+        target_phi=TARGET_DEFAULT, ddim_steps=50,
+        field_fn=field_coherent,
+        material_fn=partial(material_sphere, radius=MULTICHUNK_SPHERE_RADIUS),
+        notes={"layup": "A", "request": "sphere", "scale": "384", "ddim_steps": 50,
+               "radius_vox": MULTICHUNK_SPHERE_RADIUS, "exploratory": True,
+               "cond_dist6_note": "bounding box, not the curved surface"}, **common))
+    tgt = real_surface_target(repo)
+    out.append(CaseSpec(
+        name="rough384_ddim50_seed101",
+        volume_shape=MULTICHUNK_SLAB, seed=SEEDS[0],
+        target_phi=TARGET_DEFAULT, ddim_steps=50,
+        field_fn=field_coherent,
+        material_fn=partial(material_rough_z, seed=SEEDS[0],
+                            sa=tgt["sa_vox"], corr_len=tgt["correlation_length_vox"]),
+        notes={"layup": "A", "request": "rough", "scale": "384x384x192",
+               "ddim_steps": 50, "requested_sa_vox": tgt["sa_vox"],
+               "requested_correlation_length_vox": tgt["correlation_length_vox"],
+               "roughness_source": tgt["source"]}, **common))
+    return out
+
+
 def geometry_cases(repo=None) -> list[CaseSpec]:
     """7 - a material map the model must carve air into."""
     plies, pitch = layup_a(repo)
@@ -806,6 +867,7 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "assembly": assembly_cases,
     "geometry": geometry_cases,
     "surface": surface_cases,
+    "multichunk": multichunk_cases,
     "microstructure": microstructure_cases,
 }
 
