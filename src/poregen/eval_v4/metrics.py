@@ -795,7 +795,7 @@ SURFACE_OUTLIER_VOX = 4
 SURFACE_RIM_VOX = 2
 
 
-def _surface_outliers(h: np.ndarray, requested: int, label: np.ndarray,
+def _surface_outliers(h: np.ndarray, requested, label: np.ndarray,
                       face: str) -> dict:
     """Where the interface is badly displaced, and whether a pore explains it.
 
@@ -810,7 +810,7 @@ def _surface_outliers(h: np.ndarray, requested: int, label: np.ndarray,
     """
     from scipy import ndimage                          # noqa: PLC0415
 
-    err = h - float(requested)
+    err = h - np.asarray(requested, dtype=np.float64)
     bad = np.isfinite(h) & (np.abs(err) > SURFACE_OUTLIER_VOX)
     n_cols = int(np.isfinite(h).sum())
     out: dict = {
@@ -865,9 +865,13 @@ def _dark_but_material(xct: np.ndarray, material: np.ndarray,
 
     core = inside.copy()
     d = core.shape[0]
-    for z0, z1 in ((max(0, z_lo - SURFACE_RIM_VOX), min(d, z_lo + SURFACE_RIM_VOX)),
-                   (max(0, z_hi - SURFACE_RIM_VOX), min(d, z_hi + SURFACE_RIM_VOX))):
-        core[z0:z1] = False
+    zz = np.arange(d)[:, None, None]
+    for req in (z_lo, z_hi):
+        r = np.asarray(req, dtype=np.float64)
+        # A rough request has a per-column face, so the rim follows the surface
+        # rather than sitting at a fixed z.
+        rf = r[None, :, :] if r.ndim == 2 else float(r)
+        core &= ~(np.abs(zz - rf) < SURFACE_RIM_VOX)
     excl = (float((xct[core] < threshold).mean()) if core.any() else None)
     return {
         "all_material": full,
@@ -904,8 +908,9 @@ def surface_agreement(
     req_air = ~material
 
     out: dict = {
-        "requested_z_lo": int(z_lo),
-        "requested_z_hi": int(z_hi),
+        "requested_z_lo": (float(np.mean(z_lo)) if np.ndim(z_lo) else int(z_lo)),
+        "requested_z_hi": (float(np.mean(z_hi)) if np.ndim(z_hi) else int(z_hi)),
+        "request_is_field": bool(np.ndim(z_lo) or np.ndim(z_hi)),
         "air_fraction_outside_box": (float(pred_air[req_air].mean())
                                      if req_air.any() else None),
         "air_fraction_inside_box": (float(pred_air[material].mean())
@@ -915,10 +920,23 @@ def surface_agreement(
     for face, requested in (("lower", z_lo), ("upper", z_hi)):
         h = height_map(pred_specimen, face=face)
         rough = surface_roughness(h)
-        finite = h[np.isfinite(h)]
-        err = finite - float(requested)
+        req = np.asarray(requested, dtype=np.float64)
+        req_field = req if req.ndim == 2 else np.full(h.shape, float(req))
+        ok = np.isfinite(h)
+        finite = h[ok]
+        # Error against the REQUESTED FIELD, per column. Against a plane, a
+        # correctly-followed rough request would read as position error equal to
+        # the requested roughness — the model would be marked wrong for obeying.
+        err = finite - req_field[ok]
+        req_rough = surface_roughness(np.where(ok, req_field, np.nan))
         out[face] = {
-            "requested_z": int(requested),
+            "requested_z": (float(req) if req.ndim == 0 else None),
+            "requested_is_field": bool(req.ndim == 2),
+            "requested_roughness_sa": req_rough["sa"],
+            "requested_roughness_sq": req_rough["sq"],
+            "roughness_ratio_to_requested": (
+                (rough["sa"] / req_rough["sa"])
+                if rough["sa"] is not None and req_rough["sa"] else None),
             "position_mean": (float(finite.mean()) if finite.size else None),
             "position_sd": (float(finite.std()) if finite.size else None),
             "error_mean": (float(err.mean()) if err.size else None),
@@ -926,7 +944,7 @@ def surface_agreement(
             "error_max_abs": (float(np.abs(err).max()) if err.size else None),
             "columns_without_material": int(np.isnan(h).sum()),
             **{f"roughness_{k}": v for k, v in rough.items()},
-            "outliers": _surface_outliers(h, requested, label, face),
+            "outliers": _surface_outliers(h, req_field, label, face),
         }
 
     if xct is not None:

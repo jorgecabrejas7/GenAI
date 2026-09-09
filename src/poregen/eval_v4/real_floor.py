@@ -190,6 +190,62 @@ def _height_maps_from_mask(zarr_mask, z_chunk: int = 32):
     return first, last, d
 
 
+def _detrend_plane(h: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Height with a least-squares plane removed, NaN outside *valid*.
+
+    A real coupon is tilted and warped in the scanner frame, and that long-range
+    shape is not roughness: measured about the mean plane, Sa on two crops of
+    the same volume came out 0.479 and 3.295 voxels, which is the tilt talking,
+    not the surface. Removing a plane leaves the short-range texture the
+    generated surface is actually being compared against.
+    """
+    ys, xs = np.nonzero(valid)
+    if ys.size < 16:
+        return np.full(h.shape, np.nan)
+    z = h[ys, xs].astype(np.float64)
+    A = np.column_stack([ys.astype(np.float64), xs.astype(np.float64), np.ones(ys.size)])
+    coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+    out = np.full(h.shape, np.nan)
+    out[ys, xs] = z - A @ coef
+    return out
+
+
+def _correlation_length(h: np.ndarray, valid: np.ndarray, max_lag: int = 64) -> dict:
+    """Lateral correlation length of a height map, in voxels, per axis.
+
+    The lag at which the normalised autocovariance first falls below 1/e. A
+    surface is not described by its amplitude alone: Sa says how far the height
+    wanders, the correlation length says over what distance, and a random field
+    built with the right Sa and the wrong correlation length looks nothing like
+    the real thing.
+
+    Computed on the mean-removed height over valid columns only, one axis at a
+    time, so a coupon whose valid region is not rectangular still contributes.
+    """
+    out: dict = {}
+    hh = np.where(valid, h.astype(np.float64), np.nan)
+    hh = hh - np.nanmean(hh)
+    for axis, name in ((1, "x"), (0, "y")):
+        var = np.nanmean(hh ** 2)
+        if not np.isfinite(var) or var <= 0:
+            out[name] = None
+            continue
+        lag_at = None
+        for lag in range(1, max_lag + 1):
+            a_ = np.take(hh, np.arange(0, hh.shape[axis] - lag), axis=axis)
+            b_ = np.take(hh, np.arange(lag, hh.shape[axis]), axis=axis)
+            cov = np.nanmean(a_ * b_)
+            if not np.isfinite(cov):
+                break
+            if cov / var < np.exp(-1.0):
+                lag_at = lag
+                break
+        out[name] = int(lag_at) if lag_at is not None else None
+    vals = [v for v in out.values() if v is not None]
+    out["mean"] = float(np.mean(vals)) if vals else None
+    return out
+
+
 def surface_floor_stats(zarr_mask, zarr_xct=None, z_chunk: int = 32,
                         dark_threshold: int = 182) -> dict | None:
     """Sa and Sq of a real coupon's lower and upper faces, in voxels.
@@ -214,6 +270,16 @@ def surface_floor_stats(zarr_mask, zarr_xct=None, z_chunk: int = 32,
             "sa": float(np.abs(dev).mean()),
             "sq": float(np.sqrt((dev ** 2).mean())),
             "mean_z": float(v.mean()),
+        }
+        # Roughness about a FITTED PLANE, which is the quantity a synthetic
+        # rough request has to match. See _detrend_plane.
+        det = _detrend_plane(arr, interior)
+        dv = det[np.isfinite(det)]
+        out[face]["detrended"] = {
+            "sa": float(np.abs(dv).mean()) if dv.size else None,
+            "sq": float(np.sqrt((dv ** 2).mean())) if dv.size else None,
+            "correlation_length_vox": _correlation_length(
+                np.nan_to_num(det), np.isfinite(det)),
         }
 
     # Dark-but-material on REAL material, the floor for the generated number:
@@ -274,6 +340,16 @@ def build_surface_floor(root, g, vol_ids, *, commit: str) -> dict:
         "sa_sd": float(np.std(sa)) if sa else None,
         "sq_mean": float(np.mean(sq)) if sq else None,
         "sq_sd": float(np.std(sq)) if sq else None,
+        "detrended_sa_mean": (
+            float(np.mean([st[f]["detrended"]["sa"] for st in per_volume.values()
+                           for f in ("lower", "upper")
+                           if (st[f].get("detrended") or {}).get("sa") is not None]))
+            if per_volume else None),
+        "correlation_length_vox_mean": (
+            float(np.mean([st[f]["correlation_length_vox"]["mean"]
+                           for st in per_volume.values() for f in ("lower", "upper")
+                           if st[f].get("correlation_length_vox", {}).get("mean") is not None]))
+            if per_volume else None),
         "dark_but_material_all_material": (
             float(np.mean([x["all_material"] for x in dk if x["all_material"] is not None]))
             if dk else None),

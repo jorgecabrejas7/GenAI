@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from functools import partial
+
 import numpy as np
 
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, TILE, repo_root
@@ -211,37 +213,153 @@ def material_inset_z(shape: tuple[int, int, int]) -> np.ndarray:
     return m
 
 
+#: Fallback roughness for the rough surface request, in voxels, used only when
+#: the real floor has not been measured yet. The floor is region-dependent —
+#: detrended Sa over crops of one test volume ranged 0.17 to 2.23 voxels and the
+#: lateral correlation length 2 to 58 — so these are the middle of the observed
+#: range, not a precise claim, and every case records which source it used.
+ROUGH_SA_FALLBACK_VOX = 1.5
+ROUGH_CORR_LEN_FALLBACK_VOX = 12.0
+
+
+def real_surface_target(repo=None) -> dict:
+    """Sa and correlation length for the rough request, from the real floor.
+
+    Read from the floor file when it exists so the request is matched to
+    measured material rather than to a guess; falls back to the constants above
+    otherwise, and says which it used. A rough request built on invented
+    numbers would make the roughness RATIO gates meaningless — they compare the
+    generated surface against this target.
+    """
+    from poregen.eval_v4.io import repo_root            # noqa: PLC0415
+    from poregen.eval_v4.real_floor import SURFACE_FLOOR_FILE  # noqa: PLC0415
+
+    root = Path(repo) if repo else repo_root()
+    for cand in (root / "runs" / "campaigns" / "12-eval-v4" / "real_floor" / SURFACE_FLOOR_FILE,):
+        if not cand.exists():
+            continue
+        try:
+            d = json.loads(cand.read_text())
+        except Exception:                               # noqa: BLE001
+            continue
+        sa, cl = [], []
+        for st in (d.get("per_volume") or {}).values():
+            for f in ("lower", "upper"):
+                det = (st.get(f) or {}).get("detrended") or {}
+                if det.get("sa") is not None:
+                    sa.append(det["sa"])
+                m = (det.get("correlation_length_vox") or {}).get("mean")
+                if m is not None:
+                    cl.append(m)
+        if sa:
+            return {"sa_vox": float(np.median(sa)),
+                    "correlation_length_vox": float(np.median(cl)) if cl
+                    else ROUGH_CORR_LEN_FALLBACK_VOX,
+                    "source": str(cand), "n_faces": len(sa)}
+    return {"sa_vox": ROUGH_SA_FALLBACK_VOX,
+            "correlation_length_vox": ROUGH_CORR_LEN_FALLBACK_VOX,
+            "source": "fallback constants (real floor not measured yet)",
+            "n_faces": 0}
+
+
+def gaussian_height_field(shape2d, sa: float, corr_len: float, seed: int) -> np.ndarray:
+    """A Gaussian random height field with the requested Sa and correlation length.
+
+    White noise smoothed by a Gaussian kernel, then rescaled so the mean
+    absolute deviation is exactly ``sa``. For a Gaussian-smoothed field the
+    autocovariance goes as exp(-r^2 / 4s^2), so the 1/e correlation length is
+    2s and the kernel is ``corr_len / 2``.
+
+    Amplitude and correlation length are both matched because a surface is not
+    described by amplitude alone: the same Sa with the wrong lateral scale is a
+    different surface, and the model would be asked for something real material
+    never looks like.
+    """
+    from scipy import ndimage                           # noqa: PLC0415
+
+    rng = np.random.default_rng(seed)
+    h = rng.standard_normal(shape2d)
+    sigma = max(corr_len / 2.0, 1e-3)
+    h = ndimage.gaussian_filter(h, sigma=sigma, mode="wrap")
+    h -= h.mean()
+    cur = np.abs(h).mean()
+    return h * (sa / cur) if cur > 0 else h
+
+
+def material_rough_z(shape, *, seed: int, sa: float, corr_len: float) -> np.ndarray:
+    """Specimen between two ROUGH faces, so the request has fractional rim cells.
+
+    The flat request asks for a plane exactly on the latent grid: every pooled
+    cell is 0 or 1, and the model can satisfy it with a razor-flat surface. Real
+    training data never looks like that — a rough real surface cuts cells and
+    produces FRACTIONAL boundary cells. This builds that request, so the flat
+    result can be read as controllability rather than as realism.
+    """
+    d, h, w = shape
+    lo = gaussian_height_field((h, w), sa, corr_len, seed)
+    hi = gaussian_height_field((h, w), sa, corr_len, seed + 5000)
+    z_lo = np.clip(SURFACE_Z_LO + lo, 1, d - 2)
+    z_hi = np.clip(SURFACE_Z_HI + hi, 2, d - 1)
+    zz = np.arange(d)[:, None, None]
+    return (zz >= z_lo[None, :, :]) & (zz < z_hi[None, :, :])
+
+
 def surface_cases(repo=None) -> list[CaseSpec]:
     """9 - does the model put air, and the interface, where the map asks?
 
-    Both step counts, because the 40k diagnostic showed the sampler behaves
-    differently at 200 than at 50 (porosity conditioning 5-7x worse, latent
-    std wider on the high-sigma channels). If the surface also depends on step
-    count, the paper needs to say so rather than quote one number.
+    TWO request types, and the pair is the point.
 
-    The 1024-wide cases carry one seed each: they cost ~40x the volume of a
-    192-cubed case, and what the large scale adds is whether the interface stays
-    flat across a full panel width, which one seed answers.
+    ``flat``  the specimen box with planar faces on the latent grid. Every
+              pooled cell is 0 or 1. This measures CONTROLLABILITY: is the
+              interface where it was asked for.
+    ``rough`` faces displaced by a Gaussian height field matched to the real
+              floor's detrended Sa and correlation length, so the pooled map
+              carries FRACTIONAL rim cells. This measures REALISM: can the model
+              produce a surface with the texture real material has.
+
+    The flat case at step 74000 came out Sa 0.03 voxels against a real floor of
+    order 1 voxel, i.e. far flatter than any real surface — while passing every
+    position gate. That is not necessarily a defect: a 0/1 map REQUESTS a plane,
+    and the model obeyed. The rough request is what separates "obeyed an
+    unrealistic request" from "cannot make a rough surface".
     """
     plies, pitch = layup_a(repo)
+    tgt = real_surface_target(repo)
     out = []
     for shape, tag, seeds in ((SHAPE_SMALL, "192", SEEDS),
                               (SHAPE_LARGE, "1024", SEEDS[:1])):
         for steps in (50, 200):
             for seed in seeds:
                 out.append(CaseSpec(
-                    name=f"{tag}_ddim{steps}_seed{seed}",
+                    name=f"flat_{tag}_ddim{steps}_seed{seed}",
                     assessment="surface",
-                    volume_shape=shape,
-                    seed=seed,
-                    layup=plies,
-                    ply_thickness_vox=pitch,
-                    target_phi=TARGET_DEFAULT,
-                    ddim_steps=steps,
+                    volume_shape=shape, seed=seed,
+                    layup=plies, ply_thickness_vox=pitch,
+                    target_phi=TARGET_DEFAULT, ddim_steps=steps,
                     material_fn=material_inset_z,
                     notes={"layup": "A", "scale": tag, "ddim_steps": steps,
-                           "z_lo": SURFACE_Z_LO, "z_hi": SURFACE_Z_HI},
+                           "request": "flat", "z_lo": SURFACE_Z_LO, "z_hi": SURFACE_Z_HI},
                 ))
+    # Rough: 192-cubed x 3 seeds and 1024-wide x 1 seed, DDIM-50 only — the
+    # flat rows already show the step count does not change the surface, and a
+    # 1024-wide case is expensive.
+    for shape, tag, seeds in ((SHAPE_SMALL, "192", SEEDS),
+                              (SHAPE_LARGE, "1024", SEEDS[:1])):
+        for seed in seeds:
+            out.append(CaseSpec(
+                name=f"rough_{tag}_ddim50_seed{seed}",
+                assessment="surface",
+                volume_shape=shape, seed=seed,
+                layup=plies, ply_thickness_vox=pitch,
+                target_phi=TARGET_DEFAULT, ddim_steps=50,
+                material_fn=partial(material_rough_z, seed=seed,
+                                    sa=tgt["sa_vox"], corr_len=tgt["correlation_length_vox"]),
+                notes={"layup": "A", "scale": tag, "ddim_steps": 50,
+                       "request": "rough", "z_lo": SURFACE_Z_LO, "z_hi": SURFACE_Z_HI,
+                       "requested_sa_vox": tgt["sa_vox"],
+                       "requested_correlation_length_vox": tgt["correlation_length_vox"],
+                       "roughness_source": tgt["source"]},
+            ))
     return out
 
 

@@ -586,64 +586,120 @@ def _surface_floor(root) -> dict | None:
         return None
     if d.get("sa_mean") is None:
         return None
-    return {k: d[k] for k in
-            ("n_volumes", "n_faces", "sa_mean", "sa_sd", "sq_mean", "sq_sd")}
+    keys = ("n_volumes", "n_faces", "sa_mean", "sa_sd", "sq_mean", "sq_sd",
+            "detrended_sa_mean", "correlation_length_vox_mean")
+    return {k: d[k] for k in keys if k in d}
 
 
 def measure_surface(root, repo) -> dict:
     cases = load_cases(root, "surface")
     if not cases:
         raise FileNotFoundError(f"no surface volumes under {root}")
+    floor = _surface_floor(root)
+    floor_sa = (floor or {}).get("detrended_sa_mean") or (floor or {}).get("sa_mean")
+
     rows = []
     for case in cases:
         notes = case.manifest.notes or {}
+        material = case.material_voxels()
+        # The requested interface is read back FROM THE REQUEST ITSELF rather
+        # than rebuilt from the generator's parameters: for a rough case the
+        # request is a height field, and re-deriving it would risk measuring
+        # against a field the model was never shown.
+        lo_req = M.height_map(material, face="lower")
+        hi_req = M.height_map(material, face="upper")
         row = measure_core(case)
         row["ddim_steps"] = case.manifest.ddim_steps
         row["scale"] = notes.get("scale")
+        row["request"] = notes.get("request", "flat")
         row["surface"] = M.surface_agreement(
-            case.label, case.material_voxels(),
-            z_lo=int(notes.get("z_lo", 32)), z_hi=int(notes.get("z_hi", 160)),
-            xct=case.xct,
-        )
+            case.label, material, z_lo=lo_req, z_hi=hi_req, xct=case.xct)
+        for face in ("lower", "upper"):
+            gen_sa = row["surface"][face]["roughness_sa"]
+            row["surface"][face]["roughness_ratio_to_real_floor"] = (
+                (gen_sa / floor_sa) if gen_sa is not None and floor_sa else None)
         rows.append(row)
 
-    floor = _surface_floor(root)
-
-    def by_steps(steps):
-        sel = [r for r in rows if r["ddim_steps"] == steps]
+    def block(sel, kind):
         if not sel:
             return None
-        return {
+        out = {
             "n_cases": len(sel),
             "air_fraction_outside_box": _agg(sel, ("surface", "air_fraction_outside_box")),
             "air_fraction_inside_box": _agg(sel, ("surface", "air_fraction_inside_box")),
-            "lower_error_abs_mean": _agg(sel, ("surface", "lower", "error_abs_mean")),
-            "upper_error_abs_mean": _agg(sel, ("surface", "upper", "error_abs_mean")),
-            "lower_roughness_sa": _agg(sel, ("surface", "lower", "roughness_sa")),
-            "upper_roughness_sa": _agg(sel, ("surface", "upper", "roughness_sa")),
-            "lower_roughness_sq": _agg(sel, ("surface", "lower", "roughness_sq")),
-            "upper_roughness_sq": _agg(sel, ("surface", "upper", "roughness_sq")),
             "dark_but_material": _agg(sel, ("surface", "dark_but_material")),
+            "dark_but_material_excluding_rim": _agg(
+                sel, ("surface", "dark_but_material_excluding_rim")),
         }
+        for face in ("lower", "upper"):
+            out[face] = {
+                "error_abs_mean": _agg(sel, ("surface", face, "error_abs_mean")),
+                "roughness_sa": _agg(sel, ("surface", face, "roughness_sa")),
+                "requested_roughness_sa": _agg(sel, ("surface", face, "requested_roughness_sa")),
+                "roughness_ratio_to_requested": _agg(
+                    sel, ("surface", face, "roughness_ratio_to_requested")),
+                "roughness_ratio_to_real_floor": _agg(
+                    sel, ("surface", face, "roughness_ratio_to_real_floor")),
+                "n_outliers": _agg(sel, ("surface", face, "outliers", "n_outliers")),
+                "outlier_fraction": _agg(sel, ("surface", face, "outliers", "fraction")),
+                "outlier_clusters": _agg(sel, ("surface", face, "outliers", "n_clusters")),
+                "outliers_with_pore_fraction": _agg(
+                    sel, ("surface", face, "outliers", "with_pore_at_face_fraction")),
+            }
+        # The gates differ by request type ON PURPOSE. A flat request asks a
+        # controllability question and a rough one asks a realism question, and
+        # scoring both the same way is how a razor-flat surface passed
+        # everything at step 74000.
+        if kind == "flat":
+            errs = [out[f]["error_abs_mean"].get("mean") for f in ("lower", "upper")]
+            out["gate"] = {
+                "kind": "controllability",
+                "position_error_lt_4vox": all(
+                    e is not None and e < 4.0 for e in errs),
+            }
+        else:
+            def within(key):
+                vals = [out[f][key].get("mean") for f in ("lower", "upper")]
+                return all(v is not None and 0.5 <= v <= 2.0 for v in vals)
+            out["gate"] = {
+                "kind": "realism",
+                "sa_ratio_to_requested_in_0.5_2": within("roughness_ratio_to_requested"),
+                "sa_ratio_to_real_floor_in_0.5_2": (
+                    within("roughness_ratio_to_real_floor") if floor_sa else None),
+                "real_floor_available": bool(floor_sa),
+            }
+        return out
 
+    flat_rows = [r for r in rows if r["request"] == "flat"]
+    rough_rows = [r for r in rows if r["request"] == "rough"]
     return {
         "assessment": "surface",
-        "question": ("Does the model render air where the material map asks, and "
-                     "does the interface land where it was requested?"),
+        "question": ("Does the model render air where the material map asks, put "
+                     "the interface where requested, and give it the texture real "
+                     "material has?"),
         "gates": {
-            "air_fraction_outside_box": "> 0.95",
-            "air_fraction_inside_box": "< 0.02",
-            "surface_error_abs_mean": "< 4 voxels",
+            "flat (control)": "position |error| < 4 voxels — controllability",
+            "rough": "Sa ratio to the requested field in [0.5, 2] AND to the real "
+                     "floor in [0.5, 2] — realism",
         },
+        "why_two_requests": (
+            "At step 74000 the flat request produced Sa 0.03 voxels against a "
+            "real floor of order 1 voxel — far flatter than any real surface — "
+            "while passing every position gate. A flat request is a map of 0/1 "
+            "cells, i.e. a plane exactly on the latent grid, so the model may "
+            "simply have obeyed it. The rough request carries fractional rim "
+            "cells like real material, and separates 'obeyed an unrealistic "
+            "request' from 'cannot make a rough surface'."
+        ),
         "real_surface_floor": floor,
         "floor_note": (None if floor else
-                       "no real surface floor on disk — run `eval_v4 real-floor`; "
-                       "a roughness number without it says only that the surface "
-                       "is not perfectly flat, which no real surface is either."),
+                       "no real surface floor on disk — run `eval_v4 real-floor "
+                       "--shapes surface`; without it the realism gate cannot be "
+                       "scored and reports null rather than passing by default."),
         "per_case": rows,
         "summary": {
-            "ddim50": by_steps(50),
-            "ddim200": by_steps(200),
+            "flat": block(flat_rows, "flat"),
+            "rough": block(rough_rows, "rough"),
             **_failure_rate(rows),
         },
     }
