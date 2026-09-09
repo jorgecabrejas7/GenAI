@@ -787,6 +787,98 @@ def surface_roughness(h: np.ndarray) -> dict:
     }
 
 
+#: A column whose interface is further than this from the request is an
+#: outlier, not roughness. Same threshold as the paper's position gate.
+SURFACE_OUTLIER_VOX = 4
+#: Half-width of the partial-volume rim excluded from the second
+#: dark-but-material reading.
+SURFACE_RIM_VOX = 2
+
+
+def _surface_outliers(h: np.ndarray, requested: int, label: np.ndarray,
+                      face: str) -> dict:
+    """Where the interface is badly displaced, and whether a pore explains it.
+
+    A pore breaking the surface is legitimate geometry — the specimen really
+    does end early in that column. A displaced surface with no pore at it is
+    the model putting the interface in the wrong place. The mean position error
+    cannot tell those apart, so they are counted separately.
+
+    Clustering matters for the same reason: scattered single columns read as
+    noise in the label, while a connected patch reads as a region the model got
+    wrong.
+    """
+    from scipy import ndimage                          # noqa: PLC0415
+
+    err = h - float(requested)
+    bad = np.isfinite(h) & (np.abs(err) > SURFACE_OUTLIER_VOX)
+    n_cols = int(np.isfinite(h).sum())
+    out: dict = {
+        "threshold_vox": SURFACE_OUTLIER_VOX,
+        "n_outliers": int(bad.sum()),
+        "fraction": (float(bad.sum()) / n_cols) if n_cols else None,
+    }
+    if not bad.any():
+        out.update({"n_clusters": 0, "largest_cluster": 0,
+                    "with_pore_at_face": 0, "with_pore_at_face_fraction": None})
+        return out
+
+    lab, n = ndimage.label(bad)                        # 4-connectivity in 2-D
+    sizes = ndimage.sum(bad, lab, index=np.arange(1, n + 1))
+    out["n_clusters"] = int(n)
+    out["largest_cluster"] = int(sizes.max())
+    out["cluster_size_median"] = float(np.median(sizes))
+    # Scattered singletons vs a coherent patch, in one number.
+    out["singleton_clusters"] = int((sizes == 1).sum())
+
+    # Does a pore sit at the interface of each outlier column? Checked in a
+    # +/-SURFACE_RIM_VOX window around the PREDICTED interface, because that is
+    # where a surface-breaking pore would be.
+    d = label.shape[0]
+    ys, xs = np.nonzero(bad)
+    with_pore = 0
+    for y, x in zip(ys, xs):
+        z = int(round(float(h[y, x])))
+        lo = max(0, z - SURFACE_RIM_VOX)
+        hi = min(d, z + SURFACE_RIM_VOX + 1)
+        if np.any(label[lo:hi, y, x] == LABEL_PORE):
+            with_pore += 1
+    out["with_pore_at_face"] = int(with_pore)
+    out["with_pore_at_face_fraction"] = float(with_pore) / float(bad.sum())
+    out["face"] = face
+    return out
+
+
+def _dark_but_material(xct: np.ndarray, material: np.ndarray,
+                       pred_specimen: np.ndarray, z_lo: int, z_hi: int,
+                       threshold: int) -> dict:
+    """Dark-but-material over the whole specimen, and away from the faces.
+
+    The two requested faces carry a partial-volume rim: a voxel straddling the
+    real interface is genuinely part air, so it is genuinely dark, and counting
+    it as an unlabelled void inflates the number. The second reading excludes a
+    SURFACE_RIM_VOX band at each face so the rim's contribution is MEASURED
+    rather than assumed away or assumed harmless.
+    """
+    inside = material & pred_specimen
+    full = (float((xct[inside] < threshold).mean()) if inside.any() else None)
+
+    core = inside.copy()
+    d = core.shape[0]
+    for z0, z1 in ((max(0, z_lo - SURFACE_RIM_VOX), min(d, z_lo + SURFACE_RIM_VOX)),
+                   (max(0, z_hi - SURFACE_RIM_VOX), min(d, z_hi + SURFACE_RIM_VOX))):
+        core[z0:z1] = False
+    excl = (float((xct[core] < threshold).mean()) if core.any() else None)
+    return {
+        "all_material": full,
+        "excluding_face_rim": excl,
+        "rim_vox": SURFACE_RIM_VOX,
+        "n_voxels_all": int(inside.sum()),
+        "n_voxels_excluding_rim": int(core.sum()),
+        "threshold": int(threshold),
+    }
+
+
 def surface_agreement(
     label: np.ndarray,
     material: np.ndarray,
@@ -834,14 +926,18 @@ def surface_agreement(
             "error_max_abs": (float(np.abs(err).max()) if err.size else None),
             "columns_without_material": int(np.isnan(h).sum()),
             **{f"roughness_{k}": v for k, v in rough.items()},
+            "outliers": _surface_outliers(h, requested, label, face),
         }
 
     if xct is not None:
         # Dark-but-material: voxels the map says are specimen and the label
         # calls specimen, yet whose grey level is as dark as air. It catches a
         # decoder that renders the void correctly but does not label it.
-        inside = material & pred_specimen
-        out["dark_but_material"] = (float((xct[inside] < dark_threshold).mean())
-                                    if inside.any() else None)
+        # Reported twice — see _dark_but_material for why the rim matters.
+        dbm = _dark_but_material(xct, material, pred_specimen, z_lo, z_hi,
+                                 dark_threshold)
+        out["dark_but_material_detail"] = dbm
+        out["dark_but_material"] = dbm["all_material"]   # unchanged key
+        out["dark_but_material_excluding_rim"] = dbm["excluding_face_rim"]
         out["dark_threshold"] = int(dark_threshold)
     return out

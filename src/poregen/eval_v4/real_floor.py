@@ -159,6 +159,9 @@ def build_floor_volumes(
 # ---------------------------------------------------------------------------
 
 SURFACE_TAG = "surface"
+#: Matches metrics.SURFACE_RIM_VOX so the real and generated numbers exclude
+#: the same width of partial-volume rim and stay comparable.
+SURFACE_RIM_VOX_FLOOR = 2
 #: Written beside the crops. Not a Manifest-carrying case: a roughness floor is
 #: a statistic over a whole real volume, not a cut volume, and inventing a
 #: manifest for it would claim a provenance the number does not have.
@@ -187,7 +190,8 @@ def _height_maps_from_mask(zarr_mask, z_chunk: int = 32):
     return first, last, d
 
 
-def surface_floor_stats(zarr_mask, z_chunk: int = 32) -> dict | None:
+def surface_floor_stats(zarr_mask, zarr_xct=None, z_chunk: int = 32,
+                        dark_threshold: int = 182) -> dict | None:
     """Sa and Sq of a real coupon's lower and upper faces, in voxels.
 
     Columns are excluded when they carry no material (the drilled holes and
@@ -211,6 +215,36 @@ def surface_floor_stats(zarr_mask, z_chunk: int = 32) -> dict | None:
             "sq": float(np.sqrt((dev ** 2).mean())),
             "mean_z": float(v.mean()),
         }
+
+    # Dark-but-material on REAL material, the floor for the generated number:
+    # over all material, and again excluding a rim at each surface. The rim is
+    # per-column here — a real coupon's faces are not flat planes, so a fixed z
+    # band would exclude the wrong voxels.
+    if zarr_xct is not None:
+        n_dark = n_all = n_dark_core = n_core = 0
+        for z0 in range(0, d, z_chunk):
+            z1 = min(d, z0 + z_chunk)
+            mblk = np.asarray(zarr_mask[z0:z1]) > 0
+            if not mblk.any():
+                continue
+            xblk = np.asarray(zarr_xct[z0:z1])
+            zz = np.arange(z0, z1)[:, None, None]
+            keep = mblk & interior[None, :, :]
+            dark = keep & (xblk < dark_threshold)
+            n_all += int(keep.sum()); n_dark += int(dark.sum())
+            rim = ((np.abs(zz - first[None, :, :]) < SURFACE_RIM_VOX_FLOOR)
+                   | (np.abs(zz - last[None, :, :]) < SURFACE_RIM_VOX_FLOOR))
+            core = keep & ~rim
+            n_core += int(core.sum())
+            n_dark_core += int((core & (xblk < dark_threshold)).sum())
+        out["dark_but_material"] = {
+            "all_material": (n_dark / n_all) if n_all else None,
+            "excluding_face_rim": (n_dark_core / n_core) if n_core else None,
+            "rim_vox": SURFACE_RIM_VOX_FLOOR,
+            "n_voxels_all": n_all,
+            "n_voxels_excluding_rim": n_core,
+            "threshold": int(dark_threshold),
+        }
     return out
 
 
@@ -220,13 +254,16 @@ def build_surface_floor(root, g, vol_ids, *, commit: str) -> dict:
     for vid in vol_ids:
         if vid not in g:
             continue
-        st = surface_floor_stats(g[vid]["sample_mask"])
+        st = surface_floor_stats(g[vid]["sample_mask"],
+                                 zarr_xct=g[vid].get("xct"))
         if st is None:
             logger.warning("%s: too few interior columns for a surface floor", vid)
             continue
         per_volume[vid] = st
         logger.info("%s surface: lower Sa %.3f  upper Sa %.3f  (%d columns)",
                     vid, st["lower"]["sa"], st["upper"]["sa"], st["n_columns"])
+    dk = [st["dark_but_material"] for st in per_volume.values()
+          if st.get("dark_but_material")]
     sa = [st[f]["sa"] for st in per_volume.values() for f in ("lower", "upper")]
     sq = [st[f]["sq"] for st in per_volume.values() for f in ("lower", "upper")]
     out = {
@@ -237,6 +274,12 @@ def build_surface_floor(root, g, vol_ids, *, commit: str) -> dict:
         "sa_sd": float(np.std(sa)) if sa else None,
         "sq_mean": float(np.mean(sq)) if sq else None,
         "sq_sd": float(np.std(sq)) if sq else None,
+        "dark_but_material_all_material": (
+            float(np.mean([x["all_material"] for x in dk if x["all_material"] is not None]))
+            if dk else None),
+        "dark_but_material_excluding_face_rim": (
+            float(np.mean([x["excluding_face_rim"] for x in dk
+                           if x["excluding_face_rim"] is not None])) if dk else None),
         "per_volume": per_volume,
         "definition": (
             "Sa and Sq of the lower and upper sample_mask surfaces of each test "
