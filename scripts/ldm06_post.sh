@@ -61,6 +61,27 @@ while pgrep -f "scripts/train_ldm\.py run " >/dev/null 2>&1; do sleep 60; done
 say "ldm06/base has exited"
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 
+# ── 0a. the full diagnostic, once, with the card to itself ────────────────────
+# The every-20k diagnostic was disarmed: on this unified-memory box a CUDA
+# context could not reliably be created while the run held ~44 GB RSS and its
+# dataloader kept the page cache full, so the 60k attempt died at its first
+# CUDA call and each retry cost 10-15 minutes of training throughput. The
+# trend is covered by the trainer's OWN gen-eval every 2k and sample volumes
+# every 10k, which run inside its process and need no second context.
+#
+# So it runs here instead, first, when the memory is free — both references,
+# per-bucket porosity, the boundary material probe and the inset-box surface
+# sample, at the final weights.
+say "DIAG final start (both references, inset box, DDIM-200)"
+python scripts/diag_ldm_samples.py --run-dir "$LDM_RUN" --ddim200 \
+    > "$SCRATCH/ldm06_diag_final.log" 2>&1
+diag_rc=$?
+if [ "$diag_rc" -eq 0 ]; then
+    say "DIAG final done rc=0 -> $LDM_RUN/convergence_check.jsonl — SEND TABLE TO SUPERVISOR"
+else
+    say "DIAG final FAILED rc=$diag_rc — NOTHING MEASURED; see $SCRATCH/ldm06_diag_final.log"
+fi
+
 # ── 0b. refresh the sampled-latent std reference ──────────────────────────────
 # Deferred to here on purpose. The store's channel_stats.sampled_std is
 # PROVISIONAL at 4000 rows, and a 50k random-read pass over latents.bin

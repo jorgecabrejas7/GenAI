@@ -16,6 +16,10 @@ set -uo pipefail
 REPO=/home/jorgecabrejas/Dev/GenAI
 SCRATCH=/tmp/claude-1001/-home-jorgecabrejas-Dev-GenAI/ce0b3db0-2aa0-4a97-9bc4-7bb0db078739/scratchpad
 DIAG_EVERY=${DIAG_EVERY:-20000}
+#: Steps to wait past a target before sampling. DIAG_EVERY is a multiple of the
+#: run's gen_eval_every (2000), so firing on the target guarantees a collision
+#: with the run's full validation and 64-sample generation eval.
+SETTLE_STEPS=${SETTLE_STEPS:-800}
 RUN_DIR="${1:-$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)}"
 LOG="$REPO/runs/campaigns/09-r08-latent-sweep/ldm06_diag.log"
 
@@ -48,13 +52,44 @@ PY
 next_target=$DIAG_EVERY
 while true; do
     step=$(current_step)
-    if [ "${step:-0}" -ge "$next_target" ]; then
+    # SETTLE_STEPS past the target, not on it. The 60k run died with CUDA OOM
+    # loading its own 83M-parameter UNet, and the cause is arithmetic rather
+    # than luck: gen_eval_every is 2000 and DIAG_EVERY is 20000, so every
+    # single diagnostic fires exactly when the run is doing its heaviest thing
+    # — a full validation plus a 64-sample generation eval. Waiting a few
+    # hundred steps puts the diagnostic in the quiet part of the cycle.
+    if [ "${step:-0}" -ge "$((next_target + SETTLE_STEPS))" ]; then
         tag=$(printf '%dk' $((next_target / 1000)))
-        say "step $step >= $next_target -> diag_ldm_samples ($tag, raw + EMA, DDIM-200)"
-        python scripts/diag_ldm_samples.py --run-dir "$RUN_DIR" --ddim200 \
-            > "$SCRATCH/ldm06_diag_${tag}.log" 2>&1
-        say "diag $tag done rc=$? -> $RUN_DIR/convergence_check.jsonl"
-        say "REPORT $tag ready — send to supervisor"
+        rc=1
+        for attempt in $(seq 1 30); do
+            # Cheap probe first. On this unified-memory box a CUDA context
+            # cannot always be created while the training run holds ~44 GB RSS
+            # and the page cache holds most of the rest — the 60k diagnostic
+            # died at its FIRST cuda call, before loading anything. The probe
+            # costs a second; discovering it by loading a checkpoint costs
+            # minutes and produces a traceback that looks like a code fault.
+            if ! python -c "import torch,sys; torch.cuda.mem_get_info(); sys.exit(0)" >/dev/null 2>&1; then
+                say "diag $tag attempt $attempt: no CUDA context (memory pressure), waiting"
+                sleep 120
+                continue
+            fi
+            say "step $step >= $next_target+$SETTLE_STEPS -> diag_ldm_samples ($tag, raw + EMA, DDIM-200, attempt $attempt)"
+            python scripts/diag_ldm_samples.py --run-dir "$RUN_DIR" --ddim200 \
+                > "$SCRATCH/ldm06_diag_${tag}.log" 2>&1
+            rc=$?
+            [ "$rc" -eq 0 ] && break
+            say "FAIL diag $tag attempt $attempt rc=$rc — see $SCRATCH/ldm06_diag_${tag}.log"
+            sleep 300
+        done
+        if [ "$rc" -eq 0 ]; then
+            say "diag $tag done rc=0 -> $RUN_DIR/convergence_check.jsonl"
+            say "REPORT $tag ready — send to supervisor"
+        else
+            # NOT "ready". A failed diagnostic that announces itself as ready is
+            # worse than one that is simply missing: it says a gate was read
+            # when nothing was measured.
+            say "FAILED diag $tag after 30 attempts rc=$rc — NOTHING MEASURED, REPORT THE FAILURE"
+        fi
         next_target=$((next_target + DIAG_EVERY))
     fi
     # Training exited and we are past the last target: nothing more will come.
