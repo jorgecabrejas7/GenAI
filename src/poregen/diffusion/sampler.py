@@ -1271,7 +1271,12 @@ class VolumeGenerator:
         if return_class_probs:
             extra = extra + (probs.astype(np.float32),)
         if return_latents:
-            extra = extra + (np.asarray(z_clean, dtype=np.float32),)
+            # .detach().cpu() first. z_clean is a CUDA tensor and np.asarray on
+            # one raises TypeError — which is exactly what broke all nine
+            # eval-v4 generate stages the first time --save-latents ran.
+            z_np = z_clean.detach().cpu().numpy() if torch.is_tensor(z_clean) \
+                else np.asarray(z_clean)
+            extra = extra + (z_np.astype(np.float32),)
         return (xct_u8, label, stats) + extra
 
     @staticmethod
