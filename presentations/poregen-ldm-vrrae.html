@@ -1,0 +1,2293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Latent Diffusion for CFRP Porosity</title>
+
+<!-- ===========================================================
+     FONTS — three-face system.
+     Newsreader (serif, 400) = every display and headline.
+     Hanken Grotesk (sans)   = body, labels, micro text.
+     DM Mono                 = all chrome: page numbers, tags, ticks.
+     =========================================================== -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,400&family=Hanken+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap">
+
+<style>
+/* ===========================================================
+   THEME TOKENS
+   Strictly two colours: warm cream paper + electric cobalt ink.
+   Every "extra" tone is cobalt at a different opacity, and every
+   category in a diagram is separated by opacity or by a hatch
+   pattern — never by a second hue.
+   Change --ink and --paper to restyle the whole deck.
+   =========================================================== */
+:root{
+  --paper:#F0EBDE;
+  --paper-2:#E6E0CE;
+  --ink:#1F2BE0;
+  --ink-soft:#5560E5;
+  --ink-85:rgba(31,43,224,.85);
+  --ink-70:rgba(31,43,224,.70);
+  --ink-55:rgba(31,43,224,.55);
+  --ink-faint:rgba(31,43,224,.18);
+  --grid:rgba(31,43,224,.10);
+
+  --font-display:'Newsreader',Georgia,serif;
+  --font-body:'Hanken Grotesk',sans-serif;
+  --font-mono:'DM Mono',ui-monospace,monospace;
+
+  /* Type scale, authored at the 1920x1080 stage size. The source
+     system's clamp() values are viewport-fluid; translated here into
+     fixed stage coordinates and lifted to projector-readable sizes. */
+  --t-hero:146px;
+  --t-chapter:104px;
+  --t-headline:60px;
+  --t-row:30px;
+  --t-name:25px;
+  --t-lede:27px;
+  --t-body:21px;
+  --t-body-sm:19px;
+  --t-micro:16px;
+  --t-micro-sm:14px;
+  --t-mono:17px;
+  --t-mono-chrome:15px;
+
+  /* Spacing */
+  --edge:80px;
+  --pad-top:122px;
+  --pad-bottom:128px;
+  --gap-lg:48px;
+  --gap-md:30px;
+  --gap-sm:20px;
+
+  --stage-bg:#d9d3c2;
+  --slide-bg:#F0EBDE;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+
+/* ===========================================================
+   FIXED 16:9 STAGE — MANDATORY BASE STYLES (viewport-base.css)
+   Slides are authored at 1920x1080 and the whole stage is scaled.
+   =========================================================== */
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--stage-bg,#000)}
+.deck-viewport{position:fixed;inset:0;overflow:hidden;background:var(--stage-bg,#000)}
+.deck-stage{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;transform-origin:0 0;background:var(--slide-bg,#fff)}
+.slide{position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden;display:block;visibility:hidden;opacity:0;pointer-events:none;background:var(--slide-bg,#fff)}
+.slide.active,.slide.visible{visibility:visible;opacity:1;pointer-events:auto;z-index:1}
+img,video,canvas,svg{max-width:100%;max-height:100%}
+.deck-controls{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:1000}
+@media print{
+  html,body{width:1920px;height:auto;overflow:visible;background:#fff}
+  .deck-viewport{position:static;overflow:visible;background:#fff}
+  .deck-stage{position:static;width:auto;height:auto;transform:none!important;background:none}
+  .slide{position:relative;display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;width:1920px;height:1080px;break-after:page;page-break-after:always}
+  .slide:last-child{break-after:auto;page-break-after:auto}
+  .deck-controls{display:none!important}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.2s!important}
+}
+
+/* ===========================================================
+   PERMANENT GRAPH-PAPER GRID
+   Not decoration — it is the canvas tone. Never disabled.
+   =========================================================== */
+.deck-stage::before{
+  content:"";position:absolute;inset:0;z-index:0;pointer-events:none;
+  background-image:
+    linear-gradient(to right,var(--grid) 1px,transparent 1px),
+    linear-gradient(to bottom,var(--grid) 1px,transparent 1px);
+  background-size:40px 40px;
+}
+
+/* ===========================================================
+   UNIVERSAL CHROME — two hairlines, page number, nav hint.
+   Every slide inherits these; they are never suppressed.
+   =========================================================== */
+.slide::before,.slide::after{
+  content:"";position:absolute;left:var(--edge);right:var(--edge);
+  height:1.5px;background:var(--ink);z-index:4;
+}
+.slide::before{top:30px}
+.slide::after{bottom:24px}
+
+.pagenum{
+  position:absolute;right:var(--edge);bottom:56px;z-index:5;
+  font-family:var(--font-mono);font-size:var(--t-mono-chrome);
+  letter-spacing:.06em;color:var(--ink);
+}
+.nav-hint{
+  position:absolute;left:var(--edge);bottom:56px;z-index:5;
+  font-family:var(--font-mono);font-size:13px;letter-spacing:.08em;
+  color:var(--ink);opacity:.4;
+}
+
+/* Content rectangle, clear of the chrome */
+.frame{position:absolute;inset:var(--pad-top) var(--edge) var(--pad-bottom);z-index:3;display:flex;flex-direction:column}
+
+/* ===========================================================
+   TYPOGRAPHY ROLES
+   Newsreader is always weight 400 and always cobalt.
+   Hanken labels are always uppercase at 0.18em tracking.
+   =========================================================== */
+h1{font-family:var(--font-display);font-weight:400;font-size:var(--t-hero);line-height:.92;letter-spacing:-.008em;color:var(--ink)}
+h2{font-family:var(--font-display);font-weight:400;font-size:var(--t-headline);line-height:.95;letter-spacing:-.005em;color:var(--ink)}
+h3{font-family:var(--font-display);font-weight:400;font-size:var(--t-row);line-height:1.05;color:var(--ink)}
+h4{font-family:var(--font-display);font-weight:400;font-size:var(--t-name);line-height:1.15;color:var(--ink)}
+.chapter-title{font-family:var(--font-display);font-weight:400;font-size:var(--t-chapter);line-height:1;letter-spacing:-.005em;color:var(--ink)}
+
+.micro{font-family:var(--font-body);font-weight:600;font-size:var(--t-micro);letter-spacing:.18em;text-transform:uppercase;color:var(--ink)}
+.micro-sm{font-family:var(--font-body);font-weight:600;font-size:var(--t-micro-sm);letter-spacing:.18em;text-transform:uppercase;color:var(--ink)}
+.mono{font-family:var(--font-mono);font-size:var(--t-mono);letter-spacing:.04em;color:var(--ink)}
+.mono-sm{font-family:var(--font-mono);font-size:var(--t-mono-chrome);letter-spacing:.06em;color:var(--ink)}
+
+p,li,td,th,.body{font-family:var(--font-body);font-weight:400;font-size:var(--t-body);line-height:1.5;color:var(--ink-85)}
+.lede{font-family:var(--font-body);font-weight:400;font-size:var(--t-lede);line-height:1.5;color:var(--ink-85)}
+.sm{font-size:var(--t-body-sm);line-height:1.45}
+strong,b{font-weight:600;color:var(--ink)}
+em{font-style:italic}
+code,.code{font-family:var(--font-mono);font-size:.94em;letter-spacing:.02em;color:var(--ink)}
+
+/* ===========================================================
+   STRUCTURAL COMPONENTS
+   Flat, zero radius, no shadow. Depth is rules + grid only.
+   =========================================================== */
+.topbar{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--gap-md);
+  border-bottom:1.5px solid var(--ink);padding-bottom:18px;margin-bottom:var(--gap-md)}
+.topbar .labtag{font-family:var(--font-body);font-weight:600;font-size:var(--t-micro);
+  letter-spacing:.18em;text-transform:uppercase;color:var(--ink);white-space:nowrap;padding-bottom:6px}
+.topbar h2{max-width:1250px}
+
+.deck-body{flex:1;min-height:0}
+/* A stacked body fills the frame: the figure holds the top, the supporting
+   blocks sit on the bottom rule instead of leaving a void beneath them. */
+.deck-body.vstack-lg{justify-content:space-between}
+
+/* Hanging dash list — the dash sits in its own column so wrapped lines align */
+.dashlist{list-style:none;display:flex;flex-direction:column;gap:10px}
+.dashlist li{display:grid;grid-template-columns:26px 1fr;align-items:start}
+.dashlist li::before{content:"\2014";color:var(--ink)}
+
+.cols{display:grid;gap:var(--gap-lg)}
+.c-2{grid-template-columns:1fr 1fr}
+.c-3{grid-template-columns:1fr 1fr 1fr}
+.c-4{grid-template-columns:repeat(4,1fr)}
+.c-58{grid-template-columns:5fr 8fr}
+.c-85{grid-template-columns:8fr 5fr}
+.c-73{grid-template-columns:7fr 4fr}
+
+.vstack{display:flex;flex-direction:column;gap:var(--gap-sm)}
+.vstack-lg{display:flex;flex-direction:column;gap:var(--gap-md)}
+
+/* Faint dividers between rows of dense lists */
+.rows{display:flex;flex-direction:column}
+.row{display:grid;grid-template-columns:64px 1fr;gap:24px;align-items:start;
+  padding:14px 0;border-bottom:1px solid var(--ink-faint)}
+.row:first-child{border-top:1px solid var(--ink-faint)}
+.row .n{font-family:var(--font-mono);font-size:var(--t-mono);color:var(--ink);padding-top:6px}
+.row .t{font-family:var(--font-display);font-size:var(--t-row);color:var(--ink);margin-bottom:4px}
+
+/* Key/value ledger */
+.kv{width:100%;border-collapse:collapse}
+.kv th{font-family:var(--font-body);font-weight:600;font-size:var(--t-micro-sm);
+  letter-spacing:.18em;text-transform:uppercase;color:var(--ink);text-align:left;
+  padding:0 16px 10px 0;border-bottom:1.5px solid var(--ink)}
+.kv td{padding:11px 16px 11px 0;border-bottom:1px solid var(--ink-faint);vertical-align:top;
+  font-size:var(--t-body-sm);line-height:1.4}
+.kv td:first-child{font-family:var(--font-mono);font-size:var(--t-mono-chrome);color:var(--ink);white-space:nowrap}
+.kv td.name{font-family:var(--font-display);font-size:var(--t-name);color:var(--ink);white-space:nowrap}
+.kv tr:last-child td{border-bottom:none}
+
+/* A bordered block used for definitions and callouts */
+.block{border:1.5px solid var(--ink);padding:22px 24px}
+.block.soft{border:1px solid var(--ink-faint)}
+.block .micro{margin-bottom:10px;display:block}
+.block h4{margin-bottom:8px}
+
+/* Callout: a rule above a statement, the system's emphasis move */
+.callout{border-top:1.5px solid var(--ink);padding-top:16px}
+.callout .q{font-family:var(--font-display);font-size:32px;line-height:1.18;color:var(--ink)}
+
+/* Figure wrapper: SVG plus a mono caption */
+.fig{display:flex;flex-direction:column;gap:12px;min-height:0}
+.fig svg{width:100%;height:auto;display:block}
+.fig figcaption{font-family:var(--font-mono);font-size:var(--t-mono-chrome);
+  letter-spacing:.05em;color:var(--ink);opacity:.75;line-height:1.4}
+
+/* Numbered steps */
+.steps{display:flex;flex-direction:column;gap:0}
+.step{display:grid;grid-template-columns:52px 1fr;gap:20px;padding:12px 0;
+  border-bottom:1px solid var(--ink-faint);align-items:start}
+.step .s{font-family:var(--font-mono);font-size:var(--t-mono);color:var(--ink)}
+
+/* Inline tag */
+.tag{display:inline-block;border:1px solid var(--ink);padding:3px 10px;
+  font-family:var(--font-mono);font-size:13px;letter-spacing:.06em;color:var(--ink);white-space:nowrap}
+
+/* Pixel-glitch decorative column (declarative slides only) */
+.glitch{position:absolute;z-index:2;pointer-events:none}
+
+/* QR-block patch: 8x8 cobalt mosaic on a paper fill */
+.qr{display:grid;grid-template-columns:repeat(8,10px);grid-auto-rows:10px;gap:1.5px;
+  background:var(--paper);padding:4px;box-shadow:0 0 0 1.5px var(--paper)}
+.qr span{background:var(--grid)}
+.qr span.on{background:var(--ink)}
+
+/* Vertical mono label column */
+.vlabel{position:absolute;right:22px;top:50%;transform:translateY(-50%);
+  writing-mode:vertical-rl;text-orientation:mixed;font-family:var(--font-mono);
+  font-size:13px;letter-spacing:.1em;color:var(--ink);opacity:.55;z-index:2}
+
+/* ===========================================================
+   COVER + CHAPTER LAYOUTS (deliberately sparser)
+   =========================================================== */
+.cover .frame{justify-content:space-between}
+.cover h1{max-width:1340px;font-size:130px}
+.cover .lede{max-width:1000px;margin-top:22px;font-size:25px}
+
+.chapter .frame{justify-content:center}
+.chapter .chapter-title{max-width:1300px}
+
+/* ===========================================================
+   ANIMATION — one orchestrated reveal per slide, staggered.
+   =========================================================== */
+.reveal{opacity:0;transform:translateY(20px);
+  transition:opacity .7s var(--ease),transform .7s var(--ease)}
+.slide.visible .reveal{opacity:1;transform:none}
+.slide.visible .reveal:nth-child(1){transition-delay:.04s}
+.slide.visible .reveal:nth-child(2){transition-delay:.13s}
+.slide.visible .reveal:nth-child(3){transition-delay:.22s}
+.slide.visible .reveal:nth-child(4){transition-delay:.31s}
+.slide.visible .reveal:nth-child(5){transition-delay:.40s}
+.slide.visible .reveal:nth-child(6){transition-delay:.49s}
+
+/* SVG figures fade after the text they belong to */
+.fig svg{opacity:0;transition:opacity .8s var(--ease) .28s}
+.slide.visible .fig svg{opacity:1}
+
+/* ===========================================================
+   EDIT MODE (press E, or hover the top-left corner)
+   =========================================================== */
+.edit-hotzone{position:fixed;top:0;left:0;width:80px;height:80px;z-index:10000;cursor:pointer}
+.edit-toggle{position:fixed;top:16px;left:16px;z-index:10001;opacity:0;pointer-events:none;
+  transition:opacity .3s ease;background:var(--paper);border:1.5px solid var(--ink);
+  color:var(--ink);font-family:var(--font-mono);font-size:13px;letter-spacing:.06em;
+  padding:8px 14px;cursor:pointer}
+.edit-toggle.show,.edit-toggle.active{opacity:1;pointer-events:auto}
+.edit-toggle.active{background:var(--ink);color:var(--paper)}
+[contenteditable="true"]{outline:1px dashed var(--ink-soft);outline-offset:3px}
+</style>
+</head>
+<body>
+
+<!-- ===========================================================
+     SVG PATTERN DEFS — shared by every diagram.
+     Categories are separated by hatch/dot/scanline fills so the
+     deck stays strictly two-colour.
+     =========================================================== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <line x1="0" y1="0" x2="0" y2="8" stroke="#1F2BE0" stroke-width="2.4" opacity=".5"/>
+  </pattern>
+  <pattern id="hatch-fine" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <line x1="0" y1="0" x2="0" y2="6" stroke="#1F2BE0" stroke-width="1.2" opacity=".38"/>
+  </pattern>
+  <pattern id="hatch-back" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+    <line x1="0" y1="0" x2="0" y2="8" stroke="#1F2BE0" stroke-width="2" opacity=".42"/>
+  </pattern>
+  <pattern id="dots" width="7" height="7" patternUnits="userSpaceOnUse">
+    <circle cx="2" cy="2" r="1.5" fill="#1F2BE0" opacity=".45"/>
+  </pattern>
+  <pattern id="scan" width="6" height="6" patternUnits="userSpaceOnUse">
+    <line x1="0" y1="0" x2="6" y2="0" stroke="#1F2BE0" stroke-width="2" opacity=".3"/>
+  </pattern>
+  <pattern id="noise" width="10" height="10" patternUnits="userSpaceOnUse">
+    <circle cx="1.5" cy="2.5" r="1.1" fill="#1F2BE0" opacity=".55"/>
+    <circle cx="6.5" cy="6" r="1.1" fill="#1F2BE0" opacity=".4"/>
+    <circle cx="8.5" cy="1.5" r=".9" fill="#1F2BE0" opacity=".5"/>
+    <circle cx="3.5" cy="8" r=".9" fill="#1F2BE0" opacity=".35"/>
+  </pattern>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F2BE0"/>
+  </marker>
+  <marker id="arrow-sm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#1F2BE0"/>
+  </marker>
+</defs></svg>
+
+<div class="deck-viewport">
+<main class="deck-stage" id="deckStage">
+
+<!-- ============================================================
+     01 — COVER
+     Declarative layout: pixel-glitch column right, QR patch,
+     hero serif display, four-part index along the foot.
+     ============================================================ -->
+<section class="slide cover active visible">
+  <svg class="glitch" style="right:0;top:0" width="470" height="1080" viewBox="0 0 470 1080" aria-hidden="true">
+    <defs>
+      <pattern id="vscan" width="9" height="9" patternUnits="userSpaceOnUse">
+        <line x1="0" y1="0" x2="0" y2="9" stroke="#1F2BE0" stroke-width="2.6" opacity=".55"/>
+      </pattern>
+    </defs>
+    <rect x="230" y="96"  width="240" height="150" fill="url(#vscan)"/>
+    <rect x="150" y="246" width="320" height="120" fill="url(#vscan)"/>
+    <rect x="290" y="366" width="180" height="96"  fill="url(#vscan)"/>
+    <rect x="196" y="462" width="274" height="150" fill="url(#vscan)"/>
+    <rect x="330" y="612" width="140" height="120" fill="url(#vscan)"/>
+    <rect x="256" y="732" width="214" height="96"  fill="url(#vscan)"/>
+  </svg>
+
+  <div class="frame">
+    <div class="reveal" style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div class="mono">PoreGen &nbsp;/&nbsp; Generative microstructure for aerospace CFRP</div>
+      <div class="qr" aria-hidden="true">
+        <span class="on"></span><span></span><span class="on"></span><span class="on"></span><span></span><span class="on"></span><span></span><span class="on"></span>
+        <span></span><span class="on"></span><span class="on"></span><span></span><span class="on"></span><span></span><span class="on"></span><span></span>
+        <span class="on"></span><span class="on"></span><span></span><span class="on"></span><span></span><span class="on"></span><span class="on"></span><span></span>
+        <span></span><span></span><span class="on"></span><span></span><span class="on"></span><span class="on"></span><span></span><span class="on"></span>
+        <span class="on"></span><span></span><span></span><span class="on"></span><span class="on"></span><span></span><span class="on"></span><span></span>
+        <span></span><span class="on"></span><span class="on"></span><span></span><span></span><span class="on"></span><span></span><span class="on"></span>
+        <span class="on"></span><span></span><span class="on"></span><span class="on"></span><span></span><span></span><span class="on"></span><span></span>
+        <span></span><span class="on"></span><span></span><span class="on"></span><span class="on"></span><span class="on"></span><span></span><span class="on"></span>
+      </div>
+    </div>
+
+    <div class="reveal" style="margin-top:auto">
+      <div class="micro" style="margin-bottom:20px">X-ray tomography &middot; 25 micron voxels &middot; carbon-fibre laminates</div>
+      <h1>Porosity,<br>generated at<br>any size</h1>
+      <p class="lede">A three-class VAE compresses a 64&#179; voxel patch into 8&nbsp;&times;&nbsp;16&#179; latent cells.
+      A conditional denoiser learns the prior over those cells. The sampler denoises a whole
+      <em>chunk</em> at once and blends the decode &mdash; so one model writes a 4.8&nbsp;mm block and a
+      25&nbsp;mm laminate.</p>
+    </div>
+
+    <div class="reveal" style="margin-top:auto;display:grid;grid-template-columns:repeat(4,1fr);gap:0;border-top:1.5px solid var(--ink);padding-top:20px">
+      <div style="padding-right:34px"><div class="mono-sm" style="margin-bottom:8px">01</div><h4>The autoencoder</h4><p class="sm">Material, pore and air out of one latent</p></div>
+      <div style="padding-right:34px"><div class="mono-sm" style="margin-bottom:8px">02</div><h4>The diffusion prior</h4><p class="sm">v-prediction, six noised neighbours</p></div>
+      <div style="padding-right:34px"><div class="mono-sm" style="margin-bottom:8px">03</div><h4>Patch &middot; tile &middot; chunk</h4><p class="sm">Three grids, one joint reverse process</p></div>
+      <div style="padding-right:0"><div class="mono-sm" style="margin-bottom:8px">04</div><h4>A VRRAE proposal</h4><p class="sm">Blending where interpolation works</p></div>
+    </div>
+  </div>
+  <div class="nav-hint">&larr; &rarr; to navigate &middot; E to edit</div>
+</section>
+
+<!-- ============================================================
+     02 — INDEX
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>What this covers</h2>
+      <span class="labtag">Contents &mdash; 28 slides</span>
+    </div>
+    <div class="deck-body reveal">
+      <div class="rows">
+        <div class="row"><span class="n">01</span><div><div class="t">The autoencoder</div>
+          <p class="sm">A 64&#179; patch of grey levels plus its pore and air planes, compressed eight times into a spatial latent, decoded back as a grey volume and a three-class label. Slides 5&ndash;7.</p></div></div>
+        <div class="row"><span class="n">02</span><div><div class="t">The diffusion prior</div>
+          <p class="sm">Forward noising on a cosine schedule, DDIM reverse, and why this model regresses <span class="code">v</span> rather than &epsilon;. What the denoiser is told, and how its neighbours are prepared. Slides 8&ndash;12.</p></div></div>
+        <div class="row"><span class="n">03</span><div><div class="t">Patch, tile and chunk &mdash; and the joint sampler</div>
+          <p class="sm">Three grids with three jobs; overlapping windows fused inside the reverse process; where a window&rsquo;s six faces come from; the blended decode. The core of the talk. Slides 13&ndash;18.</p></div></div>
+        <div class="row"><span class="n">04</span><div><div class="t">Requests and arbitrary size</div>
+          <p class="sm">A painted porosity field, a painted specimen envelope, a layup profile &mdash; and what does and does not grow when the volume does. Slides 19&ndash;21.</p></div></div>
+        <div class="row"><span class="n">05</span><div><div class="t">The blending problem, and a VRRAE proposal</div>
+          <p class="sm">Every seam in this system is a weighted average in a latent that was never trained to be averaged. Where a rank-reduced latent would change that, what we already tried, and what we would need to answer together. Slides 22&ndash;28.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     03 — THE MATERIAL AND THE DATA
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>The material, and what a<br>generator has to deliver</h2>
+      <span class="labtag">Problem statement</span>
+    </div>
+    <div class="deck-body reveal cols c-73">
+      <div class="vstack-lg">
+        <div class="cols c-2" style="gap:34px">
+          <div>
+            <div class="micro" style="margin-bottom:12px">The data</div>
+            <p class="sm">Eighty X-ray tomograms of carbon-fibre laminate coupons, three panel families,
+            <strong>25&nbsp;&micro;m</strong> voxels. Each voxel carries one of three labels &mdash;
+            <strong>material</strong>, <strong>pore</strong>, <strong>air outside the specimen</strong>.
+            Splits are by <em>panel</em>, never by coupon: sibling coupons of one panel share microstructure
+            and would leak. Patches touching the drilled registration holes are dropped &mdash; they read as
+            zero porosity while being almost pure air.</p>
+          </div>
+          <div>
+            <div class="micro" style="margin-bottom:12px">The unit</div>
+            <p class="sm">Training sees <strong>64&#179; voxel patches</strong> &mdash; a 1.6&nbsp;mm cube.
+            A ply is about 19.6 voxels thick, so one patch spans roughly
+            <strong>3.3 plies</strong>: the stacking sequence is visible <em>inside</em> a patch, which is
+            exactly what has to be controllable. Two million patches at stride 32.</p>
+          </div>
+        </div>
+        <div class="block">
+          <span class="micro">What a useful generator must do</span>
+          <div class="cols c-2" style="gap:30px">
+            <ul class="dashlist sm">
+              <li><span>Deliver a <strong>requested porosity locally</strong>, not only on average</span></li>
+              <li><span>Reproduce the <strong>ply orientation profile</strong> through the thickness</span></li>
+              <li><span>Put the <strong>specimen boundary</strong> where it was asked for</span></li>
+            </ul>
+            <ul class="dashlist sm">
+              <li><span>Never place <strong>air inside</strong> the material envelope</span></li>
+              <li><span>Accept <strong>stacking sequences and shapes never seen</strong> in training</span></li>
+              <li><span>Produce volumes <strong>far larger</strong> than any training patch</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <figure class="fig">
+        <svg viewBox="0 0 520 470" role="img" aria-label="A laminate coupon: plies through the thickness, pores between them, the specimen boundary, and one 64-cubed patch">
+          <!-- coupon body -->
+          <rect x="30" y="60" width="460" height="290" fill="none" stroke="#1F2BE0" stroke-width="1.5"/>
+          <!-- plies -->
+          <g stroke="#1F2BE0" stroke-width="1" opacity=".3">
+            <line x1="30" y1="96"  x2="490" y2="96"/><line x1="30" y1="132" x2="490" y2="132"/>
+            <line x1="30" y1="168" x2="490" y2="168"/><line x1="30" y1="204" x2="490" y2="204"/>
+            <line x1="30" y1="240" x2="490" y2="240"/><line x1="30" y1="276" x2="490" y2="276"/>
+            <line x1="30" y1="312" x2="490" y2="312"/>
+          </g>
+          <!-- ply direction ticks, alternating, drawn as short strokes -->
+          <g stroke="#1F2BE0" stroke-width="1.6" opacity=".55">
+            <g><line x1="44" y1="72" x2="60" y2="86"/><line x1="74" y1="72" x2="90" y2="86"/><line x1="104" y1="72" x2="120" y2="86"/></g>
+            <g><line x1="44" y1="122" x2="60" y2="108"/><line x1="74" y1="122" x2="90" y2="108"/><line x1="104" y1="122" x2="120" y2="108"/></g>
+            <g><line x1="46" y1="150" x2="62" y2="150"/><line x1="76" y1="150" x2="92" y2="150"/><line x1="106" y1="150" x2="122" y2="150"/></g>
+            <g><line x1="52" y1="178" x2="52" y2="194"/><line x1="82" y1="178" x2="82" y2="194"/><line x1="112" y1="178" x2="112" y2="194"/></g>
+          </g>
+          <!-- pores: interlaminar, elongated -->
+          <g fill="#1F2BE0" opacity=".72">
+            <ellipse cx="150" cy="132" rx="17" ry="4"/><ellipse cx="250" cy="168" rx="24" ry="4.5"/>
+            <ellipse cx="352" cy="132" rx="13" ry="3.6"/><ellipse cx="196" cy="240" rx="20" ry="4"/>
+            <ellipse cx="330" cy="276" rx="27" ry="5"/><ellipse cx="420" cy="204" rx="15" ry="4"/>
+            <ellipse cx="108" cy="276" rx="12" ry="3.4"/><ellipse cx="286" cy="312" rx="18" ry="4"/>
+            <ellipse cx="392" cy="240" rx="10" ry="3"/><ellipse cx="230" cy="96" rx="14" ry="3.4"/>
+          </g>
+          <!-- air outside the specimen -->
+          <rect x="30" y="18" width="460" height="42" fill="url(#hatch-fine)"/>
+          <rect x="30" y="350" width="460" height="42" fill="url(#hatch-fine)"/>
+          <text x="34" y="44" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">air &mdash; outside the specimen</text>
+          <!-- one 64-cubed patch -->
+          <rect x="196" y="132" width="108" height="108" fill="none" stroke="#1F2BE0" stroke-width="3"/>
+          <line x1="304" y1="132" x2="360" y2="104" stroke="#1F2BE0" stroke-width="1"/>
+          <text x="366" y="102" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">64&#179; patch</text>
+          <text x="366" y="122" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">1.6 mm</text>
+          <!-- thickness annotation -->
+          <line x1="14" y1="60" x2="14" y2="350" stroke="#1F2BE0" stroke-width="1" marker-start="url(#arrow-sm)" marker-end="url(#arrow-sm)"/>
+          <text x="18" y="418" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">ply pitch &asymp; 19.6 vox</text>
+          <text x="18" y="440" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">&asymp; 0.49 mm</text>
+        </svg>
+        <figcaption>Through-thickness section. Porosity is interlaminar and flat, and follows the ply direction, so
+        its statistics change with depth &mdash; a generator that only matches a global porosity misses the structure.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     04 — THE STACK
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Three stages, one contract<br>between them</h2>
+      <span class="labtag">Overview</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <figure class="fig">
+        <svg viewBox="0 0 1760 470" role="img" aria-label="Pipeline: voxels to latent, a conditioned denoiser loop in latent space, and the decode back to voxels">
+          <!-- ---------- STAGE 1 ---------- -->
+          <text x="0" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">STAGE 1 &mdash; AUTOENCODER</text>
+          <rect x="0" y="70" width="150" height="150" fill="url(#dots)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="0" y="252" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">64&#179; voxels &times; 3</text>
+          <text x="0" y="276" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".65">grey / pore / air</text>
+          <line x1="166" y1="145" x2="222" y2="145" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="172" y="132" font-family="DM Mono, monospace" font-size="14" fill="#1F2BE0" opacity=".7">enc</text>
+          <rect x="234" y="100" width="90" height="90" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="234" y="252" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">8 &times; 16&#179; cells</text>
+          <text x="234" y="276" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".65">&mu;, &sigma; &mdash; both stored</text>
+
+          <!-- ---------- STAGE 2 ---------- -->
+          <line x1="340" y1="145" x2="404" y2="145" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="424" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">STAGE 2 &mdash; DIFFUSION PRIOR IN LATENT SPACE</text>
+          <rect x="424" y="34" width="736" height="336" fill="none" stroke="#1F2BE0" stroke-width="1.5" stroke-dasharray="6 5"/>
+          <rect x="460" y="100" width="90" height="90" fill="url(#noise)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="460" y="220" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">z&#8348; &mdash; noise</text>
+          <line x1="566" y1="145" x2="626" y2="145" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="638" y="90" width="250" height="110" fill="none" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="660" y="138" font-family="Newsreader, serif" font-size="28" fill="#1F2BE0">3-D U-Net</text>
+          <text x="660" y="172" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">155 in &rarr; 8 out</text>
+          <path d="M 763 90 C 763 58 515 58 515 96" fill="none" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="600" y="48" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">&times; 50 DDIM steps</text>
+          <line x1="904" y1="145" x2="964" y2="145" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="976" y="100" width="90" height="90" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="976" y="220" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">z&#8320;</text>
+          <!-- conditioning enters from below, so nothing crosses the chain -->
+          <g stroke="#1F2BE0" stroke-width="1.2" opacity=".85">
+            <line x1="690" y1="268" x2="690" y2="212" marker-end="url(#arrow-sm)"/>
+            <line x1="770" y1="268" x2="770" y2="212" marker-end="url(#arrow-sm)"/>
+            <line x1="850" y1="268" x2="850" y2="212" marker-end="url(#arrow-sm)"/>
+          </g>
+          <text x="460" y="296" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">porosity &phi; &middot; depth &middot; six per-face distances</text>
+          <text x="460" y="320" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">orientation profile &middot; material envelope</text>
+          <text x="460" y="344" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">six neighbour latents &middot; availability &middot; t&#8345;&#8347;</text>
+
+          <!-- ---------- RIGHT: the rule ---------- -->
+          <line x1="1210" y1="10" x2="1210" y2="370" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+          <text x="1250" y="60" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">EVERY SIGNAL IS ALWAYS ON</text>
+          <text x="1250" y="100" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">There are no conditioning switches.</text>
+          <text x="1250" y="126" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">A flag that no config ever flips is</text>
+          <text x="1250" y="152" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">only a way for training and</text>
+          <text x="1250" y="178" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">generation to disagree &mdash; which is</text>
+          <text x="1250" y="204" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">exactly how the previous rung lost</text>
+          <text x="1250" y="230" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">its neighbour conditioning.</text>
+
+          <!-- ---------- STAGE 3 ---------- -->
+          <text x="0" y="412" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">STAGE 3 &mdash; DECODE</text>
+          <line x1="0" y1="428" x2="1160" y2="428" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="0" y="458" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">The frozen decoder returns a grey volume in raw-scan units and a three-class label &mdash; overlapped and blended before the argmax.</text>
+        </svg>
+      </figure>
+      <div class="cols c-3">
+        <div class="block soft">
+          <span class="micro">Why a latent</span>
+          <p class="sm">Diffusion on 64&#179; voxels is eight times more elements per step, and the model would
+          spend its capacity on grey-level texture the autoencoder already reproduces. The latent is
+          <em>spatial</em>, not flat: 16&#179; cells of 8 channels, one cell per 100&nbsp;&micro;m cube.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Why the VAE is frozen afterwards</span>
+          <p class="sm">Every latent in the store was produced by one checkpoint. The launcher compares the
+          checkpoint the store recorded with the one the run names and refuses to start on a mismatch:
+          decoding with a different VAE is silently wrong, not loudly wrong.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Where the difficulty is</span>
+          <p class="sm">Not in generating one patch. In generating ten thousand of them that agree with each
+          other, with a request painted over the whole volume, at a size that never fits in memory at once.
+          That is what stage 2&rsquo;s sampler is for.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     05 — THE VAE CONTRACT
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Stage 1 &mdash; what the autoencoder compresses</h2>
+      <span class="labtag">VAE &middot; the contract</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <figure class="fig">
+        <svg viewBox="0 0 1760 350" role="img" aria-label="VAE data flow from three input planes through the spatial latent to two decoder heads">
+          <!-- INPUT: three stacked planes -->
+          <text x="0" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">ENCODER INPUT &mdash; 3 CHANNELS</text>
+          <rect x="24" y="40" width="130" height="130" fill="url(#dots)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <rect x="12" y="52" width="130" height="130" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <rect x="0"  y="64" width="130" height="130" fill="#F0EBDE" stroke="#1F2BE0" stroke-width="1.5"/>
+          <g fill="#1F2BE0" opacity=".75">
+            <ellipse cx="38" cy="100" rx="13" ry="3.6"/><ellipse cx="82" cy="136" rx="17" ry="3.8"/><ellipse cx="50" cy="170" rx="10" ry="3"/>
+          </g>
+          <text x="0" y="232" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">3 &times; 64&#179; &mdash; a 1.6 mm cube</text>
+          <text x="0" y="256" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".65">xct &middot; pore &middot; air</text>
+
+          <!-- ENCODER -->
+          <line x1="170" y1="129" x2="206" y2="129" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M 218 44 L 330 84 L 330 174 L 218 214 Z" fill="url(#scan)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="232" y="136" font-family="Newsreader, serif" font-size="24" fill="#1F2BE0">encoder</text>
+          <text x="218" y="256" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".65">2 &times; stride-2</text>
+          <text x="218" y="280" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".65">dual branch</text>
+
+          <!-- LATENT -->
+          <line x1="346" y1="129" x2="382" y2="129" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="394" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">LATENT &mdash; SPATIAL, NOT FLAT</text>
+          <rect x="394" y="54" width="150" height="150" fill="none" stroke="#1F2BE0" stroke-width="1.5"/>
+          <g stroke="#1F2BE0" stroke-width="1" opacity=".35">
+            <line x1="394" y1="91.5" x2="544" y2="91.5"/><line x1="394" y1="129" x2="544" y2="129"/><line x1="394" y1="166.5" x2="544" y2="166.5"/>
+            <line x1="431.5" y1="54" x2="431.5" y2="204"/><line x1="469" y1="54" x2="469" y2="204"/><line x1="506.5" y1="54" x2="506.5" y2="204"/>
+          </g>
+          <rect x="431.5" y="91.5" width="37.5" height="37.5" fill="#1F2BE0" opacity=".8"/>
+          <text x="394" y="232" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">8 channels &times; 16&#179; cells</text>
+          <text x="394" y="256" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".65">&mu; and &sigma;;&nbsp; z = &mu; + &sigma;&middot;&epsilon;</text>
+
+          <!-- DECODER -->
+          <line x1="560" y1="129" x2="596" y2="129" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <path d="M 608 84 L 720 44 L 720 214 L 608 174 Z" fill="url(#scan)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="620" y="136" font-family="Newsreader, serif" font-size="24" fill="#1F2BE0">decoder</text>
+
+          <!-- TWO HEADS -->
+          <line x1="734" y1="96" x2="778" y2="72" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="734" y1="162" x2="778" y2="190" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="790" y="10" width="120" height="120" fill="url(#dots)" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="928" y="52" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">grey head</text>
+          <text x="928" y="82" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".72">grey level in [0, 1] &mdash; not a logit</text>
+          <rect x="790" y="150" width="120" height="120" fill="#F0EBDE" stroke="#1F2BE0" stroke-width="1.5"/>
+          <rect x="790" y="150" width="120" height="24" fill="url(#hatch-fine)"/>
+          <g fill="#1F2BE0" opacity=".8"><ellipse cx="836" cy="204" rx="18" ry="4"/><ellipse cx="866" cy="240" rx="12" ry="3.4"/><ellipse cx="812" cy="228" rx="9" ry="3"/></g>
+          <text x="928" y="192" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">three-class head</text>
+          <text x="928" y="222" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".72">material / pore / air logits &rarr; argmax</text>
+
+          <!-- THE NUMBER -->
+          <line x1="1330" y1="10" x2="1330" y2="280" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+          <text x="1376" y="76" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0" opacity=".8">262 144 voxels &rarr; 32 768 numbers</text>
+          <text x="1376" y="136" font-family="Newsreader, serif" font-size="46" fill="#1F2BE0">8&times; compression</text>
+          <text x="1376" y="184" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0" opacity=".8">one latent cell = 4&#179; voxels</text>
+          <text x="1376" y="210" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0" opacity=".8">= a 100 &micro;m cube</text>
+
+          <!-- CAPTION RULE -->
+          <line x1="0" y1="300" x2="1760" y2="300" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+          <text x="0" y="332" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">A variant emits a binary mask <tspan font-weight="600">or</tspan> a three-class label, never both: a two-valued head and a three-valued one are different contracts, and a caller could otherwise read a pore mask that disagrees with the label.</text>
+        </svg>
+      </figure>
+      <div class="cols c-3">
+        <div class="block soft">
+          <span class="micro">Why air is its own class</span>
+          <p class="sm">A pore and the space outside the coupon are both dark and both empty. With a single binary
+          mask the model had no way to say which one it meant, and exterior air became an unexplained dark region it
+          had to invent. A labelled air class is also what later lets the sampler be <em>told</em> where the specimen
+          ends.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">The heads are not symmetric</span>
+          <p class="sm">The grey head emits an intensity on the same scale as the scan &mdash; applying a sigmoid to it
+          squashes the output into [0.5,&nbsp;0.73] and destroys contrast. The class head genuinely is a logit.
+          One decode helper per head, so the two cannot drift apart.</p>
+        </div>
+        <div class="block">
+          <span class="micro">The asymmetry that matters</span>
+          <p class="sm">The encoder sees the labels; the sampler never will. That is deliberate: the latent has to
+          <strong>carry</strong> the segmentation, so the denoiser does not have to generate it twice and cannot
+          contradict itself.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     06 — HOW THE VAE IS TRAINED
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>How the autoencoder is trained</h2>
+      <span class="labtag">VAE &middot; objective and selection</span>
+    </div>
+    <div class="deck-body reveal cols c-85">
+      <div class="vstack-lg">
+        <table class="kv">
+          <tr><th style="width:230px">Term</th><th style="width:190px">On what</th><th>Why this one</th></tr>
+          <tr><td class="name">Charbonnier</td><td>grey level</td>
+            <td>A smooth L1. Squared error on a stochastic texture returns the conditional mean, which is a blur;
+            L1 keeps edges but has no gradient at zero.</td></tr>
+          <tr><td class="name">Weighted CE</td><td>three-class logits</td>
+            <td>Unweighted, the loss is dominated by material and both minority classes collapse. Weights are
+            <em>tempered</em> &mdash; proportional to 1/&radic;f, normalised so &Sigma;&nbsp;f&#8339;w&#8339;&nbsp;=&nbsp;1.
+            Full inverse frequency made a false-positive pore so cheap that porosity was over-predicted everywhere.</td></tr>
+          <tr><td class="name">Soft Dice</td><td>pore and air only</td>
+            <td>Material is the background: its Dice sits near 1 whatever the model does, so scoring it only dilutes the signal.</td></tr>
+          <tr><td class="name">KL, free bits</td><td>per channel</td>
+            <td>Each channel&rsquo;s KL is clamped up to a floor before summing, and &beta; ramps from zero. Without the floor,
+            channels switch themselves off one by one and never come back.</td></tr>
+          <tr><td class="name">PatchGAN</td><td>2-D planes of the grey volume</td>
+            <td>A reconstruction loss alone will not put high-frequency texture back. The discriminator runs in
+            float32 &mdash; deliberately, and it is restored from the checkpoint on resume, or the adversarial game
+            restarts silently at every interruption.</td></tr>
+        </table>
+      </div>
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">Choosing the latent width</span>
+          <p class="sm">Six rungs were trained on the same data and the same trunk &mdash; z&nbsp;&isin;&nbsp;{32,&nbsp;16,&nbsp;8,&nbsp;4,&nbsp;2,&nbsp;1}
+          channels per cell. The rung is chosen on four things at once: porosity error, pore Dice in the
+          <em>dense</em> regime, air Dice, and the tile-seam ratio &mdash; not on total validation loss, which is
+          not comparable across compression factors.</p>
+          <p class="sm" style="margin-top:12px">Structure saturates: below a certain width the pore Dice falls away, above it nothing more is bought.
+          The chosen rung is the smallest that has already saturated.</p>
+        </div>
+        <div class="block">
+          <span class="micro">A trap worth naming</span>
+          <p class="sm">This decoder is BatchNorm. <strong>Freezing a module means <span class="code">eval()</span>,
+          not only <span class="code">requires_grad_(False)</span></strong> &mdash; running statistics are not
+          gradients, and a train-mode forward moves them. A &ldquo;frozen&rdquo; encoder whose statistics drift
+          silently invalidates the entire latent store built from it.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     07 — THE LATENT STORE (the bridge)
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>The bridge: what is stored<br>between the two models</h2>
+      <span class="labtag">Latent store</span>
+    </div>
+    <div class="deck-body reveal cols c-58">
+      <div class="vstack-lg">
+        <p class="lede">One pass of the frozen encoder over every patch writes a memory-mapped store. The
+        diffusion model never touches a voxel during training.</p>
+        <table class="kv">
+          <tr><th style="width:250px">Array</th><th>What it holds</th></tr>
+          <tr><td class="name">latents</td><td>&mu; <em>and</em> &sigma; per cell &mdash; not only the mean</td></tr>
+          <tr><td class="name">material</td><td>specimen-envelope fraction per latent cell</td></tr>
+          <tr><td class="name">air</td><td>one scalar per patch</td></tr>
+          <tr><td class="name">cond</td><td>&phi;, depth, six per-face distances</td></tr>
+          <tr><td class="name">orientation</td><td>(cos&nbsp;2&theta;, sin&nbsp;2&theta;) resolved with depth</td></tr>
+        </table>
+      </div>
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">The material map is the envelope, not the pores</span>
+          <p class="sm">It pools <span class="code">label&nbsp;&ne;&nbsp;air</span> &mdash; pores count as specimen.
+          Pooling the pore class instead would be a pore map at 100&nbsp;&micro;m, and the model would learn to
+          <em>upsample it</em> rather than generate porosity. The distinction decides whether the network
+          invents microstructure or copies it.</p>
+        </div>
+        <div class="block">
+          <span class="micro">Train on samples, not on means</span>
+          <p class="sm">Latents are drawn <span class="code">z = &mu; + &sigma;&middot;&epsilon;</span> per batch, and so are the
+          neighbour latents. Conditioning on posterior <em>means</em> while regressing a posterior <em>sample</em>
+          leaves the neighbour input short of E[&sigma;&sup2;] per cell &mdash; a gap that does not exist at
+          generation time, where every neighbour is a real latent.</p>
+        </div>
+        <div class="block">
+          <span class="micro">Two porosities, and they are not the same number</span>
+          <p class="sm"><strong>Full-patch &phi;</strong> = pore / 64&#179;, air outside the specimen included in the
+          denominator &mdash; what the store records, because the conditioning has to describe the patch the encoder
+          actually saw. <strong>Material porosity</strong> = pore / material &mdash; what an engineer asks for.
+          The sampler converts; the store never does.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     08 — DIFFUSION: FORWARD AND REVERSE
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Stage 2 &mdash; the diffusion process,<br>in the latent</h2>
+      <span class="labtag">Forward &amp; reverse</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <figure class="fig">
+        <svg viewBox="0 0 1760 300" role="img" aria-label="Forward noising and reverse denoising across five latent states with the alpha-bar curve beneath">
+          <!-- five latent states -->
+          <g>
+            <rect x="0"    y="46" width="150" height="150" fill="#F0EBDE" stroke="#1F2BE0" stroke-width="1.5"/>
+            <g fill="#1F2BE0"><ellipse cx="40" cy="90" rx="20" ry="5"/><ellipse cx="100" cy="130" rx="26" ry="5.5"/><ellipse cx="62" cy="166" rx="15" ry="4.5"/><ellipse cx="116" cy="70" rx="12" ry="4"/></g>
+            <text x="0" y="222" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#8320;</text>
+            <text x="0" y="244" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".6">a real patch</text>
+
+            <rect x="380"  y="46" width="150" height="150" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="1.5"/>
+            <g fill="#1F2BE0" opacity=".7"><ellipse cx="420" cy="90" rx="20" ry="5"/><ellipse cx="480" cy="130" rx="26" ry="5.5"/><ellipse cx="442" cy="166" rx="15" ry="4.5"/></g>
+            <text x="380" y="222" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#8348; &mdash; low t</text>
+
+            <rect x="760"  y="46" width="150" height="150" fill="url(#dots)" stroke="#1F2BE0" stroke-width="1.5"/>
+            <g fill="#1F2BE0" opacity=".35"><ellipse cx="800" cy="90" rx="20" ry="5"/><ellipse cx="860" cy="130" rx="26" ry="5.5"/></g>
+            <text x="760" y="222" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#8348; &mdash; mid t</text>
+
+            <rect x="1140" y="46" width="150" height="150" fill="url(#noise)" stroke="#1F2BE0" stroke-width="1.5"/>
+            <text x="1140" y="222" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#8348; &mdash; high t</text>
+
+            <rect x="1520" y="46" width="150" height="150" fill="url(#noise)" stroke="#1F2BE0" stroke-width="1.5"/>
+            <rect x="1520" y="46" width="150" height="150" fill="url(#hatch-back)"/>
+            <text x="1520" y="222" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#8348; &mdash; t = T</text>
+            <text x="1520" y="244" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".6">pure noise</text>
+          </g>
+          <!-- forward arrows -->
+          <g stroke="#1F2BE0" stroke-width="1.5">
+            <line x1="162" y1="86" x2="368" y2="86" marker-end="url(#arrow)"/>
+            <line x1="542" y1="86" x2="748" y2="86" marker-end="url(#arrow)"/>
+            <line x1="922" y1="86" x2="1128" y2="86" marker-end="url(#arrow)"/>
+            <line x1="1302" y1="86" x2="1508" y2="86" marker-end="url(#arrow)"/>
+          </g>
+          <text x="176" y="34" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">forward &mdash; closed form, no network:&nbsp;&nbsp; z&#8348; = &radic;&#257;&#8339;&nbsp;z&#8320; + &radic;(1&minus;&#257;&#8339;)&nbsp;&epsilon;</text>
+          <!-- reverse arrows -->
+          <g stroke="#1F2BE0" stroke-width="1.5" stroke-dasharray="7 5">
+            <line x1="368" y1="156" x2="162" y2="156" marker-end="url(#arrow)"/>
+            <line x1="748" y1="156" x2="542" y2="156" marker-end="url(#arrow)"/>
+            <line x1="1128" y1="156" x2="922" y2="156" marker-end="url(#arrow)"/>
+            <line x1="1508" y1="156" x2="1302" y2="156" marker-end="url(#arrow)"/>
+          </g>
+          <text x="176" y="284" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">reverse &mdash; 50 DDIM steps, one network call per step per window, deterministic given the noise</text>
+        </svg>
+      </figure>
+      <div class="cols c-3">
+        <div class="block soft">
+          <span class="micro">The schedule</span>
+          <p class="sm">Cosine, T&nbsp;=&nbsp;1000. &#257;&#8339; comes straight from the cosine f, so its terminal value
+          is already zero to float precision &mdash; there is no signal leak at the end of the ladder to close.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">What the network regresses</span>
+          <p class="sm">Not the clean latent. A quantity from which the clean latent can be recovered in closed form
+          &mdash; and <em>which</em> quantity turns out to matter at the last step. Next slide.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Why DDIM</span>
+          <p class="sm">Deterministic given the initial noise, and it skips the ladder: 50 calls instead of 1000.
+          Every random draw in the sampler is made once and reused, never sampled per step.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     09 — THE OBJECTIVE: WHY v
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>&epsilon; or v &mdash; the last step<br>decides it</h2>
+      <span class="labtag">Objective</span>
+    </div>
+    <div class="deck-body reveal cols c-2">
+      <div class="vstack-lg">
+        <table class="kv">
+          <tr><th style="width:120px">Target</th><th>Definition</th><th>Recovering the clean latent</th></tr>
+          <tr><td class="name">&epsilon;</td><td class="body sm">the noise that was added</td>
+            <td class="body sm"><span class="code">x&#770;&#8320; = (x&#8348; &minus; &radic;(1&minus;&#257;)&nbsp;&epsilon;&#770;) / &radic;&#257;</span></td></tr>
+          <tr><td class="name">v</td><td class="body sm"><span class="code">v = &radic;&#257;&nbsp;&epsilon; &minus; &radic;(1&minus;&#257;)&nbsp;x&#8320;</span></td>
+            <td class="body sm"><span class="code">x&#770;&#8320; = &radic;&#257;&nbsp;x&#8348; &minus; &radic;(1&minus;&#257;)&nbsp;v&#770;</span> &mdash; no division</td></tr>
+        </table>
+        <div class="block">
+          <span class="micro">The failure, concretely</span>
+          <p class="sm">At the terminal step of this cosine schedule
+          <span class="code">&radic;&#257;&#8340; &asymp; 6&nbsp;&times;&nbsp;10&#8315;&#185;&#8311;</span>. The &epsilon; form then divides the
+          network output by that number: the recovered latent comes back of order 10&#8312; and the clamp that guards
+          the reverse process saturates. <strong>Every sampling chain therefore began from a clamp artefact rather
+          than a prediction</strong> &mdash; on the first step, where the whole trajectory is decided.</p>
+          <p class="sm" style="margin-top:12px">The v form recovers the same quantity with no division and stays of order one.
+          The schedule object <em>refuses</em> to combine an exactly-zero terminal signal with the &epsilon; target,
+          because there the division is by exactly zero.</p>
+        </div>
+      </div>
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">Not the usual argument</span>
+          <p class="sm">The published motivation for zero terminal SNR (Lin et&nbsp;al. 2024) attacks schedules that
+          build &#257; as a cumulative product of clipped &beta;, which leaves real signal at t&nbsp;=&nbsp;T that the
+          model sees in training but never at sampling. <em>That leak does not exist here</em> &mdash; &#257; is taken
+          straight from the cosine. The rescale moves it by less than 10&#8315;&#185;&#8310;. We adopt v for the numerical
+          reason above, and say so, rather than borrowing a justification that does not apply.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">One reverse process, not one per parameterisation</span>
+          <p class="sm">Nothing downstream branches on the objective. The schedule names the training target,
+          converts an output back either way, and the DDIM step is written on the pair
+          <span class="code">(x&#770;&#8320;, &epsilon;&#770;)</span>. Guidance is combined on the <em>raw</em> network outputs:
+          at fixed t the map between v and &epsilon; is affine with shared coefficients, so an affine combination of
+          guidance arms commutes with it. The conversion happens once, inside the step.</p>
+        </div>
+        <div class="callout">
+          <div class="q">A bug in this family is invisible in the loss curve and fatal in the sample.
+          Both are worth stating in a paper.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     10 — WHAT THE DENOISER IS TOLD
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>What the denoiser is told</h2>
+      <span class="labtag">Conditioning contract &mdash; 155 input channels</span>
+    </div>
+    <div class="deck-body reveal cols c-73">
+      <div class="vstack-lg">
+        <table class="kv">
+          <tr><th style="width:290px">Concatenated at the input</th><th style="width:110px">Ch.</th><th>Meaning</th></tr>
+          <tr><td class="name">z&#8348;</td><td>8</td><td>the noisy latent at step t</td></tr>
+          <tr><td class="name">orientation</td><td>2</td><td>(cos&nbsp;2&theta;, sin&nbsp;2&theta;) ply profile, resolved through the thickness</td></tr>
+          <tr><td class="name">material</td><td>1</td><td>specimen-envelope fraction per latent cell</td></tr>
+          <tr><td class="name">neighbours</td><td>48</td><td>the six whole face-adjacent latents, 8 channels each</td></tr>
+          <tr><td class="name">availability</td><td>48</td><td>learned embedding of OOB / EXISTS / UNKNOWN per face</td></tr>
+          <tr><td class="name">t&#8345;&#8347;</td><td>48</td><td>sinusoidal embedding of each neighbour&rsquo;s own noise level</td></tr>
+        </table>
+        <div class="cols c-2">
+          <div class="block soft">
+            <span class="micro">FiLM scalars, added to the time embedding</span>
+            <p class="sm">Standardised <span class="code">log(&phi;+10&#8315;&#179;)</span> with a learned null token for
+            guidance; relative depth; the six per-face distances through one small network over the whole vector;
+            and an availability-masked pool of the neighbour latents.</p>
+          </div>
+          <div class="block soft">
+            <span class="micro">No global porosity input</span>
+            <p class="sm">It is redundant once a per-patch field fixes the volume mean, and it was the source of a
+            local/global conflation bug. Volume-level control is carried by the field, not by a scalar.</p>
+          </div>
+        </div>
+      </div>
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">The design rule</span>
+          <p class="lede" style="font-size:24px;line-height:1.35">Conditioning must be <em>composable</em>, never categorical.</p>
+          <p class="sm" style="margin-top:14px">A one-hot for &ldquo;specimen family&rdquo; can only ever reproduce the
+          three materials in the dataset. A continuous orientation field makes an <strong>unseen stacking sequence a
+          recombination of parts that were seen</strong>. That is the whole reason the model can be asked for a layup
+          that is not in the data.</p>
+        </div>
+        <div class="block">
+          <span class="micro">Six distances, not one</span>
+          <p class="sm">A single distance-to-surface scalar cannot say <em>which</em> side the specimen ends on, so a
+          patch under the top face and a patch against a side wall asked for the same thing. Six per-face gaps,
+          capped and normalised, are one definition shared by the dataset builder and the sampler.</p>
+        </div>
+        <div class="block">
+          <span class="micro">Orientation: pool the components</span>
+          <p class="sm">Never the angle, and never renormalise the pooled vector. The nominal ply sequence is used,
+          not measured deviations &mdash; a measured residual is defined relative to the volume mean and would be
+          identically zero in a unidirectional laminate.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     11 — NEIGHBOURS: SAMPLED, THEN NOISED
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>The trick that makes joint<br>sampling possible</h2>
+      <span class="labtag">Neighbours &mdash; sampled, then noised</span>
+    </div>
+    <div class="deck-body reveal cols c-58">
+      <figure class="fig">
+        <svg viewBox="0 0 640 470" role="img" aria-label="A target patch with six touching face neighbours, each noised to its own timestep">
+          <!-- exploded six-neighbour cross -->
+          <g stroke="#1F2BE0" stroke-width="1.5">
+            <rect x="245" y="175" width="120" height="120" fill="#F0EBDE"/>
+            <rect x="245" y="40"  width="120" height="120" fill="url(#hatch-fine)"/>
+            <rect x="245" y="310" width="120" height="120" fill="url(#dots)"/>
+            <rect x="110" y="175" width="120" height="120" fill="url(#noise)"/>
+            <rect x="380" y="175" width="120" height="120" fill="url(#hatch-back)"/>
+            <rect x="60"  y="40"  width="90"  height="90"  fill="url(#scan)"/>
+            <rect x="470" y="330" width="90"  height="90"  fill="none" stroke-dasharray="6 5"/>
+          </g>
+          <g fill="#1F2BE0"><ellipse cx="285" cy="215" rx="20" ry="5"/><ellipse cx="325" cy="255" rx="14" ry="4"/></g>
+          <text x="252" y="240" font-family="Newsreader, serif" font-size="24" fill="#1F2BE0" text-anchor="start">target</text>
+          <text x="252" y="30" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">t&#8345;&#8347; = t</text>
+          <text x="252" y="448" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">t&#8345;&#8347; ~ U{0..t}</text>
+          <text x="112" y="162" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">t&#8345;&#8347; high</text>
+          <text x="382" y="162" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">t&#8345;&#8347; low</text>
+          <text x="62"  y="30"  font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">OOB</text>
+          <text x="470" y="320" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">UNKNOWN</text>
+          <!-- touching annotation -->
+          <line x1="245" y1="160" x2="245" y2="175" stroke="#1F2BE0" stroke-width="4"/>
+          <text x="60" y="466" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">offset 64 = patch size: faces touch, zero shared voxels</text>
+        </svg>
+        <figcaption>Two of the six faces are shown out of plane. Each neighbour carries its own noise level into
+        the network, so the model never assumes they are clean.</figcaption>
+      </figure>
+
+      <div class="vstack-lg">
+        <div class="steps">
+          <div class="step"><span class="s">01</span><div><h4>Draw, do not read</h4>
+            <p class="sm">Each existing neighbour is sampled from its own stored posterior,
+            <span class="code">&mu; + &sigma;&middot;&epsilon;</span>, exactly as the target is drawn.</p></div></div>
+          <div class="step"><span class="s">02</span><div><h4>Noise it to its own timestep</h4>
+            <p class="sm">With probability &frac12; the target&rsquo;s own t, otherwise uniform below it. The level
+            <span class="code">t&#8345;&#8347;</span> goes in as a sinusoidal embedding.</p></div></div>
+          <div class="step"><span class="s">03</span><div><h4>Sometimes remove all six</h4>
+            <p class="sm">With probability 0.1 every face goes UNKNOWN at level zero. That is the guidance null arm,
+            so training and sampling share one definition of &ldquo;no neighbour information&rdquo;.</p></div></div>
+        </div>
+        <div class="callout">
+          <div class="q">At generation time a neighbour is <em>never</em> clean. A denoiser trained only on clean
+          neighbours meets an input distribution it has never seen on its very first sampling step.</div>
+          <p class="sm" style="margin-top:12px">In the previous generation of this model that is exactly what happened,
+          and the joint sampler had to drop neighbour conditioning altogether &mdash; which made its neighbour guidance
+          scale inert. Noised neighbours in training are what buy the joint mode.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     12 — THE TRAINING STEP
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>One training step</h2>
+      <span class="labtag">LDM &middot; latent objective + decoded auxiliary</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <figure class="fig">
+        <svg viewBox="0 0 1760 250" role="img" aria-label="Training step flow from the store through the denoiser to the latent loss and the decoded auxiliary loss">
+          <g stroke="#1F2BE0" stroke-width="1.5" fill="none">
+            <rect x="0" y="60" width="180" height="86"/>
+            <rect x="236" y="60" width="180" height="86"/>
+            <rect x="472" y="60" width="180" height="86"/>
+            <rect x="700" y="34" width="252" height="138"/>
+            <rect x="984" y="60" width="180" height="86"/>
+            <rect x="1220" y="12" width="240" height="86"/>
+            <rect x="1220" y="120" width="540" height="118" stroke-dasharray="6 5"/>
+          </g>
+          <g font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0">
+            <text x="16" y="96">store row</text><text x="16" y="122" opacity=".7" font-size="16">&mu;, &sigma;, cond, 6 nb</text>
+            <text x="252" y="96">z = &mu;+&sigma;&epsilon;</text><text x="252" y="122" opacity=".7" font-size="16">t ~ U{0..T}</text>
+            <text x="488" y="96">q(z&#8348; | z&#8320;)</text><text x="488" y="122" opacity=".7" font-size="16">neighbours noised</text>
+            <text x="1000" y="96">model out</text><text x="1000" y="122" opacity=".7" font-size="16">v&#770;</text>
+            <text x="1236" y="48">latent loss</text><text x="1236" y="76" opacity=".7" font-size="16">MSE against the target</text>
+          </g>
+          <text x="722" y="86" font-family="Newsreader, serif" font-size="28" fill="#1F2BE0">3-D U-Net</text>
+          <text x="722" y="120" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">CFG dropout 0.1:</text>
+          <text x="722" y="144" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">&phi; null &middot; all-six null</text>
+          <g stroke="#1F2BE0" stroke-width="1.5">
+            <line x1="192" y1="103" x2="224" y2="103" marker-end="url(#arrow-sm)"/>
+            <line x1="428" y1="103" x2="460" y2="103" marker-end="url(#arrow-sm)"/>
+            <line x1="664" y1="103" x2="690" y2="103" marker-end="url(#arrow-sm)"/>
+            <line x1="962" y1="103" x2="976" y2="103" marker-end="url(#arrow-sm)"/>
+            <line x1="1176" y1="80" x2="1208" y2="60" marker-end="url(#arrow-sm)"/>
+            <line x1="1176" y1="126" x2="1208" y2="150" marker-end="url(#arrow-sm)"/>
+          </g>
+          <text x="1240" y="152" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">DECODED AUXILIARY &mdash; LOWEST QUARTILE OF t ONLY</text>
+          <text x="1240" y="180" font-family="Hanken Grotesk, sans-serif" font-size="17" fill="#1F2BE0" opacity=".82">x&#770;&#8320; is decoded by the frozen VAE and scored in voxel space:</text>
+          <text x="1240" y="204" font-family="Hanken Grotesk, sans-serif" font-size="17" fill="#1F2BE0" opacity=".82">air outside the envelope &middot; pore Dice &middot; porosity consistency</text>
+          <text x="1240" y="228" font-family="Hanken Grotesk, sans-serif" font-size="17" fill="#1F2BE0" opacity=".82">&middot; grey/label agreement. Each logged separately.</text>
+        </svg>
+      </figure>
+      <div class="cols c-3">
+        <div class="block soft">
+          <span class="micro">Why score the decode at all</span>
+          <p class="sm">The latent objective is blind to any error that leaves the residual unchanged. Air placed
+          inside the specimen, a delivered porosity that ignores the request, and dark regions labelled material are
+          exactly that: two latents can differ in all three and carry the same residual.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Why only the lowest quartile of t</span>
+          <p class="sm">A recovered latent from a high-t step is a blur with no pore structure in it, so every term
+          would be measuring the schedule instead of the model. A hard cap on decoded items keeps the memory bounded
+          &mdash; a live autograd graph through the decoder costs a few hundred MB <em>per item</em>.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Frozen means frozen</span>
+          <p class="sm">The VAE in this graph carries no gradient <em>and</em> runs in eval mode. Otherwise a decode
+          in train mode folds generated latents into the frozen model&rsquo;s running statistics &mdash; and the clean
+          latent is deliberately <em>not</em> clamped here, so the gradient survives on the items that are most wrong.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     13 — CHAPTER BREAK: THE CORE
+     ============================================================ -->
+<section class="slide chapter">
+  <svg class="glitch" style="right:0;top:0" width="400" height="1080" viewBox="0 0 400 1080" aria-hidden="true">
+    <defs>
+      <pattern id="vscan2" width="9" height="9" patternUnits="userSpaceOnUse">
+        <line x1="0" y1="0" x2="0" y2="9" stroke="#1F2BE0" stroke-width="2.6" opacity=".5"/>
+      </pattern>
+    </defs>
+    <rect x="180" y="180" width="220" height="130" fill="url(#vscan2)"/>
+    <rect x="100" y="310" width="300" height="110" fill="url(#vscan2)"/>
+    <rect x="240" y="420" width="160" height="90"  fill="url(#vscan2)"/>
+    <rect x="150" y="510" width="250" height="130" fill="url(#vscan2)"/>
+    <rect x="280" y="640" width="120" height="110" fill="url(#vscan2)"/>
+  </svg>
+  <div class="frame">
+    <div class="reveal" style="max-width:1200px">
+      <div class="micro" style="margin-bottom:28px">Part three &middot; the core of the method</div>
+      <div class="chapter-title">Patch, tile, chunk &mdash;<br>and one joint<br>reverse process</div>
+      <p class="lede" style="max-width:900px;margin-top:34px">Three words that are all &ldquo;64 voxels&rdquo; and
+      none of which mean the same thing. Getting them apart is what lets a model trained on 1.6&nbsp;mm cubes write a
+      25&nbsp;mm laminate.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     14 — THREE GRIDS
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Three grids with three jobs</h2>
+      <span class="labtag">Patch &middot; tile &middot; window &middot; chunk</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <figure class="fig">
+        <svg viewBox="0 0 1760 416" role="img" aria-label="Plan view of a volume divided into tiles and chunks, with a zoom showing overlapping windows inside one chunk">
+          <!-- ---------- LEFT: volume in tiles and chunks ---------- -->
+          <text x="0" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">THE VOLUME &mdash; PLAN VIEW</text>
+          <g>
+            <!-- tile grid 8 x 4, tile = 84 -->
+            <rect x="0" y="40" width="672" height="336" fill="none" stroke="#1F2BE0" stroke-width="1.5"/>
+            <g stroke="#1F2BE0" stroke-width="1" opacity=".35">
+              <line x1="84"  y1="40" x2="84"  y2="376"/><line x1="168" y1="40" x2="168" y2="376"/>
+              <line x1="252" y1="40" x2="252" y2="376"/><line x1="336" y1="40" x2="336" y2="376"/>
+              <line x1="420" y1="40" x2="420" y2="376"/><line x1="504" y1="40" x2="504" y2="376"/>
+              <line x1="588" y1="40" x2="588" y2="376"/>
+              <line x1="0" y1="124" x2="672" y2="124"/><line x1="0" y1="208" x2="672" y2="208"/>
+              <line x1="0" y1="292" x2="672" y2="292"/>
+            </g>
+            <!-- chunk partition: 3x3 tiles -> but volume is 8x4, so chunks are 3,3,2 by 3,1 -->
+            <g stroke="#1F2BE0" stroke-width="3.5" fill="none">
+              <rect x="0" y="40" width="252" height="252"/>
+              <rect x="252" y="40" width="252" height="252"/>
+              <rect x="504" y="40" width="168" height="252"/>
+              <rect x="504" y="40" width="168" height="252" fill="#1F2BE0" fill-opacity=".06"/>
+              <rect x="0" y="292" width="252" height="84"/>
+              <rect x="252" y="292" width="252" height="84"/>
+              <rect x="504" y="292" width="168" height="84"/>
+            </g>
+            <!-- raster order numbers -->
+            <g font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">
+              <text x="10" y="62">1</text><text x="262" y="62">2</text><text x="514" y="62">3</text>
+              <text x="10" y="314">4</text><text x="262" y="314">5</text><text x="514" y="314">6</text>
+            </g>
+            <!-- one tile filled to show it is an address -->
+            <rect x="84" y="124" width="84" height="84" fill="url(#hatch-fine)"/>
+            <text x="0" y="398" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">chunks are generated in raster order; a finished chunk becomes a neighbour for the next</text>
+          </g>
+
+          <!-- zoom lines -->
+          <line x1="672" y1="40"  x2="820" y2="16"  stroke="#1F2BE0" stroke-width="1" opacity=".55"/>
+          <line x1="672" y1="292" x2="820" y2="376" stroke="#1F2BE0" stroke-width="1" opacity=".55"/>
+
+          <!-- ---------- RIGHT: inside one chunk ---------- -->
+          <text x="820" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">INSIDE ONE CHUNK &mdash; WINDOWS AT 50% OVERLAP</text>
+          <g>
+            <!-- chunk = 3 x 3 tiles, tile = 120 -->
+            <rect x="820" y="40" width="360" height="336" fill="none" stroke="#1F2BE0" stroke-width="3.5"/>
+            <g stroke="#1F2BE0" stroke-width="1" opacity=".35">
+              <line x1="940" y1="40" x2="940" y2="376"/><line x1="1060" y1="40" x2="1060" y2="376"/>
+              <line x1="820" y1="152" x2="1180" y2="152"/><line x1="820" y1="264" x2="1180" y2="264"/>
+            </g>
+            <!-- three overlapping windows, offset by half a tile -->
+            <rect x="820" y="40"  width="120" height="112" fill="url(#hatch)" opacity=".8" stroke="#1F2BE0" stroke-width="2"/>
+            <rect x="880" y="96"  width="120" height="112" fill="url(#hatch-back)" opacity=".8" stroke="#1F2BE0" stroke-width="2"/>
+            <rect x="940" y="152" width="120" height="112" fill="url(#dots)" opacity=".9" stroke="#1F2BE0" stroke-width="2"/>
+            <rect x="1000" y="208" width="120" height="112" fill="url(#scan)" opacity=".9" stroke="#1F2BE0" stroke-width="2"/>
+            <!-- stride annotation -->
+            <line x1="820" y1="392" x2="880" y2="392" stroke="#1F2BE0" stroke-width="1.5" marker-start="url(#arrow-sm)" marker-end="url(#arrow-sm)"/>
+            <text x="890" y="397" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">stride 32 vox &mdash; every voxel is covered by up to 8 windows in 3-D</text>
+          </g>
+
+          <!-- ---------- FAR RIGHT: legend ---------- -->
+          <g font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0">
+            <text x="1420" y="18" font-weight="600" font-size="15" letter-spacing="2.6">READ THE PICTURE</text>
+            <rect x="1420" y="42" width="30" height="30" fill="none" stroke="#1F2BE0" stroke-width="1"/>
+            <text x="1462" y="63" opacity=".85">a <tspan font-weight="600">tile</tspan> &mdash; an address on the volume</text>
+            <rect x="1420" y="90" width="30" height="30" fill="none" stroke="#1F2BE0" stroke-width="3.5"/>
+            <text x="1462" y="111" opacity=".85">a <tspan font-weight="600">chunk</tspan> &mdash; what is denoised jointly</text>
+            <rect x="1420" y="138" width="30" height="30" fill="url(#hatch)" stroke="#1F2BE0" stroke-width="2"/>
+            <text x="1462" y="159" opacity=".85">a <tspan font-weight="600">window</tspan> &mdash; one network call</text>
+            <rect x="1420" y="186" width="30" height="30" fill="url(#hatch-fine)"/>
+            <text x="1462" y="207" opacity=".85">a <tspan font-weight="600">patch</tspan> &mdash; the content of one window</text>
+            <line x1="1420" y1="240" x2="1740" y2="240" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+            <text x="1420" y="272" font-size="17" opacity=".8">A window and a tile are the same size and the</text>
+            <text x="1420" y="296" font-size="17" opacity=".8">same shape. They are not the same object: the</text>
+            <text x="1420" y="320" font-size="17" opacity=".8">tile grid is where a <tspan font-weight="600">request</tspan> is defined and</text>
+            <text x="1420" y="344" font-size="17" opacity=".8">where a <tspan font-weight="600">seam</tspan> would appear; the window grid</text>
+            <text x="1420" y="368" font-size="17" opacity=".8">is where the <tspan font-weight="600">network</tspan> is evaluated.</text>
+          </g>
+        </svg>
+      </figure>
+
+      <table class="kv">
+        <tr><th style="width:150px">Term</th><th style="width:230px">Size</th><th style="width:210px">In latent cells</th><th>Its one job</th></tr>
+        <tr><td class="name">patch</td><td>64&#179; voxels &mdash; 1.6&nbsp;mm</td><td>8 &times; 16&#179;</td>
+          <td>what the VAE encodes and what the denoiser has ever seen. Content.</td></tr>
+        <tr><td class="name">tile</td><td>64 voxels on the volume raster</td><td>16&#179;</td>
+          <td>the address grid. The porosity request is defined per tile, and the seam metric is measured at this period.</td></tr>
+        <tr><td class="name">window</td><td>patch-sized, placed every 32 voxels</td><td>16&#179; at stride 8</td>
+          <td>one network call. Windows overlap by half, so no voxel depends on a single prediction.</td></tr>
+        <tr><td class="name">chunk</td><td>3 &times; 3 &times; 3 tiles &mdash; 192&#179; voxels, 4.8&nbsp;mm</td><td>8 &times; 48&#179;</td>
+          <td>the canvas that is denoised jointly, and the only thing that has to be resident on the GPU.</td></tr>
+      </table>
+      <div class="callout">
+        <div class="q">A patch is content. A tile is an address. A window is a network call.
+        A chunk is one reverse process.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     15 — JOINT DENOISING INSIDE A CHUNK
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Joint denoising: fuse the<br>prediction, not the sample</h2>
+      <span class="labtag">Inside one chunk</span>
+    </div>
+    <div class="deck-body reveal cols c-73">
+      <figure class="fig">
+        <svg viewBox="0 0 1080 620" role="img" aria-label="Four overlapping windows each predict v; predictions are fused by a cosine weight and one DDIM step is taken on the whole chunk canvas">
+          <!-- the chunk canvas, read by four overlapping windows -->
+          <text x="0" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">CHUNK CANVAS AT t</text>
+          <rect x="0" y="40" width="320" height="280" fill="url(#noise)" stroke="#1F2BE0" stroke-width="3.5"/>
+          <g stroke="#1F2BE0" stroke-width="2" fill="none">
+            <rect x="0" y="40" width="140" height="140"/><rect x="70" y="110" width="140" height="140"/>
+            <rect x="140" y="40" width="140" height="140"/><rect x="180" y="180" width="140" height="140"/>
+          </g>
+
+          <!-- four windows into one batched network call -->
+          <g stroke="#1F2BE0" stroke-width="1.5">
+            <line x1="332" y1="90"  x2="396" y2="150" marker-end="url(#arrow-sm)"/>
+            <line x1="332" y1="150" x2="396" y2="176" marker-end="url(#arrow-sm)"/>
+            <line x1="332" y1="210" x2="396" y2="202" marker-end="url(#arrow-sm)"/>
+            <line x1="332" y1="270" x2="396" y2="228" marker-end="url(#arrow-sm)"/>
+          </g>
+          <rect x="408" y="120" width="240" height="140" fill="none" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="428" y="176" font-family="Newsreader, serif" font-size="28" fill="#1F2BE0">denoiser</text>
+          <text x="428" y="208" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".72">batched over windows</text>
+          <text x="428" y="232" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".72">3 guidance calls</text>
+
+          <!-- fusion -->
+          <line x1="660" y1="190" x2="716" y2="190" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="728" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">FUSE</text>
+          <rect x="728" y="40" width="352" height="280" fill="#F0EBDE" stroke="#1F2BE0" stroke-width="3.5"/>
+          <text x="748" y="84" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">v&#770; = &Sigma; w&#7522; v&#770;&#7522; / &Sigma; w&#7522;</text>
+          <path d="M 748 280 Q 818 150 888 280" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".55"/>
+          <path d="M 818 280 Q 888 150 958 280" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".55"/>
+          <path d="M 888 280 Q 958 150 1028 280" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".55"/>
+          <line x1="748" y1="280" x2="1060" y2="280" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="748" y="306" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".72">no weight reaches zero</text>
+
+          <!-- one step on the whole canvas, then the loop -->
+          <line x1="904" y1="332" x2="904" y2="396" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="560" y="408" width="520" height="104" fill="none" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="584" y="454" font-family="Newsreader, serif" font-size="28" fill="#1F2BE0">one DDIM step on the canvas</text>
+          <text x="584" y="486" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".72">then rebuild every window&rsquo;s neighbours</text>
+          <path d="M 560 460 C 400 460 330 420 250 348" fill="none" stroke="#1F2BE0" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+          <text x="356" y="392" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">&times; 50 steps</text>
+
+          <!-- closing note -->
+          <line x1="0" y1="548" x2="1080" y2="548" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+          <text x="0" y="580" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">The canvas is a single latent field. Windows are how it is <tspan font-weight="600">read</tspan>, never how it is stored &mdash; so there is</text>
+          <text x="0" y="606" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">exactly one reverse process running, not one per window.</text>
+        </svg>
+      </figure>
+
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">Why this is not tiled generation</span>
+          <p class="sm">Blending finished samples averages two independent draws. That <strong>halves the variance</strong>
+          exactly where two patches meet, and a region with the wrong variance is off-manifold for the decoder &mdash; it
+          decodes as a smooth band, which is what a seam looks like. Fusing the <em>prediction</em> keeps one trajectory,
+          with the variance the schedule asks for.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Guidance is nested, not symmetric</span>
+          <p class="sm"><span class="code">out(&empty;) + s&#7527;[out(&phi;)&minus;out(&empty;)] + s&#8345;[out(&phi;,nb)&minus;out(&phi;)]</span>.
+          Porosity and neighbours are correlated, and symmetric guidance on correlated conditions drifts off-manifold;
+          nested measures neighbour guidance <em>given</em> porosity.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">The two extremes are the same code</span>
+          <p class="sm">A chunk of one tile is sequential generation; one chunk covering the volume is pure joint
+          denoising. No second implementation, no switch &mdash; only a chunk size.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     16 — WHERE A WINDOW'S SIX FACES COME FROM
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Where a window&rsquo;s six<br>faces come from</h2>
+      <span class="labtag">Neighbour sources at generation time</span>
+    </div>
+    <div class="deck-body reveal cols c-85">
+      <figure class="fig">
+        <svg viewBox="0 0 1120 620" role="img" aria-label="A volume mid-generation: finished chunks behind, the live chunk, unreached chunks ahead, and the four sources of a window's face">
+          <text x="0" y="52" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">finished &mdash; clean latents, re-noised to t on demand</text>
+          <!-- finished chunks -->
+          <g stroke="#1F2BE0" stroke-width="2" fill="url(#hatch-fine)">
+            <rect x="0"   y="70"  width="190" height="130"/><rect x="190" y="70"  width="190" height="130"/>
+            <rect x="380" y="70"  width="190" height="130"/><rect x="570" y="70"  width="190" height="130"/>
+            <rect x="0"   y="200" width="190" height="130"/>
+          </g>
+          <!-- the live chunk -->
+          <rect x="190" y="200" width="190" height="130" fill="url(#noise)" stroke="#1F2BE0" stroke-width="4"/>
+          <!-- chunks not reached yet -->
+          <g stroke="#1F2BE0" stroke-width="1.5" fill="none" stroke-dasharray="7 6">
+            <rect x="380" y="200" width="190" height="130"/><rect x="570" y="200" width="190" height="130"/>
+            <rect x="0"   y="330" width="190" height="130"/><rect x="190" y="330" width="190" height="130"/>
+            <rect x="380" y="330" width="190" height="130"/><rect x="570" y="330" width="190" height="130"/>
+          </g>
+          <!-- a window straddling the live chunk's left face -->
+          <rect x="150" y="230" width="80" height="70" fill="none" stroke="#1F2BE0" stroke-width="3"/>
+          <line x1="150" y1="230" x2="96" y2="192" stroke="#1F2BE0" stroke-width="1"/>
+          <text x="20" y="186" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">window</text>
+          <!-- callouts placed in empty space, never on a border -->
+          <line x1="285" y1="200" x2="285" y2="150" stroke="#1F2BE0" stroke-width="1" opacity="0"/>
+          <text x="404" y="242" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">not reached yet</text>
+          <text x="404" y="264" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">&rarr; UNKNOWN</text>
+          <text x="204" y="368" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">raster order</text>
+          <path d="M 204 384 L 340 384" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow-sm)" opacity=".75"/>
+          <!-- the live chunk, labelled outside the map -->
+          <line x1="285" y1="200" x2="285" y2="176" stroke="#1F2BE0" stroke-width="1"/>
+          <text x="240" y="168" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">live chunk, at t</text>
+          <!-- the specimen boundary -->
+          <line x1="760" y1="60" x2="760" y2="470" stroke="#1F2BE0" stroke-width="4"/>
+          <text x="782" y="96"  font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">the specimen</text>
+          <text x="782" y="118" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">ends here</text>
+          <text x="782" y="144" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">&rarr; OOB</text>
+
+          <!-- the four sources, as a legend row under the map -->
+          <line x1="0" y1="500" x2="1120" y2="500" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="0" y="490" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">FOUR SOURCES FOR ONE FACE</text>
+          <g font-family="Hanken Grotesk, sans-serif" font-size="17" fill="#1F2BE0">
+            <rect x="0" y="526" width="30" height="30" fill="url(#noise)" stroke="#1F2BE0" stroke-width="2"/>
+            <text x="44" y="540" opacity=".85">the live canvas,</text><text x="44" y="562" opacity=".85">at the current t</text>
+            <rect x="280" y="526" width="30" height="30" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="2"/>
+            <text x="324" y="540" opacity=".85">a finished chunk,</text><text x="324" y="562" opacity=".85">re-noised to that t</text>
+            <rect x="560" y="526" width="30" height="30" fill="none" stroke="#1F2BE0" stroke-width="4"/>
+            <text x="604" y="540" opacity=".85">OOB &mdash; the specimen</text><text x="604" y="562" opacity=".85">ends at that face</text>
+            <rect x="840" y="526" width="30" height="30" fill="none" stroke="#1F2BE0" stroke-width="1.5" stroke-dasharray="5 4"/>
+            <text x="884" y="540" opacity=".85">UNKNOWN &mdash; exists,</text><text x="884" y="562" opacity=".85">not resolved yet</text>
+          </g>
+        </svg>
+        <figcaption>The window drawn here straddles the live chunk and a finished one. Both of its EXISTS sources sit at
+        the same noise level, so it sees one coherent field &mdash; not a clean half and a noisy half.</figcaption>
+      </figure>
+
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">The rule that makes a boundary work</span>
+          <p class="sm">A finished chunk is <em>not</em> handed over clean. It is re-noised to the current timestep
+          with fresh noise before it is read as a neighbour. That is the same rule as inpainting by repeated
+          re-noising, and it is why the model &mdash; which was trained on neighbours at their own noise levels &mdash;
+          recognises the input.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">UNKNOWN is not a special case</span>
+          <p class="sm">It is the exact null the training step used when it dropped all six neighbours at once, so
+          &ldquo;no information about that face&rdquo; means the same thing in training and in sampling.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Noise belongs to the request</span>
+          <p class="sm">Every random draw is one field the size of the canvas, rolled so that the value used at a
+          canvas position is the one the <em>request</em> sees there. Moving a request inside a larger canvas moves
+          its noise with it &mdash; without that, changing the assembly grid also changed the sample, and the two
+          effects could not be separated.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     17 — ONE PASS, END TO END
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>One generation, end to end</h2>
+      <span class="labtag">The loop</span>
+    </div>
+    <div class="deck-body reveal cols c-2">
+      <div class="steps">
+        <div class="step"><span class="s">01</span><div><h4>Snap the request to whole tiles</h4>
+          <p class="sm">A size is given in millimetres and snapped to a whole number of 64-voxel tiles on every axis.
+          The snap is checked, not assumed: a request that would silently lose a tile is refused.</p></div></div>
+        <div class="step"><span class="s">02</span><div><h4>Paint the request</h4>
+          <p class="sm">A porosity per tile, a material fraction per latent cell, and an orientation profile from the
+          layup. All three are computable before the first network call.</p></div></div>
+        <div class="step"><span class="s">03</span><div><h4>Cut into chunks, raster order</h4>
+          <p class="sm">The last chunk on an axis is simply smaller. Nothing about the model changes with the number
+          of chunks.</p></div></div>
+        <div class="step"><span class="s">04</span><div><h4>Per chunk: noise the canvas</h4>
+          <p class="sm">Drawn once, in the frame of the request.</p></div></div>
+        <div class="step"><span class="s">05</span><div><h4>Per timestep: read, predict, fuse, step</h4>
+          <p class="sm">Build every window&rsquo;s six faces from the four sources; batch the windows; three guidance
+          calls; fuse the predictions with the cosine weight; take one DDIM step on the canvas.</p></div></div>
+        <div class="step"><span class="s">06</span><div><h4>The chunk is finished</h4>
+          <p class="sm">It joins the pool of finished chunks and is re-noised on demand for whichever chunk comes next.</p></div></div>
+        <div class="step"><span class="s">07</span><div><h4>Decode overlapped, blend, argmax</h4>
+          <p class="sm">The last stage, and the one that used to leave a visible seam of its own.</p></div></div>
+      </div>
+
+      <div class="vstack-lg">
+        <figure class="fig">
+          <svg viewBox="0 0 820 300" role="img" aria-label="Nesting of the three loops: chunks outside, timesteps inside, windows innermost">
+            <rect x="0" y="20" width="820" height="260" fill="none" stroke="#1F2BE0" stroke-width="3.5"/>
+            <text x="20" y="52" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">for each chunk &mdash; raster order</text>
+            <rect x="40" y="72" width="740" height="188" fill="none" stroke="#1F2BE0" stroke-width="2"/>
+            <text x="60" y="104" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">for t in the 50-step DDIM grid</text>
+            <rect x="80" y="124" width="660" height="116" fill="none" stroke="#1F2BE0" stroke-width="1.5" stroke-dasharray="6 5"/>
+            <text x="100" y="156" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">for each window &mdash; batched</text>
+            <text x="100" y="186" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0" opacity=".8">gather 6 faces &rarr; 3 guidance calls &rarr; accumulate</text>
+            <text x="100" y="222" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">then: fuse &rarr; one DDIM step on the canvas</text>
+          </svg>
+        </figure>
+        <div class="block">
+          <span class="micro">Cost, and where it goes</span>
+          <p class="sm">Network calls scale as
+          <span class="code">chunks &times; steps &times; windows &times; 3</span>. Windows per chunk grow with the chunk
+          volume at stride&nbsp;32, so a bigger chunk is more coherent and more expensive in the same breath. Memory is
+          set by the chunk canvas and the window batch &mdash; never by the volume.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     18 — THE DECODE SIDE
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>The decode has its own seam</h2>
+      <span class="labtag">Overlapped decode &amp; blending order</span>
+    </div>
+    <div class="deck-body reveal cols c-58">
+      <figure class="fig">
+        <svg viewBox="0 0 660 430" role="img" aria-label="Decode windows overlapping with a tapered weight; grey and logits blended before the argmax">
+          <text x="0" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">DIRECT TILING &mdash; STRIDE 64</text>
+          <g stroke="#1F2BE0" stroke-width="1.5" fill="url(#hatch-fine)">
+            <rect x="0" y="36" width="150" height="90"/><rect x="150" y="36" width="150" height="90"/>
+            <rect x="300" y="36" width="150" height="90"/><rect x="450" y="36" width="150" height="90"/>
+          </g>
+          <g stroke="#1F2BE0" stroke-width="4">
+            <line x1="150" y1="30" x2="150" y2="132"/><line x1="300" y1="30" x2="300" y2="132"/><line x1="450" y1="30" x2="450" y2="132"/>
+          </g>
+          <text x="0" y="152" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">a decoder-side discontinuity at every patch face</text>
+
+          <text x="0" y="212" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">OVERLAPPED &mdash; STRIDE 32, TAPERED</text>
+          <g stroke="#1F2BE0" stroke-width="1.5" fill="none">
+            <rect x="0" y="230" width="150" height="90" fill="url(#hatch-fine)" opacity=".85"/>
+            <rect x="75" y="230" width="150" height="90" fill="url(#hatch-back)" opacity=".7"/>
+            <rect x="150" y="230" width="150" height="90" fill="url(#hatch-fine)" opacity=".85"/>
+            <rect x="225" y="230" width="150" height="90" fill="url(#hatch-back)" opacity=".7"/>
+            <rect x="300" y="230" width="150" height="90" fill="url(#hatch-fine)" opacity=".85"/>
+            <rect x="375" y="230" width="150" height="90" fill="url(#hatch-back)" opacity=".7"/>
+            <rect x="450" y="230" width="150" height="90" fill="url(#hatch-fine)" opacity=".85"/>
+          </g>
+          <!-- taper curves -->
+          <path d="M 0 380 Q 75 330 150 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <path d="M 75 380 Q 150 330 225 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <path d="M 150 380 Q 225 330 300 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <path d="M 225 380 Q 300 330 375 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <path d="M 300 380 Q 375 330 450 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <path d="M 375 380 Q 450 330 525 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <path d="M 450 380 Q 525 330 600 380" fill="none" stroke="#1F2BE0" stroke-width="2" opacity=".6"/>
+          <line x1="0" y1="380" x2="600" y2="380" stroke="#1F2BE0" stroke-width="1.5"/>
+          <text x="0" y="410" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">grey level and raw class logits accumulate under the taper</text>
+        </svg>
+      </figure>
+
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">Blend the evidence, then decide</span>
+          <p class="sm">The grey level and the <em>raw three-class logits</em> are accumulated under the tapered window,
+          and the argmax is taken <strong>after</strong> the blend. Taking the argmax first and blending labels averages
+          decisions instead of evidence &mdash; near a boundary that produces a label that neither decoder window
+          actually predicted.</p>
+        </div>
+        <div class="block">
+          <span class="micro">Two seam periods, one baseline</span>
+          <p class="sm">Discontinuity is measured at the <em>window</em> period (64 voxels) and at the <em>chunk</em>
+          period (64 &times; chunk tiles), both against one interior slice-to-slice baseline. A gap between the two
+          says which mechanism is at fault: window overlap, or the chunk boundary. Reporting a single seam number
+          cannot distinguish them.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">A measured lesson</span>
+          <p class="sm">Part of what looked like a diffusion seam was the <em>decoder&rsquo;s</em> tiling all along.
+          The overlapped decode removed it &mdash; on real volumes as well as generated ones, which is how we know it was
+          the decode and not the prior.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     19 — ASKING FOR SOMETHING SPECIFIC
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Asking for something specific</h2>
+      <span class="labtag">Three painted fields</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <div class="cols c-3">
+        <figure class="fig">
+          <div class="micro" style="margin-bottom:8px">01 &mdash; porosity, per tile</div>
+          <svg viewBox="0 0 520 250" role="img" aria-label="A porosity field defined per tile and a window straddling four tiles">
+            <g stroke="#1F2BE0" stroke-width="1" opacity=".4" fill="none">
+              <rect x="0" y="10" width="480" height="180"/>
+              <line x1="120" y1="10" x2="120" y2="190"/><line x1="240" y1="10" x2="240" y2="190"/><line x1="360" y1="10" x2="360" y2="190"/>
+              <line x1="0" y1="70" x2="480" y2="70"/><line x1="0" y1="130" x2="480" y2="130"/>
+            </g>
+            <rect x="0" y="10" width="120" height="60" fill="#1F2BE0" opacity=".10"/>
+            <rect x="120" y="10" width="120" height="60" fill="#1F2BE0" opacity=".22"/>
+            <rect x="240" y="10" width="120" height="60" fill="#1F2BE0" opacity=".55"/>
+            <rect x="360" y="10" width="120" height="60" fill="#1F2BE0" opacity=".34"/>
+            <rect x="0" y="70" width="120" height="60" fill="#1F2BE0" opacity=".30"/>
+            <rect x="120" y="70" width="120" height="60" fill="#1F2BE0" opacity=".62"/>
+            <rect x="240" y="70" width="120" height="60" fill="#1F2BE0" opacity=".18"/>
+            <rect x="360" y="70" width="120" height="60" fill="#1F2BE0" opacity=".44"/>
+            <rect x="0" y="130" width="120" height="60" fill="#1F2BE0" opacity=".48"/>
+            <rect x="120" y="130" width="120" height="60" fill="#1F2BE0" opacity=".14"/>
+            <rect x="240" y="130" width="120" height="60" fill="#1F2BE0" opacity=".38"/>
+            <rect x="360" y="130" width="120" height="60" fill="#1F2BE0" opacity=".26"/>
+            <rect x="60" y="40" width="120" height="60" fill="none" stroke="#1F2BE0" stroke-width="3"/>
+            <text x="0" y="218" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">a window straddles up to 8 tiles in 3-D</text>
+            <text x="0" y="240" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">its request = volume-weighted footprint mean</text>
+          </svg>
+        </figure>
+        <figure class="fig">
+          <div class="micro" style="margin-bottom:8px">02 &mdash; the specimen envelope</div>
+          <svg viewBox="0 0 520 250" role="img" aria-label="A painted material map: interior, exterior, and fractional cells at the surface, with a notch and a hole">
+            <g stroke="#1F2BE0" stroke-width="1" opacity=".35" fill="none">
+              <rect x="0" y="10" width="480" height="180"/>
+            </g>
+            <path d="M 40 40 L 300 40 L 300 80 L 360 80 L 360 40 L 440 40 L 440 160 L 40 160 Z" fill="#1F2BE0" opacity=".30" stroke="#1F2BE0" stroke-width="2"/>
+            <circle cx="150" cy="110" r="24" fill="#F0EBDE" stroke="#1F2BE0" stroke-width="2"/>
+            <g stroke="#1F2BE0" stroke-width="1" opacity=".45">
+              <line x1="40" y1="40" x2="40" y2="160"/><line x1="80" y1="40" x2="80" y2="160"/><line x1="120" y1="40" x2="120" y2="160"/>
+              <line x1="160" y1="40" x2="160" y2="160"/><line x1="200" y1="40" x2="200" y2="160"/><line x1="240" y1="40" x2="240" y2="160"/>
+              <line x1="280" y1="40" x2="280" y2="160"/><line x1="320" y1="80" x2="320" y2="160"/><line x1="360" y1="40" x2="360" y2="160"/>
+              <line x1="400" y1="40" x2="400" y2="160"/>
+              <line x1="40" y1="80" x2="440" y2="80"/><line x1="40" y1="120" x2="440" y2="120"/>
+            </g>
+            <text x="0" y="218" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">1 inside &middot; 0 outside &middot; fractional at the surface</text>
+            <text x="0" y="240" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">a notch or a hole is just a different painting</text>
+          </svg>
+        </figure>
+        <figure class="fig">
+          <div class="micro" style="margin-bottom:8px">03 &mdash; the layup</div>
+          <svg viewBox="0 0 520 250" role="img" aria-label="A stacking sequence turned into a smooth cos2theta and sin2theta profile through the thickness">
+            <g stroke="#1F2BE0" stroke-width="1" opacity=".35">
+              <line x1="60" y1="10" x2="60" y2="190"/><line x1="60" y1="100" x2="480" y2="100"/>
+            </g>
+            <path d="M 60 40 L 110 40 L 110 150 L 160 150 L 160 100 L 210 100 L 210 60 L 260 60 L 260 140 L 310 140 L 310 40 L 360 40 L 360 110 L 410 110 L 410 70 L 460 70"
+                  fill="none" stroke="#1F2BE0" stroke-width="2.5" opacity=".85"/>
+            <path d="M 60 130 L 110 130 L 110 60 L 160 60 L 160 120 L 210 120 L 210 150 L 260 150 L 260 70 L 310 70 L 310 130 L 360 130 L 360 90 L 410 90 L 410 140 L 460 140"
+                  fill="none" stroke="#1F2BE0" stroke-width="2.5" stroke-dasharray="6 5" opacity=".6"/>
+            <text x="0" y="46" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">cos2&theta;</text>
+            <text x="0" y="136" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">sin2&theta;</text>
+            <text x="60" y="218" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">one value per depth plane, pooled as components</text>
+            <text x="60" y="240" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">never as an angle &mdash; and never renormalised</text>
+          </svg>
+        </figure>
+      </div>
+
+      <div class="cols c-3">
+        <div class="block soft">
+          <span class="micro">The average is on raw fractions</span>
+          <p class="sm">A window&rsquo;s requested porosity is the tile field averaged over its own footprint, each tile
+          weighted by the volume it covers &mdash; on <em>raw</em> pore fractions, before the log transform. The mean of
+          a log is not the log of a mean. Sampling only the tile under the window centre handed the two windows on
+          either side of a step the two extremes, and reproduced the requested step as a wider, offset one.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Then converted to what the model was trained on</span>
+          <p class="sm">The request is a <em>material</em> porosity; the store holds <em>full-patch</em> &phi;. Per window
+          the request is scaled by the window&rsquo;s own material fraction &mdash; before the clip and before the log,
+          because clipping first turns a legal request into an illegal one and a log turns a scale into an offset.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Why a painted envelope buys shape control</span>
+          <p class="sm">The envelope is an <em>input</em>, not an output. Asking for a curved specimen, a notch or a
+          drilled hole is a different painting of the same channel &mdash; no retraining, and the model has a labelled
+          air class to put outside it.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     20 — ARBITRARY SIZE
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Why it extends to arbitrary size</h2>
+      <span class="labtag">Scaling</span>
+    </div>
+    <div class="deck-body reveal vstack-lg">
+      <figure class="fig">
+        <svg viewBox="0 0 1760 260" role="img" aria-label="Three volumes of growing size measured in chunks, with constant GPU memory">
+          <!-- 192 cubed = 1 chunk -->
+          <rect x="0" y="60" width="70" height="70" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="3"/>
+          <text x="0" y="160" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">192&#179;</text>
+          <text x="0" y="186" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">4.8 mm cube</text>
+          <text x="0" y="208" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">1 chunk</text>
+
+          <!-- 384 cubed = 8 chunks -->
+          <g>
+            <rect x="220" y="25" width="140" height="140" fill="none" stroke="#1F2BE0" stroke-width="3"/>
+            <g stroke="#1F2BE0" stroke-width="2" opacity=".6">
+              <line x1="290" y1="25" x2="290" y2="165"/><line x1="220" y1="95" x2="360" y2="95"/>
+            </g>
+            <rect x="220" y="25" width="70" height="70" fill="url(#hatch-fine)"/>
+          </g>
+          <text x="220" y="200" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">384&#179;</text>
+          <text x="220" y="226" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">9.6 mm cube &mdash; 8 chunks, planes on all three axes</text>
+
+          <!-- 1024 x 1024 x 192 -->
+          <g>
+            <rect x="700" y="25" width="373" height="140" fill="none" stroke="#1F2BE0" stroke-width="3"/>
+            <g stroke="#1F2BE0" stroke-width="1.2" opacity=".5">
+              <line x1="770" y1="25" x2="770" y2="165"/><line x1="840" y1="25" x2="840" y2="165"/>
+              <line x1="910" y1="25" x2="910" y2="165"/><line x1="980" y1="25" x2="980" y2="165"/>
+              <line x1="1050" y1="25" x2="1050" y2="165"/>
+              <line x1="700" y1="95" x2="1073" y2="95"/>
+            </g>
+            <rect x="700" y="25" width="70" height="70" fill="url(#hatch-fine)"/>
+          </g>
+          <text x="700" y="200" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">1024 &times; 1024 &times; 192</text>
+          <text x="700" y="226" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">25.6 &times; 25.6 &times; 4.8 mm &mdash; a coupon-scale field of view, tens of chunks</text>
+
+          <!-- constant memory bar -->
+          <line x1="1340" y1="20" x2="1340" y2="240" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+          <text x="1380" y="40" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">GPU MEMORY</text>
+          <rect x="1380" y="58" width="80" height="120" fill="url(#scan)" stroke="#1F2BE0" stroke-width="2"/>
+          <rect x="1490" y="58" width="80" height="120" fill="url(#scan)" stroke="#1F2BE0" stroke-width="2"/>
+          <rect x="1600" y="58" width="80" height="120" fill="url(#scan)" stroke="#1F2BE0" stroke-width="2"/>
+          <text x="1380" y="204" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">one chunk canvas + one window batch</text>
+          <text x="1380" y="226" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">identical for all three volumes above</text>
+        </svg>
+      </figure>
+
+      <div class="cols c-3">
+        <div class="block">
+          <span class="micro">What grows</span>
+          <p class="sm">The number of chunks &mdash; linearly in volume &mdash; and with it wall time and disk. Nothing else.
+          A larger volume is more of the same work, never a different kind of work.</p>
+        </div>
+        <div class="block">
+          <span class="micro">What does not</span>
+          <p class="sm">GPU memory, the model, the receptive field, and the conditioning contract. Every long-range
+          constraint travels in a <em>painted field</em> &mdash; porosity, envelope, orientation &mdash; not through the
+          network&rsquo;s receptive field. The only cross-chunk communication is the six-face neighbour channel.</p>
+        </div>
+        <div class="block">
+          <span class="micro">Where it strains &mdash; honestly</span>
+          <p class="sm">Raster order gives the volume a preferred direction: a chunk is conditioned on finished
+          neighbours behind it and on UNKNOWN ahead. Any bias in the blend therefore <strong>accumulates along that
+          direction</strong>, and the residual discontinuity we can still measure sits at the <em>chunk</em> period,
+          not the window period. That is the thread the last part of this talk pulls.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     21 — HOW WE CHECK IT
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>How a generated volume<br>is checked</h2>
+      <span class="labtag">Evaluation design</span>
+    </div>
+    <div class="deck-body reveal cols c-58">
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">The principle</span>
+          <p class="lede" style="font-size:24px;line-height:1.35">Every metric has a real-volume floor.</p>
+          <p class="sm" style="margin-top:12px">The same statistic is computed three ways: generated against real,
+          <em>real against real</em>, and the ratio between them. Two crops of the same laminate do not agree
+          perfectly either &mdash; a distance with no floor cannot tell a model failure from the natural spread of the
+          material.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">And a manifest per volume</span>
+          <p class="sm">Model run, step, objective, sampler geometry, the request, the commit. A metric declares the
+          fields it reads and <em>refuses</em> a volume whose manifest does not carry them. A number no one can trace
+          back to a checkpoint is not a result.</p>
+        </div>
+      </div>
+      <div class="rows">
+        <div class="row"><span class="n">01</span><div><div class="t">Does it obey, locally?</div>
+          <p class="sm">Delivered against requested porosity <em>within</em> one volume, tile by tile &mdash; not the
+          between-volume correlation, which is far easier and was reported once by mistake.</p></div></div>
+        <div class="row"><span class="n">02</span><div><div class="t">Seams, at both periods</div>
+          <p class="sm">Window period and chunk period, on the grey level and on the pore log-odds, against one
+          interior baseline.</p></div></div>
+        <div class="row"><span class="n">03</span><div><div class="t">Geometry control</div>
+          <p class="sm">Air outside the requested envelope and inside it; surface position and roughness; a notch, a
+          hole, and a sphere &mdash; a curved specimen no training patch contains.</p></div></div>
+        <div class="row"><span class="n">04</span><div><div class="t">Microstructure distances</div>
+          <p class="sm">Two-point correlation, pore-size distribution, border-corrected Ripley&rsquo;s K, slice FID
+          &mdash; each floored by matched real pairs.</p></div></div>
+        <div class="row"><span class="n">05</span><div><div class="t">Did it memorise?</div>
+          <p class="sm">Nearest-neighbour search against the store the volumes were generated from, at the stride
+          that makes rows unique.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     22 — CHAPTER BREAK: THE BLENDING PROBLEM
+     ============================================================ -->
+<section class="slide chapter">
+  <svg class="glitch" style="left:0;top:0" width="400" height="1080" viewBox="0 0 400 1080" aria-hidden="true">
+    <defs>
+      <pattern id="vscan3" width="9" height="9" patternUnits="userSpaceOnUse">
+        <line x1="0" y1="0" x2="0" y2="9" stroke="#1F2BE0" stroke-width="2.6" opacity=".5"/>
+      </pattern>
+    </defs>
+    <rect x="0" y="200" width="220" height="130" fill="url(#vscan3)"/>
+    <rect x="0" y="330" width="300" height="110" fill="url(#vscan3)"/>
+    <rect x="0" y="440" width="160" height="90"  fill="url(#vscan3)"/>
+    <rect x="0" y="530" width="250" height="130" fill="url(#vscan3)"/>
+    <rect x="0" y="660" width="120" height="110" fill="url(#vscan3)"/>
+  </svg>
+  <div class="frame" style="align-items:flex-end;text-align:right">
+    <div class="reveal" style="max-width:1180px">
+      <div class="micro" style="margin-bottom:28px">Part five &middot; where we would like your help</div>
+      <div class="chapter-title">Every seam in this<br>system is an average<br>in latent space</div>
+      <p class="lede" style="max-width:900px;margin-top:34px;margin-left:auto">And nothing in a KL-regularised latent
+      promises that an average of two valid codes is itself a valid code.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     23 — WHERE WE BLEND
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Three places we blend &mdash;<br>and one shared assumption</h2>
+      <span class="labtag">The problem</span>
+    </div>
+    <div class="deck-body reveal cols c-73">
+      <div class="vstack-lg">
+        <div class="cols c-3">
+          <div class="block">
+            <span class="micro">A &mdash; window overlap</span>
+            <p class="sm">Up to eight predictions are combined per voxel, every step, inside every chunk. A weighted
+            mean of network outputs.</p>
+          </div>
+          <div class="block">
+            <span class="micro">B &mdash; chunk boundary</span>
+            <p class="sm">A finished chunk is re-noised and read as a neighbour. The junction between two
+            independently completed reverse processes.</p>
+          </div>
+          <div class="block">
+            <span class="micro">C &mdash; the decode</span>
+            <p class="sm">Grey levels and class logits accumulate under a taper before the argmax. A weighted mean of
+            decoder outputs.</p>
+          </div>
+        </div>
+        <div class="callout">
+          <div class="q">All three are weighted averages taken in a space that was never trained to be averaged.</div>
+          <p class="sm" style="margin-top:14px">A KL-VAE latent is regularised only by a penalty on the marginal. It says
+          nothing about the <em>straight line between two encodings</em>. Where that line leaves the region the decoder
+          was trained on, the blend does not fail loudly &mdash; it decodes as something smooth and plausible and slightly
+          wrong, which is exactly the signature of a seam. And it is worst in the overlap regions, which is to say:
+          worst everywhere two things have to agree.</p>
+        </div>
+        <div class="block">
+          <span class="micro">The symptom we can point at</span>
+          <p class="sm">The window-period discontinuity is essentially closed &mdash; overlapping windows and a tapered
+          decode deal with it. What is left sits at the <strong>chunk period</strong>, the one junction where two
+          completed reverse processes meet, and it is the one that repeats once per chunk boundary in a large volume.
+          That is a blending symptom, not a capacity symptom: the same model, on the same request, produces it only
+          where two results have to be reconciled.</p>
+        </div>
+      </div>
+
+      <figure class="fig">
+        <svg viewBox="0 0 560 470" role="img" aria-label="Two valid latents on a curved data manifold; the straight line between them leaves the manifold">
+          <!-- manifold -->
+          <path d="M 40 330 C 130 150 260 420 360 190 C 410 80 480 120 520 70"
+                fill="none" stroke="#1F2BE0" stroke-width="3"/>
+          <text x="40" y="368" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">the region the decoder was trained on</text>
+          <!-- two points -->
+          <circle cx="150" cy="238" r="8" fill="#1F2BE0"/>
+          <circle cx="392" cy="152" r="8" fill="#1F2BE0"/>
+          <text x="104" y="228" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#7488;</text>
+          <text x="404" y="142" font-family="DM Mono, monospace" font-size="16" fill="#1F2BE0">z&#7495;</text>
+          <!-- chord -->
+          <line x1="150" y1="238" x2="392" y2="152" stroke="#1F2BE0" stroke-width="2" stroke-dasharray="7 5"/>
+          <circle cx="271" cy="195" r="7" fill="none" stroke="#1F2BE0" stroke-width="2.5"/>
+          <line x1="271" y1="195" x2="271" y2="272" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow-sm)"/>
+          <text x="196" y="298" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0">&frac12;(z&#7488; + z&#7495;)</text>
+          <text x="196" y="320" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">a code no encoder produced</text>
+          <!-- gap annotation -->
+          <line x1="271" y1="195" x2="290" y2="252" stroke="#1F2BE0" stroke-width="1" opacity=".4"/>
+          <!-- lower: what a rank-limited space does -->
+          <line x1="0" y1="396" x2="560" y2="396" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+          <text x="0" y="428" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">The published RRAE result is exactly about this gap:</text>
+          <text x="0" y="452" font-family="Hanken Grotesk, sans-serif" font-size="18" fill="#1F2BE0" opacity=".85">interpolation error, not reconstruction error.</text>
+        </svg>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     24 — THE PROPOSAL
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>The proposal: make the<br>blend operator well posed</h2>
+      <span class="labtag">VRRAE &mdash; where we would put it</span>
+    </div>
+    <div class="deck-body reveal cols c-58">
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">What the VRRAE bottleneck gives</span>
+          <p class="sm">A truncated SVD of the batch latent matrix; the coefficients used <em>directly</em> as the
+          posterior mean, with the identity map that the ablation showed is necessary; the KL applied to those
+          coefficients. Because the right singular vectors are orthonormal, the coefficients are regularised without
+          a penalty and <strong>ordered by importance</strong>, and posterior collapse is bounded to
+          &plusmn;s&#772;&#7522;/&radic;N rather than to wherever a nonlinear encoder happens to land.</p>
+          <p class="sm" style="margin-top:12px">The reported gains are on <em>interpolation</em> and random generation
+          &mdash; not on reconstruction. That is the axis this pipeline is limited on.</p>
+        </div>
+        <div class="block">
+          <span class="micro">What we would use it for</span>
+          <p class="sm">Not to replace the spatial latent wholesale. <strong>To give the three blends above a space in
+          which an average is a legal code.</strong> Project the overlapping predictions onto the fixed basis extracted
+          after training, combine the coefficients there, and reconstruct. An interpolation of coefficients on an
+          orthonormal basis stays inside the span the decoder was trained on, by construction rather than by hope.</p>
+        </div>
+      </div>
+
+      <figure class="fig">
+        <svg viewBox="0 0 1000 620" role="img" aria-label="Today a weighted mean is taken directly in the latent; the proposal projects onto a fixed basis, blends the coefficients, and reconstructs">
+          <!-- ---------- TODAY ---------- -->
+          <text x="0" y="18" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">TODAY</text>
+          <rect x="0"   y="40" width="130" height="104" fill="url(#hatch)" stroke="#1F2BE0" stroke-width="2"/>
+          <rect x="160" y="40" width="130" height="104" fill="url(#hatch-back)" stroke="#1F2BE0" stroke-width="2"/>
+          <text x="330" y="76"  font-family="Hanken Grotesk, sans-serif" font-size="19" fill="#1F2BE0" opacity=".85">a weighted mean, taken directly</text>
+          <text x="330" y="104" font-family="Hanken Grotesk, sans-serif" font-size="19" fill="#1F2BE0" opacity=".85">in the latent &mdash; with no guarantee</text>
+          <text x="330" y="132" font-family="Hanken Grotesk, sans-serif" font-size="19" fill="#1F2BE0" opacity=".85">that the result is a code at all</text>
+          <line x1="145" y1="158" x2="145" y2="192" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="80" y="200" width="130" height="104" fill="url(#noise)" stroke="#1F2BE0" stroke-width="2" stroke-dasharray="6 5"/>
+          <text x="234" y="258" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">a code no encoder produced</text>
+
+          <line x1="0" y1="340" x2="1000" y2="340" stroke="#1F2BE0" stroke-width="1" opacity=".18"/>
+
+          <!-- ---------- PROPOSED ---------- -->
+          <text x="0" y="382" font-family="Hanken Grotesk, sans-serif" font-weight="600" font-size="15" letter-spacing="2.6" fill="#1F2BE0">PROPOSED</text>
+          <rect x="0" y="406" width="110" height="84" fill="url(#hatch)" stroke="#1F2BE0" stroke-width="2"/>
+          <rect x="0" y="510" width="110" height="84" fill="url(#hatch-back)" stroke="#1F2BE0" stroke-width="2"/>
+          <line x1="122" y1="448" x2="158" y2="464" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow-sm)"/>
+          <line x1="122" y1="552" x2="158" y2="536" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow-sm)"/>
+          <rect x="170" y="425" width="150" height="150" fill="none" stroke="#1F2BE0" stroke-width="2"/>
+          <text x="188" y="496" font-family="Newsreader, serif" font-size="26" fill="#1F2BE0">project</text>
+          <text x="188" y="526" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".75">onto U&#7584;</text>
+          <line x1="332" y1="500" x2="372" y2="500" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow-sm)"/>
+          <text x="384" y="418" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">ordered coefficients</text>
+          <g>
+            <rect x="384" y="434" width="160" height="16" fill="#1F2BE0" opacity=".9"/>
+            <rect x="384" y="458" width="132" height="16" fill="#1F2BE0" opacity=".75"/>
+            <rect x="384" y="482" width="104" height="16" fill="#1F2BE0" opacity=".6"/>
+            <rect x="384" y="506" width="74"  height="16" fill="#1F2BE0" opacity=".45"/>
+            <rect x="384" y="530" width="48"  height="16" fill="#1F2BE0" opacity=".3"/>
+            <rect x="384" y="554" width="24"  height="16" fill="#1F2BE0" opacity=".18"/>
+          </g>
+          <text x="384" y="592" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".7">blend here</text>
+          <line x1="600" y1="500" x2="640" y2="500" stroke="#1F2BE0" stroke-width="1.5" marker-end="url(#arrow-sm)"/>
+          <text x="652" y="418" font-family="DM Mono, monospace" font-size="15" fill="#1F2BE0" opacity=".8">reconstruct &mdash; still in the span</text>
+          <rect x="652" y="440" width="150" height="120" fill="url(#hatch-fine)" stroke="#1F2BE0" stroke-width="2"/>
+        </svg>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     25 — WHY IT SHOULD HELP AT SIZE AND ON UNSEEN SHAPES
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>Why that matters most at<br>size, and on shapes we<br>never trained on</h2>
+      <span class="labtag">The argument</span>
+    </div>
+    <div class="deck-body reveal cols c-3">
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">01 &mdash; the error compounds</span>
+          <p class="sm">A one-chunk volume has no chunk boundary. A coupon-scale volume has tens of them, arranged in
+          a raster order, each conditioned on the ones before it. Any bias in the blend is applied again at every
+          junction and in the same direction.</p>
+          <p class="sm" style="margin-top:12px">A blend that is on-manifold <em>by construction</em> does not remove a
+          constant error &mdash; it removes the term that <strong>grows with the number of chunks</strong>. That is the
+          term that decides whether the method has a size limit.</p>
+        </div>
+      </div>
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">02 &mdash; unseen CFRP geometry</span>
+          <p class="sm">The requests we care about are the ones we cannot show the model: a curved surface, a notch, a
+          drilled hole, a stacking sequence that no coupon in the dataset has.</p>
+          <p class="sm" style="margin-top:12px">At exactly those places the material map is fractional, several faces
+          are out of bounds, and the latent sits furthest from anything the encoder ever produced. A
+          <strong>rank-limited</strong> representation cannot express a direction outside the training span &mdash; so
+          the failure mode changes from &ldquo;an off-manifold artefact&rdquo; to &ldquo;the nearest plausible
+          microstructure&rdquo;. For an engineering deliverable that is the failure we want.</p>
+        </div>
+      </div>
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">03 &mdash; it can be added late</span>
+          <p class="sm">The fixed basis is extracted once after training and then applied per sample. In the weakest
+          version of this proposal the denoiser does not change at all: the rank-reduced space is used only as the
+          space in which overlaps and boundaries are combined.</p>
+          <p class="sm" style="margin-top:12px">That makes it testable against the current model, with the current
+          evaluation suite, as an <strong>A/B on the blend operator alone</strong> &mdash; the seam ratio at the chunk
+          period is already the measurement that would show it.</p>
+        </div>
+        <div class="callout">
+          <div class="q">A clean experiment: same checkpoint, same noise, same request. Only the blend changes.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     26 — WHAT WE ALREADY TRIED
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>What we already tried,<br>and what it cost us</h2>
+      <span class="labtag">A documented negative result</span>
+    </div>
+    <div class="deck-body reveal cols c-58">
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">The 2026 attempt</span>
+          <p class="sm">We replaced the whole spatial bottleneck with a flat VRRAE one: flatten the encoder output,
+          one fully-connected layer to a target dimension, then the published rank-reduction layer, then the
+          reparameterisation and the KL &mdash; following the identity-mean construction. The decoder was made grey-only
+          to isolate the bottleneck from the segmentation loss balance.</p>
+          <p class="sm" style="margin-top:12px"><strong>Reconstruction came out about three times worse in L1 than the
+          spatial baseline.</strong> We then ran the controlled ablation &mdash; identical flat architecture, the
+          rank-reduction layer replaced by learned linear heads, everything else held fixed &mdash; to separate the two
+          candidate causes. The direction was closed as a negative result for <em>bottleneck replacement</em>.</p>
+        </div>
+        <div class="block soft">
+          <span class="micro">Two accepted consequences we walked into</span>
+          <p class="sm">A flat latent also invalidates the 3-D denoiser and its neighbour conditioning &mdash; the whole
+          diffusion stage would have had to be redesigned for a token representation. And the discoverable rank is
+          bounded by the batch size, so latent width and batch size stop being independent choices.</p>
+        </div>
+      </div>
+
+      <div class="vstack-lg">
+        <div class="block">
+          <span class="micro">What we think actually went wrong</span>
+          <ul class="dashlist sm" style="margin-top:10px">
+            <li><span><strong>Capacity, not method.</strong> A few hundred numbers for a 1.6&nbsp;mm cube of stochastic
+            texture, against roughly eight thousand in the spatial baseline. Porosity is not a smooth low-order field;
+            it is a random medium.</span></li>
+            <li><span><strong>A basis that rotates per batch.</strong> Estimated in a very high-dimensional feature
+            space, with near-degenerate singular values and the gradient instability that comes with them; and the
+            training-time bases are not the single basis used at evaluation.</span></li>
+            <li><span><strong>We measured the wrong axis.</strong> We judged it on reconstruction. The published
+            advantage is on interpolation and sampling.</span></li>
+          </ul>
+        </div>
+        <div class="callout">
+          <div class="q">So the question we would bring to you is not &ldquo;does a VRRAE bottleneck reconstruct
+          XCT?&rdquo;. It is: <em>can rank reduction give a 3-D spatial latent a blend operator that stays on the
+          manifold?</em></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     27 — OPEN QUESTIONS
+     ============================================================ -->
+<section class="slide">
+  <div class="frame">
+    <div class="topbar reveal">
+      <h2>What we would need to<br>answer together</h2>
+      <span class="labtag">Open questions</span>
+    </div>
+    <div class="deck-body reveal cols c-2">
+      <div class="rows">
+        <div class="row"><span class="n">Q1</span><div><div class="t">Rank along which axis?</div>
+          <p class="sm">Channels within a latent cell, the flattened patch, or the whole chunk canvas. Each gives a
+          different object: a per-cell code book, a per-patch code, or a global field basis. Only the first two keep
+          the spatial structure the denoiser needs.</p></div></div>
+        <div class="row"><span class="n">Q2</span><div><div class="t">Does the batch-basis argument survive?</div>
+          <p class="sm">The consistency result assumes enough linearly independent samples per batch. If the
+          &ldquo;samples&rdquo; are spatial cells of one volume they are strongly correlated by construction. Does the
+          fixed basis still hold &mdash; and should it be extracted per panel family or once globally?</p></div></div>
+        <div class="row"><span class="n">Q3</span><div><div class="t">Bottleneck, or operator?</div>
+          <p class="sm">Train the VAE with the rank-reduced bottleneck, or leave the trained latent alone and apply
+          rank reduction only inside the blend. The second is cheap and testable now; the first is the stronger claim.</p></div></div>
+      </div>
+      <div class="vstack-lg">
+        <div class="rows">
+          <div class="row"><span class="n">Q4</span><div><div class="t">How is interpolation quality measured <em>inside</em> a microstructure?</div>
+            <p class="sm">There is no standard metric. Our proposal: two-point correlation, pore-size distribution and
+            Ripley&rsquo;s K evaluated <em>across the seam</em>, each floored by matched real pairs cut from the same
+            panel. That floor is already built.</p></div></div>
+          <div class="row"><span class="n">Q5</span><div><div class="t">What is the shared publication?</div>
+            <p class="sm">One reading: a rank-reduced latent-blending operator for tiled and chunked latent diffusion,
+            demonstrated on a real industrial 3-D material where the seam is measurable against a real-volume floor
+            &mdash; method from your side, the volumetric problem, pipeline and evaluation from ours.</p></div></div>
+        </div>
+        <div class="block">
+          <span class="micro">What we can put on the table</span>
+          <p class="sm">A trained three-class VAE and a conditional 3-D latent diffusion model on real aerospace CFRP;
+          a chunked joint sampler with a fixed geometry contract; an evaluation suite with real-volume floors and
+          per-volume manifests; and an A/B harness where only the blend operator changes.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     28 — CLOSING / COLOPHON
+     ============================================================ -->
+<section class="slide">
+  <svg class="glitch" style="left:0;top:0" width="420" height="1080" viewBox="0 0 420 1080" aria-hidden="true">
+    <defs>
+      <pattern id="vscan4" width="9" height="9" patternUnits="userSpaceOnUse">
+        <line x1="0" y1="0" x2="0" y2="9" stroke="#1F2BE0" stroke-width="2.6" opacity=".5"/>
+      </pattern>
+    </defs>
+    <rect x="0" y="150" width="240" height="140" fill="url(#vscan4)"/>
+    <rect x="0" y="290" width="330" height="110" fill="url(#vscan4)"/>
+    <rect x="0" y="400" width="180" height="100" fill="url(#vscan4)"/>
+    <rect x="0" y="500" width="280" height="140" fill="url(#vscan4)"/>
+    <rect x="0" y="640" width="140" height="110" fill="url(#vscan4)"/>
+  </svg>
+  <div class="frame" style="align-items:flex-end;text-align:right">
+    <div class="reveal" style="max-width:1200px;margin-top:auto">
+      <div class="micro" style="margin-bottom:24px">Thank you</div>
+      <div class="chapter-title">One model, one<br>reverse process,<br>any size &mdash; if the<br>blend holds</div>
+    </div>
+    <div class="reveal" style="margin-top:auto;width:100%;border-top:1.5px solid var(--ink);padding-top:22px;
+         display:grid;grid-template-columns:repeat(3,1fr);gap:40px;text-align:left">
+      <div>
+        <div class="micro-sm" style="margin-bottom:10px">Method references</div>
+        <p class="sm">Rombach et&nbsp;al. 2022, latent diffusion &middot; Salimans &amp; Ho 2022, v-prediction &middot;
+        Lin et&nbsp;al. 2024, terminal SNR &middot; Ho &amp; Salimans 2022, classifier-free guidance</p>
+      </div>
+      <div>
+        <div class="micro-sm" style="margin-bottom:10px">Assembly &amp; seams</div>
+        <p class="sm">Lugmayr et&nbsp;al. 2022, re-noising &middot; Jim&eacute;nez 2023, mixture of diffusers &middot;
+        Madar et&nbsp;al. 2024, tiled diffusion &middot; Berrada et&nbsp;al. 2025, decoded-space losses</p>
+      </div>
+      <div>
+        <div class="micro-sm" style="margin-bottom:10px">Rank reduction</div>
+        <p class="sm">Mounayer et&nbsp;al. 2024, rank reduction autoencoders &middot; Mounayer et&nbsp;al. 2025,
+        variational rank reduction autoencoders</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<!-- Inline editing affordance -->
+<div class="edit-hotzone"></div>
+<button class="edit-toggle" id="editToggle" title="Edit mode (E)">EDIT</button>
+
+<script>
+/* ===========================================================
+   SLIDE PRESENTATION CONTROLLER
+   Fixed 1920x1080 stage, scaled as a whole to the viewport.
+   =========================================================== */
+class SlidePresentation {
+  constructor(){
+    this.slides = Array.from(document.querySelectorAll('.slide'));
+    this.stage  = document.getElementById('deckStage');
+    this.current = 0;
+    this.numberSlides();
+    this.setupStageScale();
+    this.setupKeyboardNav();
+    this.setupTouchNav();
+    this.setupWheelNav();
+    this.showSlide(0);
+  }
+
+  /* Page number chrome, written once so slides stay hand-editable */
+  numberSlides(){
+    const total = this.slides.length;
+    this.slides.forEach((slide, i) => {
+      if(slide.querySelector('.pagenum')) return;
+      const el = document.createElement('div');
+      el.className = 'pagenum';
+      el.textContent = String(i + 1).padStart(2,'0') + ' / ' + total;
+      slide.appendChild(el);
+    });
+  }
+
+  /* One transform for the whole stage: letterbox, never reflow */
+  setupStageScale(){
+    const scale = () => {
+      const f = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+      const x = (window.innerWidth  - 1920 * f) / 2;
+      const y = (window.innerHeight - 1080 * f) / 2;
+      this.stage.style.transform = `translate(${x}px, ${y}px) scale(${f})`;
+    };
+    scale();
+    window.addEventListener('resize', scale);
+  }
+
+  setupKeyboardNav(){
+    document.addEventListener('keydown', (e) => {
+      if(e.target.getAttribute && e.target.getAttribute('contenteditable') === 'true') return;
+      switch(e.key){
+        case 'ArrowRight': case 'ArrowDown': case ' ': case 'PageDown':
+          e.preventDefault(); this.next(); break;
+        case 'ArrowLeft': case 'ArrowUp': case 'PageUp':
+          e.preventDefault(); this.prev(); break;
+        case 'Home': e.preventDefault(); this.showSlide(0); break;
+        case 'End':  e.preventDefault(); this.showSlide(this.slides.length - 1); break;
+      }
+    });
+  }
+
+  setupTouchNav(){
+    let x0 = null;
+    document.addEventListener('touchstart', (e) => { x0 = e.changedTouches[0].clientX; }, {passive:true});
+    document.addEventListener('touchend', (e) => {
+      if(x0 === null) return;
+      const dx = e.changedTouches[0].clientX - x0;
+      if(Math.abs(dx) > 50){ dx < 0 ? this.next() : this.prev(); }
+      x0 = null;
+    }, {passive:true});
+  }
+
+  setupWheelNav(){
+    let lock = false;
+    document.addEventListener('wheel', (e) => {
+      if(lock) return;
+      if(Math.abs(e.deltaY) < 24) return;
+      lock = true;
+      e.deltaY > 0 ? this.next() : this.prev();
+      setTimeout(() => { lock = false; }, 500);
+    }, {passive:true});
+  }
+
+  next(){ this.showSlide(this.current + 1); }
+  prev(){ this.showSlide(this.current - 1); }
+
+  showSlide(i){
+    this.current = Math.max(0, Math.min(i, this.slides.length - 1));
+    this.slides.forEach((s, k) => {
+      s.classList.toggle('active',  k === this.current);
+      s.classList.toggle('visible', k === this.current);
+    });
+  }
+}
+
+/* ===========================================================
+   INLINE TEXT EDITING — press E, or hover the top-left corner.
+   Content is saved to localStorage and restored on load.
+   =========================================================== */
+class InlineEditor {
+  constructor(deck){
+    this.deck = deck;
+    this.isActive = false;
+    this.key = 'poregen-ldm-vrrae-edits';
+    this.restore();
+  }
+  selectors(){ return 'h1,h2,h3,h4,p,li,td,th,.chapter-title,.micro,.micro-sm,.mono,.mono-sm,.labtag,.q,.t,.n,.s'; }
+  toggleEditMode(){
+    this.isActive = !this.isActive;
+    const btn = document.getElementById('editToggle');
+    btn.classList.toggle('active', this.isActive);
+    btn.classList.toggle('show', this.isActive);
+    btn.textContent = this.isActive ? 'DONE' : 'EDIT';
+    document.querySelectorAll(this.selectors()).forEach(el => {
+      el.setAttribute('contenteditable', this.isActive ? 'true' : 'false');
+      if(this.isActive && !el.dataset.bound){
+        el.dataset.bound = '1';
+        el.addEventListener('input', () => this.save());
+      }
+    });
+  }
+  save(){
+    try{
+      const html = {};
+      document.querySelectorAll('.slide').forEach((s, i) => { html[i] = s.innerHTML; });
+      localStorage.setItem(this.key, JSON.stringify(html));
+    }catch(e){ /* storage can be unavailable; editing still works in-session */ }
+  }
+  restore(){
+    try{
+      const raw = localStorage.getItem(this.key);
+      if(!raw) return;
+      const html = JSON.parse(raw);
+      document.querySelectorAll('.slide').forEach((s, i) => { if(html[i]) s.innerHTML = html[i]; });
+    }catch(e){ /* ignore malformed or blocked storage */ }
+  }
+}
+
+const deck   = new SlidePresentation();
+const editor = new InlineEditor(deck);
+
+/* Toggle visibility with a grace period — a CSS sibling selector
+   cannot work here, because pointer-events:none breaks the chain. */
+const hotzone = document.querySelector('.edit-hotzone');
+const editToggle = document.getElementById('editToggle');
+let hideTimeout = null;
+hotzone.addEventListener('mouseenter', () => { clearTimeout(hideTimeout); editToggle.classList.add('show'); });
+hotzone.addEventListener('mouseleave', () => {
+  hideTimeout = setTimeout(() => { if(!editor.isActive) editToggle.classList.remove('show'); }, 400);
+});
+editToggle.addEventListener('mouseenter', () => clearTimeout(hideTimeout));
+editToggle.addEventListener('mouseleave', () => {
+  hideTimeout = setTimeout(() => { if(!editor.isActive) editToggle.classList.remove('show'); }, 400);
+});
+editToggle.addEventListener('click', () => editor.toggleEditMode());
+document.addEventListener('keydown', (e) => {
+  if((e.key === 'e' || e.key === 'E') && e.target.getAttribute('contenteditable') !== 'true'){
+    editor.toggleEditMode();
+  }
+});
+</script>
+</body>
+</html>
