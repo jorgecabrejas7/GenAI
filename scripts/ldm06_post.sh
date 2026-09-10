@@ -57,11 +57,33 @@ PY
 # ── 0. wait for ldm06/base ────────────────────────────────────────────────────
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 say "armed; watching ${LDM_RUN:-<no ldm06 run>}"
-# Matches BOTH `run` and `resume`. The original pattern was `run ` only, and
-# when ldm06-run-0001 was resumed after its spurious early stop the runner saw
-# no training process, declared the run finished and started the exit
-# diagnostic on a card that was busy training.
-while pgrep -f "scripts/train_ldm\.py (run|resume) " >/dev/null 2>&1; do sleep 60; done
+# "No training process" is NOT the same as "training finished". It also means
+# the run was stopped deliberately for a minute — to change a config, say — and
+# a runner that cannot tell the difference will start ten hours of generation
+# on a card that is about to go back to training. That happened: a two-minute
+# stop to widen sample_grid launched the whole eval-v4 set against a step-77000
+# checkpoint, halving training throughput for eleven hours to produce volumes
+# that were never the paper set.
+#
+# So the exit test is the RUN'S OWN PROGRESS: gone from the process table AND
+# the last logged step has reached total_steps. That is true only when training
+# is really over, and it survives a crash, which a marker file written on a
+# clean exit would not.
+reached_total_steps() {
+    python "$REPO/scripts/_ldm_reached_total.py" "$LDM_RUN"
+}
+
+while true; do
+    if pgrep -f "scripts/train_ldm\.py (run|resume) " >/dev/null 2>&1; then
+        sleep 60
+        continue
+    fi
+    if reached_total_steps; then
+        break
+    fi
+    say "no training process, but the run has not reached total_steps — treating this as a pause, not the end"
+    sleep 60
+done
 say "ldm06/base has exited"
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 

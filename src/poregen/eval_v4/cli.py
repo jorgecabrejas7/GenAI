@@ -74,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--data-root", type=Path, default=None,
                    help="dataset root (default data/split_v3)")
     f.add_argument("--shapes", nargs="*", default=["small", "large", "micro", "surface"],
-                   choices=["small", "large", "micro"],
+                   choices=("small", "large", "micro", "surface"),
                    help="'micro' cuts the matched-porosity reference PAIRS the "
                         "microstructure assessment is floored against")
     f.add_argument("--max-volumes", type=int, default=None)
