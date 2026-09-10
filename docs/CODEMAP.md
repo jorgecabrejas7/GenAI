@@ -200,6 +200,12 @@ real-vs-real floor.
 | `rebuild_tensorboard.py` | Rebuilds TensorBoard event files from a run's `metrics.jsonl`. |
 | `convert_patch_samples_to_tiff.py` | Migrates legacy patch-sample `.npz` archives under `runs/` to TIFF. |
 
+**Figures**
+
+| Path | What it does |
+|---|---|
+| `figures/make_architecture_figures.py` | Paper-style architecture figures for the two trained networks — r08 (the VAE) and ldm06 (the denoiser) — as `.svg` + 300-dpi `.png` + `.pdf` in `docs/figures/`. Laid out in matplotlib in SVG-like units (y down, axes filling the figure so the type scale is honest). `--measure` re-derives the latent receptive field from a freshly built r08 rather than quoting it: one cell sees 22³ voxels and 6³ = 216 cells reach every output voxel, so 4 voxels / 100 µm is the grid PITCH and the latent is not a block-average of the volume. |
+
 **Analysis — conditioning design & microstructure (CPU only)**
 
 Every script here writes under `runs/campaigns/<NN>-<name>/` — one campaign per
