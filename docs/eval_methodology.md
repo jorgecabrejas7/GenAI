@@ -81,7 +81,7 @@ built by the run's `vae.checkpoint`; either disagreement is a hard stop naming
 both values. A store is not interchangeable between runs — it fixes the latent
 width, the normalisation the sampler works in and the decoder — and the wrong
 one produces a plausible volume rather than an error. `measure` takes the same
-store from the manifest, so the memorisation floor compares generated patches
+store from the manifest, so the memorisation check compares generated patches
 against the latents the model was actually trained on.
 
 `generate --dry-run` lists every case and what it asks for, without a GPU.
@@ -319,7 +319,7 @@ There is no real floor for the Dice: a real volume was never asked for a hole.
 
 ### Microstructure statistics
 
-`src/poregen/eval_v4/microstructure.py`. Five two-sample distances, each
+`src/poregen/eval_v4/microstructure.py`. Four two-sample distances, each
 reported three ways — **generated vs real**, the **real-vs-real floor**, and
 their **ratio**. A ratio of 1 means the generated set is as close to real
 material as two disjoint crops of one real panel are to each other, which is as
@@ -331,11 +331,67 @@ close as the measurement can tell.
 | **pore-size W1** | Wasserstein-1 between the pooled equivalent diameters `(6V/π)^(1/3)` of every connected pore | voxels |
 | **Ripley's K** | K(r) of the pore centroids, border-corrected; the distance is the mean \|log(K_gen/K_real)\| over r | dimensionless |
 | **FID** | Fréchet distance on 2-D slices along all three axes, mean of the three | dimensionless |
-| **memorisation** | mean nearest-neighbour L2 distance in latent space from the generated 64³ patches, encoded by the frozen VAE, to a random 10 000 of the **train** latents | latent L2 |
 
-The memorisation ratio reads the **other way round**: held-out real crops are
-not memorised by construction, so a ratio of 1 or more means the generated
-patches are no nearer the training set than real material is.
+### Memorisation — a full-store search, not a sample
+
+The fifth statistic of assessment 8 is reported in the same `results.json` but
+is measured on other volumes and against a different floor, so it is described
+on its own.
+
+**Queries.** Every 64³ whole-material patch of every 192³ volume in
+`sampler` and `porosity_global` — the production operating point, 57 volumes
+and 1 539 patches, rather than the nine microstructure volumes. Latent queries
+are the volume RE-ENCODED through the frozen VAE, not its saved `latents.npy`:
+ldm06 trains on a posterior draw (`data.latent_mode: sampled`) while the store
+holds posterior means, so comparing the two directly would add `σ·ε` to every
+distance.
+
+**Bank.** ALL stride-64 rows of the **train** split — 219 580 of the 1 598 000
+rows in it. Not a sample. The earlier implementation searched a random 10 000,
+which gives an *upper bound* on the distance to the nearest training patch —
+the wrong side of the question, because it can only make a copy look further
+away than it is. The stride-64 restriction is not subsampling either: the store
+is built at a 32-voxel stride, so eight interleaved copies of the 64-voxel grid
+sit in it and a patch's "second-nearest neighbour" would otherwise be the same
+material shifted by 32 voxels. On the stride-64 grid no two bank rows share a
+voxel.
+
+**Spaces.** Both. Latent space is per-channel normalised with the store's own
+train statistics (raw channel σ spans 0.41–0.78, so a raw L₂ would be a
+distance in whichever channel is widest). Grey space is the RAW source patches
+`data/split_v3/patches_xct.bin` the store was built from, addressed by each
+row's `source_row`.
+
+**Statistic.** Favero's ratio `‖x − x′‖ / ‖x − x″‖` — nearest over
+second-nearest — with **< 1/3 the memorisation verdict**. A copy sits on one
+training patch and a normal distance from every other, so its ratio collapses
+toward 0; a fresh sample sits a typical distance from both, so its ratio
+approaches 1. The ratio is dimensionless, which is what lets the same number be
+read in two spaces with no common unit.
+
+**Floor.** The same ratio for 512 real **validation** patches against the same
+train bank. Real held-out material is not memorised by construction, yet it
+still has near neighbours in the train set because the panels are the same
+material — so what the val patches score is the value the ratio takes when
+nothing has been copied. Without it a generated ratio of 0.6 means nothing.
+
+**Breakdown.** By requested porosity, and by whether the volume's windows ever
+saw a neighbour: `neighbour_census` rebuilds each volume's EXISTS / OOB /
+UNKNOWN window-face counts from the manifest's `volume_shape`, `chunk_tiles`
+and `window_stride` with the sampler's own rule. A 192³ volume is exactly one
+chunk, so it has no UNKNOWN face — the breakdown records that rather than
+assuming it.
+
+**Known failure mode.** The grey bank is raw scan data and the generated query
+is decoded, so a generated patch carries the VAE decoder's reconstruction error
+that a raw validation patch does not. A volume that reproduced a training
+latent EXACTLY would still sit one reconstruction error away from the real
+patch in grey space, so **the grey ratio is an upper bound** on how memorised a
+volume is. The latent ratio is the sharp one; grey is the corroborating
+pixel-level check. A second, smaller one: `squared_distances` selects by the
+`|q|² + |b|² − 2q·b` expansion, which cancels badly near zero and rounds
+differently at different chunk widths, so the two chosen distances are
+recomputed from an explicit float64 difference before anything reads them.
 
 **Analysis geometry.** The generated cases are 192³; no test panel holds a
 clean 192-deep box, so the reference crops are 128³. Every statistic is
@@ -343,7 +399,8 @@ therefore defined on geometry both can supply: S₂ on **128³ windows** (r up t
 48 voxels, one bin per voxel) so the FFT support, the Hann debias and the bin
 edges are identical for both sets; the pore-size distribution and K on the
 whole requested material, both being size-normalised; FID on 64×64 native
-crops; memorisation on 64³ patches, the size the VAE was trained on.
+crops. (Memorisation is on 64³ patches, the size the VAE was trained on, and
+on other volumes entirely — see above.)
 
 **Connected components are 6-connected** everywhere. At a median pore diameter
 of 1.79 voxels, 26-connectivity fuses voids that meet at a single corner.
@@ -394,9 +451,9 @@ complete-spatial-randomness value `(4/3)πr³` — the volume of a ball, not the
 old script applied no edge correction, so its K was biased low by a factor that
 grew with r and had no known value to be validated against.
 
-FID needs torchvision and the memorisation check needs the latent store; each
-reports an explicit skip with the reason when its dependency is absent, so the
-other statistics are still measured.
+FID needs torchvision and the memorisation check needs the latent store AND
+the raw source patches beside it; each reports an explicit skip with the reason
+when its dependency is absent, so the other statistics are still measured.
 
 ---
 
@@ -421,7 +478,7 @@ Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
 | 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
 | 6 | `assembly` | 9 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the offset triple generated here (offsets 0 / 16 / 32 in a 256³ canvas), and the campaign-08 VAE control row. |
 | 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
-| 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K, FID on 2-D slices and the memorisation check, each against the matched real-vs-real floor. |
+| 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K and FID on 2-D slices, each against the matched real-vs-real floor. The memorisation block is reported here too but is measured on the assessment-1 and assessment-2 volumes against the whole train store, with its own real-val floor. |
 
 **Assessment 8 runs at three porosity levels and no more** because every
 statistic in it is confounded by pore fraction, and each level needs its own

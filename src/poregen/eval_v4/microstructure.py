@@ -33,7 +33,12 @@ computed on geometry that both can supply:
   size-normalised (a distribution of diameters; K carries its own ``V/N**2``),
   so a bigger box is a bigger sample and not a different measurement.
 * **FID** on 64x64 crops of 2-D slices, which is a per-crop measurement.
-* **Memorisation** on 64-cubed patches, the size the VAE was trained on.
+
+The memorisation check that assessment 8 also reports is NOT here: it is
+:mod:`poregen.eval_v4.memorisation`.  It is not a distribution distance and
+it does not read these volumes — it searches the whole training store for
+the nearest neighbour of every generated 64-cubed patch, and it takes its
+queries from the sampler and porosity_global volumes.
 
 What changed in the port, and why
 ---------------------------------
@@ -66,7 +71,6 @@ from __future__ import annotations
 import functools
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
@@ -125,16 +129,6 @@ FID_EXTRACTOR = (
     "to 299x299, ImageNet-normalised with the weights' own preset mean/std, "
     "which transform_input then maps to the pytorch-fid input range [-1,1]"
 )
-
-# -- memorisation -----------------------------------------------------------
-
-MEMO_PATCH = 64
-#: Training latents sampled for the nearest-neighbour search.  The full store
-#: is ~1.8 M patches; the distance to the nearest of a random 10 000 is an
-#: upper bound on the distance to the nearest of all of them, and the same
-#: bound is applied to the real crops, so the comparison is fair.
-MEMO_TRAIN_SAMPLE = 10_000
-MEMO_CHUNK = 256
 
 
 # ---------------------------------------------------------------------------
@@ -609,126 +603,6 @@ def frechet_distance(fa: np.ndarray, fb: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Memorisation
-# ---------------------------------------------------------------------------
-
-def train_latent_mu(
-    latents_root: str | Path,
-    n_sample: int = MEMO_TRAIN_SAMPLE,
-    seed: int = 0,
-) -> np.ndarray:
-    """``(n, C*d*h*w)`` posterior means of a random sample of TRAIN latents.
-
-    Reads the current store layout: ``metadata.json`` at the root, and per split
-    a ``latents.bin`` of ``(N, 2C, d, h, w)`` float16 packed ``mu_then_std``
-    beside an ``index.parquet`` that gives N.  Only the mu half is read — the
-    posterior width says nothing about which patch a latent is.
-    """
-    import json  # noqa: PLC0415
-
-    import pandas as pd  # noqa: PLC0415
-
-    root = Path(latents_root)
-    meta = json.loads((root / "metadata.json").read_text())
-    storage = meta["storage"]
-    if storage["pack_scheme"] != "mu_then_std":
-        raise ValueError(
-            f"{root}: pack_scheme is {storage['pack_scheme']!r}; this reader knows "
-            "'mu_then_std' — channels 0..C-1 are the posterior mean."
-        )
-    c, *spatial = (int(v) for v in meta["latent_shape"])
-    n = len(pd.read_parquet(str(root / "train" / "index.parquet")))
-    store = np.memmap(
-        str(root / "train" / "latents.bin"), dtype=np.dtype(storage["dtype"]),
-        mode="r", shape=(n, 2 * c, *spatial),
-    )
-    rng = np.random.default_rng(seed)
-    take = np.sort(rng.choice(n, size=min(int(n_sample), n), replace=False))
-    return np.asarray(store[take, :c], np.float32).reshape(len(take), -1)
-
-
-def encode_volume_patches(
-    vae,
-    xct_u8: np.ndarray,
-    label_u8: np.ndarray,
-    material: np.ndarray,
-    device=None,
-    patch: int = MEMO_PATCH,
-    batch: int = 4,
-) -> np.ndarray:
-    """``(m, C*d*h*w)`` posterior means of every whole-material patch of a volume.
-
-    The patches are the non-overlapping ``patch``-cubed tiling, which is the
-    grid the store was built on, so a generated patch and a training latent are
-    the same kind of object and their distance means something.
-
-    The encoder inputs come from the model's own ``encoder_inputs`` declaration
-    through :func:`poregen.training.engine.encoder_input_keys`, and the moments
-    from ``encode_moments`` — the same two entry points
-    ``scripts/build_latent_dataset.py`` used to write the store.  The r08 VAE
-    encodes the grey volume AND the 3-class label; feeding it the grey alone
-    would produce latents from a different function to the ones in the store.
-    """
-    import torch  # noqa: PLC0415
-
-    from poregen.training.engine import encoder_input_keys  # noqa: PLC0415
-
-    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    keys = encoder_input_keys(vae)
-    unknown = set(keys) - {"xct", "label"}
-    if unknown:
-        raise ValueError(
-            f"the VAE declares encoder inputs {keys}; this check can supply only "
-            f"'xct' and 'label' from a generated case, not {sorted(unknown)}."
-        )
-
-    d, h, w = xct_u8.shape
-    origins = [
-        (z, y, x)
-        for z in range(0, d - patch + 1, patch)
-        for y in range(0, h - patch + 1, patch)
-        for x in range(0, w - patch + 1, patch)
-        if material[z:z + patch, y:y + patch, x:x + patch].all()
-    ]
-    if not origins:
-        return np.zeros((0, 0), np.float32)
-
-    out = []
-    with torch.no_grad():
-        for s in range(0, len(origins), batch):
-            sl = [np.s_[z:z + patch, y:y + patch, x:x + patch]
-                  for z, y, x in origins[s:s + batch]]
-            arrays = {
-                "xct": torch.from_numpy(
-                    np.stack([xct_u8[i] for i in sl]).astype(np.float32) / 255.0
-                ).unsqueeze(1),
-                "label": torch.from_numpy(
-                    np.stack([label_u8[i] for i in sl]).astype(np.int64)
-                ),
-            }
-            mu, _ = vae.encode_moments(*(arrays[k].to(device) for k in keys))
-            out.append(mu.flatten(1).float().cpu().numpy())
-    return np.concatenate(out).astype(np.float32)
-
-
-def nearest_neighbour_distance(query: np.ndarray, bank: np.ndarray) -> np.ndarray:
-    """Min L2 distance from every row of ``query`` to any row of ``bank``."""
-    import torch  # noqa: PLC0415
-
-    if query.shape[1] != bank.shape[1]:
-        raise ValueError(
-            f"latent dimensions differ: {query.shape[1]} from the VAE against "
-            f"{bank.shape[1]} in the store. The store was built with a different "
-            "VAE, so a distance between them would be meaningless."
-        )
-    q = torch.from_numpy(query)
-    b = torch.from_numpy(bank)
-    out = [torch.cdist(q[s:s + MEMO_CHUNK], b).min(dim=1).values
-           for s in range(0, len(q), MEMO_CHUNK)]
-    return torch.cat(out).numpy().astype(np.float64)
-
-
-# ---------------------------------------------------------------------------
 # One volume's profile, and the two-sample comparison
 # ---------------------------------------------------------------------------
 
@@ -925,88 +799,4 @@ def fid_between(
         "crop_size": FID_CROP,
         "per_axis": per_axis,
         "mean": float(np.mean(values)) if values else float("nan"),
-    }
-
-
-def memorisation(
-    cases,
-    latents_root: str | Path,
-    *,
-    repo: str | Path | None = None,
-    device=None,
-    n_train: int = MEMO_TRAIN_SAMPLE,
-    seed: int = 0,
-) -> dict:
-    """Nearest-neighbour distance from each case's patches to the TRAIN latents.
-
-    Near zero means the model is reproducing training material.  The number
-    alone says nothing — a latent space carries no natural scale — so the
-    caller runs this over the real reference crops as well: held-out real
-    material is not memorised by construction, so what IT scores is the floor,
-    and a generated set at the same distance has copied nothing a real crop of
-    the same panels has not.
-
-    The store may not exist.  That is reported with the path it looked for,
-    because a silent zero here would read as "no memorisation".
-    """
-    import json  # noqa: PLC0415
-
-    import torch  # noqa: PLC0415
-
-    root = Path(latents_root)
-    if not (root / "metadata.json").exists():
-        return {"available": False, "latents_root": str(root),
-                "reason": f"no latent store at {root} — the memorisation check "
-                          "needs the training latents the LDM was trained on"}
-    if not cases:
-        return {"available": False, "latents_root": str(root),
-                "reason": "no cases to encode"}
-
-    meta = json.loads((root / "metadata.json").read_text())
-    ckpt = Path(meta["vae_checkpoint"])
-    if not ckpt.is_absolute():
-        ckpt = Path(repo or ".") / ckpt
-    if not ckpt.exists():
-        return {"available": False, "latents_root": str(root),
-                "reason": f"the store names VAE checkpoint {ckpt}, which is not there"}
-
-    from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: PLC0415
-
-    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vae, _, _, _ = load_vae_from_checkpoint(ckpt, device)
-    vae.requires_grad_(False)
-    vae.eval()
-
-    bank = train_latent_mu(root, n_sample=n_train, seed=seed)
-    per_case: dict[str, dict] = {}
-    all_d: list[np.ndarray] = []
-    for c in cases:
-        mu = encode_volume_patches(
-            vae, c.xct, c.label, c.material_voxels(), device=device
-        )
-        if mu.size == 0:
-            per_case[c.manifest.case] = {"n_patches": 0}
-            continue
-        d = nearest_neighbour_distance(mu, bank)
-        all_d.append(d)
-        per_case[c.manifest.case] = {
-            "n_patches": int(len(d)),
-            "nn_distance_mean": float(d.mean()),
-            "nn_distance_min": float(d.min()),
-        }
-    if not all_d:
-        return {"available": False, "latents_root": str(root),
-                "reason": "no whole-material patch in any case"}
-    pooled = np.concatenate(all_d)
-    return {
-        "available": True,
-        "latents_root": str(root),
-        "vae_checkpoint": str(ckpt),
-        "n_train_latents": int(len(bank)),
-        "n_patches": int(len(pooled)),
-        "nn_distance_mean": float(pooled.mean()),
-        "nn_distance_sd": float(pooled.std(ddof=1)) if len(pooled) > 1 else 0.0,
-        "nn_distance_min": float(pooled.min()),
-        "nn_distance_p5": float(np.percentile(pooled, 5)),
-        "per_case": per_case,
     }

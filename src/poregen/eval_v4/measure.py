@@ -2,8 +2,14 @@
 
 ``measure`` reads the case directories an assessment wrote, applies the metrics
 that assessment is about, and aggregates over seeds.  It never re-reads the
-model: a measurement must be repeatable from the volumes alone, and a metric
-that needed the model back would not be.
+DENOISER: a measurement must be repeatable from the volumes alone, and a metric
+that needed the sampler back would not be.
+
+The one thing it does reload is the frozen VAE, and only for assessment 8's
+memorisation check, which has to put a generated volume back into the latent
+space the training store lives in.  That check is a GPU pass over the whole
+272 GB store, so ``measure microstructure`` is the only measure stage that is
+not cheap and not CPU-only.
 
 Every per-case row carries its own manifest fields, so a results file says what
 it measured and not only what it found.  Aggregation is always mean and sample
@@ -863,7 +869,15 @@ def measure_microstructure(root, repo) -> dict:
     against each other, and the ratio.  The floor is not a formality — a
     Wasserstein distance between two finite samples of the SAME material is not
     zero, so without it a generated number cannot be called large or small.
+
+    The memorisation block rides along in this assessment but is measured on
+    other volumes: it searches the whole training store for the nearest
+    neighbour of every 64-cubed patch of the 192-cubed ``sampler`` and
+    ``porosity_global`` volumes.  Those are the production operating point and
+    there are 57 of them, so they are where a copy would matter; the nine
+    microstructure volumes are too few a sample to answer the question.
     """
+    from poregen.eval_v4 import memorisation as MEMO  # noqa: PLC0415
     from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415
 
     cases = load_cases(root, "microstructure")
@@ -884,18 +898,6 @@ def measure_microstructure(root, repo) -> dict:
             "micro_level", case.manifest.requested_global_phi)
 
     by_level = _group(zip(rows, cases), lambda rc: float(rc[0]["micro_level"]))
-    # The store the volumes were generated from, taken from the manifest and
-    # from nowhere else: the memorisation floor compares generated patches
-    # against the TRAINING latents, so a guessed store would answer a different
-    # question and still print a number.
-    store = (cases[0].manifest.notes or {}).get("latents_root")
-    if not store:
-        raise KeyError(
-            f"{cases[0].manifest.case}: manifest notes carry no latents_root, so the "
-            "store these volumes came from is unknown and the memorisation check "
-            "cannot be run. Regenerate the assessment."
-        )
-    latents_root = Path(store)
 
     levels: dict[str, dict] = {}
     for level in sorted(by_level):
@@ -918,8 +920,6 @@ def measure_microstructure(root, repo) -> dict:
         floor = MS.compare_sets(a_p, b_p)
         fid_gen = MS.fid_between(gen, real_a + real_b, seed=int(level * 1e6))
         fid_floor = MS.fid_between(real_a, real_b, seed=int(level * 1e6) + 1)
-        memo_gen = MS.memorisation(gen, latents_root, repo=repo)
-        memo_floor = MS.memorisation(real_a + real_b, latents_root, repo=repo)
 
         misses = [(c.manifest.notes or {}).get("phi_miss") for c in real_a + real_b]
         levels[f"{level:g}"] = {
@@ -941,17 +941,9 @@ def measure_microstructure(root, repo) -> dict:
                 "ripley_log_ratio": MS.ratio(
                     against["ripley_log_ratio"], floor["ripley_log_ratio"]),
                 "fid": MS.ratio(fid_gen.get("mean"), fid_floor.get("mean")),
-                # A memorisation ratio is the other way round: the generated
-                # patches should be at least as FAR from the training set as
-                # held-out real material is, so 1 or more is the healthy side.
-                "memorisation_nn_distance": MS.ratio(
-                    memo_gen.get("nn_distance_mean"),
-                    memo_floor.get("nn_distance_mean")),
             },
             "fid_generated_vs_real": fid_gen,
             "fid_real_vs_real": fid_floor,
-            "memorisation_generated": memo_gen,
-            "memorisation_real": memo_floor,
             "profiles": [p.summary() for p in gen_p + a_p + b_p],
         }
 
@@ -959,15 +951,17 @@ def measure_microstructure(root, repo) -> dict:
         "assessment": "microstructure",
         "question": "Does the generated microstructure have the statistics of real material?",
         "note": (
-            "Five distribution distances, each reported three ways: generated "
+            "Four distribution distances, each reported three ways: generated "
             "against real, real against real (two disjoint crops of ONE panel), "
             "and the ratio. A ratio of 1 means the generated set is as close to "
             "real material as real material is to itself, which is as close as "
-            "this measurement can tell. The memorisation ratio reads the other "
-            "way: 1 or more means the generated patches are no nearer the "
-            "training latents than held-out real patches are. Every level is "
-            "scored against real crops matched to ITS porosity, because a "
-            "porosity gap would otherwise be read as a texture gap."
+            "this measurement can tell. Every level is scored against real crops "
+            "matched to ITS porosity, because a porosity gap would otherwise be "
+            "read as a texture gap. The memorisation block is the fifth "
+            "statistic and reads differently: it is a full-store nearest-"
+            "neighbour search over the sampler and porosity_global volumes, and "
+            "what makes it readable is the real-val floor inside it, not the "
+            "real-vs-real crops."
         ),
         "geometry": {
             "s2_window": MS.S2_WINDOW, "s2_r_max": MS.S2_R_MAX,
@@ -977,6 +971,7 @@ def measure_microstructure(root, repo) -> dict:
         },
         "per_case": rows,
         "levels": levels,
+        "memorisation": MEMO.memorisation(root, repo=repo),
     }
 
 

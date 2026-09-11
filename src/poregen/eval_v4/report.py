@@ -693,8 +693,86 @@ def report_real_floor(res, root, floor) -> tuple[str, list[str]]:
     return "\n".join(text) + "\n", []
 
 
+def memorisation_section(memo: dict) -> str:
+    """The full-store nearest-neighbour search, beside its real-val floor.
+
+    The generated row alone says nothing: real held-out material also has near
+    neighbours in the train set, so the floor row is what turns the ratio into
+    a reading.  Both rows are always printed together for that reason.
+    """
+    if not memo:
+        return ""
+    if not memo.get("available"):
+        return ("\n## Memorisation\n\nThe memorisation check was skipped: "
+                f"{memo.get('reason')}.\n")
+
+    bank = memo["bank"]
+    crit = memo["criterion"]
+
+    def block(label: str, cell: dict) -> list[list[str]]:
+        out = []
+        for space in ("latent", "grey"):
+            s = cell.get(space) or {}
+            if not s.get("n"):
+                continue
+            out.append([
+                label if space == "latent" else "", space, str(s["n"]),
+                fmt(s["ratio_mean"], 3), fmt(s["ratio_median"], 3),
+                fmt(s["ratio_min"], 3), fmt(s["ratio_p5"], 3),
+                f"{s['n_memorised']} ({s['frac_memorised']:.1%})",
+            ])
+        return out
+
+    header = ["set", "space", "patches", "ratio mean", "median", "min", "p5",
+              f"below {crit['threshold']:.3f}"]
+    rows = block("generated", memo["generated"])
+    rows += block("real val floor", memo["real_val_floor"])
+
+    by_phi = [
+        r for key, cell in sorted(memo["by_requested_phi"].items(),
+                                  key=lambda kv: float(kv[0]))
+        for r in block(f"phi {key}", cell)
+    ]
+    by_nb = [
+        r for key, cell in sorted(memo["by_neighbours"].items())
+        for r in block(key.replace("_", " "), cell)
+    ]
+
+    text = [
+        "",
+        "## Memorisation - the full-store nearest-neighbour search",
+        "",
+        f"Every 64-cubed patch of every {'x'.join(str(s) for s in memo['query_shape'])} "
+        f"volume in {', '.join(memo['assessments'])} ({memo['n_patches']} patches "
+        f"from {memo['n_cases']} volumes), searched against ALL "
+        f"{bank['n_rows']} stride-{bank['stride']} rows of the train split "
+        f"(of {bank['n_rows_in_split']} rows in it). Not a sample: the whole bank.",
+        "",
+        f"Statistic `{crit['statistic']}`. {crit['reading']}",
+        "",
+        table(header, rows),
+        "",
+        "### By requested porosity",
+        "",
+        table(header, by_phi),
+        "",
+        "### By neighbour availability during generation",
+        "",
+        table(header, by_nb),
+        "",
+        f"Latent space is per-channel normalised with the store's own train "
+        f"statistics; grey space is the raw source patches at "
+        f"`{bank['grey_source']}`. A generated patch reaches grey space through "
+        f"the VAE decoder and a real validation patch does not, so the grey "
+        f"ratio is an UPPER bound on how memorised a volume is - the latent "
+        f"ratio is the sharp one.",
+        "",
+    ]
+    return "\n".join(text)
+
+
 def report_microstructure(res, root, floor) -> tuple[str, list[str]]:
-    """Five distances, each against the real-vs-real floor that makes it readable."""
+    """Four distances against the real-vs-real floor, then the memorisation search."""
     geom = res["geometry"]
     rows, notes = [], []
     for key, cell in sorted(res["levels"].items(), key=lambda kv: kv[1]["requested"]):
@@ -709,17 +787,11 @@ def report_microstructure(res, root, floor) -> tuple[str, list[str]]:
              fl["ripley_log_ratio"], rat["ripley_log_ratio"], 3),
             ("FID, 2-D slices", cell["fid_generated_vs_real"].get("mean"),
              cell["fid_real_vs_real"].get("mean"), rat["fid"], 1),
-            ("memorisation NN distance",
-             cell["memorisation_generated"].get("nn_distance_mean"),
-             cell["memorisation_real"].get("nn_distance_mean"),
-             rat["memorisation_nn_distance"], 2),
         ]
         for i, (name, a, b, r, digits) in enumerate(stats):
-            memo = name.startswith("memorisation")
             rows.append([
                 key if i == 0 else "", name, fmt(a, digits), fmt(b, digits),
-                fmt(r, 2),
-                "1 or more is healthy" if memo else "1 is the floor, lower is better",
+                fmt(r, 2), "1 is the floor, lower is better",
             ])
         miss = cell.get("real_phi_miss_max")
         if miss is not None and miss > 0.005:
@@ -734,11 +806,6 @@ def report_microstructure(res, root, floor) -> tuple[str, list[str]]:
     if first and not first["fid_generated_vs_real"].get("available"):
         fid_note = ("\nFID was not computed: "
                     f"{first['fid_generated_vs_real'].get('reason')}.\n")
-    memo_note = ""
-    if first and not first["memorisation_generated"].get("available"):
-        memo_note = ("\nThe memorisation check was skipped: "
-                     f"{first['memorisation_generated'].get('reason')}.\n")
-
     text = [
         "## Microstructure statistics against the real-vs-real floor",
         "",
@@ -746,7 +813,7 @@ def report_microstructure(res, root, floor) -> tuple[str, list[str]]:
                "ratio", "reading"], rows),
         "",
         fid_note,
-        memo_note,
+        memorisation_section(res.get("memorisation") or {}),
         "## What was measured on what",
         "",
         table(["setting", "value"], [
@@ -821,8 +888,8 @@ def _fig_microstructure(res, root) -> list[str]:
     ax.legend(frameon=False, ncol=2)
 
     ax = axes[3]
-    keys = ["s2_w1", "psd_w1", "ripley_log_ratio", "fid", "memorisation_nn_distance"]
-    labels = ["S2", "PSD", "Ripley", "FID", "memo"]
+    keys = ["s2_w1", "psd_w1", "ripley_log_ratio", "fid"]
+    labels = ["S2", "PSD", "Ripley", "FID"]
     xs = np.arange(len(keys))
     width = 0.8 / max(len(cells), 1)
     for j, (key, c) in enumerate(cells):
