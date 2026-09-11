@@ -875,3 +875,19 @@ def test_the_metrics_run_on_a_campaign_05_volume(tmp_path):
     assert local["n_cells"] == 27
     assert M.porosity_error(label, material, manifest=m)["delivered_phi"] == \
         pytest.approx(phases["phi_pore"])
+
+
+def test_every_assessment_has_cases_a_measurer_and_a_reporter():
+    """A missing reporter is SILENT: `report` builds its list from REPORTERS.
+
+    multichunk shipped with cases and a measurer and no reporter, so its
+    findings.md would simply not have been written — no error, no warning, just
+    an assessment missing from the report. This is the check that would have
+    caught it.
+    """
+    from poregen.eval_v4.cases import ASSESSMENTS
+    from poregen.eval_v4.measure import MEASURERS
+    from poregen.eval_v4.report import REPORTERS
+
+    assert not set(ASSESSMENTS) - set(MEASURERS), "assessment without a measurer"
+    assert not set(ASSESSMENTS) - set(REPORTERS), "assessment without a reporter"

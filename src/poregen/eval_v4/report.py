@@ -1111,6 +1111,48 @@ def _fig_field_stats(res, root) -> list[str]:
     return savefig(fig, figures_dir(root, "field_stats"), "field_stats")
 
 
+def report_multichunk(res, root, floor) -> tuple[str, list[str]]:
+    s = res["summary"]
+
+    def block(kind, title):
+        b = s.get(kind)
+        if b is None:
+            return [f"### {title}", "", "Not generated.", ""]
+        rows = [
+            ["window-plane seam, grey", ms(b["window_plane_seam_xct"], 3)],
+            ["CHUNK-plane seam, grey", ms(b["chunk_plane_seam_xct"], 3)],
+            ["window-plane seam, pore logit", ms(b["window_plane_seam_pore"], 3)],
+            ["CHUNK-plane seam, pore logit", ms(b["chunk_plane_seam_pore"], 3)],
+            ["pore Dice across the chunk planes", ms(b["pore_dice_across_chunk_planes"], 3)],
+        ]
+        if kind == "sphere":
+            rows += [["radial surface error (vox)", ms(b["radial_surface_error_vox"], 2)],
+                     ["octant spread (vox)", ms(b["octant_spread_vox"], 2)]]
+        if kind == "rough":
+            rows += [[f"{f} Sa ratio to the request", ms(b[f"{f}_roughness_ratio_to_requested"], 3)]
+                     for f in ("lower", "upper")]
+        return [f"### {title} ({b['n_cases']} cases)", "",
+                table(["quantity", "mean +/- sd"], rows), ""]
+
+    text = [
+        "## Assembly across chunk planes on all three axes", "",
+        res.get("question", ""), "",
+        "Every other large case is 1024x1024x192, which is a single chunk deep: "
+        "the z axis never crosses a chunk plane. These do, on all three.", "",
+        res.get("chunk_plane_note", ""), "",
+        "**" + res.get("not_physics", "") + "**", "",
+        "The two seam families are reported separately. A window plane is two "
+        "overlapping windows inside ONE chunk solve; a chunk plane is two "
+        "independent solves meeting. Pooling them would let a good window "
+        "average away a bad chunk boundary.", "",
+        *block("box", "Full-material box"),
+        *block("sphere", "Sphere, radius 160"),
+        *block("rough", "Rough surface slab"),
+        f"Failure rate: {fmt(s.get('failure_rate'), 2)}",
+    ]
+    return "\n".join(text) + "\n", []
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -1119,6 +1161,7 @@ REPORTERS = {
     "layup": report_layup,
     "assembly": report_assembly,
     "geometry": report_geometry,
+    "multichunk": report_multichunk,
     "surface": report_surface,
     "microstructure": report_microstructure,
     "field_stats": report_field_stats,
