@@ -872,10 +872,13 @@ def measure_microstructure(root, repo) -> dict:
 
     The memorisation block rides along in this assessment but is measured on
     other volumes: it searches the whole training store for the nearest
-    neighbour of every 64-cubed patch of the 192-cubed ``sampler`` and
-    ``porosity_global`` volumes.  Those are the production operating point and
-    there are 57 of them, so they are where a copy would matter; the nine
-    microstructure volumes are too few a sample to answer the question.
+    neighbour of every 64-cubed patch of the ``sampler``, ``porosity_global``,
+    ``multichunk`` and ``assembly_modes`` volumes.  The first two are the
+    production operating point and there are 57 of them, so they are where a
+    copy would matter; the last two are the only volumes that cross a chunk
+    plane, and therefore the only ones whose windows are ever denoised with
+    UNKNOWN neighbours.  The nine microstructure volumes are too few a sample
+    to answer the question either way.
     """
     from poregen.eval_v4 import memorisation as MEMO  # noqa: PLC0415
     from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415

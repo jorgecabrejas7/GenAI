@@ -694,11 +694,13 @@ def report_real_floor(res, root, floor) -> tuple[str, list[str]]:
 
 
 def memorisation_section(memo: dict) -> str:
-    """The full-store nearest-neighbour search, beside its real-val floor.
+    """The full-store nearest-neighbour search, beside its two real-val floors.
 
     The generated row alone says nothing: real held-out material also has near
-    neighbours in the train set, so the floor row is what turns the ratio into
-    a reading.  Both rows are always printed together for that reason.
+    neighbours in the train set, so a floor row is what turns the ratio into a
+    reading.  Grey space gets TWO floors and the difference between them is the
+    VAE decoder: the round-tripped row is the like-for-like one, the raw row is
+    what the ratio would be with no decoder error at all.
     """
     if not memo:
         return ""
@@ -709,24 +711,32 @@ def memorisation_section(memo: dict) -> str:
     bank = memo["bank"]
     crit = memo["criterion"]
 
+    def row(label: str, space: str, s: dict) -> list[str] | None:
+        if not s or not s.get("n"):
+            return None
+        return [
+            label, space, str(s["n"]),
+            fmt(s["ratio_mean"], 3), fmt(s["ratio_median"], 3),
+            fmt(s["ratio_min"], 3), fmt(s["ratio_p5"], 3),
+            f"{s['n_memorised']} ({s['frac_memorised']:.1%})",
+        ]
+
     def block(label: str, cell: dict) -> list[list[str]]:
         out = []
-        for space in ("latent", "grey"):
-            s = cell.get(space) or {}
-            if not s.get("n"):
-                continue
-            out.append([
-                label if space == "latent" else "", space, str(s["n"]),
-                fmt(s["ratio_mean"], 3), fmt(s["ratio_median"], 3),
-                fmt(s["ratio_min"], 3), fmt(s["ratio_p5"], 3),
-                f"{s['n_memorised']} ({s['frac_memorised']:.1%})",
-            ])
+        for i, space in enumerate(("latent", "grey")):
+            r = row(label if i == 0 else "", space, cell.get(space) or {})
+            if r:
+                out.append(r)
         return out
 
     header = ["set", "space", "patches", "ratio mean", "median", "min", "p5",
               f"below {crit['threshold']:.3f}"]
+    floor = memo["real_val_floor"]
     rows = block("generated", memo["generated"])
-    rows += block("real val floor", memo["real_val_floor"])
+    rows += block("real val floor (VAE round trip)", floor)
+    raw_row = row("real val floor (raw scan)", "grey", floor.get("grey_raw") or {})
+    if raw_row:
+        rows.append(raw_row)
 
     by_phi = [
         r for key, cell in sorted(memo["by_requested_phi"].items(),
@@ -738,34 +748,52 @@ def memorisation_section(memo: dict) -> str:
         for r in block(key.replace("_", " "), cell)
     ]
 
+    shapes = sorted({"x".join(str(v) for v in c["volume_shape"])
+                     for c in memo["per_case"].values() if c.get("volume_shape")})
+    coarse = memo.get("cases_bucketed_at_volume_level") or []
+    coarse_note = (
+        f"\n**{len(coarse)} volume(s) could not be bucketed per window** and fall "
+        f"back to the volume-level bucket: {', '.join(coarse)}. Their patch "
+        "positions were never window origins, so no honest per-window state "
+        "exists for them.\n"
+        if coarse else ""
+    )
+
     text = [
         "",
         "## Memorisation - the full-store nearest-neighbour search",
         "",
-        f"Every 64-cubed patch of every {'x'.join(str(s) for s in memo['query_shape'])} "
-        f"volume in {', '.join(memo['assessments'])} ({memo['n_patches']} patches "
-        f"from {memo['n_cases']} volumes), searched against ALL "
-        f"{bank['n_rows']} stride-{bank['stride']} rows of the train split "
-        f"(of {bank['n_rows_in_split']} rows in it). Not a sample: the whole bank.",
+        f"Every 64-cubed patch of every generated volume in "
+        f"{', '.join(memo['assessments_found'])} at {', '.join(shapes)} voxels "
+        f"({memo['n_patches']} patches from {memo['n_cases']} volumes), searched "
+        f"against ALL {bank['n_rows']} stride-{bank['stride']} rows of the train "
+        f"split (of {bank['n_rows_in_split']} rows in it). Not a sample: the "
+        f"whole bank. Volumes above {memo['max_tiles_per_volume']} tiles are left "
+        f"out on cost - {len(memo.get('skipped_too_large') or [])} of them.",
         "",
         f"Statistic `{crit['statistic']}`. {crit['reading']}",
         "",
         table(header, rows),
         "",
+        floor["note"],
+        "",
         "### By requested porosity",
         "",
         table(header, by_phi),
         "",
-        "### By neighbour availability during generation",
+        "### By neighbour availability when the window was denoised",
+        "",
+        f"Neighbour state is {memo['neighbour_state_source']}. A face counts as "
+        "UNKNOWN only when the chunk it reaches into had not been solved yet, so "
+        "this is an ordering fact and not a geometric one: the same position in "
+        "the last chunk of a volume has every neighbour it needs.",
         "",
         table(header, by_nb),
+        coarse_note,
         "",
         f"Latent space is per-channel normalised with the store's own train "
-        f"statistics; grey space is the raw source patches at "
-        f"`{bank['grey_source']}`. A generated patch reaches grey space through "
-        f"the VAE decoder and a real validation patch does not, so the grey "
-        f"ratio is an UPPER bound on how memorised a volume is - the latent "
-        f"ratio is the sharp one.",
+        f"statistics; the grey bank is the raw source patches at "
+        f"`{bank['grey_source']}`.",
         "",
     ]
     return "\n".join(text)

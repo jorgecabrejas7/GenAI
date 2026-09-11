@@ -338,10 +338,14 @@ The fifth statistic of assessment 8 is reported in the same `results.json` but
 is measured on other volumes and against a different floor, so it is described
 on its own.
 
-**Queries.** Every 64³ whole-material patch of every 192³ volume in
-`sampler` and `porosity_global` — the production operating point, 57 volumes
-and 1 539 patches, rather than the nine microstructure volumes. Latent queries
-are the volume RE-ENCODED through the frozen VAE, not its saved `latents.npy`:
+**Queries.** Every 64³ whole-material patch of every generated volume of at
+most 256 tiles in `sampler`, `porosity_global`, `multichunk` and
+`assembly_modes`. The first two are the production operating point (57 volumes,
+1 539 patches); the last two are the only volumes big enough to hold a chunk
+plane, and therefore the only ones that can fill the UNKNOWN neighbour bucket.
+The 192×1024×1024 cases are 768 query patches each and are left out on cost —
+the result names them rather than dropping them silently. Latent queries are
+the volume RE-ENCODED through the frozen VAE, not its saved `latents.npy`:
 ldm06 trains on a posterior draw (`data.latent_mode: sampled`) while the store
 holds posterior means, so comparing the two directly would add `σ·ε` to every
 distance.
@@ -375,23 +379,56 @@ still has near neighbours in the train set because the panels are the same
 material — so what the val patches score is the value the ratio takes when
 nothing has been copied. Without it a generated ratio of 0.6 means nothing.
 
-**Breakdown.** By requested porosity, and by whether the volume's windows ever
-saw a neighbour: `neighbour_census` rebuilds each volume's EXISTS / OOB /
-UNKNOWN window-face counts from the manifest's `volume_shape`, `chunk_tiles`
-and `window_stride` with the sampler's own rule. A 192³ volume is exactly one
-chunk, so it has no UNKNOWN face — the breakdown records that rather than
-assuming it.
+In grey space there are **two** floor rows and the difference between them is
+the VAE decoder.
 
-**Known failure mode.** The grey bank is raw scan data and the generated query
-is decoded, so a generated patch carries the VAE decoder's reconstruction error
-that a raw validation patch does not. A volume that reproduced a training
-latent EXACTLY would still sit one reconstruction error away from the real
-patch in grey space, so **the grey ratio is an upper bound** on how memorised a
-volume is. The latent ratio is the sharp one; grey is the corroborating
-pixel-level check. A second, smaller one: `squared_distances` selects by the
-`|q|² + |b|² − 2q·b` expansion, which cancels badly near zero and rounds
-differently at different chunk widths, so the two chosen distances are
-recomputed from an explicit float64 difference before anything reads them.
+| row | what it is | what it bounds |
+|---|---|---|
+| `grey` — **VAE round trip** | the val patch's own stored posterior mean, decoded by the same frozen r08 VAE the generated volume was decoded by | the like-for-like floor: it carries the same reconstruction error the generated query carries |
+| `grey_raw` — **raw scan** | the same val patches, untouched | what the ratio would be with no decoder error at all |
+
+Read the generated grey row against `grey`. **With the round-tripped floor the
+grey ratio is no longer merely an upper bound** — both sides of the comparison
+now reach grey space through the same decoder, so a generated ratio below the
+floor is evidence of copying and one at the floor is not. The absolute < 1/3
+verdict on a grey ratio stays conservative, because a volume that copied a
+training latent exactly would still sit one reconstruction error from the real
+patch; the generated-against-floor reading is the one that decides anything,
+and it is now fair. In latent space the round trip is the identity, so there is
+one floor.
+
+**Breakdown.** By requested porosity, and by which faces the window at that
+patch position had UNKNOWN **when it was denoised**. `window_states` rebuilds
+every window's EXISTS / OOB / UNKNOWN faces from the manifest's `volume_shape`,
+`chunk_tiles` and `window_stride`, using the sampler's own window grid, chunk
+partition, chunk ORDER and `_neighbour_plan` rule.
+
+That is an ordering fact, not a geometric one. In a 384³ volume at the
+production 3-tile chunk the window at latent cell (32, 32, 32) sits in the
+first chunk and its +z/+y/+x neighbours reach into chunks nobody has solved
+yet, so three faces are UNKNOWN; the window at (48, 48, 48) is its mirror image
+— interior, touching a chunk plane — but sits in the LAST chunk, so all six of
+its neighbours are finished and none is UNKNOWN. A reconstruction that only
+looked at geometry would score the two the same.
+
+The reconstruction is exact rather than a guess for two reasons. The canvas is
+`volume_shape` and nothing else — `request_offset` names the frame the noise is
+drawn in, not a larger canvas, so a translated request has the same chunk grid.
+And the chunk order is the fixed z-major nesting of `_chunk_ranges`, with no
+dependence on content, seed or machine. A 192³ volume is exactly one chunk, so
+every one of its patches lands in the `neighbours_present` bucket; the
+`multichunk` volumes fill both buckets from within a single volume, which is
+the cleanest possible comparison. If a patch position were ever not a window
+origin, that volume falls back to the volume-level bucket and is listed in
+`cases_bucketed_at_volume_level` — a coarse label that is true beats a fine one
+that is subtly wrong.
+
+**Known failure mode.** `squared_distances` selects by the `|q|² + |b|² − 2q·b`
+expansion, which cancels badly near zero — exactly where this check looks — and
+rounds differently at different chunk widths, so the two chosen distances are
+recomputed from an explicit float64 difference before anything reads them. The
+grey bank is also every stride-64 train row, air-heavy ones included; they are
+far from any whole-material query and cannot become its nearest neighbour.
 
 **Analysis geometry.** The generated cases are 192³; no test panel holds a
 clean 192-deep box, so the reference crops are 128³. Every statistic is
@@ -478,7 +515,7 @@ Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
 | 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
 | 6 | `assembly` | 9 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the offset triple generated here (offsets 0 / 16 / 32 in a 256³ canvas), and the campaign-08 VAE control row. |
 | 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
-| 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K and FID on 2-D slices, each against the matched real-vs-real floor. The memorisation block is reported here too but is measured on the assessment-1 and assessment-2 volumes against the whole train store, with its own real-val floor. |
+| 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K and FID on 2-D slices, each against the matched real-vs-real floor. The memorisation block is reported here too but is measured on the assessment-1, -2 and -10 volumes against the whole train store, with its own real-val floors. |
 
 **Assessment 8 runs at three porosity levels and no more** because every
 statistic in it is confounded by pore fraction, and each level needs its own
