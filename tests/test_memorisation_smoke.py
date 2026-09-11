@@ -90,3 +90,43 @@ class TestSmokeSet:
         rewrite added — untouched.
         """
         assert MS.SMOKE_ASSESSMENTS == ("sampler", "multichunk")
+
+
+class TestBusyGpuGuard:
+    """The store may not be streamed while the card is generating.
+
+    On this machine host and device share 121 GB. A streaming pass fills the
+    page cache and CUDA allocations then fail — without `free` ever reporting
+    low available memory, so the symptom never points at the cause. The guard
+    lives in the script and not only in the queue script, because the rule has
+    to hold for a hand-run too: that is exactly how it was broken.
+    """
+
+    def _smi(self, monkeypatch, rows, found=True):
+        monkeypatch.setattr(MS.shutil, "which",
+                            lambda _: "/usr/bin/nvidia-smi" if found else None)
+
+        class Done:
+            stdout = "\n".join(rows)
+        monkeypatch.setattr(MS.subprocess, "run", lambda *a, **k: Done())
+
+    def test_another_cuda_job_is_reported(self, monkeypatch):
+        self._smi(monkeypatch, ["309849, python", "1234, other"])
+        assert MS.gpu_jobs_other_than(999) == [(309849, "python"), (1234, "other")]
+
+    def test_our_own_pid_is_not_a_reason_to_refuse(self, monkeypatch):
+        self._smi(monkeypatch, ["999, python"])
+        assert MS.gpu_jobs_other_than(999) == []
+
+    def test_an_idle_card_permits_the_run(self, monkeypatch):
+        self._smi(monkeypatch, [])
+        assert MS.gpu_jobs_other_than(999) == []
+
+    def test_no_nvidia_smi_is_not_treated_as_a_busy_card(self, monkeypatch):
+        """A CPU-only box must not be blocked by a check it cannot make."""
+        self._smi(monkeypatch, ["1, x"], found=False)
+        assert MS.gpu_jobs_other_than(999) == []
+
+    def test_unparseable_rows_are_skipped(self, monkeypatch):
+        self._smi(monkeypatch, ["", "not a row", "7, python"])
+        assert MS.gpu_jobs_other_than(999) == [(7, "python")]

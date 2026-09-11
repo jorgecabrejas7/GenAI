@@ -841,3 +841,74 @@ class TestMaxCasesPerAssessment:
         self._campaign(monkeypatch, cases)
         with pytest.raises(KeyError, match="latents_root"):
             MEMO.memorisation(tmp_path, assessments=("sampler",))
+
+
+# --------------------------------------------------------------------------- #
+# the pass drops its own page cache
+# --------------------------------------------------------------------------- #
+class TestPageRelease:
+    """The search must release each bank chunk after using it.
+
+    This machine shares 121 GB between CPU and GPU. Page cache is reclaimable
+    in principle, but a CUDA allocation does not wait for reclaim — it fails.
+    A pass over the 195 GiB store that never releases will fill the cache in
+    minutes while `free` still reports tens of GB available, and the CUDA job
+    beside it dies with no sign of the cause. So a chunk that is read and not
+    released is a defect, not an inefficiency.
+    """
+
+    def _spy(self, store, name, calls):
+        real = getattr(store, name)
+
+        def wrapper(lo, hi, memmap=None):
+            calls.append((lo, hi))
+            return real(lo, hi, memmap)
+        object.__setattr__(store, name, wrapper)
+
+    @pytest.mark.parametrize("space,method", [("latent", "release_latent_chunk"),
+                                              ("grey", "release_grey_chunk")])
+    def test_every_chunk_read_is_released(self, tmp_path, space, method):
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")
+        calls = []
+        self._spy(store, method, calls)
+        dim = store.latent_dim if space == "latent" else store.grey_dim
+        MEMO.search(np.zeros((2, dim), np.float32), store, space, chunk=3)
+        n = len(store)
+        expected = [(lo, min(lo + 3, n)) for lo in range(0, n, 3)]
+        assert calls == expected          # every chunk, once, in order
+        assert calls[-1][1] == n          # including the short final one
+
+    def test_releasing_does_not_change_the_answer(self, tmp_path):
+        """It is advisory: the pages come back from the file if touched again."""
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")
+        q = np.stack([store.latent_chunk(3, 4)[0],
+                      store.latent_chunk(7, 8)[0]])
+        first = MEMO.search(q, store, "latent", chunk=3)
+        second = MEMO.search(q, store, "latent", chunk=5)
+        assert list(first.i1) == list(second.i1) == [3, 7]
+        assert first.d1 == pytest.approx(second.d1, abs=1e-9)
+
+    def test_an_empty_span_releases_nothing_rather_than_raising(self, tmp_path):
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")
+        store.release_latent_chunk(5, 5)          # no rows in the span
+        store.release_grey_chunk(5, 5)
+
+    def test_the_released_span_covers_the_rows_the_chunk_read(self, tmp_path):
+        """The bank rows are a strided subset, so the span carries gaps.
+
+        Releasing the whole span is intended: the interleaved store rows are
+        not in the bank and are not wanted either.
+        """
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")
+        seen = {}
+
+        def fake(path, file_rows, row_bytes, memmap=None):
+            seen["lo"] = int(file_rows.min()) * row_bytes
+            seen["hi"] = (int(file_rows.max()) + 1) * row_bytes
+        object.__setattr__(store, "_release_span", fake)
+        store.release_latent_chunk(0, 4)
+        row_bytes = (2 * store.latent_channels
+                     * int(np.prod(store.latent_spatial))
+                     * store.latent_dtype.itemsize)
+        assert seen["lo"] == int(store.rows[0]) * row_bytes
+        assert seen["hi"] == (int(store.rows[3]) + 1) * row_bytes

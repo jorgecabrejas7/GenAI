@@ -91,6 +91,8 @@ from __future__ import annotations
 
 import json
 import logging
+import mmap
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -674,6 +676,62 @@ class PatchStore:
     def grey_chunk(self, lo: int, hi: int, memmap=None) -> np.ndarray:
         return self.grey_at(np.arange(lo, hi), memmap)
 
+    # -- dropping pages behind the read ------------------------------------
+    #
+    # THIS MACHINE HAS 121 GB OF UNIFIED MEMORY SHARED BY CPU AND GPU.  Page
+    # cache is reclaimable in principle, but a CUDA allocation does not wait
+    # for the kernel to reclaim it: it fails.  A streaming pass over a 195 GiB
+    # store will fill the cache in minutes, and "available" stays high the
+    # whole time while CUDA jobs die.  So the pass drops its own pages as it
+    # goes, and the resident file-backed set stays bounded by the chunk size
+    # instead of growing to the size of the store.
+
+    def _release_span(self, path: Path, file_rows: np.ndarray, row_bytes: int,
+                      memmap=None) -> None:
+        """Drop the page cache for the byte span these rows occupy.
+
+        The bank rows are the stride-64 subset, so a chunk of positions covers
+        one contiguous SPAN of the file with unwanted rows interleaved.  The
+        whole span is released: the interleaved rows are not in the bank and
+        are not wanted either.
+
+        `madvise` first, to drop the pages this process has mapped, then
+        `posix_fadvise` on the file, which is what actually evicts them —
+        fadvise cannot free a page another mapping still holds.  Both are
+        advisory and both are allowed to fail; the search is still correct if
+        nothing is released, only hungrier.
+        """
+        if file_rows.size == 0:
+            return
+        lo = int(file_rows.min()) * row_bytes
+        hi = (int(file_rows.max()) + 1) * row_bytes
+        handle = getattr(memmap, "_mmap", None)
+        if handle is not None:
+            page = mmap.PAGESIZE
+            off = (lo // page) * page
+            try:
+                handle.madvise(mmap.MADV_DONTNEED, off, hi - off)
+            except (OSError, ValueError, AttributeError):
+                pass
+        try:
+            fd = os.open(str(path), os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, lo, hi - lo, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+    def release_latent_chunk(self, lo: int, hi: int, memmap=None) -> None:
+        row_bytes = (2 * self.latent_channels * int(np.prod(self.latent_spatial))
+                     * self.latent_dtype.itemsize)
+        self._release_span(self.root / self.split / "latents.bin",
+                           self.rows[lo:hi], row_bytes, memmap)
+
+    def release_grey_chunk(self, lo: int, hi: int, memmap=None) -> None:
+        self._release_span(self.patch_file, self.source_rows[lo:hi],
+                           self.patch ** 3, memmap)
+
     def normalise_latents(self, mu: np.ndarray) -> np.ndarray:
         """Put raw encoder means on the store's normalised scale."""
         if mu.shape[1] != self.latent_dim:
@@ -732,11 +790,15 @@ def search(
     """
     import torch  # noqa: PLC0415
 
-    readers = {"latent": (store.latent_chunk, store.latent_memmap, LATENT_BANK_CHUNK),
-               "grey": (store.grey_chunk, store.patch_memmap, GREY_BANK_CHUNK)}
+    readers = {
+        "latent": (store.latent_chunk, store.latent_memmap,
+                   store.release_latent_chunk, LATENT_BANK_CHUNK),
+        "grey": (store.grey_chunk, store.patch_memmap,
+                 store.release_grey_chunk, GREY_BANK_CHUNK),
+    }
     if space not in readers:
         raise KeyError(f"space must be one of {sorted(readers)}, got {space!r}")
-    reader, mapper, default_chunk = readers[space]
+    reader, mapper, release, default_chunk = readers[space]
     chunk = int(chunk or default_chunk)
 
     expected = store.latent_dim if space == "latent" else store.grey_dim
@@ -765,6 +827,7 @@ def search(
             (idx.cpu().numpy().astype(np.int64) + lo),
         )
         del bank, d2
+        release(lo, hi, memmap)
         if lo // chunk % 50 == 0:
             logger.info("memorisation %s search: %d/%d bank rows", space, hi, n)
     refine(acc, queries, store, space)

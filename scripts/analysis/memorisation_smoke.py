@@ -108,6 +108,47 @@ def _gpu_gb(pid: int) -> float:
     return 0.0
 
 
+def gpu_jobs_other_than(pid: int) -> list[tuple[int, str]]:
+    """CUDA processes on the card that are not `pid` or its children.
+
+    THE STORE MAY NOT BE STREAMED WHILE THE CARD IS GENERATING.  GB10 has
+    121 GB of unified memory shared by CPU and GPU: a streaming pass fills the
+    page cache, and a CUDA allocation does not wait for the kernel to reclaim
+    it — it fails.  This has already cost generation runs on this machine
+    (ldm06 run note, incident 3), and `free` reports tens of GB "available"
+    throughout, so the symptom never points at the cause.
+
+    The check is here rather than in the queue script because the rule has to
+    hold for a hand-run too: that is exactly how it was broken.
+    """
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        return []
+    try:
+        out = subprocess.run(
+            [smi, "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20, check=False,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    mine = {pid}
+    jobs = []
+    for row in out.splitlines():
+        parts = [c.strip() for c in row.split(",")]
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        other = int(parts[0])
+        if other in mine:
+            continue
+        try:
+            if int(Path(f"/proc/{other}/stat").read_text().split()[3]) == pid:
+                continue                      # our own child
+        except (OSError, IndexError, ValueError):
+            pass
+        jobs.append((other, parts[1]))
+    return jobs
+
+
 def _child(args: argparse.Namespace) -> int:
     """Run the search and write the result. Executed in the child process."""
     from poregen.eval_v4.memorisation import memorisation
@@ -133,6 +174,10 @@ def main() -> int:
                          "page-cache and not memory the run needs.")
     ap.add_argument("--full", action="store_true",
                     help="run every volume, not the two-volume smoke set")
+    ap.add_argument("--allow-busy-gpu", action="store_true",
+                    help="run even if another CUDA job holds the card. Only "
+                         "for a machine where host and device memory are "
+                         "separate pools.")
     ap.add_argument("--_child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
@@ -141,6 +186,18 @@ def main() -> int:
 
     if args._child:
         return _child(args)
+
+    busy = [] if args.allow_busy_gpu else gpu_jobs_other_than(os.getpid())
+    if busy:
+        names = ", ".join(f"{p} ({n})" for p, n in busy)
+        print(
+            f"REFUSING to start: the card is busy with {names}.\n"
+            "This pass streams a 195 GiB store and the page cache it fills "
+            "makes CUDA allocations fail on this machine's unified memory, "
+            "without ever showing up as low 'available' memory. Run it in its "
+            "own queue slot, when the card is idle. --allow-busy-gpu overrides.",
+            file=sys.stderr)
+        return 3
 
     report = Path(args.root) / f"memorisation_{tag}_run.json"
     Path(args.root).mkdir(parents=True, exist_ok=True)
