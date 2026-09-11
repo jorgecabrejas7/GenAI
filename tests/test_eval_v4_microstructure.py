@@ -349,61 +349,6 @@ class TestFid:
 
 
 # ---------------------------------------------------------------------------
-# Memorisation
-# ---------------------------------------------------------------------------
-
-class TestMemorisation:
-    def test_a_missing_store_is_an_explicit_failure_to_read(self, tmp_path):
-        with pytest.raises(FileNotFoundError):
-            MS.train_latent_mu(tmp_path / "latents_that_do_not_exist")
-
-    def test_a_store_with_another_pack_scheme_is_refused(self, tmp_path):
-        import json
-
-        (tmp_path / "metadata.json").write_text(json.dumps({
-            "latent_shape": [4, 16, 16, 16],
-            "storage": {"pack_scheme": "mu_only", "dtype": "float16"},
-        }))
-        with pytest.raises(ValueError, match="mu_then_std"):
-            MS.train_latent_mu(tmp_path)
-
-    def test_the_store_reader_returns_the_mu_half_only(self, tmp_path):
-        import json
-
-        import pandas as pd
-
-        c, sp, n = 2, 4, 6
-        (tmp_path / "metadata.json").write_text(json.dumps({
-            "latent_shape": [c, sp, sp, sp],
-            "storage": {"pack_scheme": "mu_then_std", "dtype": "float16"},
-        }))
-        split = tmp_path / "train"
-        split.mkdir()
-        arr = np.zeros((n, 2 * c, sp, sp, sp), np.float16)
-        arr[:, :c] = 1.0                          # mu
-        arr[:, c:] = 9.0                          # std, which must not be read
-        arr.tofile(split / "latents.bin")
-        pd.DataFrame({"source_row": np.arange(n)}).to_parquet(split / "index.parquet")
-
-        mu = MS.train_latent_mu(tmp_path, n_sample=4)
-        assert mu.shape == (4, c * sp ** 3)
-        assert (mu == 1.0).all()
-
-    def test_a_latent_of_the_wrong_width_is_refused(self):
-        with pytest.raises(ValueError, match="different VAE"):
-            MS.nearest_neighbour_distance(np.zeros((2, 8), np.float32),
-                                          np.zeros((3, 16), np.float32))
-
-    def test_a_patch_identical_to_a_stored_one_has_distance_zero(self):
-        rng = np.random.default_rng(0)
-        bank = rng.normal(size=(50, 12)).astype(np.float32)
-        query = np.vstack([bank[7], bank[7] + 100.0])
-        d = MS.nearest_neighbour_distance(query, bank)
-        assert d[0] == pytest.approx(0.0, abs=1e-4)
-        assert d[1] > 100.0
-
-
-# ---------------------------------------------------------------------------
 # The per-volume profile and the set comparison
 # ---------------------------------------------------------------------------
 

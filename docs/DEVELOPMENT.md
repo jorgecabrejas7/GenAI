@@ -34,7 +34,12 @@ eval_v4 generate sampler --model runs/ldm/<run> --ckpt 130000 \
                  --out runs/campaigns/10-eval-v4/             # GPU, hours
 eval_v4 generate sampler --model runs/ldm/<run> --ckpt best --dry-run
 eval_v4 measure sampler --root runs/campaigns/10-eval-v4/     # CPU, repeatable
-eval_v4 measure microstructure --root runs/campaigns/10-eval-v4/   # needs the micro crops
+eval_v4 measure microstructure --root runs/campaigns/10-eval-v4/   # needs the micro crops,
+                                                              # AND the sampler +
+                                                              # porosity_global volumes and
+                                                              # the latent store: the
+                                                              # memorisation search is a GPU
+                                                              # pass over the whole train store
 eval_v4 report --root runs/campaigns/10-eval-v4/
 eval_v4 manifest-check --root runs/campaigns/10-eval-v4/      # exit 1 on a fault
 
