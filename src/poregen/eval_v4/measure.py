@@ -980,6 +980,207 @@ def measure_microstructure(root, repo) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 11 - four ways to assemble the same request
+# ---------------------------------------------------------------------------
+
+#: The per-chunk quantities the arms are compared on.  Each is a path into one
+#: row of ``metrics.chunk_profile``, and every one of them is defined for a real
+#: crop too, which is what makes the floor row possible.
+CHUNK_KEYS = {
+    "chunk_plane_seam_xct": ("xct", "chunk_plane_ratio"),
+    "tile_plane_seam_xct": ("xct", "tile_plane_ratio"),
+    "chunk_plane_seam_pore": ("pore", "chunk_plane_ratio"),
+    "tile_plane_seam_pore": ("pore", "tile_plane_ratio"),
+    "phi_pore": ("porosity", "phi_pore"),
+    "s2_relative_distance": ("s2", "s2_relative_distance"),
+}
+
+
+def _dig(row, path):
+    v = row
+    for p in path:
+        v = (v or {}).get(p) if isinstance(v, dict) else None
+    return v
+
+
+def _chunk_series(case_rows: list[list[dict]]) -> dict:
+    """Mean and sd ACROSS SEEDS at every chunk index, plus the trend in index.
+
+    ``case_rows`` is one ``chunk_profile`` list per seed.  The volumes of one
+    cell are the same shape, so chunk index k is the same block in all of them;
+    the aggregation asserts that rather than assuming it.
+    """
+    n = {len(r) for r in case_rows}
+    if len(n) != 1:
+        raise ValueError(
+            f"the seeds of one cell produced {sorted(n)} chunks; they must be the "
+            "same shape to be aggregated per chunk index."
+        )
+    n_chunks = n.pop()
+    out: dict = {"n_chunks": n_chunks, "by_chunk_index": {}, "trend": {}}
+    for name, path in CHUNK_KEYS.items():
+        per_index = []
+        flat_x, flat_y = [], []
+        for k in range(n_chunks):
+            vals = [_dig(rows[k], path) for rows in case_rows]
+            per_index.append(M.mean_sd(vals))
+            for v in vals:
+                if v is not None and np.isfinite(v):
+                    flat_x.append(k)
+                    flat_y.append(v)
+        out["by_chunk_index"][name] = per_index
+        # The fit is over every seed's every chunk, not over the per-index
+        # means: a slope fitted on three points that are themselves means
+        # would hide the seed spread the slope has to be read against.
+        out["trend"][name] = M.fit_ols(flat_x, flat_y)
+    return out
+
+
+def _floor_chunk_profile(root, period) -> dict:
+    """The same per-chunk profile on the real crops, by shape tag.
+
+    A real volume was assembled by nothing, so what it scores at the reference
+    planes is what the MEASUREMENT reads when there is no seam - the only thing
+    a generated ratio can be called large or small against.
+    """
+    by_tag: dict[str, list] = {}
+    for case in load_cases(root, "real_floor"):
+        notes = case.manifest.notes or {}
+        tag = notes.get("shape_tag")
+        if tag not in ("small", "large"):
+            continue
+        rows = M.chunk_profile(
+            case.xct, case.label, case.material_voxels(),
+            manifest=case.manifest, period=period, pore_logit=case.pore_logit,
+        )
+        by_tag.setdefault(tag, []).append(rows)
+    out = {}
+    for tag, runs in sorted(by_tag.items()):
+        flat = [r for rows in runs for r in rows]
+        out[tag] = {
+            "n_volumes": len(runs),
+            "n_chunks_each": [len(r) for r in runs],
+            **{name: M.mean_sd([_dig(r, path) for r in flat])
+               for name, path in CHUNK_KEYS.items()},
+        }
+    return out
+
+
+def measure_assembly_modes(root, repo) -> dict:
+    """How much of the quality is the hybrid sampler, and how far is the ceiling?
+
+    Every arm is read on the SAME reference chunk grid, taken from the cases and
+    not from each volume's own ``chunk_tiles`` - the arms have different chunk
+    geometries by construction, so their own grids would put four different sets
+    of planes in one table.  Each volume also keeps its own-grid seam block from
+    ``measure_core``, which is what the sampler itself reported.
+
+    The per-chunk series is the point of the assessment.  A chunked sampler
+    fails by compounding: chunk k assembles against material chunk k-1 already
+    produced, so an arm can hold a good volume average and still degrade with
+    distance from the first chunk.  ``trend`` is the OLS slope of each quantity
+    against the chunk index, over every seed's every chunk.
+    """
+    from poregen.eval_v4.cases import (  # noqa: PLC0415
+        ASSEMBLY_MODES_REFERENCE_TILES,
+        TEACHER_MAX_DEPTH_VOX,
+    )
+    from poregen.eval_v4.io import TILE  # noqa: PLC0415
+
+    cases = load_cases(root, "assembly_modes")
+    if not cases:
+        raise FileNotFoundError(f"no assembly_modes volumes under {root}")
+    period = tuple(TILE * int(c) for c in ASSEMBLY_MODES_REFERENCE_TILES)
+
+    rows = []
+    profiles = []
+    for case in cases:
+        notes = case.manifest.notes or {}
+        material = case.material_voxels()
+        row = measure_core(case)
+        row["arm"] = notes.get("arm")
+        row["scale"] = notes.get("scale")
+        row["neighbour_mode"] = notes.get("neighbour_mode")
+        row["generated_chunk_tiles"] = list(case.manifest.chunk_tiles or ())
+        row["reference_chunk_period"] = list(period)
+        row["reference_latents"] = notes.get("reference_latents")
+        # The whole-volume seam at the REFERENCE planes, so the four arms have
+        # one comparable headline number beside the per-chunk series.
+        grey = case.xct.astype(np.float32) / 255.0
+        row["reference_seams"] = {
+            **M.seam_discontinuity(grey, period, prefix="seam_ref_xct",
+                                   interior_exclude=TILE),
+            **M.seam_discontinuity(grey, TILE, prefix="seam_ref_tile_xct"),
+        }
+        profile = M.chunk_profile(
+            case.xct, case.label, material, manifest=case.manifest,
+            period=period, pore_logit=case.pore_logit,
+        )
+        row["n_chunks"] = len(profile)
+        rows.append(row)
+        profiles.append(profile)
+
+    cells: dict[str, dict] = {}
+    for (arm, scale), group in sorted(
+        _group(zip(rows, profiles), lambda rp: (rp[0]["arm"], rp[0]["scale"])).items()
+    ):
+        grp_rows = [r for r, _ in group]
+        cells[f"{arm}@{scale}"] = {
+            "arm": arm,
+            "scale": scale,
+            "n_seeds": len(group),
+            "seeds": sorted(r["seed"] for r in grp_rows),
+            "generated_chunk_tiles": grp_rows[0]["generated_chunk_tiles"],
+            "neighbour_mode": grp_rows[0]["neighbour_mode"],
+            "volume_seam_xct_reference": _agg(grp_rows, ("reference_seams", "seam_ref_xct_ratio")),
+            "volume_seam_tile_xct": _agg(grp_rows, ("reference_seams", "seam_ref_tile_xct_ratio")),
+            "delivered_phi": _agg(grp_rows, ("porosity", "delivered_phi")),
+            "air_fraction_interior": _agg(grp_rows, ("air_fraction_interior",)),
+            "wall_time_s": _agg(grp_rows, ("wall_time_s",)),
+            "peak_gpu_memory_bytes": _agg(grp_rows, ("peak_gpu_memory_bytes",)),
+            **_failure_rate(grp_rows),
+            **_chunk_series([p for _, p in group]),
+        }
+
+    return {
+        "assessment": "assembly_modes",
+        "question": ("How much of the generated quality comes from the hybrid "
+                     "chunked sampler rather than its alternatives, and how far "
+                     "is the assembly from an upper bound?"),
+        "note": (
+            "Four arms, one request, one seed set per scale. `joint` is one chunk "
+            "with every neighbour UNKNOWN (the ldm05 MultiDiffusion sampler); "
+            "`autoregressive` is chunk_tiles (1,1,1), patch at a time against "
+            "finished material; `hybrid` is the production (3,3,3); "
+            "`teacher_forced` is the production chunking with every neighbour "
+            "replaced by the encoding of a REAL test volume at the same position. "
+            "The last is a CONTROL, not a sampler: it is the ceiling the hybrid "
+            "would reach if the material it assembles against were perfect."
+        ),
+        "reference_grid_note": (
+            f"Every arm is measured on the same reference chunk grid, "
+            f"{list(period)} voxels, whatever grid it was generated on. For the "
+            "hybrid arm that IS its generation grid; for the others it is 'what "
+            "happens at the planes the production sampler would have had to "
+            "assemble across'. The joint arm has no chunk planes at all, so its "
+            "row is the measurement's own no-seam reading."
+        ),
+        "teacher_forced_note": (
+            f"The teacher-forced arm exists at the slab only. No specimen in the "
+            f"dataset is thicker than about {TEACHER_MAX_DEPTH_VOX} voxels on the "
+            "64-voxel tile grid, so there is no real material to teach with at "
+            "384 deep, and repeating a block to fill the depth would put a fake "
+            "join on a chunk plane - the one place this assessment measures. The "
+            "384 cells carry no ceiling rather than a fabricated one."
+        ),
+        "chunk_keys": {k: list(v) for k, v in CHUNK_KEYS.items()},
+        "real_floor": _floor_chunk_profile(root, period),
+        "per_case": rows,
+        "cells": cells,
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -991,6 +1192,7 @@ MEASURERS = {
     "surface": measure_surface,
     "multichunk": measure_multichunk,
     "microstructure": measure_microstructure,
+    "assembly_modes": measure_assembly_modes,
 }
 
 

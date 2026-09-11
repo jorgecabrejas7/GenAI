@@ -33,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from poregen.diffusion.sampler import seam_discontinuity
+from poregen.diffusion.sampler import AXIS_NAMES, seam_discontinuity
 from poregen.eval_v4.io import (
     LABEL_AIR,
     LABEL_MATERIAL,
@@ -429,6 +429,268 @@ def chunk_plane_slab(shape: tuple[int, int, int], period, half_width: int = TILE
         shaped = near.reshape([-1 if a == axis else 1 for a in range(3)])
         m |= np.broadcast_to(shaped, shape)
     return m
+
+
+# ---------------------------------------------------------------------------
+# 3b - the same seams, resolved PER CHUNK along the generation order
+# ---------------------------------------------------------------------------
+#
+# ``seam_metrics`` answers "is there a seam in this volume".  These answer
+# "which chunk's seam, and does it get worse the further the chunk is from the
+# first one" — the question a chunked sampler's failure mode is actually
+# shaped like, because chunk k assembles against material chunk k-1 already
+# produced, and an error that compounds shows up as a trend in k and not as a
+# worse volume average.
+#
+# The grid is a PARAMETER, never the case's own ``chunk_tiles``.  Four arms
+# with four chunk geometries have to be read at the same planes or the table
+# compares four different measurements.
+
+def chunk_blocks(shape: tuple[int, int, int], period) -> list[dict]:
+    """The reference chunk grid, in RASTER (generation) order.
+
+    ``period`` is the chunk size in voxels, per axis or one value for all three.
+    The last block on an axis is short when the volume is not a whole number of
+    chunks, exactly as ``VolumeGenerator._chunk_ranges`` cuts it.
+
+    Each block carries the axes on which it has a LOWER chunk plane: the plane
+    at its own origin, where it met material that already existed.  Attributing
+    a plane to the block ABOVE it is what makes "seam of chunk k" well defined —
+    every plane has exactly one owner, and chunk 0 owns none.
+    """
+    shape = tuple(int(s) for s in shape)
+    per = (int(period),) * 3 if np.isscalar(period) else tuple(int(p) for p in period)
+    if any(p <= 0 for p in per):
+        raise ValueError(f"chunk period must be positive on every axis, got {per}.")
+    starts = [list(range(0, shape[a], per[a])) for a in range(3)]
+    out = []
+    for z0 in starts[0]:
+        for y0 in starts[1]:
+            for x0 in starts[2]:
+                origin = (z0, y0, x0)
+                out.append({
+                    "chunk_index": len(out),
+                    "origin": list(origin),
+                    "shape": [min(per[a], shape[a] - origin[a]) for a in range(3)],
+                    "lower_plane_axes": [a for a in range(3) if origin[a] > 0],
+                })
+    return out
+
+
+def _plane_mad(vol: np.ndarray, axis: int, boundary: int, foot) -> float:
+    """Mean |slice-to-slice difference| at one plane, over one block's footprint.
+
+    ``boundary`` indexes the plane BETWEEN voxel ``boundary - 1`` and
+    ``boundary`` — the same convention ``seam_discontinuity`` uses.
+    """
+    sl_lo = list(foot)
+    sl_hi = list(foot)
+    sl_lo[axis] = slice(boundary - 1, boundary)
+    sl_hi[axis] = slice(boundary, boundary + 1)
+    return float(np.abs(vol[tuple(sl_hi)].astype(np.float32)
+                        - vol[tuple(sl_lo)].astype(np.float32)).mean())
+
+
+def chunk_seam_profile(vol: np.ndarray, block: dict, tile: int = TILE) -> dict:
+    """Seams of ONE chunk, split into the chunk family and the tile family.
+
+    Three plane families inside and on the lower face of a block:
+
+    ``chunk``    the block's own lower-face planes — where two independently
+                 denoised canvases meet.  Absent for chunk 0.
+    ``tile``     planes strictly inside the block at multiples of ``tile`` —
+                 where two overlapping WINDOWS of the same solve meet.
+    ``interior`` every other plane strictly inside the block.  This is the
+                 baseline both ratios are divided by, so the two families are
+                 judged against the same natural slice-to-slice variation —
+                 the convention ``seam_metrics`` already applies volume-wide.
+
+    Each axis contributes its planes weighted by the number of voxels behind
+    them, so an anisotropic block does not over-weight its thin axis.
+    """
+    origin = tuple(int(v) for v in block["origin"])
+    extent = tuple(int(v) for v in block["shape"])
+    foot = tuple(slice(origin[a], origin[a] + extent[a]) for a in range(3))
+    fam: dict[str, list[tuple[float, float]]] = {"chunk": [], "tile": [], "interior": []}
+    per_axis: dict[str, dict] = {}
+
+    inner = np.asarray(vol[foot], np.float32)
+    for axis in range(3):
+        elems = float(extent[(axis + 1) % 3] * extent[(axis + 2) % 3])
+        axis_fam: dict[str, list[float]] = {"chunk": [], "tile": [], "interior": []}
+        if axis in block["lower_plane_axes"]:
+            # The lower plane lies BETWEEN this block and the previous one, so
+            # it is the one plane that cannot come from a diff of the block.
+            axis_fam["chunk"].append(_plane_mad(vol, axis, origin[axis], foot))
+        others = tuple(i for i in range(3) if i != axis)
+        per_plane = np.abs(np.diff(inner, axis=axis)).mean(axis=others)
+        boundary = np.arange(origin[axis] + 1, origin[axis] + extent[axis])
+        is_tile = (boundary % int(tile)) == 0
+        axis_fam["tile"] = [float(v) for v in per_plane[is_tile]]
+        axis_fam["interior"] = [float(v) for v in per_plane[~is_tile]]
+        per_axis[AXIS_NAMES[axis]] = {
+            f"{k}_mad": (float(np.mean(v)) if v else None) for k, v in axis_fam.items()
+        }
+        per_axis[AXIS_NAMES[axis]]["n_chunk_planes"] = len(axis_fam["chunk"])
+        for k, v in axis_fam.items():
+            fam[k] += [(m, elems) for m in v]
+
+    def agg(vals) -> float | None:
+        if not vals:
+            return None
+        w = sum(e for _, e in vals)
+        return float(sum(m * e for m, e in vals) / w) if w else None
+
+    mad = {k: agg(v) for k, v in fam.items()}
+    base = mad["interior"]
+
+    def ratio(key: str) -> float | None:
+        if mad[key] is None or base is None or base <= 1e-12:
+            return None
+        return float(mad[key] / base)
+
+    return {
+        "chunk_plane_mad": mad["chunk"],
+        "tile_plane_mad": mad["tile"],
+        "interior_mad": base,
+        "chunk_plane_ratio": ratio("chunk"),
+        "tile_plane_ratio": ratio("tile"),
+        "n_chunk_planes": len(fam["chunk"]),
+        "n_tile_planes": len(fam["tile"]),
+        "n_interior_planes": len(fam["interior"]),
+        "per_axis": per_axis,
+    }
+
+
+def chunk_porosity(label: np.ndarray, material: np.ndarray, block: dict) -> dict:
+    """Material porosity and air fraction inside one chunk block."""
+    sl = tuple(slice(block["origin"][a], block["origin"][a] + block["shape"][a])
+               for a in range(3))
+    lab, mat = label[sl], material[sl]
+    n_mat = float(mat.sum())
+    return {
+        "phi_pore": float(((lab == LABEL_PORE) & mat).sum() / n_mat) if n_mat else None,
+        "air_fraction": float((lab == LABEL_AIR).mean()),
+        "material_fraction": float(mat.mean()),
+    }
+
+
+def _centred_window(centre: int, side: int, limit: int) -> tuple[int, int] | None:
+    """``(lo, hi)`` of a ``side``-long window centred at ``centre`` inside
+    ``[0, limit)``, or ``None`` when it does not fit."""
+    if side > limit:
+        return None
+    lo = int(np.clip(centre - side // 2, 0, limit - side))
+    return lo, lo + side
+
+
+def chunk_s2(
+    label: np.ndarray,
+    material: np.ndarray,
+    block: dict,
+    *,
+    window: int,
+    min_material: float,
+) -> dict:
+    """S2 inside one chunk against S2 straddling each of its chunk planes.
+
+    The inside window is centred on the block; each across window is centred on
+    one of the block's lower-face planes, so half of it is material the previous
+    chunk produced and half is this chunk's.  If the join is sound the two
+    curves agree; if the structure stops at the plane, the across curve loses
+    correlation at exactly the lag that reaches over it.
+
+    ``s2_relative_distance`` is ``mean|across - inside| / mean(inside)``, which
+    is 0 for identical curves and is scale-free, so chunks at different porosity
+    are still comparable.  ``None`` wherever a window does not fit or is not at
+    least ``min_material`` requested specimen — a window half outside the
+    specimen would measure the envelope and not the join.
+    """
+    from poregen.eval_v4.microstructure import s2_radial  # noqa: PLC0415
+
+    origin = tuple(int(v) for v in block["origin"])
+    extent = tuple(int(v) for v in block["shape"])
+    centre = tuple(origin[a] + extent[a] // 2 for a in range(3))
+
+    def curve(centres) -> tuple[list | None, float | None]:
+        box = [_centred_window(centres[a], window, label.shape[a]) for a in range(3)]
+        if any(b is None for b in box):
+            return None, None
+        sl = tuple(slice(b[0], b[1]) for b in box)
+        mat = material[sl]
+        if float(mat.mean()) < min_material:
+            return None, None
+        _, s2 = s2_radial((label[sl] == LABEL_PORE) & mat)
+        return [float(v) for v in s2], float(s2[0])
+
+    inside, inside_zero = curve(centre)
+    out: dict = {
+        "window": int(window),
+        "s2_inside": inside,
+        "s2_inside_zero_lag": inside_zero,
+        "across": {},
+    }
+    for axis in block["lower_plane_axes"]:
+        centres = list(centre)
+        centres[axis] = origin[axis]
+        across, across_zero = curve(centres)
+        dist = None
+        if inside is not None and across is not None:
+            a, b = np.asarray(across, float), np.asarray(inside, float)
+            ok = np.isfinite(a) & np.isfinite(b)
+            denom = float(np.abs(b[ok]).mean()) if ok.any() else 0.0
+            if denom > 1e-12:
+                dist = float(np.abs(a[ok] - b[ok]).mean() / denom)
+        out["across"][AXIS_NAMES[axis]] = {
+            "s2": across,
+            "s2_zero_lag": across_zero,
+            "s2_relative_distance": dist,
+        }
+    vals = [v["s2_relative_distance"] for v in out["across"].values()
+            if v["s2_relative_distance"] is not None]
+    out["s2_relative_distance"] = float(np.mean(vals)) if vals else None
+    return out
+
+
+@requires()
+def chunk_profile(
+    xct_u8: np.ndarray,
+    label: np.ndarray,
+    material: np.ndarray,
+    *,
+    manifest: Manifest,
+    period,
+    pore_logit: np.ndarray | None = None,
+    with_s2: bool = True,
+) -> list[dict]:
+    """Every per-chunk number for one volume, in generation order.
+
+    ``period`` is the REFERENCE chunk grid in voxels and is given by the
+    assessment, not read from the manifest: the whole point is to read volumes
+    assembled on different grids at the same planes.  A real crop goes through
+    unchanged — it carries no request, and nothing here needs one — which is
+    what makes the floor row possible.
+    """
+    from poregen.eval_v4.microstructure import S2_MIN_MATERIAL, S2_WINDOW  # noqa: PLC0415
+
+    grey = xct_u8.astype(np.float32) / 255.0
+    rows = []
+    for block in chunk_blocks(label.shape, period):
+        row = {
+            "chunk_index": block["chunk_index"],
+            "origin": block["origin"],
+            "shape": block["shape"],
+            "lower_plane_axes": block["lower_plane_axes"],
+            "xct": chunk_seam_profile(grey, block),
+            "porosity": chunk_porosity(label, material, block),
+        }
+        if pore_logit is not None:
+            row["pore"] = chunk_seam_profile(np.asarray(pore_logit, np.float32), block)
+        if with_s2:
+            row["s2"] = chunk_s2(label, material, block,
+                                 window=S2_WINDOW, min_material=S2_MIN_MATERIAL)
+        rows.append(row)
+    return rows
 
 
 # ---------------------------------------------------------------------------

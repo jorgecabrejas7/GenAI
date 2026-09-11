@@ -21,6 +21,13 @@ recorded here rather than worked around silently:
   the noise realisation as well as in the grid, and the pair would measure
   neither.
 
+* **Neighbour source.**  ``CaseSpec.neighbour_mode`` selects one of
+  :data:`poregen.diffusion.sampler.NEIGHBOUR_MODES`.  ``"reference"``
+  (teacher forcing) additionally needs a canvas of real encoded material, which
+  :mod:`poregen.eval_v4.teacher` builds from the RUN's own latent store - the
+  one ``resolve_latent_store`` already checked.  Every other assessment leaves
+  the default ``"canvas"``, which is the production path.
+
 Seeding is the sampler's own: ``generate(seed=...)`` drives every random draw
 of the reverse process from a local generator, so a case is reproducible from
 its manifest alone and one case cannot shift the noise another case will draw.
@@ -325,6 +332,7 @@ class VolumeRunner:
             n_steps=spec.ddim_steps, s_por=spec.s_por, s_nb=spec.s_nb,
             cfg_rescale=self.cfg_rescale,
         )
+        reference, reference_note = self._reference_latents(spec, shape)
         generator = VolumeGenerator(
             sampler=sampler,
             vae=self.vae,
@@ -339,6 +347,8 @@ class VolumeRunner:
             chunk_tiles=spec.chunk_tiles,
             window_stride=spec.window_stride,
             decode_stride=spec.decode_stride,
+            neighbour_mode=spec.neighbour_mode,
+            reference_latents=reference,
         )
         snapped = generator._volume_shape(size_mm)
         if tuple(snapped) != shape:
@@ -423,6 +433,8 @@ class VolumeRunner:
                 "device": str(self.device),
                 "autocast_dtype": str(self.autocast_dtype),
                 "conditioned_phi_after_clamp": clamped,
+                "neighbour_mode": spec.neighbour_mode,
+                "reference_latents": reference_note,
                 "request_offset": list(spec.request_offset),
                 "specimen_box": (
                     [list(spec.specimen_box[0]), list(spec.specimen_box[1])]
@@ -483,6 +495,23 @@ class VolumeRunner:
                         float(field[iz, iy, ix]) if field is not None else value
                     )
         return field, por_map
+
+    def _reference_latents(self, spec: CaseSpec, shape: tuple[int, int, int]):
+        """``(canvas, provenance)`` for a teacher-forced case, else ``(None, None)``.
+
+        The store is the RUN's own - ``self.latents_root``, already checked
+        against the model's latent width and the VAE that has to decode the
+        result.  Naming another store here would feed the denoiser latents from
+        an encoder it has never seen and call the result a ceiling.
+        """
+        if spec.neighbour_mode != "reference":
+            return None, None
+        from poregen.eval_v4.teacher import reference_latent_canvas  # noqa: PLC0415
+
+        canvas, note = reference_latent_canvas(
+            self.latents_root, shape, seed=spec.seed
+        )
+        return torch.from_numpy(canvas).to(self.device), note
 
     def _material_request(self, spec: CaseSpec):
         """(voxel envelope, latent-cell envelope) or ``(None, None)`` for 'full'."""

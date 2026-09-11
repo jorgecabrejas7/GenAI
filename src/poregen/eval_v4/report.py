@@ -899,6 +899,159 @@ def report_surface(res, root, floor) -> tuple[str, list[str]]:
     return "\n".join(text) + "\n", []
 
 
+#: Row order of the arm tables.  Fixed, not alphabetical: the three samplers in
+#: increasing chunk size and then the ceiling, so the table reads as the
+#: argument it is.
+ARM_ORDER = ("joint", "autoregressive", "hybrid", "teacher_forced")
+#: Per-chunk quantities the findings show, and how many digits each deserves.
+CHUNK_ROWS = (
+    ("chunk_plane_seam_xct", "chunk-plane seam (grey)", 3),
+    ("tile_plane_seam_xct", "tile-plane seam (grey)", 3),
+    ("chunk_plane_seam_pore", "chunk-plane seam (pore)", 3),
+    ("tile_plane_seam_pore", "tile-plane seam (pore)", 3),
+    ("phi_pore", "porosity per chunk", 4),
+    ("s2_relative_distance", "S2 across vs inside", 4),
+)
+
+
+def _mean_sd(values) -> dict:
+    """Mean and sd of already-aggregated numbers, in the shape ``ms`` reads.
+
+    Local on purpose: importing ``metrics`` for one function would pull the
+    sampler, and with it torch, into a stage that reads ``results.json`` and
+    nothing else.
+    """
+    v = [x for x in values if x is not None and np.isfinite(x)]
+    if not v:
+        return {"mean": None, "sd": None, "n": 0}
+    a = np.asarray(v, float)
+    return {"mean": float(a.mean()),
+            "sd": float(a.std(ddof=1)) if a.size > 1 else 0.0,
+            "n": int(a.size)}
+
+
+def _cell_order(cells: dict) -> list[str]:
+    def key(name):
+        arm = cells[name]["arm"]
+        rank = ARM_ORDER.index(arm) if arm in ARM_ORDER else len(ARM_ORDER)
+        return (str(cells[name]["scale"]), rank)
+
+    return sorted(cells, key=key)
+
+
+def report_assembly_modes(res, root, floor) -> tuple[str, list[str]]:
+    cells = res["cells"]
+    order = _cell_order(cells)
+
+    head = table(
+        ["arm @ scale", "chunk tiles", "neighbours", "seeds", "seam at ref planes",
+         "seam at tile planes", "delivered phi", "air (interior)", "wall s", "fail"],
+        [[name, str(c["generated_chunk_tiles"]), str(c["neighbour_mode"]),
+          str(c["n_seeds"]), ms(c["volume_seam_xct_reference"], 3),
+          ms(c["volume_seam_tile_xct"], 3), ms(c["delivered_phi"]),
+          ms(c["air_fraction_interior"]), ms(c["wall_time_s"], 1),
+          fmt(c["failure_rate"], 2)]
+         for name, c in ((n, cells[n]) for n in order)],
+    )
+
+    fl = res.get("real_floor") or {}
+    floor_rows = [
+        [f"real {tag}", str(f["n_volumes"]),
+         *[ms(f.get(key), dig) for key, _, dig in CHUNK_ROWS]]
+        for tag, f in sorted(fl.items())
+    ]
+
+    def mean_over_chunks(cell, key):
+        vals = [b.get("mean") for b in cell["by_chunk_index"][key]]
+        return _mean_sd(vals)
+
+    body = [
+        "## The four arms", "",
+        res["note"], "",
+        head, "",
+        res["reference_grid_note"], "",
+        res["teacher_forced_note"], "",
+        "## Per chunk, along the generation order", "",
+        "Every quantity below is a mean over the seeds at each chunk index, then "
+        "summarised two ways: its mean over all chunks, and the OLS slope against "
+        "the chunk index. The slope is the number that matters — a chunked "
+        "sampler fails by compounding, so an arm can hold a good volume average "
+        "and still degrade with distance from the first chunk. A slope of zero "
+        "means the last chunk is as good as the first.", "",
+        table(
+            ["quantity", "n"] + [lab for _, lab, _ in CHUNK_ROWS],
+            floor_rows,
+        ) if floor_rows else "No real floor on disk — run `eval_v4 real-floor`.",
+        "",
+        "The real rows are the floor: real material was assembled by nothing, so "
+        "what it scores at the reference planes is what the measurement reads "
+        "when there is no seam.", "",
+    ]
+
+    for name in order:
+        c = cells[name]
+        rows = []
+        for key, label, dig in CHUNK_ROWS:
+            series = c["by_chunk_index"][key]
+            trend = c["trend"][key]
+            first = series[0].get("mean") if series else None
+            last = series[-1].get("mean") if series else None
+            rows.append([
+                label, ms(mean_over_chunks(c, key), dig),
+                fmt(first, dig), fmt(last, dig),
+                fmt(trend.get("slope"), dig + 1), fmt(trend.get("r2"), 2),
+            ])
+        body += [
+            f"### {name} ({c['n_chunks']} chunks, seeds {c['seeds']})", "",
+            table(["quantity", "mean over chunks", "chunk 0", "last chunk",
+                   "slope / chunk", "r2"], rows),
+            "",
+        ]
+
+    figs = _fig_assembly_modes(res, root)
+    return "\n".join(body) + "\n", figs
+
+
+def _fig_assembly_modes(res, root) -> list[str]:
+    """One panel per quantity: the per-chunk series of every arm, at each scale."""
+    set_style()
+    cells = res["cells"]
+    scales = sorted({c["scale"] for c in cells.values()})
+    keys = [("chunk_plane_seam_xct", "chunk-plane seam (grey)"),
+            ("phi_pore", "porosity per chunk"),
+            ("s2_relative_distance", "S2 across vs inside")]
+    fig, axes = plt.subplots(len(keys), len(scales),
+                             figsize=(5.2 * len(scales), 3.0 * len(keys)),
+                             squeeze=False)
+    for i, (key, ylabel) in enumerate(keys):
+        for j, scale in enumerate(scales):
+            ax = axes[i][j]
+            for name in _cell_order(cells):
+                c = cells[name]
+                if c["scale"] != scale:
+                    continue
+                series = c["by_chunk_index"][key]
+                # Chunk 0 owns no chunk plane, so its value is legitimately
+                # absent; NaN leaves a gap in the line rather than drawing a
+                # point that was never measured.
+                y = [np.nan if b.get("mean") is None else b["mean"] for b in series]
+                e = [b.get("sd") or 0.0 for b in series]
+                colour = SERIES_COLORS[ARM_ORDER.index(c["arm"]) % len(SERIES_COLORS)]
+                ax.errorbar(range(len(y)), y, yerr=e, marker="o", ms=3, capsize=2,
+                            color=colour, label=c["arm"])
+            fl = (res.get("real_floor") or {}).get("large" if scale == "1024" else "small")
+            v = (fl or {}).get(key, {}).get("mean")
+            if v is not None:
+                ax.axhline(v, color=FLOOR_COLOR, ls=":", lw=1.1, label="real floor")
+            ax.set_xlabel("chunk index (generation order)")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"{scale}")
+            if i == 0 and j == 0:
+                ax.legend(frameon=False, ncol=2)
+    fig.tight_layout()
+    return savefig(fig, figures_dir(root, "assembly_modes"), "per_chunk_series")
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -909,6 +1062,7 @@ REPORTERS = {
     "geometry": report_geometry,
     "surface": report_surface,
     "microstructure": report_microstructure,
+    "assembly_modes": report_assembly_modes,
     "real_floor": report_real_floor,
 }
 

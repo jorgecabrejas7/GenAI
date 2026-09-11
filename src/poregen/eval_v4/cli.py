@@ -101,7 +101,8 @@ def cmd_generate(args) -> int:
         for s in specs:
             print(
                 f"{s.name:34s} shape={s.volume_shape} ddim={s.ddim_steps} "
-                f"chunk={s.chunk_tiles} s_por={s.s_por} s_nb={s.s_nb} "
+                f"chunk={s.chunk_tiles} nb={s.neighbour_mode} "
+                f"s_por={s.s_por} s_nb={s.s_nb} "
                 f"seed={s.seed} phi={s.target_phi} "
                 f"field={'yes' if s.field_fn else 'no'} "
                 f"material={'painted' if s.material_fn else 'full'}"

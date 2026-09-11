@@ -140,6 +140,15 @@ Availability has three states: **OOB** (the specimen ends at that face),
 store only ever emits EXISTS and OOB; UNKNOWN comes from `drop_nb` and from the
 chunks the sampler has not reached.
 
+`VolumeGenerator.neighbour_mode` decides which of those a window may see. The
+production value is `"canvas"`, described above. `"unknown"` forces every
+in-bounds face to the CFG null, which with one chunk over the whole volume is
+exactly the ldm05 joint sampler; `"reference"` reads every in-bounds face from a
+canvas of real encoded material, which is teacher forcing. Both are measurement
+arms of eval_v4's `assembly_modes` and neither is ever a production path. OOB
+survives in all three: the canvas edge is geometry, and `cond_dist6` carries the
+same fact, so removing it would change more than the neighbour content.
+
 ## Diffusion objective and the terminal step
 
 `DDPMSchedule` owns what the denoiser regresses. Two keys under

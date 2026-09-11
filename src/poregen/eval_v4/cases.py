@@ -74,6 +74,10 @@ class CaseSpec:
     decode_stride: int = DECODE_STRIDE
     s_por: float = 1.0
     s_nb: float = 1.0
+    #: Where each window's six face neighbours come from - one of
+    #: :data:`poregen.diffusion.sampler.NEIGHBOUR_MODES`.  ``"canvas"`` is the
+    #: production path; only :func:`assembly_modes_cases` asks for another.
+    neighbour_mode: str = "canvas"
     #: builds the requested phi per 64-voxel TILE, given the tile grid and seed
     field_fn: Callable[[tuple[int, int, int], int], np.ndarray] | None = None
     #: builds the requested specimen envelope at VOXEL resolution
@@ -801,6 +805,97 @@ def multichunk_cases(repo=None) -> list[CaseSpec]:
     return out
 
 
+#: Scales the four assembly arms are compared at, and the tag each carries.
+#: The 384 cube crosses a chunk plane on every axis; the slab is the T-I
+#: reader's production shape and crosses them in x and y only.
+ASSEMBLY_MODES_SHAPES = ((MULTICHUNK_SHAPE, "384"), (SHAPE_LARGE, "1024"))
+#: Held at 50 for every arm.  This assessment is about the ASSEMBLY, and a step
+#: count that moved with the arm would put a sampler difference and a step-count
+#: difference in the same column.
+ASSEMBLY_MODES_DDIM = 50
+#: Seeds per scale.  Three at 384 and two at 1024x1024x192, which is 3.5x the
+#: voxels: the same cost trade the multi-chunk set already makes.  Every arm at
+#: one scale runs the SAME seeds, which is what makes the arms comparable.
+ASSEMBLY_MODES_SEEDS = {"384": SEEDS, "1024": SEEDS[:2]}
+#: The chunk grid every arm is MEASURED on, whatever grid it was GENERATED on.
+#: The arms have different chunk geometries by construction - that is the point
+#: of the assessment - so each arm's own chunk period would put four different
+#: sets of planes in one table. The production period (3 tiles = 192 voxels) is
+#: the reference: for the hybrid arm it is also the generation grid, so the
+#: comparison is "what the other arms do at the planes the production sampler
+#: would have had to assemble across".
+ASSEMBLY_MODES_REFERENCE_TILES = CHUNK_TILES
+#: Deepest canvas the teacher-forced arm can be built for, in voxels.  Test
+#: patches in the r08 store reach z0 = 128, so the deepest real block on the
+#: 64-voxel tile grid is 3 tiles.  See :mod:`poregen.eval_v4.teacher`.
+TEACHER_MAX_DEPTH_VOX = 192
+
+
+def assembly_modes_cases(repo=None) -> list[CaseSpec]:
+    """11 - how much of the quality is the hybrid sampler, and what is the ceiling?
+
+    Four ways to assemble the SAME request from the SAME seeds.  Everything
+    except the assembly is held: one uniform porosity target (so any porosity
+    drift from chunk to chunk is a defect and not the request), layup A, 50 DDIM
+    steps, the production window stride and decode stride.
+
+    ``joint``
+        one chunk over the whole volume and every neighbour UNKNOWN - the ldm05
+        MultiDiffusion sampler.  No chunk planes exist, so what it scores at the
+        reference planes is what the MEASUREMENT reads on a volume that was
+        never assembled across them.
+    ``autoregressive``
+        ``chunk_tiles = (1, 1, 1)``: every tile is its own chunk, so each patch
+        is denoised to completion against finished material.  The ldm05
+        sequential sampler, and the arm with the most planes to get wrong.
+    ``hybrid``
+        ``chunk_tiles = (3, 3, 3)``, the production setting.
+    ``teacher_forced``
+        the production chunking with every neighbour replaced by the encoding of
+        a REAL test volume at the same canvas position.  It is a control, not a
+        sampler: it is the quality the hybrid would reach if the material it
+        assembles against were perfect, so the gap between it and ``hybrid`` is
+        what better neighbour handling could still buy.
+
+    The teacher-forced arm runs at the slab only.  No specimen in the dataset is
+    384 voxels thick, so there is no real material to teach with at that depth,
+    and filling the missing depth by repeating a block would put a fake join
+    exactly on a chunk plane - the one place this assessment measures.  The
+    ceiling is therefore reported at 1024x1024x192 and is absent at 384, which
+    the results and the findings both say rather than leaving a blank cell.
+    """
+    plies, pitch = layup_a(repo)
+    out = []
+    for shape, tag in ASSEMBLY_MODES_SHAPES:
+        whole = tuple(s // TILE for s in shape)
+        arms = [
+            ("joint", whole, "unknown"),
+            ("autoregressive", (1, 1, 1), "canvas"),
+            ("hybrid", CHUNK_TILES, "canvas"),
+        ]
+        if shape[0] <= TEACHER_MAX_DEPTH_VOX:
+            arms.append(("teacher_forced", CHUNK_TILES, "reference"))
+        for arm, chunk_tiles, mode in arms:
+            for seed in ASSEMBLY_MODES_SEEDS[tag]:
+                out.append(CaseSpec(
+                    name=f"{arm}_{tag}_seed{seed}",
+                    assessment="assembly_modes",
+                    volume_shape=shape,
+                    seed=seed,
+                    layup=plies,
+                    ply_thickness_vox=pitch,
+                    target_phi=TARGET_DEFAULT,
+                    ddim_steps=ASSEMBLY_MODES_DDIM,
+                    chunk_tiles=chunk_tiles,
+                    neighbour_mode=mode,
+                    notes={"layup": "A", "arm": arm, "scale": tag,
+                           "neighbour_mode": mode,
+                           "ddim_steps": ASSEMBLY_MODES_DDIM,
+                           "reference_chunk_tiles": list(ASSEMBLY_MODES_REFERENCE_TILES)},
+                ))
+    return out
+
+
 def geometry_cases(repo=None) -> list[CaseSpec]:
     """7 - a material map the model must carve air into."""
     plies, pitch = layup_a(repo)
@@ -871,13 +966,21 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "surface": surface_cases,
     "multichunk": multichunk_cases,
     "microstructure": microstructure_cases,
+    "assembly_modes": assembly_modes_cases,
 }
 
 #: Assessments whose measure step also reads another assessment's volumes.
 #: ``microstructure`` reads the matched real crops the ``real-floor`` stage
 #: writes: without them it has a number and no floor to read it against, which
 #: for a distribution distance is no measurement at all.
-BORROWS = {"assembly": ("sampler",), "microstructure": ("real_floor",)}
+BORROWS = {
+    "assembly": ("sampler",),
+    "microstructure": ("real_floor",),
+    # Every per-chunk number the arms produce is a ratio or a fraction whose
+    # value on real material is not 0 or 1; without the floor a seam ratio of
+    # 1.2 cannot be called large or small.
+    "assembly_modes": ("real_floor",),
+}
 
 
 def build_cases(assessment: str, repo=None) -> list[CaseSpec]:
