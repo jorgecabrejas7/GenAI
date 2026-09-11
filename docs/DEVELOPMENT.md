@@ -195,6 +195,53 @@ because the second incident was a hand-run that ignored the first:
   the resident file-backed set stays bounded by the chunk (~3.9 GB for latents,
   ~1 GB for grey) instead of growing to the size of the store.
 
+## Never edit a shell script while it is running
+
+**Bash reads a script as it executes it, by byte offset — not once, into
+memory.** Rewriting the file under a running instance therefore does not
+"update" it: the interpreter continues at its saved offset in whatever bytes
+now live there. What it reads is a fragment of the new content starting
+partway through, so the usual outcome is not an error but a *quiet exit* — the
+queue stops at the next stage boundary and everything after it silently never
+runs.
+
+This has cost queue time more than once. On 2026-09-11 an in-place edit to
+`scripts/ldm06_post_tail.sh` made the running queue exit after
+`generate assembly_modes` instead of continuing to `layup`; the stop looked
+like a normal stage completion in the log, and the missing stage was only
+noticed because a new instance was started and re-ran the queue from the top.
+
+It is the editing tool, not the editor's intent, that decides this. `sed -i`
+and `git checkout` **replace** the file — a new inode, with the running process
+still holding the old one — and are safe. A Python `write_text`, a shell
+redirect `> file`, and most editors' save-in-place **truncate and rewrite the
+same inode**, and are not. Measured on this machine:
+
+```
+$ printf 'a\nb\n' > probe.txt && stat -c %i probe.txt
+2000015
+$ sed -i 's/a/A/' probe.txt && stat -c %i probe.txt
+2000016                      # new inode - the running process keeps the old file
+$ python -c "p=...; p.write_text(...)" && stat -c %i probe.txt
+2000016                      # SAME inode - the running process sees the change
+```
+
+`ls -l /proc/<pid>/fd/255` shows what a running shell is actually reading: after
+a safe replacement it points at `… (deleted)`, which is the old inode it still
+holds.
+
+The rules:
+
+- **Write to a temporary file and `mv` it into place.** `mv` within a
+  filesystem is a rename, so the running process keeps its own inode. Verify
+  with `/proc/<pid>/fd/255`.
+- **Better, for a queue change: do not edit the running script at all.** Write
+  the change as a NEW script and start it after the current one exits, or hand
+  over at a stage boundary — the way `ldm06_post_tail.sh` takes the queue from
+  `ldm06_post.sh`.
+- The same applies to any file a running process re-reads, not only shell
+  scripts: a config polled each iteration, a gate file, a case list.
+
 ## Running the tests while a job holds the GPU
 
 Hide the card: `CUDA_VISIBLE_DEVICES= python -m pytest tests/ -q`.
