@@ -246,6 +246,7 @@ def test_the_report_carries_the_measured_numbers(result):
         "settings": {
             "sauvola_k_values": [0.100, 0.125, 0.150],
             "sauvola_k_base": LU.SAUVOLA_K,
+            "sauvola_k_frac": 0.20,
             "material_methods": ["otsu"],
         },
         "volumes": [volume],
@@ -263,7 +264,11 @@ def test_the_report_carries_the_measured_numbers(result):
     })
     assert f"{summary['phi_range']:.5f}" in report
     assert f"{summary['dice_min']:.3f}" in report
-    assert "k0.125/otsu" in report
+    # The production k is named as such, so a reader cannot mistake which
+    # column the paper quotes.
+    assert f"k={LU.SAUVOLA_K:g} (production)" in report
+    # One material method was swept, so there is no appendix to head.
+    assert "Other variants, not used" not in report
 
 
 class TestMaterialThreshold:
@@ -358,3 +363,48 @@ class TestModelPorosityError:
         # The reader must not mistake it for the eval-v4 number.
         assert "CONVERGENCE DIAGNOSTIC" in line
         assert "not measured yet" in line
+
+
+# --------------------------------------------------------------------------- #
+# the Dice the result quotes is the perturbation's, not every pair's
+# --------------------------------------------------------------------------- #
+class TestDiceScoping:
+    """The quoted Dice must come from the `sauvola_k` variants alone.
+
+    A material method that segments a different specimen envelope disagrees
+    with ours almost everywhere. Including such a pair makes the minimum
+    measure THAT disagreement, not how sensitive our labels are to `sauvola_k`
+    — the same error that overstated the porosity range before it was scoped.
+    """
+
+    def _volume(self):
+        #: k0.1/otsu, k0.125/otsu, k0.15/otsu, k0.125/yen — yen disagrees with
+        #: every otsu variant far more than they disagree among themselves.
+        names = ["k0.1/otsu", "k0.125/otsu", "k0.15/otsu", "k0.125/yen"]
+        m = [
+            [1.00, 0.56, 0.32, 0.07],
+            [0.56, 1.00, 0.60, 0.06],
+            [0.32, 0.60, 1.00, 0.09],
+            [0.07, 0.06, 0.09, 1.00],
+        ]
+        return {"variants": [{"name": n} for n in names], "dice_matrix": m}
+
+    def test_it_uses_only_pairs_of_the_held_method(self):
+        got = LU._dice_k_only(self._volume(), "otsu")
+        assert got == (0.32, 0.56)          # min and median of 0.56/0.32/0.60
+
+    def test_the_cross_method_pairs_would_have_halved_the_minimum(self):
+        """The number the scoping exists to keep out."""
+        v = self._volume()
+        every_pair = [v["dice_matrix"][i][j]
+                      for i in range(4) for j in range(i + 1, 4)]
+        assert min(every_pair) == 0.06
+        assert LU._dice_k_only(v, "otsu")[0] > min(every_pair) * 5
+
+    def test_a_volume_with_no_matrix_yields_no_number(self):
+        assert LU._dice_k_only({"variants": [{"name": "k0.1/otsu"}]}, "otsu") is None
+        assert LU._dice_k_only({}, "otsu") is None
+
+    def test_a_single_variant_has_no_pair_to_score(self):
+        v = {"variants": [{"name": "k0.125/otsu"}], "dice_matrix": [[1.0]]}
+        assert LU._dice_k_only(v, "otsu") is None

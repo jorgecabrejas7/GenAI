@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import statistics
 import sys
 import time
 from datetime import datetime, timezone
@@ -338,167 +339,151 @@ def _model_comparison_line(results: dict, k_only_mean: float) -> str:
     )
 
 
+def _dice_k_only(volume: dict, held: str) -> tuple[float, float] | None:
+    """Pore Dice between the `sauvola_k` variants ALONE, at the held method.
+
+    The all-variant minimum is a pair involving a method that segments a
+    different specimen envelope, so it measures that disagreement and not the
+    sensitivity of our labels to `sauvola_k`.  Restricting to one material
+    method is what makes the number the perturbation of OUR method.
+    """
+    names = [r["name"] for r in volume.get("variants", [])]
+    matrix = volume.get("dice_matrix")
+    if not matrix or not names:
+        return None
+    idx = [i for i, n in enumerate(names) if n.endswith("/" + held)]
+    pairs = [matrix[i][j] for a, i in enumerate(idx) for j in idx[a + 1:]]
+    if not pairs:
+        return None
+    return min(pairs), statistics.median(pairs)
+
+
 def findings_markdown(results: dict) -> str:
     """findings.md, derived from the numbers rather than restating them."""
     s = results["summary"]
     settings = results["settings"]
     material = settings["material_methods"]
-    #: The method the production pipeline uses.  Every other material method is
-    #: a DIFFERENT segmentation, not a perturbation of this one, and the
-    #: `range, k only` column is the one that holds it fixed.
+    #: The material method the production pipeline uses.  This campaign
+    #: perturbs OUR segmentation; the other methods are not competing answers
+    #: and are not swept.
     held = material[0]
-    excluded = "/".join(m for m in material[1:] if m != "isodata") or "the others"
-    k_only = [v["summary"]["phi_range_sauvola_k_only"]
-              for v in results["volumes"] if "summary" in v]
-    k_only_txt = " / ".join(_f(x) for x in k_only) if k_only else "—"
-    k_only_mean = sum(k_only) / len(k_only) if k_only else float("nan")
-    model_line = _model_comparison_line(results, k_only_mean)
-    _render_commit = head_commit(REPO)
-
-    # The thresholds and phi that make the exclusion argument, read off the
-    # variants themselves rather than asserted in prose.
-    def _by_method(method):
-        out = []
-        for v in results["volumes"]:
-            for r in v.get("variants", []):
-                if r["name"].endswith("/" + method):
-                    out.append(r)
-        return out
-
-    def _thr_txt(method):
-        thrs = sorted({round(r["material_threshold"]) for r in _by_method(method)})
-        return "/".join(str(t) for t in thrs) if thrs else "—"
-
-    ex_method = material[1] if len(material) > 1 else held
-    thr_held, thr_excluded = _thr_txt(held), _thr_txt(ex_method)
-    ex_phi = [r["phi"] for r in _by_method(ex_method)]
-    phi_excluded_txt = (f"{_f(min(ex_phi))}–{_f(max(ex_phi))} against "
-                        f"{_f(min(r['phi'] for r in _by_method(held)))}–"
-                        f"{_f(max(r['phi'] for r in _by_method(held)))}"
-                        if ex_phi else "—")
-
-    ks_sorted = settings["sauvola_k_values"]
-    k_direction_rows = []
-    for v in results["volumes"]:
-        if "summary" not in v:
-            continue
-        phi_at = {r["name"]: r["phi"] for r in v.get("variants", [])}
-        vals = [phi_at.get(variant_name(k, held)) for k in ks_sorted]
-        if any(x is None for x in vals):
-            continue
-        k_direction_rows.append(
-            f"- `{v['volume_id'][-28:]}`: "
-            + " → ".join(_f(x) for x in vals)
-            + f"  (range {_f(max(vals) - min(vals))})")
+    ks = settings["sauvola_k_values"]
+    k_base = settings["sauvola_k_base"]
     if not s["n_volumes"]:
         return ("# 13 — Label uncertainty of the reported porosity\n\n"
                 "No volume was segmented; see `results.json` for the per-volume "
                 "errors.\n")
+
+    done = [v for v in results["volumes"] if "summary" in v]
+    k_only = [v["summary"]["phi_range_sauvola_k_only"] for v in done]
+    k_mean = sum(k_only) / len(k_only) if k_only else float("nan")
+    dice = [_dice_k_only(v, held) for v in done]
+    dice_min = min(d[0] for d in dice if d) if any(dice) else float("nan")
+    dice_med = statistics.median([d[1] for d in dice if d]) if any(dice) else float("nan")
+
     lines = [
         "# 13 — Label uncertainty of the reported porosity",
         "",
-        "How much does the porosity we report move when the segmentation "
-        "parameters move inside a defensible range?  The answer is the label-noise "
-        "floor under every control-error figure.",
+        "How far does the porosity we report move when OUR segmentation is "
+        f"perturbed?  `sauvola_k` is moved +/-{settings.get('sauvola_k_frac', 0.20):.0%} "
+        f"about the production value {k_base}, with the material mask left at "
+        f"production `{held}`.  The answer is the label-noise floor under every "
+        "control-error figure in the paper.",
         "",
-        f"- full real test volumes segmented: **{s['n_volumes']}**",
-        f"- variants per volume: **{s['n_variants']}** "
-        f"(sauvola_k {settings['sauvola_k_values']} × material "
-        f"{settings['material_methods']})",
-        f"- the number to quote — porosity range from `sauvola_k` alone, with the "
-        f"material method held at `{settings['material_methods'][0]}`: "
-        f"**{k_only_txt}** "
-        f"(mean {_f(k_only_mean)}, **{k_only_mean / s['porosity_gate']:.1f}x** the "
-        f"{s['porosity_gate']} eval-v4 porosity gate)",
-        f"- lowest pore Dice between any two variants: **{_f(s['dice_min'], '.3f')}**; "
-        f"median **{_f(s['dice_median'], '.3f')}** — a LOWER BOUND, see below",
-        f"- widest range over every variant, `{excluded}` included: "
-        f"**{_f(s['phi_range_max'])}** ({s['phi_range_max_volume']}); mean "
-        f"**{_f(s['phi_range_mean'])}**. "
-        f"**Not the number to quote** — `{excluded}` is a different segmentation, "
-        "not a perturbation of ours.  The next section says why.",
-        "",]
-    lines += [model_line, ""] if model_line else []
-    lines += [
-        "## Per volume",
-        "",
-        "| volume | φ baseline | φ min | φ max | φ range | range, k only | "
-        "range, material only | Dice min | Dice median |",
-        "|---|---|---|---|---|---|---|---|---|",
+        f"- real test volumes, segmented in FULL: **{len(done)}**",
+        f"- **porosity range: {' / '.join(_f(x) for x in k_only)}**  "
+        f"(mean **{_f(k_mean)}**)",
+        f"- that is **{k_mean / s['porosity_gate']:.1f}x the {s['porosity_gate']} "
+        "eval-v4 porosity gate**",
+        f"- direction: phi FALLS as `sauvola_k` rises — a larger k makes the "
+        "Sauvola criterion stricter, so fewer voxels are called pore",
+        f"- pore Dice between the perturbed labels: min **{_f(dice_min, '.3f')}**, "
+        f"median **{_f(dice_med, '.3f')}** — a LOWER BOUND, see below",
     ]
-    for v in results["volumes"]:
-        if "summary" not in v:
-            lines.append(f"| {v['volume_id'][-28:]} | — | — | — | — | — | — | — | "
-                         f"{v.get('error', 'skipped')} |")
-            continue
-        u = v["summary"]
+    model_line = _model_comparison_line(results, k_mean)
+    if model_line:
+        lines.append(model_line)
+    lines += [
+        "",
+        "## The result",
+        "",
+        f"phi per volume at each `sauvola_k`, material mask held at `{held}`:",
+        "",
+        f"| volume | k={ks[0]} | k={k_base} (production) | k={ks[2]} | range | "
+        "Dice min | Dice median |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for v, d in zip(done, dice):
+        phi_at = {r["name"]: r["phi"] for r in v.get("variants", [])}
+        vals = [phi_at.get(variant_name(k, held)) for k in ks]
+        cells = " | ".join(_f(x) if x is not None else "—" for x in vals)
         lines.append(
-            f"| {v['volume_id'][-28:]} | {_f(u['phi_baseline'])} | {_f(u['phi_min'])} | "
-            f"{_f(u['phi_max'])} | {_f(u['phi_range'])} | "
-            f"{_f(u['phi_range_sauvola_k_only'])} | {_f(u['phi_range_material_only'])} | "
-            f"{_f(u['dice_min'], '.3f')} | {_f(u['dice_median'], '.3f')} |"
+            f"| {v['volume_id'][-28:]} | {cells} | "
+            f"{_f(v['summary']['phi_range_sauvola_k_only'])} | "
+            f"{_f(d[0], '.3f') if d else '—'} | {_f(d[1], '.3f') if d else '—'} |"
         )
-    lines += [
-        "",
-        "## Per variant",
-        "",
-        "| volume | variant | material threshold | material voxels | pore voxels | φ |",
-        "|---|---|---|---|---|---|",
-    ]
-    for v in results["volumes"]:
-        for r in v.get("variants", []):
-            lines.append(
-                f"| {v['volume_id'][-28:]} | {r['name']} | {r['material_threshold']:.2f} | "
-                f"{r['n_material']} | {r['n_pore']} | {r['phi']:.5f} |"
-            )
     lines += [
         "",
         "## Reading it",
         "",
-        "`φ range` is the full spread over every variant, so it carries both "
-        "axes at once.  `range, k only` holds the material method at "
-        f"`{held}` and `range, material only` holds "
-        f"`sauvola_k` at {settings['sauvola_k_base']}, which says which knob the "
-        "number is sensitive to.",
+        f"**What the gate is.** The eval-v4 porosity gate is {s['porosity_gate']}: "
+        "a generated volume passes when its delivered phi is within that of the "
+        "requested phi.  The range above is what the SAME real material measures "
+        "as under a perturbation of our own segmentation, so it is the floor "
+        "under that gate.",
         "",
-        f"**Why `{excluded}` is excluded from the quoted number, and kept in the "
-        "table.**  It is not dropped for being inconvenient; it is dropped for "
-        "not being a perturbation of our segmentation.  The material threshold "
-        f"it picks is shown in the per-variant table: `{excluded}` chooses "
-        f"{thr_excluded}, against {thr_held} for `{held}`.  At that threshold the "
-        "low-grey AIR around the specimen is counted as MATERIAL, so the "
-        "denominator grows and everything dark inside it becomes pore — φ rises "
-        f"by about an order of magnitude ({phi_excluded_txt}).  That is a "
-        "different segmentation of a different specimen envelope, not our "
-        f"segmentation with a knob moved.  `{held}` and `isodata` pick the same "
-        "threshold to the voxel and give identical φ, so the material axis has "
-        "two distinct answers here, not three.",
+        "**Why the Dice is a lower bound.** It is measured over the whole volume "
+        "and not inside a shared material mask, so a pore that one perturbation "
+        "places outside the other's specimen envelope counts as a full "
+        "disagreement.  No pore Dice quoted against these labels can mean more "
+        "than this.",
         "",
-        f"**Direction of the `k` effect**, at fixed `{held}`: φ FALLS as "
-        f"`sauvola_k` rises — a larger k makes the Sauvola criterion stricter and "
-        f"fewer voxels are called pore.  Per volume, φ at "
-        f"k={settings['sauvola_k_values'][0]} → {settings['sauvola_k_base']} → "
-        f"k={settings['sauvola_k_values'][2]}:",
-        "",
-        *k_direction_rows,
-        "",
-        f"The eval-v4 porosity gate is {settings.get('porosity_gate', s['porosity_gate'])}: "
-        "a generated volume passes when its delivered φ is within that of the "
-        "requested φ.  The label uncertainty above is the floor under that gate — "
-        "it is what the SAME real material measures as, under settings we could "
-        "equally have defended.",
-        "",
-        "`Dice min` is the agreement between the two variants that agree least. "
-        "It is measured over the whole volume, not inside a shared material mask, "
-        "so a pore that one variant places outside the other's specimen envelope "
-        "counts as a disagreement.  No pore Dice we report against these labels "
-        "can mean more than this number.",
+        f"**The perturbation is a stated choice.** Nothing establishes that the "
+        f"true uncertainty on `sauvola_k` is +/-{settings.get('sauvola_k_frac', 0.20):.0%}; "
+        "the range must always be quoted with the perturbation that produced it.",
+    ]
+    # The appendix exists only if the run recorded something to put in it; a
+    # heading over an empty table would imply a sweep that did not happen.
+    if len(material) > 1:
+        lines += [
+            "",
+            "## Other variants, not used",
+            "",
+            "Recorded by the run, reported here for completeness, and excluded "
+            "from the result above.  This is not a comparison of segmentation "
+            "methods — the campaign measures our own method's sensitivity, and "
+            "nothing here bears on which method is right.",
+            "",
+            "| method | material threshold | phi range over the k values | used |",
+            "|---|---|---|---|",
+        ]
+    for method in material[1:]:
+        thrs, phis = [], []
+        for v in done:
+            for r in v.get("variants", []):
+                if r["name"].endswith("/" + method):
+                    thrs.append(round(r["material_threshold"]))
+                    phis.append(r["phi"])
+        thr_txt = "/".join(str(t) for t in sorted(set(thrs))) or "—"
+        phi_txt = f"{_f(min(phis))}–{_f(max(phis))}" if phis else "—"
+        held_thr = "/".join(str(t) for t in sorted(
+            {round(r["material_threshold"]) for v in done
+             for r in v.get("variants", []) if r["name"].endswith("/" + held)}))
+        if method == "isodata" and thr_txt == held_thr:
+            note = f"no — identical to `{held}` (same threshold, same phi)"
+        else:
+            note = (f"no — threshold {thr_txt} against {held_thr} for `{held}` "
+                    "counts the low-grey air around the specimen as material, so "
+                    "it segments a different specimen envelope")
+        lines.append(f"| `{method}` | {thr_txt} | {phi_txt} | {note} |")
+
+    lines += [
         "",
         "Source: `scripts/analysis/label_uncertainty.py`.  The numbers were "
         f"measured at commit `{results['commit']}`"
-        + (f"; this text was rendered later, at `{_render_commit}`, with "
+        + (f"; this text was rendered later, at `{head_commit(REPO)}`, with "
            "`--report-only` — no volume was segmented again."
-           if _render_commit and _render_commit != results["commit"] else "."),
+           if head_commit(REPO) != results["commit"] else "."),
         "",
     ]
     return "\n".join(lines)
