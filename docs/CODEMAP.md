@@ -232,6 +232,8 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 `ply_angle_structure_tensor`) · `09-r08-latent-sweep` (`r08_rung_report`,
 `r08_calibration_probe`) · `12-sample-mask-audit`
 (`sample_mask_component_audit`) · `13-label-uncertainty` (`label_uncertainty`).
+(`sample_mask_component_audit`) · `14-downstream-utility`
+(`downstream_utility`).
 
 | Path | What it does |
 |---|---|
@@ -281,6 +283,7 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/decoder_ft_redecode.py` | The D43 decoder fine-tune gate: two decoders on the SAME latents. Val arm re-decodes real val patches through the frozen encoder (ground truth exists, so pore Dice and porosity MAE are real); generated arm re-decodes ldm06 latents saved by `--save-latents` (no ground truth, so sharpness is a ratio against real and segmentation is compared BETWEEN decoders). Refuses to report anything if the encoder moved between the two checkpoints — the latent store would be stale and the comparison meaningless. Assembles full volumes before measuring S2, because S2 needs 128-cubed windows of contiguous material that do not exist in a pile of 64-cubed patches, and scores both decoders inside the BASELINE's material mask so the same analysis windows are used for each. |
 | `analysis/label_uncertainty.py` | How much of the reported porosity error is label noise? (CPU, read-only.) Re-runs the dataset segmentation on THREE FULL real test volumes — not 192-cubed crops, which are neither the quantity the paper reports nor a shape `material_mask`'s global Otsu survives — with `sauvola_k` at 0.125 and ±20 % crossed with the material-threshold method (Otsu, Yen, isodata), and reports per volume the porosity range and the pore Dice BETWEEN the variants. Streams over Y in slabs (Sauvola is 2-D per (z, x) plane, so a slab is bit-identical to the whole crop) and holds each material mask bit-packed, so nine variants of a 1.05 GB crop cost well under a gigabyte; material thresholds come from a lossless 256-bin histogram, which is why only histogram methods are offered. Validated in `tests/test_label_uncertainty.py` against production `onlypores` and against a closed-form synthetic. Writes `runs/campaigns/13-label-uncertainty/`. |
 | `analysis/r08_rung_report.py` | Per-rung full-split report (`--run`), and the sweep decision table (`--compare`). `--compare` builds ONLY from artefacts that already exist — the run's own final `val_full` / `test_full` in `metrics.jsonl` (which are whole-split evaluations carrying the per-bin table and counts), the CPU calibration probe, the tile-seam and the latent-sanity summary — so the decision costs no GPU. A missing artefact renders as an em-dash and the footnote says a blank means 'not produced', not 'zero'. |
+| `analysis/downstream_utility.py` | Is the synthetic data USEFUL, not merely realistic? (GPU, ~1 day.) Trains the SAME plain 3-D U-Net three times over — real train patches only, ldm06 patches only, half of each — at one identical budget (steps, batch size, optimiser, augmentation and TOTAL patch count all fixed; only the data mix differs) and scores all three on the REAL split_v3 TEST panels with the repo's own `multiclass_metrics` and `porosity_binned_mae`. The synthetic patches are drawn to reproduce the real arm's own joint (porosity bin × has-air) histogram, so the arms differ in provenance and not in porosity; a stratum the pool cannot supply is redistributed and NAMED in the report, never silently dropped. Holding the total patch count fixed makes arm (c) a REPLACEMENT of half the real data rather than an addition — no arm may see more data than another. Sources: eval v4 assessments `sampler`, `porosity_global`, `microstructure` and `surface` (the only source of AIR), off-manifold φ 0.15 excluded; it REFUSES to start, naming the missing cases, until every one exists. `--dry-run` builds and prints every arm plan without a model. Writes `runs/campaigns/14-downstream-utility/`. |
 
 **Orchestration (long unattended chains)**
 
@@ -368,6 +371,7 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 | `test_eval_v4.py` | eval v4 on data whose answer is worked out by hand: the manifest contract (required fields, self-consistency, a metric refusing a volume it does not describe), the within-volume local metric on labels with an exactly-set porosity per tile — including the two-volume case that shows why the pooled R² is not obedience — seam plane selection at both periods, layup scoring on synthetic angles through the real T-I scoring maths, and geometry Dice. One test runs the metrics on a real campaign-05 volume. |
 | `test_eval_v4_field_stats.py` | eval v4 `field_stats` on fields whose statistics are set by construction: Gaussian-smoothed noise with a different sigma per axis, whose 1/e length is exactly `2σ`, recovered per axis to 12 % and told apart at a built 1:2:4 ratio; the 1/e crossing interpolated between lags by hand; a field that only trends reporting NO length rather than the size of the crop; window porosity as pore-over-material exactly, with mostly-air windows dropped; a label drawn from a known field giving back that field's window means (and its correlation lengths) to 0.002; the measure and report stages over a campaign on disk, including that `field_stats` is in both `MEASURERS` and `REPORTERS` — an assessment with no reporter is silently dropped from `findings.md`. |
 | `test_porosity_field.py` | Coherent porosity field: mean-to-target, clamp range, per-seed determinism, x-vs-z anisotropy, marginal spread, and every branch of `_build_local_por_map` in `generate_volumes.py` plus `_gaussian_por_grid` (both deliberately leave peaks outside the sampler's clamp). Uses the real T-E/T-D artefacts. |
+| `test_downstream_utility.py` | The downstream-utility campaign's comparability invariants — the part whose failure would invalidate the result silently. Every arm gets exactly the same patch count and the same run spec outside the data mix; every arm targets the SAME joint (porosity bin × has-air) histogram, and the mixed arm's real half is literally a subset of the real arm's patches; `Arm` carries the data mix and nothing else, so no training setting can drift between arms; `build_model` takes the budget and no arm. Plus the stratified draw (exact histogram, recorded reuse, a missing stratum redistributed and named), the synthetic arm REFUSING a campaign that is missing or half-generated, synthetic patch cutting against the coordinates it was selected by, flips moving image and label together, and pore/air Dice and per-bin porosity error against a hand-computed two-patch answer. CPU only; reads no patch memmap. |
 
 ---
 
@@ -465,9 +469,12 @@ runs/
     ├── 06-ldm06-probe/           ldm06_probe/ — Part A provisional, Part B superseded by 05
     ├── 07-vae-metric-recompute/  vae_metric_recompute/ — results.json only; report not run
     ├── 08-pre-ldm06-diagnostics/ vae_tile_seam/, ddim200_1024/, ply_angle_structure_tensor/
-    └── 09-r08-latent-sweep/      queue.log (every rung transition with an rc),
-                                  r08_<variant>/tile_seam/, calibration_probe_r08_<variant>/,
-                                  decision_table.md, ldm06_bringup.log
+    ├── 09-r08-latent-sweep/      queue.log (every rung transition with an rc),
+    │                             r08_<variant>/tile_seam/, calibration_probe_r08_<variant>/,
+    │                             decision_table.md, ldm06_bringup.log
+    └── 14-downstream-utility/    results.json (every arm x seed, with the stratified
+                                  draw report), findings.md, README.md —
+                                  scripts/analysis/downstream_utility.py
 ```
 Every campaign carries a `README.md` (question, exact command, checkpoint and
 settings, headline numbers, caveats, vault note) and a row in `INDEX.md`.
