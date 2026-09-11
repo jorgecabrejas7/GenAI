@@ -488,14 +488,180 @@ class TestNeighbourCensus:
         real = Manifest(assessment="sampler", case="r",
                         volume_shape=(128, 128, 128), git_commit="abc",
                         sampler="real")
-        with pytest.raises(ValueError, match="neighbour census"):
+        with pytest.raises(ValueError, match="neighbour states"):
             MEMO.neighbour_census(real)
 
-    def test_a_translated_request_is_refused_rather_than_measured_wrong(self):
-        m = manifest_for((192, 192, 192), region_offset=(0, 0, 0),
-                         region_shape=(64, 64, 64))
-        with pytest.raises(ValueError, match="region_offset"):
-            MEMO.neighbour_census(m)
+    def test_a_translated_request_has_the_same_chunk_grid(self):
+        """`request_offset` names the noise frame, not a larger canvas.
+
+        `_generate_latents` derives `canvas_cells` from `volume_shape` alone,
+        so a case that translates its request inside the canvas has exactly
+        the same chunks, windows and neighbour states as one that does not.
+        """
+        plain = MEMO.neighbour_census(manifest_for((192, 384, 384)))
+        moved = MEMO.neighbour_census(
+            manifest_for((192, 384, 384), region_offset=(0, 64, 64),
+                         region_shape=(192, 192, 192)))
+        assert moved == plain
+
+
+# ---------------------------------------------------------------------------
+# Per-window neighbour state: which faces were UNKNOWN WHEN IT WAS DENOISED
+# ---------------------------------------------------------------------------
+
+class TestWindowStates:
+    """The chunk ORDER decides this, not the geometry.
+
+    A 384-cubed volume at the production 3-tile chunk is 2 chunks on every
+    axis, walked z-major. The window at latent cell (32, 32, 32) sits in the
+    FIRST chunk and its +z/+y/+x neighbours reach into chunks nobody has
+    solved yet. The window at (48, 48, 48) sits in the LAST chunk and is its
+    mirror image geometrically — interior, touching a chunk plane — but every
+    neighbour it has was already finished. If the reconstruction only looked
+    at geometry the two would score the same. They must not.
+    """
+
+    SHAPE = (384, 384, 384)
+
+    def test_a_window_that_looks_into_an_unsolved_chunk_has_unknown_faces(self):
+        w = MEMO.window_states(manifest_for(self.SHAPE))
+        first = w.at_voxel((128, 128, 128))            # latent cell 32
+        assert first["unknown"] == 3                   # +z, +y, +x
+        assert first["exists"] == 3                    # -z, -y, -x
+        assert first["oob"] == 0
+        assert first["bucket"] == MEMO.NB_UNKNOWN_BUCKET
+
+    def test_the_mirror_window_in_the_last_chunk_has_none(self):
+        w = MEMO.window_states(manifest_for(self.SHAPE))
+        last = w.at_voxel((192, 192, 192))             # latent cell 48
+        assert last["unknown"] == 0
+        assert last["exists"] == 6
+        assert last["bucket"] == MEMO.NB_PRESENT
+
+    def test_a_fully_interior_window_of_a_single_chunk_volume_is_not_unknown(self):
+        w = MEMO.window_states(manifest_for((192, 192, 192)))
+        mid = w.at_voxel((64, 64, 64))
+        assert mid["unknown"] == 0
+        assert mid["exists"] == 6
+        assert mid["bucket"] == MEMO.NB_PRESENT
+
+    def test_the_chunk_grid_and_window_count_are_the_samplers(self):
+        w = MEMO.window_states(manifest_for(self.SHAPE))
+        assert w.n_chunks == 8                         # 2 per axis
+        assert w.cells == (96, 96, 96)
+        assert w.win == 16 and w.stride == 8
+        # 5 windows per axis per chunk, 8 chunks.
+        assert len(w.states) == 8 * 5 ** 3
+
+    @pytest.mark.parametrize("shape", [(192, 192, 192), (384, 384, 384),
+                                       (192, 384, 384)])
+    def test_every_query_patch_position_is_a_window_origin(self, shape):
+        """No fallback is needed for any shape the search actually takes.
+
+        The queries are the non-overlapping 64-voxel tiling and the windows
+        run at stride 32, so every patch origin is also a window origin. If
+        that ever stopped being true the caller would bucket at the volume
+        level and say so, which is why it is asserted here rather than assumed.
+        """
+        w = MEMO.window_states(manifest_for(shape))
+        origins = MEMO.patch_origins(np.ones(shape, bool))
+        assert origins
+        assert all(w.at_voxel(o) is not None for o in origins)
+
+    def test_a_position_that_is_not_a_window_origin_returns_none(self):
+        w = MEMO.window_states(manifest_for((192, 192, 192)))
+        assert w.at_voxel((4, 0, 0)) is None           # not on the latent grid
+        assert w.at_voxel((160, 0, 0)) is None         # past the last window
+
+    def test_the_multi_chunk_volume_fills_both_buckets(self):
+        """The whole point of adding these volumes: two buckets, one volume."""
+        w = MEMO.window_states(manifest_for(self.SHAPE))
+        origins = MEMO.patch_origins(np.ones(self.SHAPE, bool))
+        buckets = [w.at_voxel(o)["bucket"] for o in origins]
+        assert MEMO.NB_UNKNOWN_BUCKET in buckets
+        assert MEMO.NB_PRESENT in buckets
+
+    def test_a_single_chunk_volume_fills_only_one(self):
+        w = MEMO.window_states(manifest_for((192, 192, 192)))
+        origins = MEMO.patch_origins(np.ones((192, 192, 192), bool))
+        buckets = {w.at_voxel(o)["bucket"] for o in origins}
+        assert buckets == {MEMO.NB_PRESENT}
+
+
+# ---------------------------------------------------------------------------
+# The two grey floors
+# ---------------------------------------------------------------------------
+
+class StubDecoder:
+    """A VAE decoder whose reconstruction error I choose.
+
+    ``build_store`` fills row ``i``'s latent with ``i`` and its source patch
+    with ``i``, so a perfect decoder would return ``i / 255`` and this one
+    returns ``i / 255 + error``. That difference IS the reconstruction error
+    the real decoder has and the raw patch does not.
+    """
+
+    def __init__(self, error: float):
+        self.error = float(error)
+
+    def decoder(self, z):
+        return z
+
+    def xct_head(self, z):
+        n = z.shape[0]
+        val = z.reshape(n, -1)[:, :1] / 255.0 + self.error
+        return val.reshape(n, 1, 1, 1, 1).expand(n, 1, MEMO.PATCH,
+                                                 MEMO.PATCH, MEMO.PATCH)
+
+
+class TestGreyFloors:
+    #: Small enough that a round-tripped patch is still nearest to its OWN bank
+    #: row (the synthetic rows are 2/255 apart), so the error is the whole
+    #: distance and nothing else.
+    ERROR = 0.001
+
+    def test_the_round_trip_carries_the_error_and_the_raw_patch_does_not(self, tmp_path):
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")
+        pick = np.array([1, 2, 3])
+        raw = store.grey_at(pick)
+        rt = MEMO.decode_grey(StubDecoder(self.ERROR), store.raw_latent_at(pick),
+                              device="cpu")
+        assert rt.shape == raw.shape
+        assert not np.allclose(rt, raw)
+        assert (rt - raw) == pytest.approx(np.full(raw.shape, self.ERROR), abs=1e-6)
+
+    def test_the_two_floors_give_different_ratios_on_the_same_bank(self, tmp_path):
+        """Which floor you use changes the answer, so the report prints both.
+
+        The raw val patch IS a bank row here, so its nearest distance is 0 and
+        its ratio is 0 — an optimistic floor no decoded query could ever
+        match. The round-tripped one sits one reconstruction error away, which
+        is exactly the handicap a generated query carries.
+        """
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")
+        pick = np.array([1, 2, 3])
+        raw = store.grey_at(pick)
+        rt = MEMO.decode_grey(StubDecoder(self.ERROR), store.raw_latent_at(pick),
+                              device="cpu")
+
+        acc_raw = MEMO.search(raw, store, "grey", chunk=4)
+        acc_rt = MEMO.search(rt, store, "grey", chunk=4)
+
+        # Both find the same row; only the distance to it differs.
+        assert list(acc_raw.i1) == list(pick)
+        assert list(acc_rt.i1) == list(pick)
+        assert acc_raw.d1 == pytest.approx(np.zeros(3), abs=1e-9)
+        assert acc_raw.ratio() == pytest.approx(np.zeros(3), abs=1e-9)
+        # 64^3 voxels each ERROR out: sqrt(64^3) * ERROR.
+        assert acc_rt.d1 == pytest.approx(
+            np.full(3, self.ERROR * MEMO.PATCH ** 1.5), rel=1e-4)
+        assert (acc_rt.ratio() > acc_raw.ratio()).all()
+
+    def test_decode_grey_refuses_a_flat_latent(self, tmp_path):
+        store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=8), "train")
+        with pytest.raises(ValueError, match=r"\(n, C, d, h, w\)"):
+            MEMO.decode_grey(StubDecoder(0.0), store.latent_chunk(0, 2),
+                             device="cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -528,17 +694,35 @@ class TestReportSection:
             "bank": {"split": "train", "stride": 64, "n_rows": 219580,
                      "n_rows_in_split": 1598000, "latent_dim": 32768,
                      "grey_dim": 262144, "grey_source": "/x/patches_xct.bin"},
-            "assessments": ["sampler", "porosity_global"],
-            "query_shape": [192, 192, 192],
-            "n_cases": 57, "n_patches": 1539,
-            "generated": _summary_block(0.82, 1539),
-            "real_val_floor": {"n_patches": 512, **_summary_block(0.86, 512)},
+            "assessments_requested": ["sampler", "porosity_global", "multichunk",
+                                      "assembly_modes"],
+            "assessments_found": ["sampler", "porosity_global", "multichunk"],
+            "max_tiles_per_volume": 256,
+            "n_cases": 62, "n_patches": 2600,
+            "skipped_too_large": [{"case": "1024_ddim50_seed101"}],
+            "neighbour_state_source": "rebuilt per window from the manifest",
+            "cases_bucketed_at_volume_level": [],
+            "generated": _summary_block(0.82, 2600),
+            "real_val_floor": {
+                "n_patches": 512,
+                **_summary_block(0.86, 512),
+                "grey_raw": _summary_block(0.91, 512)["grey"],
+                "note": "round trip is the like-for-like floor",
+            },
             "by_requested_phi": {"0.01": {"n_patches": 81,
                                           **_summary_block(0.80, 81)},
                                  "0.1": {"n_patches": 81,
                                          **_summary_block(0.84, 81)}},
-            "by_neighbours": {MEMO.NB_PRESENT: {"n_patches": 1539,
-                                                **_summary_block(0.82, 1539)}},
+            "by_neighbours": {
+                MEMO.NB_PRESENT: {"n_patches": 2000,
+                                  **_summary_block(0.82, 2000)},
+                MEMO.NB_UNKNOWN_BUCKET: {"n_patches": 600,
+                                         **_summary_block(0.75, 600)},
+            },
+            "per_case": {
+                "a": {"volume_shape": [192, 192, 192]},
+                "b": {"volume_shape": [384, 384, 384]},
+            },
         }
 
     def test_the_generated_row_never_appears_without_its_floor(self):
@@ -546,7 +730,16 @@ class TestReportSection:
 
         text = memorisation_section(self._result())
         assert "generated" in text
-        assert "real val floor" in text
+        assert "real val floor (VAE round trip)" in text
+
+    def test_both_grey_floors_are_printed_and_named(self):
+        """Which floor a reader used must be legible from the table alone."""
+        from poregen.eval_v4.report import memorisation_section
+
+        text = memorisation_section(self._result())
+        assert "real val floor (VAE round trip)" in text
+        assert "real val floor (raw scan)" in text
+        assert "like-for-like" in text
 
     def test_both_breakdowns_are_printed(self):
         from poregen.eval_v4.report import memorisation_section
@@ -554,8 +747,25 @@ class TestReportSection:
         text = memorisation_section(self._result())
         assert "By requested porosity" in text
         assert "phi 0.01" in text and "phi 0.1" in text
-        assert "By neighbour availability" in text
+        assert "By neighbour availability when the window was denoised" in text
         assert "neighbours present" in text
+        assert "neighbours unknown" in text
+
+    def test_it_says_the_neighbour_state_is_an_ordering_fact(self):
+        from poregen.eval_v4.report import memorisation_section
+
+        text = memorisation_section(self._result())
+        assert "rebuilt per window from the manifest" in text
+        assert "not a geometric one" in text
+
+    def test_a_volume_level_fallback_is_named_not_hidden(self):
+        from poregen.eval_v4.report import memorisation_section
+
+        res = self._result()
+        res["cases_bucketed_at_volume_level"] = ["odd_case"]
+        text = memorisation_section(res)
+        assert "could not be bucketed per window" in text
+        assert "odd_case" in text
 
     def test_it_says_the_search_was_over_the_whole_store(self):
         from poregen.eval_v4.report import memorisation_section
@@ -563,6 +773,7 @@ class TestReportSection:
         text = memorisation_section(self._result())
         assert "219580" in text and "stride-64" in text
         assert "Not a sample" in text
+        assert "192x192x192" in text and "384x384x384" in text
 
     def test_a_skipped_check_says_why_instead_of_printing_a_zero(self):
         from poregen.eval_v4.report import memorisation_section
