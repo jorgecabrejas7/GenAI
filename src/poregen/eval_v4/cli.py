@@ -19,7 +19,7 @@ import logging
 import sys
 from pathlib import Path
 
-from poregen.eval_v4.cases import ASSESSMENTS, build_cases
+from poregen.eval_v4.cases import ASSESSMENTS, MEASURE_ONLY, build_cases
 from poregen.eval_v4.io import case_dir, repo_root
 
 log = logging.getLogger("eval_v4")
@@ -59,7 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "must compare two decoders on identical latents.")
 
     m = sub.add_parser("measure", help="run the metrics over one assessment")
-    m.add_argument("assessment", choices=sorted(ASSESSMENTS))
+    # MEASURE_ONLY assessments are measurable but not generatable: they read
+    # volumes another assessment and the real floor already wrote.
+    m.add_argument("assessment", choices=sorted([*ASSESSMENTS, *MEASURE_ONLY]))
     _add_root(m)
 
     r = sub.add_parser("report", help="write findings.md and the figures")

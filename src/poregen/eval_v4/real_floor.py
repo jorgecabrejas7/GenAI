@@ -219,28 +219,23 @@ def _correlation_length(h: np.ndarray, valid: np.ndarray, max_lag: int = 64) -> 
     built with the right Sa and the wrong correlation length looks nothing like
     the real thing.
 
-    Computed on the mean-removed height over valid columns only, one axis at a
-    time, so a coupon whose valid region is not rectangular still contributes.
+    Computed over valid columns only, one axis at a time, so a coupon whose
+    valid region is not rectangular still contributes.  The height map is
+    sampled every voxel, so a lag IS a voxel count here.
+
+    The curve and the 1/e crossing are :mod:`poregen.eval_v4.metrics`' pair, the
+    same ones the ``field_stats`` assessment reads a porosity field with: one
+    correlation length in the suite, measured one way.
     """
     out: dict = {}
     hh = np.where(valid, h.astype(np.float64), np.nan)
-    hh = hh - np.nanmean(hh)
     for axis, name in ((1, "x"), (0, "y")):
-        var = np.nanmean(hh ** 2)
-        if not np.isfinite(var) or var <= 0:
+        lim = min(max_lag, hh.shape[axis] - 1)
+        if lim < 1:
             out[name] = None
             continue
-        lag_at = None
-        for lag in range(1, max_lag + 1):
-            a_ = np.take(hh, np.arange(0, hh.shape[axis] - lag), axis=axis)
-            b_ = np.take(hh, np.arange(lag, hh.shape[axis]), axis=axis)
-            cov = np.nanmean(a_ * b_)
-            if not np.isfinite(cov):
-                break
-            if cov / var < np.exp(-1.0):
-                lag_at = lag
-                break
-        out[name] = int(lag_at) if lag_at is not None else None
+        curve = M.lag_correlation([hh], axis, lim)
+        out[name] = M.correlation_length_1_over_e(curve["lag"], curve["r"])
     vals = [v for v in out.values() if v is not None]
     out["mean"] = float(np.mean(vals)) if vals else None
     return out

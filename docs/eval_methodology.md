@@ -407,6 +407,54 @@ convention rather than two that can drift. **Every eval-v3 VAE FID recorded
 before 2026-09-08 is void** for the same reason the eval-v4 ones are: the
 features were off-distribution, so the number was comparable to nothing.
 
+### Field statistics — the delivered porosity field
+
+`poregen.eval_v4.field_stats`. Naiff, Ramos and Wang ("Large-Scale Porous Media
+Generation Through Field-Controlled Latent Diffusion Models", SSRN
+10.2139/ssrn.7161201) claim that a porosity field is a **sufficient descriptor
+of large-scale heterogeneity**. That is a claim about a measurable quantity, and
+this is the measurement of it: the marginal distribution of local porosity per
+window, and how far that field stays correlated along each axis, generated
+against real.
+
+**Delivered, not requested.** Every field is read out of a `label.tif` — pore
+voxels over material voxels — never out of the `requested_field.npy` beside it.
+The request is measured too and reported as its own row, because the failure
+worth catching is a request with the right statistics that the model does not
+deliver.
+
+**One window on both sides.** 64-voxel windows every 32 voxels, on real crops
+and generated volumes alike; a window under half material is dropped. That is
+the grid campaign 01's T-D measured the real correlation lengths on (z 79.45,
+y 413.58, x 900.95 voxels), which are in turn the lengths
+`build_porosity_field` smooths the coherent request with — so the request, the
+delivery, the real material and the target the request was built from are all
+the same kind of number. The T-D lengths are printed as the first row of the
+correlation table.
+
+**Per axis.** The material is a laminate: it decorrelates in about 80 voxels
+through the thickness and in several hundred in plane. A single isotropic
+correlation length would average away the structure most likely to be lost.
+
+**A length longer than the crop is not a length.** The 1/e crossing is
+interpolated between lags (on a 32-voxel grid, whole lags alone are a 20 % error
+on an 80-voxel length). When the curve does not cross inside the lags a field
+holds, the report prints `> reach` rather than a number, and `corr_length_gap`
+refuses to difference two lengths found over different reaches. A 192³ volume
+reaches 128 voxels of lag, so it can measure z and can only ever say "longer
+than this crop" in y and x; the `r(axis, lag)` columns at fixed voxel-disjoint
+lags are the comparison that holds at every crop size. A crossing found close to
+the reach rests on few independent samples and should be read with the reach
+beside it.
+
+Distances between marginals are W1 on the porosities and W1 after each sample is
+divided by its own mean — the second removes the global porosity the two sets
+happen to sit at and leaves the shape of the heterogeneity. Both carry a
+real-vs-real floor: the real crops are split in half and scored against
+themselves, because two halves of real material do not score zero either.
+
+---
+
 ## The eight assessments
 
 Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
@@ -422,6 +470,7 @@ Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
 | 6 | `assembly` | 9 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the offset triple generated here (offsets 0 / 16 / 32 in a 256³ canvas), and the campaign-08 VAE control row. |
 | 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
 | 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K, FID on 2-D slices and the memorisation check, each against the matched real-vs-real floor. |
+| — | `field_stats` | 0 | **Measure-only: it generates nothing.** Re-reads the coherent-field volumes `porosity_local` and `multichunk` already wrote, and the real crops, for the marginal and the per-axis correlation length of the delivered field. `eval_v4 measure field_stats` and `eval_v4 report`; there is no `generate field_stats`. |
 
 **Assessment 8 runs at three porosity levels and no more** because every
 statistic in it is confounded by pore fraction, and each level needs its own

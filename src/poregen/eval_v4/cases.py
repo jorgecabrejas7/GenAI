@@ -879,6 +879,13 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
 #: for a distribution distance is no measurement at all.
 BORROWS = {"assembly": ("sampler",), "microstructure": ("real_floor",)}
 
+#: Assessments that generate NOTHING.  ``field_stats`` re-measures the coherent
+#: field out of volumes ``porosity_local`` and ``multichunk`` already wrote and
+#: out of the real crops, so it has a measure step and a report but no cases and
+#: no ``generate`` subcommand.  Asking the GPU for the same volumes a second
+#: time would not make the answer better.
+MEASURE_ONLY = ("field_stats",)
+
 
 def build_cases(assessment: str, repo=None) -> list[CaseSpec]:
     if assessment not in ASSESSMENTS:
