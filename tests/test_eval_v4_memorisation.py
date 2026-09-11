@@ -797,6 +797,10 @@ class _StubCase:
 class TestMaxCasesPerAssessment:
     """The cut selects volumes BEFORE the tile filter, and is recorded.
 
+    Every call passes ``allow_busy_gpu``: these tests are about which volumes
+    are SELECTED, and a CUDA job that happens to hold the card while the suite
+    runs must not decide whether they pass.
+
     A smoke run that silently searched everything would cost the hours it
     exists to avoid; one that searched nothing and said `available: False`
     would look like a clean result.  Both are tested for.
@@ -810,7 +814,7 @@ class TestMaxCasesPerAssessment:
     def test_a_cut_of_zero_keeps_no_volume_and_says_so(self, monkeypatch, tmp_path):
         self._campaign(monkeypatch, [_StubCase("a", (192, 192, 192))])
         out = MEMO.memorisation(tmp_path, assessments=("sampler",),
-                                max_cases_per_assessment=0)
+                                max_cases_per_assessment=0, allow_busy_gpu=True)
         assert out["available"] is False
         assert "no generated volume" in out["reason"]
 
@@ -823,24 +827,24 @@ class TestMaxCasesPerAssessment:
         cases = [_StubCase("big", (192, 1024, 1024)), _StubCase("small", (192, 192, 192))]
         self._campaign(monkeypatch, cases)
         cut = MEMO.memorisation(tmp_path, assessments=("sampler",),
-                                max_cases_per_assessment=1)
+                                max_cases_per_assessment=1, allow_busy_gpu=True)
         assert cut["available"] is False
         # Uncut, the small volume survives the tile filter and the run gets as
         # far as the store, which this campaign has no manifest note for.
         with pytest.raises(KeyError, match="latents_root"):
-            MEMO.memorisation(tmp_path, assessments=("sampler",))
+            MEMO.memorisation(tmp_path, assessments=("sampler",), allow_busy_gpu=True)
 
     def test_the_cut_is_recorded_on_the_result(self, monkeypatch, tmp_path):
         self._campaign(monkeypatch, [_StubCase("a", (192, 192, 192))])
         with pytest.raises(KeyError, match="latents_root"):
             MEMO.memorisation(tmp_path, assessments=("sampler",),
-                              max_cases_per_assessment=1)
+                              max_cases_per_assessment=1, allow_busy_gpu=True)
 
     def test_no_cut_is_the_default(self, monkeypatch, tmp_path):
         cases = [_StubCase(str(i), (192, 192, 192)) for i in range(3)]
         self._campaign(monkeypatch, cases)
         with pytest.raises(KeyError, match="latents_root"):
-            MEMO.memorisation(tmp_path, assessments=("sampler",))
+            MEMO.memorisation(tmp_path, assessments=("sampler",), allow_busy_gpu=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -912,3 +916,52 @@ class TestPageRelease:
                      * store.latent_dtype.itemsize)
         assert seen["lo"] == int(store.rows[0]) * row_bytes
         assert seen["hi"] == (int(store.rows[3]) + 1) * row_bytes
+
+
+# --------------------------------------------------------------------------- #
+# the search refuses to run beside a CUDA job
+# --------------------------------------------------------------------------- #
+class TestBusyGpuSkip:
+    """Streaming the store beside a generating card kills the card's job.
+
+    Host and device share one pool on this machine, and a CUDA allocation
+    fails rather than waiting for page cache to be reclaimed. The search
+    therefore reports itself unavailable instead of running — but it must say
+    WHY and name what blocked it, because a silent skip here reads exactly
+    like "no memorisation found", which is the one wrong answer this module
+    must never give.
+    """
+
+    def test_a_busy_card_skips_the_search_and_names_the_process(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setattr(MEMO, "gpu_jobs_other_than",
+                            lambda pid: [(4242, "python")])
+        out = MEMO.memorisation(tmp_path, assessments=("sampler",))
+        assert out["available"] is False
+        assert out["blocked_by"] == [{"pid": 4242, "process": "python"}]
+        assert "4242" in out["reason"]
+        assert "--allow-busy-gpu" in out["reason"]
+
+    def test_the_skip_is_not_mistaken_for_a_clean_result(
+            self, monkeypatch, tmp_path):
+        """No ratio, no verdict, no count — nothing a reader could quote."""
+        monkeypatch.setattr(MEMO, "gpu_jobs_other_than",
+                            lambda pid: [(1, "x")])
+        out = MEMO.memorisation(tmp_path, assessments=("sampler",))
+        for key in ("latent", "grey", "n_memorised", "n_patches", "ratio"):
+            assert key not in out
+
+    def test_an_idle_card_does_not_skip(self, monkeypatch, tmp_path):
+        """It proceeds far enough to complain about the campaign instead."""
+        monkeypatch.setattr(MEMO, "gpu_jobs_other_than", lambda pid: [])
+        out = MEMO.memorisation(tmp_path, assessments=("sampler",))
+        assert out["available"] is False
+        assert "no generated volume" in out["reason"]
+        assert "blocked_by" not in out
+
+    def test_the_override_runs_anyway(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(MEMO, "gpu_jobs_other_than",
+                            lambda pid: [(1, "x")])
+        out = MEMO.memorisation(tmp_path, assessments=("sampler",),
+                                allow_busy_gpu=True)
+        assert "no generated volume" in out["reason"]

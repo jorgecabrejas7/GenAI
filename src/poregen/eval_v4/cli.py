@@ -63,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     # volumes another assessment and the real floor already wrote.
     m.add_argument("assessment", choices=sorted([*ASSESSMENTS, *MEASURE_ONLY]))
     _add_root(m)
+    # `microstructure` carries the full-store memorisation search, which
+    # streams a 195 GiB store.  On unified memory that starves a CUDA job
+    # beside it, so the search skips itself when the card is busy and this
+    # overrides that, for a machine whose host and device memory are separate.
+    m.add_argument("--allow-busy-gpu", action="store_true",
+                   help="let the memorisation search run while another CUDA "
+                        "job holds the card (microstructure only)")
 
     r = sub.add_parser("report", help="write findings.md and the figures")
     _add_root(r)
@@ -134,7 +141,8 @@ def cmd_generate(args) -> int:
 def cmd_measure(args) -> int:
     from poregen.eval_v4.measure import measure  # noqa: PLC0415
 
-    res = measure(args.root, args.assessment, args.repo)
+    res = measure(args.root, args.assessment, args.repo,
+                  allow_busy_gpu=args.allow_busy_gpu)
     print(f"{args.assessment}: {res['n_cases_measured']} of {res['n_cases_expected']} "
           f"cases -> {args.root}/{args.assessment}/results.json")
     return 0

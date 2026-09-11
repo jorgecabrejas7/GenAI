@@ -166,6 +166,35 @@ machine, not locally.
 - Discriminator intentionally runs in `float32` (spectral norm power iteration is
   less accurate in bfloat16) — do not wrap it in autocast
 
+## GB10 unified memory: never stream the store beside a CUDA job
+
+**A streaming read of the latent store while a CUDA job runs can kill the CUDA
+job.** Host and device share one 121 GB pool. A pass over `latents.bin`
+(195 GiB) fills the page cache in minutes, and a CUDA allocation does not wait
+for the kernel to reclaim that cache — it fails. The reason this is worth a
+section of its own is that the symptom never points at the cause: `free`
+reports tens of GB "available" throughout, because page cache *is* reclaimable
+in principle, and the job that dies is the one that did nothing wrong. It has
+happened twice. During ldm06 training, external CUDA jobs failed repeatedly at
+the 60k diagnostics (ldm06 run note, incident 3). On 2026-09-11 the memorisation
+smoke test was re-run beside `eval_v4 generate assembly_modes` and was killed
+for low memory at about nine minutes, with 97 GB reported available.
+
+Two rules follow, and both are enforced in code rather than left to a runbook,
+because the second incident was a hand-run that ignored the first:
+
+- **Store-streaming jobs get their own queue slot, with the card idle.**
+  `poregen.eval_v4.memorisation.gpu_jobs_other_than` names any other CUDA
+  process; the memorisation search skips itself with a reason when the card is
+  busy, and `scripts/analysis/memorisation_smoke.py` refuses to start. Both take
+  `--allow-busy-gpu`, which is correct only where host and device memory are
+  separate pools.
+- **Readers release pages behind them.** Each bank chunk is dropped with
+  `madvise(MADV_DONTNEED)` and then `posix_fadvise(POSIX_FADV_DONTNEED)` once it
+  has been scored — fadvise alone cannot free a page a mapping still holds — so
+  the resident file-backed set stays bounded by the chunk (~3.9 GB for latents,
+  ~1 GB for grey) instead of growing to the size of the store.
+
 ## Running the tests while a job holds the GPU
 
 Hide the card: `CUDA_VISIBLE_DEVICES= python -m pytest tests/ -q`.

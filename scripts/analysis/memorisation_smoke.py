@@ -108,45 +108,11 @@ def _gpu_gb(pid: int) -> float:
     return 0.0
 
 
-def gpu_jobs_other_than(pid: int) -> list[tuple[int, str]]:
-    """CUDA processes on the card that are not `pid` or its children.
+def gpu_jobs_other_than(pid: int):
+    """Re-exported from the library, which is where the rule is enforced."""
+    from poregen.eval_v4.memorisation import gpu_jobs_other_than as _f  # noqa: PLC0415
 
-    THE STORE MAY NOT BE STREAMED WHILE THE CARD IS GENERATING.  GB10 has
-    121 GB of unified memory shared by CPU and GPU: a streaming pass fills the
-    page cache, and a CUDA allocation does not wait for the kernel to reclaim
-    it — it fails.  This has already cost generation runs on this machine
-    (ldm06 run note, incident 3), and `free` reports tens of GB "available"
-    throughout, so the symptom never points at the cause.
-
-    The check is here rather than in the queue script because the rule has to
-    hold for a hand-run too: that is exactly how it was broken.
-    """
-    smi = shutil.which("nvidia-smi")
-    if smi is None:
-        return []
-    try:
-        out = subprocess.run(
-            [smi, "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=20, check=False,
-        ).stdout
-    except (subprocess.SubprocessError, OSError):
-        return []
-    mine = {pid}
-    jobs = []
-    for row in out.splitlines():
-        parts = [c.strip() for c in row.split(",")]
-        if len(parts) != 2 or not parts[0].isdigit():
-            continue
-        other = int(parts[0])
-        if other in mine:
-            continue
-        try:
-            if int(Path(f"/proc/{other}/stat").read_text().split()[3]) == pid:
-                continue                      # our own child
-        except (OSError, IndexError, ValueError):
-            pass
-        jobs.append((other, parts[1]))
-    return jobs
+    return _f(pid)
 
 
 def _child(args: argparse.Namespace) -> int:

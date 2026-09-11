@@ -93,6 +93,8 @@ import json
 import logging
 import mmap
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -868,6 +870,47 @@ def _spaces(accs: dict[str, Top2], select: np.ndarray | None = None) -> dict:
 # The entry point the measure stage calls
 # ---------------------------------------------------------------------------
 
+def gpu_jobs_other_than(pid: int) -> list[tuple[int, str]]:
+    """CUDA processes on the card that are not `pid` or its children.
+
+    THE STORE MAY NOT BE STREAMED WHILE THE CARD IS GENERATING.  GB10 has
+    121 GB of unified memory shared by CPU and GPU: a streaming pass fills the
+    page cache, and a CUDA allocation does not wait for the kernel to reclaim
+    it — it fails.  This has already cost generation runs on this machine
+    (ldm06 run note, incident 3), and `free` reports tens of GB "available"
+    throughout, so the symptom never points at the cause.
+
+    The check is here rather than in the queue script because the rule has to
+    hold for a hand-run too: that is exactly how it was broken.
+    """
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        return []
+    try:
+        out = subprocess.run(
+            [smi, "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20, check=False,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    mine = {pid}
+    jobs = []
+    for row in out.splitlines():
+        parts = [c.strip() for c in row.split(",")]
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        other = int(parts[0])
+        if other in mine:
+            continue
+        try:
+            if int(Path(f"/proc/{other}/stat").read_text().split()[3]) == pid:
+                continue                      # our own child
+        except (OSError, IndexError, ValueError):
+            pass
+        jobs.append((other, parts[1]))
+    return jobs
+
+
 def memorisation(
     root: str | Path,
     *,
@@ -878,6 +921,7 @@ def memorisation(
     max_cases_per_assessment: int | None = None,
     n_floor: int = FLOOR_PATCHES,
     seed: int = 0,
+    allow_busy_gpu: bool = False,
 ) -> dict:
     """Full-store memorisation of every generated volume small enough to search.
 
@@ -896,6 +940,32 @@ def memorisation(
     and both store passes — before the full search is given the GPU for hours.
     """
     import torch  # noqa: PLC0415
+
+    # This pass streams a 195 GiB store.  On unified memory the page cache it
+    # fills makes a CUDA allocation FAIL rather than wait for reclaim, so a
+    # generation running beside it dies — and `free` reports tens of GB
+    # available throughout, so the symptom never points here.  Reported as
+    # unavailable rather than raised: the other four statistics of assessment 8
+    # are unaffected and should still be measured, and a reason that names the
+    # blocking process is recoverable by re-running when the card is idle.
+    busy = [] if allow_busy_gpu else gpu_jobs_other_than(os.getpid())
+    if busy:
+        names = ", ".join(f"{p} ({n})" for p, n in busy)
+        logger.warning(
+            "memorisation SKIPPED: the card is busy with %s. Re-run "
+            "`eval_v4 measure microstructure` when it is idle.", names)
+        return {
+            "available": False,
+            "blocked_by": [{"pid": p, "process": n} for p, n in busy],
+            "reason": (
+                f"the card is busy with {names}. This search streams a 195 GiB "
+                "store and the page cache it fills makes CUDA allocations fail "
+                "on unified memory, so it must not run beside a generating "
+                "job. Re-run `eval_v4 measure microstructure` when the card is "
+                "idle, or pass --allow-busy-gpu where host and device memory "
+                "are separate pools."
+            ),
+        }
 
     cases, skipped, present = [], [], []
     for assessment in assessments:

@@ -863,7 +863,7 @@ def _micro_reference(root) -> dict[float, dict[str, list]]:
     return out
 
 
-def measure_microstructure(root, repo) -> dict:
+def measure_microstructure(root, repo, *, allow_busy_gpu: bool = False) -> dict:
     """Generated microstructure against real, and real against real.
 
     Every distance here is read three ways: what the generated set scores
@@ -976,7 +976,8 @@ def measure_microstructure(root, repo) -> dict:
         },
         "per_case": rows,
         "levels": levels,
-        "memorisation": MEMO.memorisation(root, repo=repo),
+        "memorisation": MEMO.memorisation(root, repo=repo,
+                                          allow_busy_gpu=allow_busy_gpu),
     }
 
 
@@ -1358,12 +1359,17 @@ MEASURERS = {
 }
 
 
-def measure(root: str | Path, assessment: str, repo: str | Path | None = None) -> dict:
+def measure(root: str | Path, assessment: str, repo: str | Path | None = None,
+            *, allow_busy_gpu: bool = False) -> dict:
     """Measure one assessment and write ``<root>/<assessment>/results.json``."""
     if assessment not in MEASURERS:
         raise KeyError(f"unknown assessment {assessment!r}; choose from {sorted(MEASURERS)}")
     repo = Path(repo) if repo else repo_root()
-    results = MEASURERS[assessment](Path(root), repo)
+    # Only microstructure carries the full-store memorisation search, so only
+    # microstructure has a reason to care whether the card is busy.  Naming the
+    # one measurer is honest; giving every measurer a flag it ignores is not.
+    extra = {"allow_busy_gpu": allow_busy_gpu} if assessment == "microstructure" else {}
+    results = MEASURERS[assessment](Path(root), repo, **extra)
     results["n_cases_measured"] = len(results["per_case"])
     # A measure-only assessment generates nothing, so there is no case list to
     # be short of: what it measures is whatever the assessments it reads wrote.
