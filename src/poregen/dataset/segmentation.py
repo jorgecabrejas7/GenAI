@@ -102,13 +102,23 @@ def slice_cleaning(img: np.ndarray, min_size: int = 2) -> np.ndarray:
 
 # ── Material mask ─────────────────────────────────────────────────────────────
 
-def material_mask(xct: np.ndarray) -> np.ndarray:
+def material_mask(xct: np.ndarray, *, threshold: float | None = None) -> np.ndarray:
     """Generate a binary material mask via Otsu + max-projection + void-filling.
 
     The specimen box is the bounding box of the LARGEST component of the
     max-projection.  Component label ids follow raster order, so a bright dust
     speck in a corner is numbered before the coupon and would otherwise be taken
     for the specimen.
+
+    Parameters
+    ----------
+    xct : (Z, Y, X) array
+        Raw CT volume, already cropped to its content bounding box.
+    threshold : float, optional
+        Global material threshold.  ``None`` — the dataset-build setting — takes
+        Otsu of *xct*.  A value is passed only to measure how much the material
+        boundary, and therefore every porosity taken inside it, depends on that
+        choice; see ``scripts/analysis/label_uncertainty.py``.
 
     Raises
     ------
@@ -119,7 +129,7 @@ def material_mask(xct: np.ndarray) -> np.ndarray:
         than segmented against an arbitrary half of itself.
     """
     logger.info("Computing material mask...")
-    threshold_value = filters.threshold_otsu(xct)
+    threshold_value = filters.threshold_otsu(xct) if threshold is None else threshold
     binary = xct > threshold_value
 
     max_proj = np.max(binary, axis=0)
