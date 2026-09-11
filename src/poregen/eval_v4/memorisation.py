@@ -812,6 +812,7 @@ def memorisation(
     device=None,
     assessments: tuple[str, ...] = ASSESSMENTS,
     max_tiles: int = MAX_TILES_PER_VOLUME,
+    max_cases_per_assessment: int | None = None,
     n_floor: int = FLOOR_PATCHES,
     seed: int = 0,
 ) -> dict:
@@ -824,6 +825,12 @@ def memorisation(
     A missing store or a missing VAE checkpoint is reported with the path it
     looked for.  A silent zero here would read as "no memorisation", which is
     the one wrong answer this function must never give.
+
+    ``max_cases_per_assessment`` keeps the first N volumes of each assessment
+    and records the cut in ``max_cases_per_assessment`` on the result, so a
+    short run cannot be mistaken for the full one.  It exists for the smoke
+    test that proves the hardware path — the VAE load, the encode, the decode
+    and both store passes — before the full search is given the GPU for hours.
     """
     import torch  # noqa: PLC0415
 
@@ -832,6 +839,8 @@ def memorisation(
         found = load_cases(root, assessment)
         if found:
             present.append(assessment)
+        if max_cases_per_assessment is not None:
+            found = found[:max_cases_per_assessment]
         for case in found:
             m = case.manifest
             if m.sampler == "real":
@@ -1015,6 +1024,7 @@ def memorisation(
         "assessments_requested": list(assessments),
         "assessments_found": present,
         "max_tiles_per_volume": int(max_tiles),
+        "max_cases_per_assessment": max_cases_per_assessment,
         "n_cases": len(per_case),
         "n_patches": int(n_gen),
         "skipped_too_large": skipped,

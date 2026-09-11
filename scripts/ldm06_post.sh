@@ -24,35 +24,14 @@ set -uo pipefail          # NOT -e: one failed stage must not kill the chain
 REPO=/home/jorgecabrejas/Dev/GenAI
 CAMP="$REPO/runs/campaigns/09-r08-latent-sweep"
 EVAL_CAMP="$REPO/runs/campaigns/12-eval-v4"
-FT_CAMP="$REPO/runs/campaigns/11-decoder-ft"
 SCRATCH=/tmp/claude-1001/-home-jorgecabrejas-Dev-GenAI/ce0b3db0-2aa0-4a97-9bc4-7bb0db078739/scratchpad
 LOG="$CAMP/post_ldm06.log"
 GO="$REPO/runs/campaigns/ldm06_go"
 ASSESSMENTS=(sampler microstructure porosity_global porosity_local geometry surface layup assembly cfg)
-OWED=(base reduction-factor-8 reduction-factor-32 reduction-factor-4)
-TAIL_RUNGS=(reduction-factor-2 reduction-factor-64)
 
-mkdir -p "$CAMP" "$FT_CAMP" "$SCRATCH"
+mkdir -p "$CAMP" "$SCRATCH"
 cd "$REPO" || exit 1
 say() { printf '%s  POST %s\n' "$(date -Is)" "$*" >> "$LOG"; printf '%s  POST %s\n' "$(date -Is)" "$*"; }
-
-run_dir_for() {
-    local want="r08/$1" d got
-    for d in $(ls -dt "$REPO"/runs/vae/r08-run-*/ 2>/dev/null); do
-        [ -f "${d}best.ckpt" ] || continue
-        got=$(python - "$d" <<'PY'
-import sys, json, pathlib
-try:
-    print(json.loads((pathlib.Path(sys.argv[1]) / "run_metadata.json").read_text())
-          .get("experiment_id", ""))
-except Exception:
-    print("")
-PY
-)
-        [ "$got" = "$want" ] && { printf '%s' "$d"; return 0; }
-    done
-    return 1
-}
 
 # ── 0. wait for ldm06/base ────────────────────────────────────────────────────
 LDM_RUN=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
@@ -144,102 +123,11 @@ else
     say "GO absent -> skipping eval v4 generation; supervisor triggers it separately"
 fi
 
-# ── 1b. wait for the decoder-ft go-ahead ──────────────────────────────────────
-# The user wants to see the fine-tune setup before it starts, so the runner
-# stops here until runs/campaigns/decoder_ft_go appears. No timeout: an
-# unattended chain that gave up and started anyway would defeat the point of
-# the gate.
-#
-# The wait is not idle. The OWED full-split rung reports and the eval-v4
-# measure/report stages are queued here rather than after the fine-tune,
-# because they are needed either way and the card would otherwise sit still.
-# rf-2 and rf-64 are NOT: each holds the GPU for ~26 h, so a go-ahead arriving
-# a minute later would still wait a day.
-FT_GO="$REPO/runs/campaigns/decoder_ft_go"
-
-# -- inspection pack (CPU) FIRST, before anything touches the GPU ----------
-# The user inspects the volumes personally before the fine-tune, so this must
-# exist before the card is committed to ~4.7 h of rung reports. It reads three
-# slices per case, not the volumes, so it costs seconds.
-say "INSPECT pack start (CPU)"
-python scripts/analysis/eval_v4_inspection_pack.py --root "$EVAL_CAMP" \
-    > "$SCRATCH/evalv4_inspection.log" 2>&1
-say "INSPECT pack done rc=$? -> $EVAL_CAMP/inspection — SEND PATH TO SUPERVISOR"
-
-say "GATE waiting for $FT_GO — clearing the owed reports meanwhile"
-# -- the owed full-split rung reports (GPU) --------------------------------
-for exp in "${OWED[@]}"; do
-    d=$(run_dir_for "$exp")
-    if [ -z "$d" ]; then say "OWED $exp skipped: no run directory"; continue; fi
-    say "OWED $exp report start"
-    python scripts/analysis/r08_rung_report.py --run "$d" > "$SCRATCH/report_${exp}.log" 2>&1
-    say "OWED $exp report done rc=$?"
-done
-say "COMPARE start (final paper table)"
-python scripts/analysis/r08_rung_report.py --compare > "$SCRATCH/r08_compare_final.log" 2>&1
-say "COMPARE done rc=$?"
-
-
-# -- eval v4 measure and report (CPU) --------------------------------------
-# Only for assessments whose volumes exist; measure refuses on an empty one,
-# which is the right behaviour and not an error worth stopping the chain for.
-if [ -d "$EVAL_CAMP" ]; then
-    for a in "${ASSESSMENTS[@]}"; do
-        if [ -d "$EVAL_CAMP/volumes/$a" ]; then
-            say "EVALV4 measure $a start (CPU)"
-            python -m poregen.eval_v4.cli measure "$a" --root "$EVAL_CAMP" \
-                > "$SCRATCH/evalv4_measure_${a}.log" 2>&1
-            say "EVALV4 measure $a done rc=$?"
-        else
-            say "EVALV4 measure $a skipped: no volumes"
-        fi
-    done
-    say "EVALV4 report start (CPU)"
-    python -m poregen.eval_v4.cli report --root "$EVAL_CAMP" \
-        > "$SCRATCH/evalv4_report.log" 2>&1
-    say "EVALV4 report done rc=$?"
-fi
-
-# -- now block until the go-ahead ------------------------------------------
-if [ ! -e "$FT_GO" ]; then
-    say "GATE blocked: waiting for $FT_GO (polling 60 s, no timeout)"
-    while [ ! -e "$FT_GO" ]; do sleep 60; done
-fi
-say "GATE released: $FT_GO present"
-
-# ── 2. decoder fine-tune, option 1 ────────────────────────────────────────────
-say "DECODER-FT start (r08/decoder-ft)"
-python scripts/train_vae.py run r08/decoder-ft > "$SCRATCH/decoder_ft.log" 2>&1
-ft_rc=$?
-say "DECODER-FT done rc=$ft_rc"
-# The run dir is named from experiment.name ("r08"), not the variant, so the
-# fine-tune lands in r08-run-NNNN-... beside the sweep rungs. Resolve it by
-# experiment_id, the same way every other rung is resolved here.
-FT_RUN=$(run_dir_for decoder-ft)
-say "DECODER-FT run dir: ${FT_RUN:-<none>}"
-
-# ── 3. re-decode comparison ───────────────────────────────────────────────────
-BASE_CKPT="$(run_dir_for reduction-factor-8)best.ckpt"
-if [ "$ft_rc" -eq 0 ] && [ -n "$FT_RUN" ] && [ -f "${FT_RUN}best.ckpt" ]; then
-    say "REDECODE start (baseline $BASE_CKPT)"
-    python scripts/analysis/decoder_ft_redecode.py \
-        --baseline "$BASE_CKPT" --finetuned "${FT_RUN}best.ckpt" \
-        --latents "$EVAL_CAMP/*/*/latents.npy" \
-        --out "$FT_CAMP/redecode" \
-        > "$SCRATCH/redecode.log" 2>&1
-    say "REDECODE done rc=$?"
-    say "GATE TABLE -> $FT_CAMP/redecode/results.json — SEND TO SUPERVISOR"
-else
-    say "REDECODE skipped: fine-tune rc=$ft_rc, run=${FT_RUN:-<none>}"
-fi
-
-# ── 5. the bracket rungs, last ────────────────────────────────────────────────
-for exp in "${TAIL_RUNGS[@]}"; do
-    say "START r08/$exp"
-    python scripts/train_vae.py run "r08/$exp" > "$SCRATCH/r08_${exp}.log" 2>&1
-    rc=$?
-    say "DONE r08/$exp rc=$rc"
-    [ "$rc" -ne 0 ] && say "FAIL r08/$exp rc=$rc — chain continues"
-done
-
-say "CHAIN COMPLETE"
+# ── 1b. everything after generation belongs to ldm06_post_tail.sh ────────────
+# The gate, the decoder fine-tune, the re-decode, the owed rung reports and the
+# bracket rungs USED TO LIVE HERE.  They cannot any more: the tail script stops
+# this runner at the `surface` boundary to move layup to the end, so anything
+# written below that point would never run.  Two scripts that both launch
+# r08/decoder-ft is worse than one — the fine-tune would run twice if a kill
+# ever missed.  ldm06_post_tail.sh owns the queue from `surface` onward.
+say "GENERATION COMPLETE — ldm06_post_tail.sh owns the queue from here"

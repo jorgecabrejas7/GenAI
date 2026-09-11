@@ -13,6 +13,8 @@ claims the check is worth anything for:
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 
 import numpy as np
@@ -780,3 +782,62 @@ class TestReportSection:
 
         text = memorisation_section({"available": False, "reason": "no store"})
         assert "skipped" in text and "no store" in text
+
+
+# --------------------------------------------------------------------------- #
+# the smoke-test volume cut
+# --------------------------------------------------------------------------- #
+class _StubCase:
+    """Only what `memorisation` reads before it opens the store."""
+
+    def __init__(self, name, shape):
+        self.manifest = dataclasses.replace(manifest_for(shape), case=name)
+
+
+class TestMaxCasesPerAssessment:
+    """The cut selects volumes BEFORE the tile filter, and is recorded.
+
+    A smoke run that silently searched everything would cost the hours it
+    exists to avoid; one that searched nothing and said `available: False`
+    would look like a clean result.  Both are tested for.
+    """
+
+    def _campaign(self, monkeypatch, cases):
+        monkeypatch.setattr(
+            MEMO, "load_cases",
+            lambda root, assessment: cases if assessment == "sampler" else [])
+
+    def test_a_cut_of_zero_keeps_no_volume_and_says_so(self, monkeypatch, tmp_path):
+        self._campaign(monkeypatch, [_StubCase("a", (192, 192, 192))])
+        out = MEMO.memorisation(tmp_path, assessments=("sampler",),
+                                max_cases_per_assessment=0)
+        assert out["available"] is False
+        assert "no generated volume" in out["reason"]
+
+    def test_the_cut_is_applied_before_the_tile_filter(self, monkeypatch, tmp_path):
+        """Order matters: the cut takes the FIRST N, not the first N that fit.
+
+        With an oversize volume first, a cut of one leaves nothing — and that
+        must read as "nothing was searched", not as a clean bank.
+        """
+        cases = [_StubCase("big", (192, 1024, 1024)), _StubCase("small", (192, 192, 192))]
+        self._campaign(monkeypatch, cases)
+        cut = MEMO.memorisation(tmp_path, assessments=("sampler",),
+                                max_cases_per_assessment=1)
+        assert cut["available"] is False
+        # Uncut, the small volume survives the tile filter and the run gets as
+        # far as the store, which this campaign has no manifest note for.
+        with pytest.raises(KeyError, match="latents_root"):
+            MEMO.memorisation(tmp_path, assessments=("sampler",))
+
+    def test_the_cut_is_recorded_on_the_result(self, monkeypatch, tmp_path):
+        self._campaign(monkeypatch, [_StubCase("a", (192, 192, 192))])
+        with pytest.raises(KeyError, match="latents_root"):
+            MEMO.memorisation(tmp_path, assessments=("sampler",),
+                              max_cases_per_assessment=1)
+
+    def test_no_cut_is_the_default(self, monkeypatch, tmp_path):
+        cases = [_StubCase(str(i), (192, 192, 192)) for i in range(3)]
+        self._campaign(monkeypatch, cases)
+        with pytest.raises(KeyError, match="latents_root"):
+            MEMO.memorisation(tmp_path, assessments=("sampler",))
