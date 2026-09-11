@@ -818,21 +818,31 @@ class TestMaxCasesPerAssessment:
         assert out["available"] is False
         assert "no generated volume" in out["reason"]
 
-    def test_the_cut_is_applied_before_the_tile_filter(self, monkeypatch, tmp_path):
-        """Order matters: the cut takes the FIRST N, not the first N that fit.
+    def test_the_cut_counts_volumes_that_will_be_searched(self, monkeypatch, tmp_path):
+        """Order matters: the cut takes the first N THAT FIT, not the first N.
 
-        With an oversize volume first, a cut of one leaves nothing — and that
-        must read as "nothing was searched", not as a clean bank.
+        `load_cases` returns sorted directory order and `sampler`'s first case
+        on disk is a 1024-wide volume at 768 tiles. Counting before the tile
+        filter meant a cut of one took that case, the filter dropped it, and
+        the assessment contributed nothing while `assessments_found` still
+        named it — the smoke run of 2026-09-11 searched one volume believing it
+        had searched two.
         """
         cases = [_StubCase("big", (192, 1024, 1024)), _StubCase("small", (192, 192, 192))]
         self._campaign(monkeypatch, cases)
-        cut = MEMO.memorisation(tmp_path, assessments=("sampler",),
-                                max_cases_per_assessment=1, allow_busy_gpu=True)
-        assert cut["available"] is False
-        # Uncut, the small volume survives the tile filter and the run gets as
-        # far as the store, which this campaign has no manifest note for.
+        # The oversize volume is skipped and the small one is still searched,
+        # so the run reaches the store this campaign has no manifest note for.
         with pytest.raises(KeyError, match="latents_root"):
-            MEMO.memorisation(tmp_path, assessments=("sampler",), allow_busy_gpu=True)
+            MEMO.memorisation(tmp_path, assessments=("sampler",),
+                              max_cases_per_assessment=1, allow_busy_gpu=True)
+
+    def test_an_oversize_volume_is_still_recorded_as_skipped(self, monkeypatch, tmp_path):
+        """Taken off the search on cost, never dropped in silence."""
+        self._campaign(monkeypatch, [_StubCase("big", (192, 1024, 1024))])
+        out = MEMO.memorisation(tmp_path, assessments=("sampler",),
+                                max_cases_per_assessment=1, allow_busy_gpu=True)
+        assert out["available"] is False
+        assert "no generated volume" in out["reason"]
 
     def test_the_cut_is_recorded_on_the_result(self, monkeypatch, tmp_path):
         self._campaign(monkeypatch, [_StubCase("a", (192, 192, 192))])

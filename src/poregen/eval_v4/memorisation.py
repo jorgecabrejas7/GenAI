@@ -933,11 +933,12 @@ def memorisation(
     looked for.  A silent zero here would read as "no memorisation", which is
     the one wrong answer this function must never give.
 
-    ``max_cases_per_assessment`` keeps the first N volumes of each assessment
-    and records the cut in ``max_cases_per_assessment`` on the result, so a
-    short run cannot be mistaken for the full one.  It exists for the smoke
-    test that proves the hardware path — the VAE load, the encode, the decode
-    and both store passes — before the full search is given the GPU for hours.
+    ``max_cases_per_assessment`` keeps the first N SEARCHABLE volumes of each
+    assessment — first N after the tile filter, not before it — and records the
+    cut on the result, so a short run cannot be mistaken for the full one.  It
+    exists for the smoke test that proves the hardware path (the VAE load, the
+    encode, the decode and both store passes) before the full search is given
+    the GPU for hours.
     """
     import torch  # noqa: PLC0415
 
@@ -972,8 +973,7 @@ def memorisation(
         found = load_cases(root, assessment)
         if found:
             present.append(assessment)
-        if max_cases_per_assessment is not None:
-            found = found[:max_cases_per_assessment]
+        kept = 0
         for case in found:
             m = case.manifest
             if m.sampler == "real":
@@ -984,6 +984,16 @@ def memorisation(
                                 "volume_shape": list(m.volume_shape),
                                 "tiles": tiles})
                 continue
+            # The cut counts volumes that will actually be SEARCHED.  Counting
+            # them before the tile filter looks tidier and is wrong: `load_cases`
+            # returns sorted directory order, `sampler`'s first case on disk is a
+            # 1024-wide one at 768 tiles, and a cut of one therefore took a case
+            # the filter then dropped — so the assessment contributed nothing
+            # while `assessments_found` still named it.  The smoke run of
+            # 2026-09-11 searched one volume believing it had searched two.
+            if max_cases_per_assessment is not None and kept >= max_cases_per_assessment:
+                continue
+            kept += 1
             cases.append(case)
     if not cases:
         return {"available": False,

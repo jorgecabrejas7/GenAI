@@ -112,8 +112,11 @@ if [ -f scripts/analysis/label_uncertainty.py ]; then
     # Its own campaign (13-label-uncertainty) is the script's default; an
     # --out into the eval-v4 tree would put one question's answer inside
     # another's campaign.
+    # --model-run supplies the model porosity error findings.md is compared
+    # against. Without it the comparison line is omitted entirely, so a re-run
+    # of this stage would silently strip it from a campaign that had it.
     ( nice -n 19 env OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= \
-        python scripts/analysis/label_uncertainty.py \
+        python scripts/analysis/label_uncertainty.py --model-run "$LDM_RUN" \
         > "$SCRATCH/tail_label_uncertainty.log" 2>&1
       say "STAGE label_uncertainty done rc=$?" ) &
 else
