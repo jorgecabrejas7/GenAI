@@ -23,6 +23,22 @@ which is what ``nb_t`` carries into the denoiser.  ``chunk_tiles=(1,1,1)``
 reduces the whole thing to patch-at-a-time sequential generation; a single
 chunk covering the volume reduces it to pure joint denoising.
 
+Where a window's neighbours COME FROM is :data:`NEIGHBOUR_MODES`.  Production is
+``"canvas"`` — the chunk canvas and the finished chunks, described above.  The
+other two exist so the production choice can be measured against its
+alternatives and against a ceiling (``eval_v4``'s ``assembly_modes``), and
+neither is ever the production path:
+
+``"unknown"``
+    every in-bounds face is the CFG null, so the neighbour conditioning is
+    inert.  With one chunk over the whole volume this is exactly the ldm05
+    joint sampler.  Faces where the canvas ENDS stay OOB: the arm removes
+    neighbour content, not the fact that the volume has an edge.
+``"reference"``
+    every in-bounds face is read from ``reference_latents``, a canvas of REAL
+    encoded material.  Teacher forcing: the upper bound the sampler would reach
+    if the neighbours it assembles against were perfect.
+
 Decoding is overlapped too: the finished latent canvas is decoded in windows at
 ``decode_stride`` voxels and the decoded grey levels and class logits are
 blended with a tapered window (the fix validated on the VAE tile seams —
@@ -63,7 +79,11 @@ from poregen.models.vae.base import decode_class_probs, decode_label
 
 logger = logging.getLogger(__name__)
 
-_AXIS_NAMES = ("z", "y", "x")
+AXIS_NAMES = ("z", "y", "x")
+
+#: Where a window's six face neighbours come from.  See the module docstring:
+#: ``"canvas"`` is the production path and the other two are measurement arms.
+NEIGHBOUR_MODES = ("canvas", "unknown", "reference")
 
 # The decode blend window must never be exactly zero: a volume's own outer face
 # is covered by a single decode window, and a zero weight there would leave the
@@ -72,7 +92,9 @@ _AXIS_NAMES = ("z", "y", "x")
 _DECODE_WINDOW_FLOOR = 1e-3
 
 __all__ = [
+    "AXIS_NAMES",
     "DDIMSampler",
+    "NEIGHBOUR_MODES",
     "VolumeGenerator",
     "porosity_to_cond",
     "region_noise_field",
@@ -319,7 +341,7 @@ def seam_discontinuity(
     seam_sum = seam_w = int_sum = int_w = 0.0
     total_planes = 0
 
-    for axis, name in enumerate(_AXIS_NAMES):
+    for axis, name in enumerate(AXIS_NAMES):
         n = vol.shape[axis]
         if n < 2:
             continue
@@ -620,6 +642,12 @@ class VolumeGenerator:
     chunk_tiles   : tiles per chunk per axis (default (3, 3, 3))
     window_stride : voxels between window origins inside a chunk (default 32)
     decode_stride : voxels between decode window origins (default 32)
+    neighbour_mode: one of :data:`NEIGHBOUR_MODES` (default ``"canvas"``, the
+                    production path).  See the module docstring.
+    reference_latents : (C, Z, Y, X) NORMALISED clean latents covering the whole
+                    canvas, required by — and only by — ``neighbour_mode
+                    ="reference"``.  Every in-bounds neighbour is read from it
+                    at the window's own canvas position.
     """
 
     def __init__(
@@ -637,6 +665,8 @@ class VolumeGenerator:
         chunk_tiles: tuple[int, int, int] = (3, 3, 3),
         window_stride: int = 32,
         decode_stride: int = 32,
+        neighbour_mode: str = "canvas",
+        reference_latents: torch.Tensor | None = None,
     ) -> None:
         if patch_size % latent_size:
             raise ValueError(
@@ -657,7 +687,22 @@ class VolumeGenerator:
         self.decode_stride = int(decode_stride)
         self.downsample    = self.patch_size // self.latent_size
         self.z_channels    = sampler.model.cfg.z_channels
+        self.neighbour_mode = str(neighbour_mode)
+        self.reference_latents = reference_latents
 
+        if self.neighbour_mode not in NEIGHBOUR_MODES:
+            raise ValueError(
+                f"neighbour_mode must be one of {NEIGHBOUR_MODES}, got "
+                f"{self.neighbour_mode!r}."
+            )
+        if (self.reference_latents is not None) != (self.neighbour_mode == "reference"):
+            raise ValueError(
+                "reference_latents and neighbour_mode='reference' go together: "
+                f"got neighbour_mode={self.neighbour_mode!r} with "
+                f"reference_latents={'a tensor' if reference_latents is not None else None}. "
+                "A reference canvas that no window reads would claim a teacher-forced "
+                "run that did not happen."
+            )
         if any(c < 1 for c in self.chunk_tiles):
             raise ValueError(f"chunk_tiles must all be >= 1, got {self.chunk_tiles}.")
         for name, stride in (("window_stride", self.window_stride),
@@ -790,6 +835,15 @@ class VolumeGenerator:
         z_clean = torch.zeros(C, *canvas_cells, device=self.device)
         available = np.zeros(canvas_cells, dtype=bool)   # cells of finished chunks
 
+        reference = self.reference_latents
+        if reference is not None:
+            if tuple(reference.shape) != (C, *canvas_cells):
+                raise ValueError(
+                    f"reference_latents has shape {tuple(reference.shape)}, expected "
+                    f"the latent canvas {(C, *canvas_cells)} of volume {volume_shape}."
+                )
+            reference = reference.to(self.device, dtype=torch.float32)
+
         chunk_grid = [
             self._chunk_ranges(n_tiles[a], self.chunk_tiles[a]) for a in range(3)
         ]
@@ -807,9 +861,9 @@ class VolumeGenerator:
 
         logger.info(
             "VolumeGenerator: %s voxels = %s tiles, %d chunk(s) of %s tiles, "
-            "windows every %d voxels, %d DDIM steps",
+            "windows every %d voxels, %d DDIM steps, neighbours from %s",
             volume_shape, n_tiles, len(chunks), self.chunk_tiles,
-            self.window_stride, len(timesteps) - 1,
+            self.window_stride, len(timesteps) - 1, self.neighbour_mode,
         )
 
         for chunk_idx, chunk in enumerate(chunks):
@@ -822,10 +876,18 @@ class VolumeGenerator:
             cur_sl = tuple(slice(lo[a] - ctx_lo[a], hi[a] - ctx_lo[a]) for a in range(3))
             chunk_sl = tuple(slice(lo[a], hi[a]) for a in range(3))
 
-            # Availability as the windows of THIS chunk see it: finished chunks
-            # plus the chunk being generated.
-            visible = available.copy()
-            visible[chunk_sl] = True
+            # Availability as the windows of THIS chunk see it.  The three
+            # neighbour modes differ HERE and nowhere else in the plan: what a
+            # window may treat as a real neighbour is a property of the canvas,
+            # so _neighbour_plan needs no mode of its own.
+            if self.neighbour_mode == "unknown":
+                visible = np.zeros(canvas_cells, dtype=bool)   # every face is the CFG null
+            elif self.neighbour_mode == "reference":
+                visible = np.ones(canvas_cells, dtype=bool)    # every face is real material
+            else:
+                # finished chunks plus the chunk being generated
+                visible = available.copy()
+                visible[chunk_sl] = True
             done_mask = torch.from_numpy(available[ctx_sl].astype(np.float32)).to(self.device)
 
             origins = window_origins(chunk_cells, L, s_cells)
@@ -856,22 +918,40 @@ class VolumeGenerator:
                 # Context canvas at this timestep: finished chunks re-noised to
                 # t with FRESH noise, the current chunk at its live state.
                 t_one = torch.full((1,), t_val, dtype=torch.long, device=self.device)
-                ctx_clean = z_clean[(slice(None), *ctx_sl)].unsqueeze(0)
                 # The re-noising draw runs in the same frame as the initial one:
                 # a canvas-sized field, of which this chunk's context block is a
                 # slice.  Drawing the context block on its own would anchor it
                 # to the chunk again.  The field is drawn even when nothing is
                 # finished yet (``done_mask`` is all zero there), so the draw
                 # order does not depend on where the request sits.
-                ctx_noise = region_noise_field(
-                    C, canvas_cells, offset_cells, self.device, generator
-                )
-                ctx = schedule.q_sample(
-                    ctx_clean,
-                    t_one,
-                    noise=ctx_noise[(slice(None), *ctx_sl)].unsqueeze(0),
-                ) * done_mask
-                ctx[(0, slice(None), *cur_sl)] = x[0]
+                ctx = None
+                if self.neighbour_mode == "reference":
+                    # Teacher forcing: the context is REAL material at the same
+                    # positions, re-noised to t like any other EXISTS neighbour.
+                    # The current chunk's own live state does not enter it — a
+                    # ceiling means every one of the six faces is perfect, not
+                    # only the ones outside the chunk.
+                    ctx_noise = region_noise_field(
+                        C, canvas_cells, offset_cells, self.device, generator
+                    )
+                    ctx = schedule.q_sample(
+                        reference[(slice(None), *ctx_sl)].unsqueeze(0),
+                        t_one,
+                        noise=ctx_noise[(slice(None), *ctx_sl)].unsqueeze(0),
+                    )
+                elif self.neighbour_mode == "canvas":
+                    ctx_clean = z_clean[(slice(None), *ctx_sl)].unsqueeze(0)
+                    ctx_noise = region_noise_field(
+                        C, canvas_cells, offset_cells, self.device, generator
+                    )
+                    ctx = schedule.q_sample(
+                        ctx_clean,
+                        t_one,
+                        noise=ctx_noise[(slice(None), *ctx_sl)].unsqueeze(0),
+                    ) * done_mask
+                    ctx[(0, slice(None), *cur_sl)] = x[0]
+                # neighbour_mode == "unknown" builds no context at all: every
+                # face is UNKNOWN, so nb_slices is all None and nothing reads it.
 
                 out_sum = torch.zeros_like(x)
                 for start in range(0, n_win, B_max):
@@ -1251,6 +1331,7 @@ class VolumeGenerator:
         stats: dict[str, Any] = {
             "volume_shape": list(volume_shape),
             "chunk_tiles": list(self.chunk_tiles),
+            "neighbour_mode": self.neighbour_mode,
             "window_stride": self.window_stride,
             "decode_stride": self.decode_stride,
             "ddim_steps": len(self.sampler.timesteps) - 1,

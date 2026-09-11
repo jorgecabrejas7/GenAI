@@ -262,6 +262,37 @@ log-odds is read from `probs.npz`; when a case did not store it the metric
 reports `pore_logit_available: false` rather than substituting the argmax, which
 is not a continuous field.
 
+#### The same seams, per chunk along the generation order
+
+`seam_metrics` answers "is there a seam in this volume". `chunk_profile` answers
+"which chunk's seam, and does it get worse the further the chunk is from the
+first one" — the shape a chunked sampler's failure actually has, because chunk
+*k* assembles against material chunk *k−1* already produced, and an error that
+compounds shows as a trend in *k* rather than as a worse volume average.
+
+`chunk_blocks` cuts the volume into the reference chunk grid in RASTER order,
+which is the order the sampler generates in, and cuts a short last block exactly
+as `VolumeGenerator._chunk_ranges` does. Each block owns the planes at **its own
+origin** — the planes where it met material that already existed — so every
+plane has exactly one owner and chunk 0 owns none. Inside a block the planes
+split into the tile family (multiples of 64, where two overlapping WINDOWS of
+one solve meet) and the interior baseline (everything else), and both the chunk
+and tile ratios are divided by that same baseline, the convention `seam_metrics`
+already applies volume-wide.
+
+Beside the seams, each chunk reports its own material porosity, and `chunk_s2`
+compares S₂ inside the chunk with S₂ in a window centred ON each of its lower
+planes — half the window is the previous chunk's material and half is this
+one's. `s2_relative_distance` is `mean|across − inside| / mean(inside)`: 0 for
+identical curves, and scale-free, so chunks at different porosity stay
+comparable. A window that does not fit, or that is not almost entirely
+requested specimen, reports `null` rather than a number measured on the
+envelope.
+
+The grid is a PARAMETER of the measurement and is never read from the volume's
+own manifest — see assessment 11, where four arms with four chunk geometries
+have to be read at the same planes.
+
 ### Cross-head disagreement
 
 The share of requested material where the **grey** head renders a dark void and
@@ -512,21 +543,25 @@ themselves, because two halves of real material do not score zero either.
 
 ---
 
-## The eight assessments
+## The eleven assessments
 
-Seeds 101 / 202 / 303 throughout; 105 cases in total. `chunk_tiles = (3, 3, 3)`,
+Seeds 101 / 202 / 303 throughout; 177 cases in total. `chunk_tiles = (3, 3, 3)`,
 `window_stride = 32` and `decode_stride = 32` unless a case says otherwise.
+The case counts are those `eval_v4.cases.build_cases` produces.
 
 | # | Assessment | Cases | Asks |
 |---|---|---:|---|
 | 1 | `sampler` | 18 | DDIM {50, 100, 200} × {192³, 1024×1024×192}, target 0.03, layup A. Porosity error, interior air, both seam periods, wall time, failure rate. |
-| 2 | `porosity_global` | 24 | targets {0.005 … 0.10} plus an off-manifold 0.15, 192³, DDIM-200. OLS slope/intercept/R², the gate per level. |
-| 3 | `porosity_local` | 9 | three painted fields on the 3×3×3 tile grid — two halves 0.01/0.05, checkerboard 0.01/0.05, and the coherent field from `poregen.diffusion.porosity_field`. Within-volume slope and R². |
+| 2 | `porosity_global` | 48 | targets {0.005 … 0.10} plus an off-manifold 0.15, 192³, DDIM {50, 200}. OLS slope/intercept/R², the gate per level. |
+| 3 | `porosity_local` | 18 | three painted fields on the 3×3×3 tile grid — two halves 0.01/0.05, checkerboard 0.01/0.05, and the coherent field from `poregen.diffusion.porosity_field`. Within-volume slope and R². |
 | 4 | `cfg` | 24 | `s_por` {1.0, 1.5, 2.0} × targets {0.02, 0.05}; plus `s_nb` {0, 1} at target 0.03. |
 | 5 | `layup` | 9 | 1024×1024×192, target 0.03, DDIM-200. A (training), C (a permutation of A), B16 (the 16-ply 0.25 mm sequence). |
 | 6 | `assembly` | 9 | window vs chunk seams and cross-head disagreement **on the sampler volumes**, the offset triple generated here (offsets 0 / 16 / 32 in a 256³ canvas), and the campaign-08 VAE control row. |
-| 7 | `geometry` | 3 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z. |
+| 7 | `geometry` | 8 | 192×512×512 with a 64-voxel notch and a 200-voxel cylindrical hole through z, plus the off-manifold sphere. |
 | 8 | `microstructure` | 9 | 192³, DDIM-200, layup A, targets {0.01, 0.03, 0.06}. S₂(r) W1, pore-size W1, Ripley's K and FID on 2-D slices, each against the matched real-vs-real floor. The memorisation block is reported here too but is measured on the assessment-1 and assessment-2 volumes against the whole train store, with its own real-val floor. |
+| 9 | `surface` | 12 | a flat z-surface request (controllability) and a rough one matched to the real floor's Sa and correlation length (realism), at 192³ and 1024 wide. |
+| 10 | `multichunk` | 5 | 384³ — two chunks on EVERY axis, so the z chunk planes exist — as a box, a sphere and a rough slab. |
+| 11 | `assembly_modes` | 17 | four ways to assemble the SAME request from the SAME seeds, at 384³ and 1024×1024×192, reported per chunk index. See below. |
 | — | `field_stats` | 0 | **Measure-only: it generates nothing.** Re-reads the coherent-field volumes `porosity_local` and `multichunk` already wrote, and the real crops, for the marginal and the per-axis correlation length of the delivered field. `eval_v4 measure field_stats` and `eval_v4 report`; there is no `generate field_stats`. |
 
 **Assessment 8 runs at three porosity levels and no more** because every
@@ -587,6 +622,47 @@ offset cannot tell them apart:
 Read 0 against 32 for chunk alignment and 32 against 16 for window phase. The
 report gives the pore Dice and the φ difference per offset and never pools
 them: the two offsets answer different questions.
+
+**The four arms (assessment 11).** Assessment 6 asks whether the answer depends
+on where the assembly grid falls. Assessment 11 asks the prior question: how
+much of the quality is the hybrid chunked sampler at all, and how far is it from
+a ceiling. Four arms, one request, one seed set per scale:
+
+| arm | `chunk_tiles` | neighbours | what it is |
+|---|---|---|---|
+| `joint` | the whole volume | UNKNOWN (the CFG null) | the ldm05 MultiDiffusion sampler: one canvas, neighbour conditioning inert, no chunk plane anywhere |
+| `autoregressive` | (1, 1, 1) | the canvas | the ldm05 sequential sampler: one patch at a time against finished material |
+| `hybrid` | (3, 3, 3) | the canvas | production |
+| `teacher_forced` | (3, 3, 3) | a REAL test volume's encodings at the same canvas positions | a control, not a sampler — the ceiling the hybrid would reach with perfect neighbours |
+
+Only the neighbour source and the chunk geometry move. The porosity target is
+uniform (so any drift from chunk to chunk is a defect and not the request), the
+step count is 50 for every arm, and every arm starts from the identical noise
+field: the initial canvas draw is the first draw of the reverse process, so it
+does not depend on how many re-noising draws an arm goes on to make.
+
+*The teacher-forced canvas* is assembled by pasting one stored latent per
+64-voxel tile from the run's own store — the rows whose origins are 64 apart
+tile a block with no overlap — and what is pasted is a posterior draw
+`mu + sigma·eps`, per-channel normalised, seeded by the case. The store is never
+re-encoded: an encoder other than the one that built it would produce latents
+the denoiser has never seen, which would measure the encoder and call it a
+ceiling.
+
+*Why the ceiling is missing at 384.* Test patches in the r08 store reach
+`z0 = 128`, so the deepest real block on the 64-voxel tile grid is 192 voxels.
+There is no real material to teach with at 384 deep, and repeating a block to
+fill the depth would put a fake join exactly on a chunk plane — the one place
+this assessment measures. `teacher.find_reference_block` raises rather than
+faking it, and the 384 cells carry no ceiling row.
+
+*Every arm is measured on the same grid.* The arms have different chunk
+geometries by construction, so reading each on its own `chunk_tiles` would put
+four different sets of planes in one table. The reference grid is the production
+period, 192 voxels: for `hybrid` it is also the generation grid, and for the
+others it is "what happens at the planes the production sampler would have had
+to assemble across". The `joint` arm has no chunk planes at all, so its row is
+the measurement's own no-seam reading, beside the real-volume floor.
 
 ---
 
