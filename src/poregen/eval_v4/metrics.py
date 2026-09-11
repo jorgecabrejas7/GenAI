@@ -114,6 +114,100 @@ def mean_sd(values) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Spatial correlation of a sampled field
+# ---------------------------------------------------------------------------
+
+#: Below this many pairs a lag's correlation is not reported.  At the longest
+#: lags of a small field only a handful of pairs survive, and a correlation read
+#: off three pairs is noise with a number attached.
+MIN_LAG_PAIRS = 16
+
+
+def lag_correlation(fields, axis: int, max_lag: int,
+                    min_pairs: int = MIN_LAG_PAIRS) -> dict:
+    """Pearson correlation between samples ``k`` steps apart along one axis.
+
+    ``fields`` is a list of arrays on the SAME sampling grid; the pair sums are
+    pooled over them, so several volumes give one curve.  Non-finite entries (a
+    window that was dropped) are excluded pairwise, so a field whose usable
+    region is not a box still contributes every pair it does hold.
+
+    The estimator is the one campaign 01's T-D used on the real patch grid
+    (``scripts/analysis/t_d_autocorrelation.pooled_lag_correlation``): the means
+    and variances are taken over the PAIRED subsets at each lag, not once over
+    the whole field.  Lags come back in grid steps; the caller multiplies by its
+    own stride to get voxels.
+    """
+    fields = [np.asarray(f, float) for f in fields]
+    if not fields:
+        raise ValueError("lag_correlation needs at least one field.")
+    n = np.zeros(max_lag + 1)
+    sx = np.zeros(max_lag + 1)
+    sy = np.zeros(max_lag + 1)
+    sxx = np.zeros(max_lag + 1)
+    syy = np.zeros(max_lag + 1)
+    sxy = np.zeros(max_lag + 1)
+    for g in fields:
+        length = g.shape[axis]
+        for k in range(0, min(max_lag, length - 1) + 1):
+            a = np.take(g, np.arange(0, length - k), axis=axis)
+            b = np.take(g, np.arange(k, length), axis=axis)
+            m = np.isfinite(a) & np.isfinite(b)
+            if not m.any():
+                continue
+            av, bv = a[m], b[m]
+            n[k] += av.size
+            sx[k] += av.sum(); sy[k] += bv.sum()
+            sxx[k] += (av * av).sum(); syy[k] += (bv * bv).sum()
+            sxy[k] += (av * bv).sum()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mx = sx / n
+        my = sy / n
+        cov = sxy / n - mx * my
+        vx = sxx / n - mx * mx
+        vy = syy / n - my * my
+        r = cov / np.sqrt(np.maximum(vx, 0.0) * np.maximum(vy, 0.0))
+    r[n < min_pairs] = np.nan
+    return {"lag": np.arange(max_lag + 1), "r": r, "n_pairs": n}
+
+
+def correlation_length_1_over_e(lags, corr) -> float | None:
+    """The lag at which ``corr`` first falls below 1/e, linearly interpolated.
+
+    ``None`` when the curve never crosses inside the lags it was given.  A field
+    that has not decorrelated within the volume has no correlation length that
+    volume can measure, and returning the largest lag instead would report the
+    size of the crop as a property of the material.
+
+    Interpolating between the bracketing lags is not a refinement here.  On a
+    window grid with a 32-voxel step, a 79-voxel correlation length crosses at
+    lag 2.5; the nearest whole lag is 64 or 96 voxels, a 20 % error introduced
+    by the reporting alone.  This is the rule campaign 01's T-D used, so a
+    number from here and the T-D correlation lengths the coherent field is
+    built from are the same kind of number.
+    """
+    lags = np.asarray(lags, float).ravel()
+    corr = np.asarray(corr, float).ravel()
+    good = np.isfinite(corr)
+    if not good.size or not good[0]:
+        return None
+    stop = len(corr) if good.all() else int(np.argmin(good))
+    lags, corr = lags[:stop], corr[:stop]
+    thr = float(np.exp(-1.0))
+    below = np.where(corr < thr)[0]
+    if not below.size:
+        return None
+    i = int(below[0])
+    if i == 0:
+        return 0.0
+    c0, c1 = corr[i - 1], corr[i]
+    l0, l1 = lags[i - 1], lags[i]
+    if c0 == c1:
+        return float(l1)
+    return float(l0 + (c0 - thr) / (c0 - c1) * (l1 - l0))
+
+
 def wrap180(d) -> np.ndarray:
     """Signed axial angle difference in [-90, 90)."""
     return (np.asarray(d, float) + 90.0) % 180.0 - 90.0

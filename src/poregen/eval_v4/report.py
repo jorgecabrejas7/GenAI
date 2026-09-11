@@ -966,6 +966,151 @@ def report_surface(res, root, floor) -> tuple[str, list[str]]:
     return "\n".join(text) + "\n", []
 
 
+def _group_order(groups: dict) -> list[str]:
+    """Real groups first - they are the floor every other row is read against."""
+    rank = {"real": 0, "requested": 1, "generated": 2}
+    return sorted(groups, key=lambda n: (rank.get(n.split("/", 1)[0], 3), n))
+
+
+def _axis_cell(ax: dict) -> str:
+    """A correlation length, or the reach that could not find one."""
+    v = ax.get("corr_length_vox")
+    if v is None:
+        return f"> {ax.get('reach_vox', 0)}"
+    return f"{v:.0f}"
+
+
+def report_field_stats(res, root, floor) -> tuple[str, list[str]]:
+    """The marginal and the per-axis correlation length, real row first."""
+    geom = res["geometry"]
+    groups = res["groups"]
+    order = _group_order(groups)
+
+    marg_rows = []
+    for name in order:
+        g = groups[name]
+        m, q = g["marginal"], g["marginal"]["quantiles"]
+        marg_rows.append([
+            name, str(g["n_fields"]), str(m["n"]), fmt(m["mean"]), fmt(m["sd"]),
+            fmt(m["cv"], 3), fmt(q.get("0.05")), fmt(q.get("0.5")), fmt(q.get("0.95")),
+        ])
+
+    corr_rows = []
+    for name in order:
+        g = groups[name]
+        pa, an = g["per_axis"], g["anisotropy"]
+        corr_rows.append([
+            name,
+            _axis_cell(pa["z"]), _axis_cell(pa["y"]), _axis_cell(pa["x"]),
+            fmt(an.get("y_over_z"), 2), fmt(an.get("x_over_z"), 2),
+            "/".join(str(pa[a].get("reach_vox", 0)) for a in ("z", "y", "x")),
+            fmt(pa["z"]["r_at_lag_vox"].get("64"), 3),
+            fmt(pa["y"]["r_at_lag_vox"].get("128"), 3),
+            fmt(pa["x"]["r_at_lag_vox"].get("128"), 3),
+        ])
+    ref = (res.get("t_d_reference") or {}).get("corr_length_vox")
+    if ref:
+        corr_rows.insert(0, [
+            "T-D target (real patch grid)", f"{ref['z']:.0f}", f"{ref['y']:.0f}",
+            f"{ref['x']:.0f}", fmt(ref["y"] / ref["z"], 2), fmt(ref["x"] / ref["z"], 2),
+            "whole dataset", "--", "--", "--",
+        ])
+
+    cmp_rows = []
+    for key, c in sorted(res["comparisons"].items()):
+        m, cl = c["marginal"], c["corr_length"]
+        cmp_rows.append([
+            key, fmt(m["w1"], 5), fmt(m["w1_ratio"], 3), fmt(m["ks"], 3),
+            *[fmt(cl[a]["difference_vox"], 0) for a in ("z", "y", "x")],
+        ])
+
+    body = [
+        "## What the delivered field looks like",
+        "",
+        f"Local porosity is measured over **{geom['window_vox']}-voxel windows "
+        f"every {geom['stride_vox']} voxels**, pore voxels over material voxels, "
+        f"on real crops and generated volumes alike. A window holding less than "
+        f"{geom['min_material_frac']:.0%} material is dropped. The requested field "
+        f"is read on the {geom['requested_field_stride_vox']}-voxel tile grid it "
+        "was painted on.",
+        "",
+        table(["group", "fields", "windows", "mean phi", "sd", "cv",
+               "p5", "p50", "p95"], marg_rows),
+        "",
+        "## How far it stays correlated, per axis",
+        "",
+        table(["group", "L z (vox)", "L y (vox)", "L x (vox)", "Ly/Lz", "Lx/Lz",
+               "reach z/y/x", "r(z, 64)", "r(y, 128)", "r(x, 128)"], corr_rows),
+        "",
+        "`L` is the lag at which the field's correlation falls to 1/e, "
+        "interpolated between lags. `> N` means the field had NOT decorrelated "
+        "by the longest lag the crop reaches: the length is longer than the crop, "
+        "not absent. Compare two rows on one axis only when both found a length "
+        "inside their common reach - the `r(axis, lag)` columns are the "
+        "comparison that always holds.",
+        "",
+        "## Distance to the real marginal",
+        "",
+        table(["comparison", "W1", "W1 (mean-normalised)", "KS",
+               "dL z", "dL y", "dL x"], cmp_rows),
+        "",
+        "`W1 (mean-normalised)` divides each sample by its own mean first, so it "
+        "measures the SHAPE of the heterogeneity and not the global porosity the "
+        "two sets sit at. The `real floor` row is real material against real "
+        "material: no generated row can be expected below it. `dL` is "
+        "generated minus real, blank where either side had no measurable length "
+        "inside the common reach.",
+    ]
+    note = (res.get("t_d_reference") or {}).get("note")
+    if note:
+        body += ["", f"T-D target row: {note} Source "
+                     f"`{res['t_d_reference']['source']}`."]
+    return "\n".join(body) + "\n", _fig_field_stats(res, root)
+
+
+def _fig_field_stats(res, root) -> list[str]:
+    set_style()
+    groups = res["groups"]
+    order = [n for n in _group_order(groups) if not n.startswith("requested/")]
+    fig, axes = plt.subplots(1, 4, figsize=(15.0, 3.5))
+
+    for ai, name in enumerate(("z", "y", "x")):
+        ax = axes[ai]
+        for j, gname in enumerate(order):
+            pa = groups[gname]["per_axis"][name]
+            lag = np.asarray(pa["lag_vox"], float)
+            r = np.asarray([np.nan if v is None else v for v in pa["correlation"]],
+                           float)
+            real = gname.startswith("real/")
+            ax.plot(lag, r, color=FLOOR_COLOR if real
+                    else SERIES_COLORS[j % len(SERIES_COLORS)],
+                    ls="--" if real else "-", label=gname)
+        ax.axhline(float(np.exp(-1.0)), color=FLOOR_COLOR, ls=":", lw=0.9)
+        ax.axhline(0.0, color=FLOOR_COLOR, lw=0.6)
+        ax.set_xlabel(f"lag along {name} (voxels)")
+        if ai == 0:
+            ax.set_ylabel("correlation of window phi")
+            ax.legend(frameon=False)
+        ax.set_title(f"{name} axis")
+
+    ax = axes[3]
+    for j, gname in enumerate(order):
+        q = groups[gname]["marginal"]["quantiles"]
+        levels = sorted(float(k) for k in q)
+        vals = [q[f"{lv:g}"] for lv in levels]
+        real = gname.startswith("real/")
+        ax.plot(vals, levels, marker="o", ms=3,
+                color=FLOOR_COLOR if real else SERIES_COLORS[j % len(SERIES_COLORS)],
+                ls="--" if real else "-", label=gname)
+    ax.set_xlabel("window phi (pore/material)")
+    ax.set_ylabel("cumulative fraction of windows")
+    ax.set_title("marginal")
+    ax.legend(frameon=False)
+
+    fig.tight_layout()
+    return savefig(fig, figures_dir(root, "field_stats"), "field_stats")
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -976,6 +1121,7 @@ REPORTERS = {
     "geometry": report_geometry,
     "surface": report_surface,
     "microstructure": report_microstructure,
+    "field_stats": report_field_stats,
     "real_floor": report_real_floor,
 }
 

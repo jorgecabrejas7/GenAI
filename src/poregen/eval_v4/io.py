@@ -149,10 +149,25 @@ class Case:
     path: Path
     manifest: Manifest
 
+    #: Arrays read on demand and then held; :meth:`release` drops them again.
+    ARRAYS = ("xct", "label", "pore_logit", "requested_field", "requested_material")
+
     @classmethod
     def load(cls, case_dir: str | Path) -> "Case":
         case_dir = Path(case_dir)
         return cls(path=case_dir, manifest=Manifest.read(case_dir))
+
+    def release(self) -> None:
+        """Drop every array read so far; the next use reads it again.
+
+        ``load_cases`` hands back the whole list, so a measurer that walks it
+        holds every volume it has touched until the pass ends.  A real
+        1024-square crop is 200 MB of label alone.  A measurer that takes one
+        statistic per volume and never needs the volume again calls this and
+        keeps only the statistic.
+        """
+        for name in self.ARRAYS:
+            self.__dict__.pop(name, None)
 
     @cached_property
     def xct(self) -> np.ndarray:

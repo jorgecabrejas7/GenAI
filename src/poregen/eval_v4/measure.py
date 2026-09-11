@@ -25,14 +25,16 @@ from pathlib import Path
 
 import numpy as np
 
+from poregen.eval_v4 import field_stats as FS
 from poregen.eval_v4 import metrics as M
 from poregen.eval_v4.cases import (
     ASSEMBLY_OFFSETS,
     ASSEMBLY_REGION,
+    ASSESSMENTS,
     OFF_MANIFOLD_TARGET,
     build_cases,
 )
-from poregen.eval_v4.io import Case, load_cases, repo_root, write_results
+from poregen.eval_v4.io import TILE, Case, load_cases, repo_root, write_results
 from poregen.eval_v4.manifest import Manifest
 
 logger = logging.getLogger(__name__)
@@ -975,6 +977,167 @@ def measure_microstructure(root, repo) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 11 - the statistics of the delivered porosity field
+# ---------------------------------------------------------------------------
+
+def _td_reference(repo: Path) -> dict:
+    """The real correlation lengths the coherent request is BUILT from.
+
+    Not a second measurement of the real material - it is the target
+    :func:`poregen.diffusion.porosity_field.build_porosity_field` smooths with,
+    read from the same file the generator reads.  It belongs in the results
+    because it separates two different failures: a request that never carried
+    the real lengths, and a request that did and a model that lost them.
+    """
+    from poregen.diffusion.porosity_field import (  # noqa: PLC0415
+        DEFAULT_TD_RESULTS,
+        load_corr_lengths_voxels,
+    )
+
+    path = Path(repo) / DEFAULT_TD_RESULTS
+    if not path.exists():
+        return {"source": str(DEFAULT_TD_RESULTS), "corr_length_vox": None}
+    z, y, x = load_corr_lengths_voxels(path)
+    return {
+        "source": str(DEFAULT_TD_RESULTS),
+        "corr_length_vox": {"z": z, "y": y, "x": x},
+        "note": (
+            "campaign 01 T-D, patch level, volume mean removed, on the SAME "
+            "64-voxel window and 32-voxel stride this assessment uses."
+        ),
+    }
+
+
+def _pool(fields: list[np.ndarray]) -> np.ndarray:
+    return np.concatenate([np.asarray(f, float).ravel() for f in fields])
+
+
+def _field_group(fields: list[np.ndarray], rows: list[dict], key: str,
+                 stride: int) -> dict:
+    """One group's pooled statistics, plus the per-field spread of each length."""
+    per_axis = FS.axis_correlations(fields, stride=stride)
+    return {
+        "n_fields": len(fields),
+        "field_grids": [list(f.shape) for f in fields],
+        "n_windows": int(sum(int(np.isfinite(f).sum()) for f in fields)),
+        "marginal": FS.marginal_stats(_pool(fields)),
+        "per_axis": per_axis,
+        "anisotropy": FS.anisotropy(per_axis),
+        "corr_length_vox_per_field": {
+            ax: _agg(rows, (key, "per_axis", ax, "corr_length_vox")) for ax in FS.AXES
+        },
+    }
+
+
+def measure_field_stats(root, repo) -> dict:
+    """Does the delivered field have the spatial statistics of the real one?"""
+    rows: list[dict] = []
+    delivered: dict[str, list[np.ndarray]] = defaultdict(list)
+    requested: dict[str, list[np.ndarray]] = defaultdict(list)
+
+    for assessment, key, want in FS.COHERENT_SOURCES:
+        for case in load_cases(root, assessment):
+            if (case.manifest.notes or {}).get(key) != want:
+                continue
+            group = f"generated/{assessment}"
+            field = FS.delivered_field(case.label, case.material_voxels())
+            row = {**case_identity(case), "kind": "generated", "group": group,
+                   "source_assessment": assessment,
+                   "delivered": FS.field_statistics(field)}
+            delivered[group].append(field)
+            req = case.requested_field
+            if req is not None:
+                # The request lives on the 64-voxel TILE grid it was painted on,
+                # so it is read at that stride and the row says so.  Measuring it
+                # on the delivered grid would mean resampling the request, which
+                # is a statistic of the interpolation as much as of the field.
+                row["requested"] = FS.field_statistics(req, window=TILE, stride=TILE)
+                requested[group].append(req)
+            rows.append(row)
+            case.release()
+
+    for case in load_cases(root, "real_floor"):
+        notes = case.manifest.notes or {}
+        if notes.get("shape_tag") not in FS.REAL_SHAPE_TAGS:
+            continue
+        group = f"real/{notes['shape_tag']}"
+        field = FS.delivered_field(case.label, case.material_voxels())
+        rows.append({"case": case.manifest.case, "kind": "real", "group": group,
+                     "volume_shape": list(case.manifest.volume_shape), "notes": notes,
+                     "delivered": FS.field_statistics(field)})
+        delivered[group].append(field)
+        case.release()
+
+    if not rows:
+        raise FileNotFoundError(
+            f"no coherent-field volumes and no real crops under {root} - this "
+            f"assessment measures volumes the other assessments wrote, so run "
+            f"`eval_v4 measure porosity_local` and `eval_v4 real-floor` first."
+        )
+
+    by_group = _group(rows, lambda r: r["group"])
+    groups, pools = {}, {}
+    for name, fields in sorted(delivered.items()):
+        groups[name] = _field_group(fields, by_group[name], "delivered", FS.STRIDE)
+        pools[name] = _pool(fields)
+    for name, fields in sorted(requested.items()):
+        tag = f"requested/{name.split('/', 1)[1]}"
+        groups[tag] = _field_group(fields, by_group[name], "requested", TILE)
+        pools[tag] = _pool(fields)
+
+    real_names = [n for n in groups if n.startswith("real/")]
+    test_names = [n for n in groups if not n.startswith("real/")]
+    comparisons = {}
+    for a in test_names:
+        for b in real_names:
+            comparisons[f"{a} vs {b}"] = {
+                "marginal": FS.marginal_distance(pools[a], pools[b]),
+                "corr_length": FS.corr_length_gap(groups[a]["per_axis"],
+                                                  groups[b]["per_axis"]),
+            }
+    # The real-vs-real floor. A distance has no reading without it: two halves of
+    # the real material do not score zero against each other either.
+    for b in real_names:
+        half_a, half_b = delivered[b][0::2], delivered[b][1::2]
+        if not half_a or not half_b:
+            continue
+        comparisons[f"{b} vs {b} (real floor)"] = {
+            "marginal": FS.marginal_distance(_pool(half_a), _pool(half_b)),
+            "corr_length": FS.corr_length_gap(FS.axis_correlations(half_a),
+                                              FS.axis_correlations(half_b)),
+        }
+
+    return {
+        "assessment": "field_stats",
+        "question": (
+            "Does the DELIVERED local porosity field have the spatial statistics "
+            "of the real one - its marginal, and its correlation length per axis?"
+        ),
+        "note": (
+            "This is the quantity a porosity field is claimed to be a sufficient "
+            "descriptor of large-scale heterogeneity FOR (Naiff, Ramos and Wang, "
+            "SSRN 10.2139/ssrn.7161201), so it is the direct comparison point. "
+            "Every field is read from the LABEL, never from the request beside "
+            "it; the request is measured separately and reported as its own row. "
+            "Real and generated use the same window, and a correlation length "
+            "longer than the crop is reported as absent rather than as the crop."
+        ),
+        "geometry": {
+            "window_vox": FS.WINDOW,
+            "stride_vox": FS.STRIDE,
+            "requested_field_stride_vox": TILE,
+            "min_material_frac": FS.MIN_MATERIAL_FRAC,
+            "fixed_lags_vox": list(FS.FIXED_LAGS_VOX),
+            "min_lag_pairs": M.MIN_LAG_PAIRS,
+        },
+        "t_d_reference": _td_reference(repo),
+        "per_case": rows,
+        "groups": groups,
+        "comparisons": comparisons,
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -986,6 +1149,7 @@ MEASURERS = {
     "surface": measure_surface,
     "multichunk": measure_multichunk,
     "microstructure": measure_microstructure,
+    "field_stats": measure_field_stats,
 }
 
 
@@ -995,8 +1159,13 @@ def measure(root: str | Path, assessment: str, repo: str | Path | None = None) -
         raise KeyError(f"unknown assessment {assessment!r}; choose from {sorted(MEASURERS)}")
     repo = Path(repo) if repo else repo_root()
     results = MEASURERS[assessment](Path(root), repo)
-    results["n_cases_expected"] = len(build_cases(assessment, repo))
     results["n_cases_measured"] = len(results["per_case"])
+    # A measure-only assessment generates nothing, so there is no case list to
+    # be short of: what it measures is whatever the assessments it reads wrote.
+    results["n_cases_expected"] = (
+        len(build_cases(assessment, repo)) if assessment in ASSESSMENTS
+        else results["n_cases_measured"]
+    )
     write_results(root, assessment, results)
     logger.info(
         "%s: measured %d of %d cases",
@@ -1012,7 +1181,6 @@ def manifest_check(root: str | Path, repo: str | Path | None = None) -> dict:
     things: a manifest that does not parse, a volume whose array contradicts its
     manifest, and a case the assessment defines but the campaign does not hold.
     """
-    from poregen.eval_v4.cases import ASSESSMENTS  # noqa: PLC0415
     from poregen.eval_v4.io import iter_case_dirs, load_u8  # noqa: PLC0415
 
     repo = Path(repo) if repo else repo_root()
