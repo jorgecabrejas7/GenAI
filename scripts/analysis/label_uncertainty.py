@@ -279,10 +279,117 @@ def _f(value, spec: str = ".5f") -> str:
     return "—" if value is None else format(value, spec)
 
 
+def model_porosity_error(run_dir: Path) -> dict | None:
+    """The model's own porosity MAE at its last convergence check.
+
+    Read from the run's `convergence_check.jsonl` and nowhere else, so the
+    comparison in findings.md carries the step and the file it came from.  The
+    file is appended to during training and its last line can be half-written,
+    so malformed lines are skipped rather than fatal.  The variant reported is
+    the one with the SMALLEST error, named — quoting the best of four without
+    saying which would overstate it.
+    """
+    path = Path(run_dir) / "convergence_check.jsonl"
+    rows = []
+    for line in path.read_text().splitlines() if path.exists() else []:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not rows:
+        return None
+    last = rows[-1]
+    best = None
+    for name, block in last.get("variants", {}).items():
+        mae = block.get("overall", {}).get("por_mae")
+        if mae is None:
+            continue
+        n = sum(b.get("n", 0) for b in block.get("buckets", {}).values())
+        if best is None or mae < best["por_mae"]:
+            best = {"variant": name, "por_mae": float(mae), "n_samples": int(n)}
+    if best is None:
+        return None
+    return {**best, "step": last.get("step"), "source": str(path)}
+
+
+def _model_comparison_line(results: dict, k_only_mean: float) -> str:
+    """One line putting the model's own porosity error beside the label noise.
+
+    The comparison only means anything if the reader knows where the model
+    number came from, so the line names the run, the step, the variant and the
+    file.  With no `--model-run` given there is no line at all: a comparison
+    with an unsourced number is worse than none.
+    """
+    m = results.get("model_porosity_error")
+    if not m:
+        return ""
+    ratio = k_only_mean / m["por_mae"]
+    return (
+        f"- the model's own porosity error at step {m['step']} is "
+        f"**{_f(m['por_mae'])}** ({m['variant']}), which is **{ratio:.0f}x smaller** "
+        f"than the label uncertainty above.  The model reproduces the labelling "
+        f"convention more precisely than the convention itself is known.  "
+        f"Source: `{m['source']}` — the CONVERGENCE DIAGNOSTIC "
+        f"({m['n_samples']} bucket draws), not the eval-v4 sampler assessment, "
+        f"which is not measured yet."
+    )
+
+
 def findings_markdown(results: dict) -> str:
     """findings.md, derived from the numbers rather than restating them."""
     s = results["summary"]
     settings = results["settings"]
+    material = settings["material_methods"]
+    #: The method the production pipeline uses.  Every other material method is
+    #: a DIFFERENT segmentation, not a perturbation of this one, and the
+    #: `range, k only` column is the one that holds it fixed.
+    held = material[0]
+    excluded = "/".join(m for m in material[1:] if m != "isodata") or "the others"
+    k_only = [v["summary"]["phi_range_sauvola_k_only"]
+              for v in results["volumes"] if "summary" in v]
+    k_only_txt = " / ".join(_f(x) for x in k_only) if k_only else "—"
+    k_only_mean = sum(k_only) / len(k_only) if k_only else float("nan")
+    model_line = _model_comparison_line(results, k_only_mean)
+    _render_commit = head_commit(REPO)
+
+    # The thresholds and phi that make the exclusion argument, read off the
+    # variants themselves rather than asserted in prose.
+    def _by_method(method):
+        out = []
+        for v in results["volumes"]:
+            for r in v.get("variants", []):
+                if r["name"].endswith("/" + method):
+                    out.append(r)
+        return out
+
+    def _thr_txt(method):
+        thrs = sorted({round(r["material_threshold"]) for r in _by_method(method)})
+        return "/".join(str(t) for t in thrs) if thrs else "—"
+
+    ex_method = material[1] if len(material) > 1 else held
+    thr_held, thr_excluded = _thr_txt(held), _thr_txt(ex_method)
+    ex_phi = [r["phi"] for r in _by_method(ex_method)]
+    phi_excluded_txt = (f"{_f(min(ex_phi))}–{_f(max(ex_phi))} against "
+                        f"{_f(min(r['phi'] for r in _by_method(held)))}–"
+                        f"{_f(max(r['phi'] for r in _by_method(held)))}"
+                        if ex_phi else "—")
+
+    ks_sorted = settings["sauvola_k_values"]
+    k_direction_rows = []
+    for v in results["volumes"]:
+        if "summary" not in v:
+            continue
+        phi_at = {r["name"]: r["phi"] for r in v.get("variants", [])}
+        vals = [phi_at.get(variant_name(k, held)) for k in ks_sorted]
+        if any(x is None for x in vals):
+            continue
+        k_direction_rows.append(
+            f"- `{v['volume_id'][-28:]}`: "
+            + " → ".join(_f(x) for x in vals)
+            + f"  (range {_f(max(vals) - min(vals))})")
     if not s["n_volumes"]:
         return ("# 13 — Label uncertainty of the reported porosity\n\n"
                 "No volume was segmented; see `results.json` for the per-volume "
@@ -298,14 +405,21 @@ def findings_markdown(results: dict) -> str:
         f"- variants per volume: **{s['n_variants']}** "
         f"(sauvola_k {settings['sauvola_k_values']} × material "
         f"{settings['material_methods']})",
-        f"- widest porosity range on any volume: **{_f(s['phi_range_max'])}** "
-        f"({s['phi_range_max_volume']})",
-        f"- mean porosity range: **{_f(s['phi_range_mean'])}**",
-        f"- porosity gate the eval suite scores against: **{s['porosity_gate']}** "
-        f"→ label uncertainty is **{_f(s['phi_range_max_over_gate'], '.1%')}** of it",
+        f"- the number to quote — porosity range from `sauvola_k` alone, with the "
+        f"material method held at `{settings['material_methods'][0]}`: "
+        f"**{k_only_txt}** "
+        f"(mean {_f(k_only_mean)}, **{k_only_mean / s['porosity_gate']:.1f}x** the "
+        f"{s['porosity_gate']} eval-v4 porosity gate)",
         f"- lowest pore Dice between any two variants: **{_f(s['dice_min'], '.3f')}**; "
-        f"median **{_f(s['dice_median'], '.3f')}**",
-        "",
+        f"median **{_f(s['dice_median'], '.3f')}** — a LOWER BOUND, see below",
+        f"- widest range over every variant, `{excluded}` included: "
+        f"**{_f(s['phi_range_max'])}** ({s['phi_range_max_volume']}); mean "
+        f"**{_f(s['phi_range_mean'])}**. "
+        f"**Not the number to quote** — `{excluded}` is a different segmentation, "
+        "not a perturbation of ours.  The next section says why.",
+        "",]
+    lines += [model_line, ""] if model_line else []
+    lines += [
         "## Per volume",
         "",
         "| volume | φ baseline | φ min | φ max | φ range | range, k only | "
@@ -343,9 +457,36 @@ def findings_markdown(results: dict) -> str:
         "",
         "`φ range` is the full spread over every variant, so it carries both "
         "axes at once.  `range, k only` holds the material method at "
-        f"`{settings['material_methods'][0]}` and `range, material only` holds "
+        f"`{held}` and `range, material only` holds "
         f"`sauvola_k` at {settings['sauvola_k_base']}, which says which knob the "
         "number is sensitive to.",
+        "",
+        f"**Why `{excluded}` is excluded from the quoted number, and kept in the "
+        "table.**  It is not dropped for being inconvenient; it is dropped for "
+        "not being a perturbation of our segmentation.  The material threshold "
+        f"it picks is shown in the per-variant table: `{excluded}` chooses "
+        f"{thr_excluded}, against {thr_held} for `{held}`.  At that threshold the "
+        "low-grey AIR around the specimen is counted as MATERIAL, so the "
+        "denominator grows and everything dark inside it becomes pore — φ rises "
+        f"by about an order of magnitude ({phi_excluded_txt}).  That is a "
+        "different segmentation of a different specimen envelope, not our "
+        f"segmentation with a knob moved.  `{held}` and `isodata` pick the same "
+        "threshold to the voxel and give identical φ, so the material axis has "
+        "two distinct answers here, not three.",
+        "",
+        f"**Direction of the `k` effect**, at fixed `{held}`: φ FALLS as "
+        f"`sauvola_k` rises — a larger k makes the Sauvola criterion stricter and "
+        f"fewer voxels are called pore.  Per volume, φ at "
+        f"k={settings['sauvola_k_values'][0]} → {settings['sauvola_k_base']} → "
+        f"k={settings['sauvola_k_values'][2]}:",
+        "",
+        *k_direction_rows,
+        "",
+        f"The eval-v4 porosity gate is {settings.get('porosity_gate', s['porosity_gate'])}: "
+        "a generated volume passes when its delivered φ is within that of the "
+        "requested φ.  The label uncertainty above is the floor under that gate — "
+        "it is what the SAME real material measures as, under settings we could "
+        "equally have defended.",
         "",
         "`Dice min` is the agreement between the two variants that agree least. "
         "It is measured over the whole volume, not inside a shared material mask, "
@@ -353,8 +494,11 @@ def findings_markdown(results: dict) -> str:
         "counts as a disagreement.  No pore Dice we report against these labels "
         "can mean more than this number.",
         "",
-        "Source: `scripts/analysis/label_uncertainty.py`, "
-        f"commit `{results['commit']}`.",
+        "Source: `scripts/analysis/label_uncertainty.py`.  The numbers were "
+        f"measured at commit `{results['commit']}`"
+        + (f"; this text was rendered later, at `{_render_commit}`, with "
+           "`--report-only` — no volume was segmented again."
+           if _render_commit and _render_commit != results["commit"] else "."),
         "",
     ]
     return "\n".join(lines)
@@ -380,7 +524,26 @@ def main() -> int:
                     choices=sorted(MATERIAL_METHODS), help="material-threshold methods")
     ap.add_argument("--slab", type=int, default=SLAB_Y, help="Y voxels per slab")
     ap.add_argument("--out", type=Path, default=OUT_DIR)
+    ap.add_argument("--model-run", type=Path, default=None,
+                    help="an LDM run directory; its last convergence_check.jsonl "
+                         "row supplies the model porosity error findings.md is "
+                         "compared against. Omitted: no comparison is printed.")
+    ap.add_argument("--report-only", action="store_true",
+                    help="rebuild findings.md from the existing results.json "
+                         "without segmenting anything again")
     args = ap.parse_args()
+
+    # Re-rendering the prose must not cost another full segmentation pass: the
+    # numbers are already in results.json and re-running would only risk
+    # producing different ones.
+    if args.report_only:
+        results = json.loads((args.out / "results.json").read_text())
+        if args.model_run is not None:
+            results["model_porosity_error"] = model_porosity_error(args.model_run)
+            (args.out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+        (args.out / "findings.md").write_text(findings_markdown(results))
+        print(f"Rewrote {args.out / 'findings.md'} from results.json")
+        return 0
 
     logging.getLogger("poregen").setLevel(logging.WARNING)
 
@@ -457,6 +620,8 @@ def main() -> int:
         },
         "volumes": volumes,
         "summary": summary,
+        "model_porosity_error": (model_porosity_error(args.model_run)
+                                 if args.model_run is not None else None),
     }
 
     out = args.out

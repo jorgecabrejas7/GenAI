@@ -291,3 +291,70 @@ class TestMaterialThreshold:
         counts = LU.grey_histogram(cropped_volume())
         thresholds = {m: LU.material_threshold(counts, m) for m in LU.MATERIAL_METHODS}
         assert len(set(thresholds.values())) > 1
+
+
+# --------------------------------------------------------------------------- #
+# the model comparison findings.md prints
+# --------------------------------------------------------------------------- #
+class TestModelPorosityError:
+    """The comparison is only worth printing if its number is sourced.
+
+    `findings.md` claims the model is more precise than the labelling
+    convention. That claim rests entirely on one number, so the reader has to
+    be able to find it: the step it came from, the variant, and the file.
+    """
+
+    def _run_dir(self, tmp_path, rows):
+        import json
+        d = tmp_path / "ldm-run"
+        d.mkdir()
+        (d / "convergence_check.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+        return d
+
+    def _row(self, step, maes):
+        return {"step": step,
+                "variants": {name: {"overall": {"por_mae": mae},
+                                    "buckets": {"3": {"n": 8}, "4": {"n": 8}}}
+                             for name, mae in maes.items()}}
+
+    def test_it_reads_the_last_step_and_names_the_best_variant(self, tmp_path):
+        run = self._run_dir(tmp_path, [
+            self._row(1000, {"raw_ddim50": 0.9}),
+            self._row(130000, {"raw_ddim50": 0.00108, "raw_ddim200": 0.00104}),
+        ])
+        got = LU.model_porosity_error(run)
+        assert got["step"] == 130000
+        assert got["variant"] == "raw_ddim200"
+        assert got["por_mae"] == pytest.approx(0.00104)
+        assert got["n_samples"] == 16
+        assert got["source"].endswith("convergence_check.jsonl")
+
+    def test_a_half_written_last_line_is_skipped_not_fatal(self, tmp_path):
+        """The file is appended to during training; the tail can be truncated."""
+        run = self._run_dir(tmp_path, [self._row(130000, {"raw_ddim50": 0.002})])
+        path = run / "convergence_check.jsonl"
+        path.write_text(path.read_text() + '{"step": 131000, "varia')
+        got = LU.model_porosity_error(run)
+        assert got["step"] == 130000
+
+    def test_a_run_with_no_convergence_file_gives_no_claim(self, tmp_path):
+        assert LU.model_porosity_error(tmp_path) is None
+
+    def test_no_model_run_means_no_comparison_line(self):
+        """Silence beats an unsourced number."""
+        assert LU._model_comparison_line({"model_porosity_error": None}, 0.01) == ""
+        assert LU._model_comparison_line({}, 0.01) == ""
+
+    def test_the_line_carries_the_ratio_the_step_and_the_source(self):
+        line = LU._model_comparison_line(
+            {"model_porosity_error": {"por_mae": 0.001, "variant": "raw_ddim200",
+                                      "step": 130000, "n_samples": 32,
+                                      "source": "runs/ldm/x/convergence_check.jsonl"}},
+            0.014)
+        assert "130000" in line and "raw_ddim200" in line
+        assert "14x smaller" in line
+        assert "convergence_check.jsonl" in line
+        # The reader must not mistake it for the eval-v4 number.
+        assert "CONVERGENCE DIAGNOSTIC" in line
+        assert "not measured yet" in line
