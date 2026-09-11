@@ -43,7 +43,7 @@ Usage
     python scripts/analysis/sample_mask_component_audit.py
     python scripts/analysis/sample_mask_component_audit.py --limit 5    # smoke test
 
-Writes ``runs/campaigns/12-sample-mask-audit/`` (results.json, per_volume.csv,
+Writes ``runs/campaigns/15-sample-mask-audit/`` (results.json, per_volume.csv,
 findings.md).  Read-only with respect to ``data/``; safe to run beside a
 training job (no GPU, ~1 s of I/O per volume).
 """
@@ -73,7 +73,7 @@ from poregen.dataset.segmentation import (  # noqa: E402
 
 ZARR_ROOT = REPO / "data" / "split_v3" / "volumes.zarr"
 SPLITS = REPO / "data" / "split_v3" / "splits.json"
-OUT_DIR = REPO / "runs" / "campaigns" / "12-sample-mask-audit"
+OUT_DIR = REPO / "runs" / "campaigns" / "15-sample-mask-audit"
 
 
 def bbox_of(mask2d: np.ndarray) -> tuple[int, int, int, int] | None:
