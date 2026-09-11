@@ -155,7 +155,7 @@ nice -n 19 env CUDA_VISIBLE_DEVICES= python -m poregen.eval_v4.cli measure field
 say "STAGE field_stats done rc=$?"
 
 # ── 5. memorisation smoke, under the cap ────────────────────────────────────
-say "STAGE memorisation_smoke start (2 volumes, cap ${MEMO_MAX_MIN} min / ${MEMO_MAX_GB} GB)"
+say "STAGE memorisation_smoke start (2 volumes, cap ${MEMO_MAX_MIN} min / ${MEMO_MAX_GB} GB anonymous RSS; mapped store pages are reported, not capped)"
 python scripts/analysis/memorisation_smoke.py --root "$EVAL_CAMP" \
     --max-minutes "$MEMO_MAX_MIN" --max-gb "$MEMO_MAX_GB" \
     > "$SCRATCH/tail_memorisation_smoke.log" 2>&1

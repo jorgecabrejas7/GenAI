@@ -17,11 +17,17 @@ What it establishes is that the path runs, what it costs per volume, and what
 the full pass will therefore cost.
 
 THE CAP IS ENFORCED FROM OUTSIDE.  The search runs in a child process and this
-parent polls its host RSS and its GPU memory.  A watchdog inside the child
-would share the child's fate: an allocation that runs away takes the interpreter
-with it, and nothing is left to report why.  On a breach the child is killed and
-the breach is written out.  The GPU queue is never held by a run that has
-already exceeded what it was given.
+parent polls its ANONYMOUS resident memory and its GPU memory.  A watchdog
+inside the child would share the child's fate: an allocation that runs away
+takes the interpreter with it, and nothing is left to report why.  On a breach
+the child is killed and the breach is written out.  The GPU queue is never held
+by a run that has already exceeded what it was given.
+
+The cap is on anonymous memory and NOT on VmRSS.  `PatchStore` memory-maps a
+195 GiB latent store, so a healthy streaming pass leaves gigabytes of clean,
+reclaimable page-cache resident and charged to VmRSS.  The first version of
+this script capped on VmRSS and killed the first real run at 22.2 GB after
+2.9 minutes, with the GPU at 5.1 GB and nothing actually wrong.  See `_rss_gb`.
 
 Usage:
     python scripts/analysis/memorisation_smoke.py --root runs/campaigns/12-eval-v4
@@ -51,15 +57,33 @@ SMOKE_ASSESSMENTS = ("sampler", "multichunk")
 POLL_SECONDS = 10.0
 
 
-def _rss_gb(pid: int) -> float:
-    """Host resident set size of `pid`, in GB. 0.0 once the process is gone."""
+def _rss_gb(pid: int) -> tuple[float, float]:
+    """`pid`'s (anonymous, file-backed) resident memory in GB, (0, 0) if gone.
+
+    THE CAP IS ON THE ANONYMOUS HALF, and the split is the whole point.
+    `PatchStore` memory-maps a 195 GiB latent store and gathers rows from it,
+    so every bank chunk it reads leaves resident page-cache behind.  Those
+    pages are charged to VmRSS but they are clean, file-backed and reclaimed
+    the moment anything else wants the memory — they cannot exhaust the
+    machine.  Capping on VmRSS therefore kills a healthy streaming reader for
+    doing exactly what it was designed to do: measured here, touching 6 GiB of
+    the store moved VmRSS by 5.79 GB and RssAnon by 0.00.
+
+    RssShmem counts with the anonymous half: shared memory is not backed by a
+    file and is not reclaimable.
+    """
     try:
+        fields = {}
         for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) / (1024 * 1024)
+            for key in ("RssAnon:", "RssFile:", "RssShmem:"):
+                if line.startswith(key):
+                    fields[key] = int(line.split()[1]) / (1024 * 1024)
+        if not fields:
+            return 0.0, 0.0
+        return (fields.get("RssAnon:", 0.0) + fields.get("RssShmem:", 0.0),
+                fields.get("RssFile:", 0.0))
     except (OSError, ValueError, IndexError):
-        pass
-    return 0.0
+        return 0.0, 0.0
 
 
 def _gpu_gb(pid: int) -> float:
@@ -103,7 +127,10 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="where the result JSON goes")
     ap.add_argument("--max-minutes", type=float, default=60.0)
     ap.add_argument("--max-gb", type=float, default=20.0,
-                    help="cap on host RSS and on GPU memory, each")
+                    help="cap on ANONYMOUS host RSS and on GPU memory, each. "
+                         "File-backed pages are reported, never capped: the "
+                         "store is memory-mapped, so they are reclaimable "
+                         "page-cache and not memory the run needs.")
     ap.add_argument("--full", action="store_true",
                     help="run every volume, not the two-volume smoke set")
     ap.add_argument("--_child", action="store_true", help=argparse.SUPPRESS)
@@ -128,16 +155,18 @@ def main() -> int:
     # A new process group, so a breach kills the search and anything it spawned
     # rather than leaving a worker holding the GPU the queue is waiting for.
     child = subprocess.Popen(cmd, cwd=str(REPO), start_new_session=True)
-    peak_rss = peak_gpu = 0.0
+    peak_rss = peak_file = peak_gpu = 0.0
     breach: str | None = None
 
     while child.poll() is None:
         time.sleep(POLL_SECONDS)
         elapsed_min = (time.monotonic() - t0) / 60
-        peak_rss = max(peak_rss, _rss_gb(child.pid))
+        anon, mapped = _rss_gb(child.pid)
+        peak_rss = max(peak_rss, anon)
+        peak_file = max(peak_file, mapped)
         peak_gpu = max(peak_gpu, _gpu_gb(child.pid))
         if peak_rss > args.max_gb:
-            breach = f"host RSS {peak_rss:.1f} GB > {args.max_gb:.1f} GB"
+            breach = f"host anonymous RSS {peak_rss:.1f} GB > {args.max_gb:.1f} GB"
         elif peak_gpu > args.max_gb:
             breach = f"GPU memory {peak_gpu:.1f} GB > {args.max_gb:.1f} GB"
         elif elapsed_min > args.max_minutes:
@@ -153,7 +182,8 @@ def main() -> int:
         "assessments": None if args.full else list(SMOKE_ASSESSMENTS),
         "cases_per_assessment": None if args.full else 1,
         "elapsed_minutes": round(elapsed_min, 2),
-        "peak_host_rss_gb": round(peak_rss, 2),
+        "peak_host_rss_anon_gb": round(peak_rss, 2),
+        "peak_host_rss_file_gb": round(peak_file, 2),
         "peak_gpu_gb": round(peak_gpu, 2),
         "cap_minutes": args.max_minutes,
         "cap_gb": args.max_gb,
