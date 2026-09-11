@@ -35,10 +35,15 @@ say() { printf '%s  TAIL %s\n' "$(date -Is)" "$*" >> "$LOG"; printf '%s  TAIL %s
 # holds the accidental 2026-09-09 run, which contains its own
 # "EVALV4 generate cfg done rc=1" — a plain grep matches that and fires
 # immediately, which is exactly what happened on the first attempt.
+# Match the RUNNER's own prefix. say() here writes "TAIL ..." into the same
+# log, so a message that merely mentions the phrase matches itself: the second
+# attempt fired one second after arming, on its own "waiting for ..." line.
+# The runner prefixes every line with "POST ", this script with "TAIL ", so the
+# prefix disambiguates them.
 START_LINE=$(wc -l < "$RUNNER_LOG" 2>/dev/null || echo 0)
-say "armed at log line $START_LINE; waiting for a NEW 'EVALV4 generate cfg done'"
+say "armed at log line $START_LINE; waiting for the runner to finish cfg"
 while ! tail -n "+$((START_LINE + 1))" "$RUNNER_LOG" 2>/dev/null \
-        | grep -q "EVALV4 generate cfg done"; do
+        | grep -q "POST EVALV4 generate cfg done"; do
     sleep 60
 done
 say "cfg generation finished"
