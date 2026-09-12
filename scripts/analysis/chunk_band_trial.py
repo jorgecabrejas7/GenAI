@@ -13,6 +13,7 @@ outcome rather than the mechanism, because the outcome is what the paper needs:
   a  chunk overlap 32, blended   each chunk's rim replaced by the other's interior
   c  both
   f  drop the neighbour arm for MIXED-set windows only, at production cost
+  g  f AND the overlap: the two clear opposite strips
   e  chunk overlap 32, PINNED    kept to show that pinning alone does NOT work
 
 Every arm runs the production path — `VolumeRunner` with a `CaseSpec` — so a
@@ -57,6 +58,11 @@ ARMS = {
     # neighbour arm is dropped per window instead of globally: production cost.
     "f":  ("drop nb on mixed sets", 1.0, 0, None, "blend", True),
     "e":  ("overlap 32 pinned only", 1.0, OVERLAP, None, "pin", False),
+    # (g) = (f) + (a). They fix opposite strips: (f) drops the neighbour arm on
+    # mixed-set windows and clears the TRAILING strip, the overlap makes the
+    # successor's LEADING strip double-covered and clears that. Neither alone
+    # does both, and both together cost 1.36x production rather than 3.8x.
+    "g":  ("drop nb on mixed + overlap 32", 1.0, OVERLAP, None, "blend", True),
     # (a2): overlap 64 with only the leading 32 pinned, so the predecessor's own
     # rim is FREE for the successor to redraw against a pore-normal context.
     # `a2b` blends the free part, `a2s` takes the successor outright — together
@@ -108,7 +114,7 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--ckpt", default="latest")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--arms", nargs="+", default=["b", "a", "c", "f", "e"],
+    ap.add_argument("--arms", nargs="+", default=["b", "a", "c", "f", "g", "e"],
                     choices=sorted(ARMS))
     ap.add_argument("--only-1024", action="store_true")
     ap.add_argument("--allow-busy-gpu", action="store_true")
