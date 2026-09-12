@@ -114,3 +114,50 @@ class TestRimProfile:
         lab = per_tile(lambda idx: np.where(idx[0] < 32, AIR, PORE).astype(np.uint8))
         prof = W.rim_profile(lab, TILES)
         assert all(v == pytest.approx(1.0) for v in prof.values() if v is not None)
+
+
+class TestFaceProfile:
+    """phi by distance from ONE face, with the other faces kept out of it.
+
+    The point of this statistic is to say whether a dip sits on the face whose
+    neighbour is missing or foreign, or on all six alike. That only works if a
+    voxel near two faces is not counted for both: every corner would otherwise
+    appear in three face profiles and one face's dip would leak into the other
+    two, which is exactly the reading the experiment has to rule out.
+    """
+
+    def _planted(self, axis: int, high_side: bool, depth: int = 16):
+        n = W.TILE
+
+        def pattern(idx):
+            blk = np.full(idx[0].shape, PORE, np.uint8)
+            sl = [slice(None)] * 3
+            sl[axis] = slice(n - depth, n) if high_side else slice(0, depth)
+            blk[tuple(sl)] = MATERIAL
+            return blk
+
+        return per_tile(pattern)
+
+    def test_a_dip_on_one_face_appears_on_that_face_only(self):
+        prof = W.face_profile(self._planted(1, high_side=True), TILES)
+        assert prof["+y"]["0"] == pytest.approx(0.0)
+        assert prof["+y"]["8"] == pytest.approx(0.0)
+        assert prof["+y"]["16"] == pytest.approx(1.0)
+        for other in ("-y", "+x", "-x", "+z", "-z"):
+            assert all(v == pytest.approx(1.0) for v in prof[other].values())
+
+    @pytest.mark.parametrize("face,axis,high", [("-z", 0, False), ("+z", 0, True),
+                                                ("-x", 2, False), ("+x", 2, True)])
+    def test_every_face_is_found_where_it_is_planted(self, face, axis, high):
+        prof = W.face_profile(self._planted(axis, high_side=high), TILES)
+        assert prof[face]["0"] == pytest.approx(0.0)
+        assert prof[face]["16"] == pytest.approx(1.0)
+
+    def test_a_uniform_volume_is_flat_on_every_face(self):
+        """A porosity difference must not read as a face effect."""
+        rng = np.random.default_rng(0)
+        lab = np.where(rng.random(SHAPE) < 0.25, PORE, MATERIAL).astype(np.uint8)
+        prof = W.face_profile(lab, TILES)
+        for fc, shells in prof.items():
+            vals = [v for v in shells.values() if v is not None]
+            assert max(vals) - min(vals) < 0.02, fc

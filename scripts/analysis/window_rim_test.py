@@ -112,7 +112,45 @@ def interior_phi(label: np.ndarray, tiles=TILES) -> float | None:
     return phi_of(np.concatenate([b.ravel() for b in blocks]))
 
 
-def build(runner, reference, s_nb: float, ddim: int, theta):
+FACES = (("-z", 0, -1), ("+z", 0, +1), ("-y", 1, -1), ("+y", 1, +1),
+         ("-x", 2, -1), ("+x", 2, +1))
+
+
+def face_profile(label: np.ndarray, tiles=TILES, core: int = 16) -> dict:
+    """phi by distance from EACH face separately, pooled over interior tiles.
+
+    Distance is measured from one face at a time, and the other two axes are
+    restricted to the tile's central `core`..`TILE-core` band so a voxel near
+    two faces cannot be counted for both.  Without that restriction every
+    corner would appear in three face profiles and a dip on one face would
+    leak into the other two.
+    """
+    n = TILE
+    rz, ry, rx = interior_range(tiles)
+    out: dict[str, dict[str, float | None]] = {}
+    for name, axis, sign in FACES:
+        shells: dict[str, list[int]] = {}
+        for d in range(0, n // 2, SLAB):
+            pore = solid = 0
+            for tz in rz:
+                for ty in ry:
+                    for tx in rx:
+                        blk = label[tz * n:(tz + 1) * n,
+                                    ty * n:(ty + 1) * n,
+                                    tx * n:(tx + 1) * n]
+                        sl = [slice(core, n - core)] * 3
+                        sl[axis] = (slice(d, d + SLAB) if sign < 0
+                                    else slice(n - d - SLAB, n - d))
+                        sel = blk[tuple(sl)]
+                        pore += int((sel == LABEL_PORE).sum())
+                        solid += int((sel != LABEL_AIR).sum())
+            shells[str(d)] = (pore / solid) if solid else None
+        out[name] = shells
+    return out
+
+
+def build(runner, reference, s_nb: float, ddim: int, theta,
+          neighbour_mode: str = "reference"):
     from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator
     from poregen.eval_v4.generate import LATENT_SIZE, PATCH_SIZE, VOXEL_SIZE_MM
 
@@ -129,7 +167,8 @@ def build(runner, reference, s_nb: float, ddim: int, theta):
         # One tile per chunk and a window per tile: NO overlap, so nothing
         # averages the rim away and each window is decided exactly once.
         chunk_tiles=(1, 1, 1), window_stride=TILE, decode_stride=32,
-        neighbour_mode="reference", reference_latents=reference,
+        neighbour_mode=neighbour_mode,
+        reference_latents=reference if neighbour_mode == "reference" else None,
     )
 
 
@@ -151,6 +190,13 @@ def main() -> int:
     ap.add_argument("--neighbours", type=Path, default=None,
                     help="a latents.npy to use as the neighbour canvas instead "
                          "of real material — the generated-neighbour arm")
+    ap.add_argument("--neighbour-mode", default="reference",
+                    choices=("reference", "canvas", "unknown"),
+                    help="'reference' gives every window six real neighbours. "
+                         "'canvas' with one tile per chunk gives the raster "
+                         "order's MIXED set — the three trailing faces EXISTS, "
+                         "the three leading faces UNKNOWN — which is the set a "
+                         "chunk-frontier window actually has.")
     ap.add_argument("--allow-busy-gpu", action="store_true")
     args = ap.parse_args()
 
@@ -188,6 +234,7 @@ def main() -> int:
     reference = torch.from_numpy(np.ascontiguousarray(canvas)).to(runner.device)
 
     results = {"shape": list(shape), "tiles": list(tiles),
+               "neighbour_mode": args.neighbour_mode,
                "n_interior_windows": n_interior(tiles),
                "ddim": args.ddim, "target_phi": args.target_phi,
                "checkpoint_step": runner.checkpoint_step,
@@ -195,7 +242,7 @@ def main() -> int:
 
     # The control: the SAME real latents through the same decoder, so the
     # comparison is window-vs-window and not model-vs-scanner.
-    gen0 = build(runner, reference, args.s_nb[0], args.ddim, theta)
+    gen0 = build(runner, reference, args.s_nb[0], args.ddim, theta, "reference")
     with torch.no_grad():
         xct, probs = gen0._decode_canvas(
             reference, shape, runner.autocast_dtype, 64)
@@ -209,7 +256,7 @@ def main() -> int:
     }
 
     for s_nb in args.s_nb:
-        gen = build(runner, reference, s_nb, args.ddim, theta)
+        gen = build(runner, reference, s_nb, args.ddim, theta, args.neighbour_mode)
         t0 = time.perf_counter()
         with torch.no_grad():
             out = gen.generate(
@@ -223,6 +270,7 @@ def main() -> int:
         results["arms"][f"s_nb={s_nb:g}"] = {
             "phi_interior_windows": interior_phi(lab, tiles),
             "phi_by_shell": rim_profile(lab, tiles),
+            "phi_by_face": face_profile(lab, tiles),
             "wall_s": round(time.perf_counter() - t0, 1),
         }
         np.save(args.out / f"label_snb{s_nb:g}.npy", lab)
@@ -242,6 +290,18 @@ def main() -> int:
             (f"{a['phi_by_shell'][s]:>9.4f}" if a["phi_by_shell"].get(s) is not None
              else f"{'-':>9}") for s in shells)
         print(f"{arm:<22}{a['phi_interior_windows']:>11.4f}{cells}")
+    faces = [f[0] for f in FACES]
+    for arm, a in results["arms"].items():
+        if "phi_by_face" not in a:
+            continue
+        print(f"\nphi by distance from EACH face — {arm} "
+              f"(neighbours {args.neighbour_mode})")
+        print(f"{'face':<8}" + "".join(f"{'d=' + s:>9}" for s in shells))
+        for fc in faces:
+            row = a["phi_by_face"][fc]
+            print(f"{fc:<8}" + "".join(
+                (f"{row[s]:>9.4f}" if row.get(s) is not None else f"{'-':>9}")
+                for s in shells))
     print(f"\nWrote {args.out / 'results.json'}")
     return 0
 
