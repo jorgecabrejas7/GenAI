@@ -218,6 +218,24 @@ class TestStressCaseList:
             assert name in fits, f"{name} has no fit rule"
             assert fits[name](shape), f"{name}: {shape} cannot hold its features"
 
+    def test_the_cases_that_can_carry_a_layup_reading_are_the_ones_intended(self):
+        """The T-I readers take a centred 1024x1024 in-plane window and were
+        floored at that window in campaign 08, so a narrower canvas gets no
+        reading rather than one scored against a floor that does not apply.
+
+        `taper` is in this list on purpose: x was widened from 384 to 1024 for
+        it, because a ply drop-off is the one stress request where a ply angle
+        means something. The L-bracket is NOT, and cannot be made so by widening
+        the canvas — each leg is only 224 voxels long once the corner is
+        excluded.
+        """
+        from poregen.eval_v4.measure import LAYUP_WINDOW_VOX
+
+        readable = {name for name, shape, *_ in STRESS_GEOMETRIES
+                    if min(shape[1], shape[2]) >= LAYUP_WINDOW_VOX}
+        assert readable == {"taper", "gradient_spots", "cube1024",
+                            "two_coupons", "letters"}
+
     def test_the_painted_field_stays_inside_the_conditioning_clamp(self):
         """A request above POR_MAX would measure the clamp, not the model."""
         from poregen.diffusion.conditioning import POR_MAX

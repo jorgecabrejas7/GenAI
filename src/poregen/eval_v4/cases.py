@@ -992,8 +992,13 @@ STRESS_GEOMETRIES: tuple = (
      "hollow cylinder, axis along x; outer r 200, wall 120 vox (5 mm / 3 mm)"),
     ("lbracket", (640, 640, 192), SG.material_l_bracket, None,
      "two 192-thick legs, 512 long, inner fillet r 96, outer round r 288"),
-    ("taper", (192, 1024, 384), SG.material_taper, None,
-     "thickness 192 -> 80 vox linearly along y"),
+    # x is 1024 and not 384 so the T-I readers fit: the ply drop-off is the one
+    # stress request where a ply angle is physically meaningful, and the readers
+    # take a centred 1024x1024 in-plane window that a 384 axis cannot hold.
+    # 2.67x the voxels of the 384 canvas, for that one reading.
+    ("taper", (192, 1024, 1024), SG.material_taper, None,
+     "thickness 192 -> 80 vox linearly along y; x widened to 1024 so the T-I "
+     "layup readers fit"),
     ("gradient_spots", (192, 1024, 1024), None, SG.field_ramp_and_spots,
      "flat plate; requested phi ramps 0.005 -> 0.08 along y plus two "
      "sigma-96 spots peaking at 0.10"),
