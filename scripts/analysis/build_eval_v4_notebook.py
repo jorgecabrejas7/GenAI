@@ -135,6 +135,8 @@ rsync -avP --partial $H/runs/campaigns/10-eval-v4-real-floor ./campaigns/
 rsync -avP $H/runs/ldm/ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04/convergence_check.jsonl ./campaigns/ldm06_convergence_check.jsonl
 # these two appear later in the queue; the commands fail harmlessly until then
 rsync -avP --partial $H/runs/campaigns/17-chunk-band-trial   ./campaigns/
+rsync -avP --partial $H/runs/campaigns/16-window-rim          ./campaigns/
+rsync -avP --partial --exclude 'r08_*' --exclude 'calibration_probe*' --exclude 'gate_*' $H/runs/campaigns/09-r08-latent-sweep ./campaigns/
 rsync -avP --partial $H/runs/campaigns/11-decoder-ft         ./campaigns/
 rsync -avP --partial $H/runs/campaigns/14-downstream-utility ./campaigns/
 ```
@@ -227,6 +229,8 @@ FLOOR10_ROOT = CAMPAIGNS / "10-eval-v4-real-floor"
 DECODER_FT_ROOT = CAMPAIGNS / "11-decoder-ft"
 DOWNSTREAM_ROOT = CAMPAIGNS / "14-downstream-utility"
 TRIAL_ROOT = CAMPAIGNS / "17-chunk-band-trial"
+RIM_ROOT = CAMPAIGNS / "16-window-rim"
+RUNGS_ROOT = CAMPAIGNS / "09-r08-latent-sweep"
 CONV_JSONL = next((p for p in [CAMPAIGNS / "ldm06_convergence_check.jsonl",
                                ROOT.parents[2] / "ldm" / "ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04" / "convergence_check.jsonl"]
                    if p.exists()), CAMPAIGNS / "ldm06_convergence_check.jsonl")
@@ -765,6 +769,179 @@ else:
 # ===========================================================================
 # 6. real floors, 7. sampler, 8. porosity global, 9. porosity local
 # ===========================================================================
+
+def build_research_log() -> None:
+    section("Research log since the ldm06 training finished",
+            "a dated account of everything that happened after step 130k: results, defects found, decisions taken and pending, queue state")
+    md("""
+**Purpose of this section.** If you read nothing else, read this. It is the narrative the numbers below belong to, written
+by the supervising session and updated with the builder (date of this text: **2026-09-12 09:00**). Each entry names the
+section of this notebook or the vault note where the evidence lives. Dates are local machine time.
+
+**Where we were when training ended.** ldm06 is the conditional 3D latent diffusion model of this paper: VAE r08 (8 latent
+channels, 4× spatial compression, 3-class head material/pore/air) + a 83 M-parameter UNet trained 130k steps on the
+split_v3 store (1.6 M overlapping 64³ windows, holes removed, panel-level split) with v-prediction, noised-neighbour
+conditioning and a hybrid chunked sampler (windows of 64 voxels at stride 32, fused every step; chunks of 192³ solved in
+order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:45** at step 130 000.
+""")
+    md("""
+**Timeline.**
+
+| when (2026) | what | where |
+|---|---|---|
+| 09-11 03:45 | ldm06 reaches 130k. Exit gates on the final weights: porosity error 0.0010–0.0011, latent spread 0.97–0.98 of the sampled reference, zero interior air, surface position ±0.03 vox, kill-switch 0.0049/0.0500. EMA = raw. | section *training-time diagnostics*; vault *LDM Experiments → ldm06* |
+| 09-11 03:50 → 20:35 | Eval v4 generation (217 volumes, 13 assessments), measure, report, two inspection packs. **All on `best.ckpt` = step 119k**, hardcoded in the runner; discovered 23:50. | sections 6–19; caveat in *chunk-plane band* |
+| 09-11 12:45 | Label uncertainty (campaign 13): Sauvola k ±20 % moves real porosity by 0.014–0.016 (3× the gate, 14× the model error); Yen excluded as a different segmentation; between-k pore Dice min 0.28 / median 0.56. | section *label uncertainty*; vault E9 |
+| 09-11 12:42 / 20:35 | Inspection packs built (13 cases; then with layup and assembly-mode cases). Author's visual inspection = the gate for the decoder fine-tune; **not yet given**. | `12-eval-v4/inspection/` |
+| 09-11 14:3x | Memorisation smoke test killed twice: memory cap counted page cache; then the machine killed it for low memory while a CUDA job ran. Rule adopted: on this GB10 unified-memory machine, nothing streams the 195 GiB store beside a GPU job; readers drop pages. Passed in its own slot (3.5 min). | `docs/DEVELOPMENT.md`; vault LDM Experiments incident 6 |
+| 09-11 18:5x | Branch `refactor` fast-forwarded into `main` and deleted. `main` is the only branch. | git |
+| 09-11 19:00–23:30 | This notebook built (builder committed), verified headless three times. | `scripts/analysis/build_eval_v4_notebook.py` |
+| 09-11 21:40 → 09-12 01:07 | VAE rung reports (base, rf-8, rf-32, rf-4) and the compare table. rf-2 and rf-64 still owed. | section *VAE compressor rungs* |
+| 09-11 23:50 | **Defect found:** pore-logit seam ratio at chunk planes 0.39 and cross-plane pore Dice 0.27 trace to one thing — a pore-depleted band in the 32 voxels on each side of every chunk plane (φ at −8 ≈ 0.2 of the mean; real crops flat). Explains the hybrid arm's φ deficit of 0.005. | section *chunk-plane band* |
+| 09-12 00:30–02:00 | Four-arm and s_nb diagnosis: the band is caused by the neighbour conditioning (s_nb 0 removes it); not re-noising, not edge fusion, not drift. Latent spread in the band normal → content, not blur. | same section, arms figure |
+| 09-12 02:40 | Single-window rim test negative: a window beside six consistent neighbours dips ≤ 16 % in 8 voxels. | section *single-window rim tests* |
+| 09-12 03:30 | Single-window test with 3 present + 3 missing faces: **pores move away from the missing face** (0.05–0.15 of the window mean), present faces untouched; inheritance from a pore-poor neighbour 1.7–2.5×. | same |
+| 09-12 04:00 | **Root cause in the training code:** neighbour dropout dropped all six faces per sample; 64 % of training windows have one missing face and it is always the specimen surface; "present + unknown" never occurred. Learned rule: nothing behind a face = surface = no pores. The one healthy plane per volume is the terminal one (next chunk's far face = volume edge = trained case). | same; `12-eval-v4/README.md` |
+| 09-12 04:00–08:49 | Fix trial (campaign 17) on 130k, scored on non-terminal planes (trailing / leading strip, worst plane, cost): overlap+blend (a) 0.31 fail; s_nb 0.5 (b) 0.51 fail; both (c) 0.56 fail at 3.8×; drop-neighbours-when-mixed (f) 0.85 / 0.75 fail at 1×; **(g) = (f)+overlap 0.82 / 1.00, worst 0.74, PASS on the mean at 1.36×**; **(a2s) overlap 64 with 32 pinned, successor writes the strip: 0.95 / 0.91, worst 0.84, PASS on every plane at 2.05×**; (a2b) blend ≈ a2s. Pinned-only (e) 0.19 = the steering control. | section *chunk-plane band*, trial table |
+| 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
+""")
+    md("""
+**Decisions taken in this period** (supervisor, within the author's standing instructions): move layup to the end so
+the inspection pack arrived at 12:30 instead of 19:50; label uncertainty reports only the perturbation of our own method;
+the memorisation check searches the full store and the multi-chunk volumes; `refactor` merged into `main`; campaign 12
+stays on 119k and is documented as such, the next generation is on 130k; band criterion = mean over non-terminal planes
+plus worst plane; downstream utility runs last so it trains on the regenerated set.
+
+**Decisions that belong to the author and are open:**
+1. Visual inspection of the pack → go / no-go for the decoder fine-tune (D43). Recommendation: judge it on the regenerated set.
+2. Which band fix: sampler rule (f) or (g) today, or the per-face fine-tune (mechanism-clean, ≈ 7 h), or both.
+3. Regenerate campaign 12 on 130k with the chosen fix (≈ 12 h generation + measure). Recommended.
+4. Whether the "hybrid unifies joint and autoregressive" claim is withdrawn: on seams hybrid = joint = teacher-forced at the real floor; it beats autoregressive; it does not beat joint. Framing v2 says withdraw; replace with "unbounded size at joint quality, no drift".
+5. Train longer (vault L2): parked; the exit gates did not move between 74k and 130k.
+
+**What the eval says for the paper, in one paragraph.** Global porosity control (slope 1.07, R² 0.999, 90 % in gate) and
+layup control (1.3–2.2° for the trained sequences, beyond the reader floors) hold. Geometry (Dice 0.992), sphere (1 vox),
+rough-surface roughness (0.965 of request) hold. Grey seams at window and chunk planes are at the real floor. No
+memorisation (4,199 patches vs the full train store, zero copies). Failure rate zero. Microstructure statistics are 1.5–6×
+the real-vs-real floor, worst at low porosity. Local control follows large patterns (slope 0.94) but halves tile-scale
+contrast (0.49). The pore band at chunk planes is a documented defect with a known cause and a fix under test; all
+chunk-plane pore numbers above must be read with it.
+""")
+    code(r'''
+# Live state of the queue and decisions, read from disk (no narrative here)
+state = {
+    "decoder-ft gate file present": (CAMPAIGNS / "decoder_ft_go").exists(),
+    "decoder-ft campaign (11) exists": DECODER_FT_ROOT.exists(),
+    "downstream campaign (14) exists": DOWNSTREAM_ROOT.exists(),
+    "band trial report (17)": TRIAL_ROOT.joinpath("trial_report.json").exists(),
+    "rim tests (16)": RIM_ROOT.exists(),
+    "VAE rung compare (09) final table": RUNGS_ROOT.joinpath("decision_table.json").exists(),
+    "campaign-12 checkpoint step (from one manifest)": (load_json(next(ROOT.glob("sampler/volumes/*/manifest.json"))).get("checkpoint_step") if list(ROOT.glob("sampler/volumes/*/manifest.json")) else None),
+}
+display(pd.Series(state, name="state").to_frame())
+if TRIAL_ROOT.joinpath("trial_report.json").exists():
+    print("trial arms present:", ", ".join(load_json(TRIAL_ROOT / "trial_report.json").keys()))
+''')
+
+
+def build_rungs() -> None:
+    section("VAE compressor rungs (campaign 09)",
+            "the six-rung reduction-factor table behind the choice of 8 latent channels: Dice, porosity MAE per bin, dense panels, seams")
+    md("""
+**What this is.** Before ldm06, the compressor (VAE r08) was trained at several *reduction factors*: how many numbers the
+latent keeps per 4×4×4 block of voxels. With `z` channels at 4× spatial compression, the reduction is 64/z: z=16 → 4×,
+z=8 → 8×, z=4 → 16×, z=2 → 32×. rf-2 (z=32) and rf-64 (z=1) are still owed. Every rung is the same architecture, the
+same data, the same loss; only z changes. **Why it matters:** the diffusion model lives in this latent; whatever the
+compressor cannot reconstruct, the generator cannot produce. The paper's claim is that pore Dice is monotone in latent
+width and saturates between 8× and 4×, which is why 8× (z=8) was chosen.
+
+**How to read the table.** *val φ MAE* = mean absolute error of the porosity of a reconstructed window vs the labelled
+one. *pore Dice* = overlap of reconstructed vs labelled pore voxels (1 = perfect). *DENSE pore Dice* = the same on the
+≥ 6 % porosity panels only, the hard case. *tau* = the calibrated pore threshold on validation. *seam* ratios are the
+tile-decode discontinuity (near 1 = invisible). *drift 2σ* = how far the latent statistics move over training.
+""")
+    code(r'''
+F = RUNGS_ROOT / "findings.md"; DT = RUNGS_ROOT / "decision_table.json"
+if not F.exists():
+    unavailable("campaign 09 findings.md", "eval_v4 owed rung reports + COMPARE (ran 2026-09-12 01:07)")
+else:
+    display(Markdown(F.read_text()))
+    if DT.exists():
+        R = load_json(DT)["rungs"]
+        T = pd.DataFrame([{"rung": r["experiment"], "z": r["z_channels"], "reduction": 64 // r["z_channels"], "step": r["step"], "wall_h": r["wall_h"],
+                           "pore Dice val": (r.get("val_full") or {}).get("dice_pore") or (r.get("val_full") or {}).get("class_dice_1"),
+                           "pore Dice test": (r.get("test_full") or {}).get("dice_pore") or (r.get("test_full") or {}).get("class_dice_1"),
+                           "phi MAE val": (r.get("val_full") or {}).get("phi_mae"), "stopped": r.get("stopped")} for r in R]).sort_values("reduction")
+        display(T.round(4))
+        fig = go.Figure()
+        for col in ("pore Dice val", "pore Dice test"):
+            if T[col].notna().any(): fig.add_trace(go.Scatter(x=T["reduction"], y=T[col], mode="lines+markers", name=col, text=T["rung"]))
+        fig.update_layout(title="Pore Dice vs reduction factor (log x) — the saturation argument for z=8", xaxis_type="log", xaxis_title="reduction factor (64 / z)", yaxis_title="Dice", height=380); fig.show()
+''')
+    md("""
+**What to look for.** Dice should fall as the reduction grows; the knee between 4× and 8× is the argument for 8×. If rf-4
+is not better than rf-8 by more than the seed-to-seed spread, 8× is the right choice (half the latent, same quality).
+Compare the *DENSE* column: that is where compressors fail first.
+""")
+
+
+def build_rim_tests() -> None:
+    section("Single-window rim tests (campaign 16)",
+            "one window denoised alone, with different neighbour sets: where do the pores go relative to each face?")
+    md("""
+**What this is.** The chunk band (previous section) needed a test at the smallest scale: one 64-voxel window denoised on
+its own (no fusion, no chunks), with its six neighbours fed in different ways, then the porosity measured in 8-voxel
+shells by distance from each face, divided by the window's own mean. 64 interior windows, DDIM-50, the 130k weights.
+
+Three runs: **real** = six real neighbours from a validation volume (consistent set); **generated** = six neighbours taken
+from a generated volume; **mixed** = the natural canvas set of a raster order, three faces present and three missing.
+Each run has arms: `reference_decoded` (the real window through the VAE, no diffusion: the flat control), `s_nb=1`
+(neighbour guidance on) and `s_nb=0` (off). A shell value of 1.0 means no effect; below 1 fewer pores near that face.
+""")
+    code(r'''
+if not RIM_ROOT.exists():
+    unavailable("campaign 16-window-rim", "scripts/analysis/window_rim_test.py (ran 2026-09-12 02:40 and 03:30)")
+else:
+    rows = []
+    for run in ("real", "generated", "mixed"):
+        f = RIM_ROOT / run / "results.json"
+        if not f.exists(): continue
+        d = load_json(f)
+        for arm, A in d["arms"].items():
+            mean = A.get("phi_interior_windows") or float("nan")
+            for shell, v in (A.get("phi_by_shell") or {}).items():
+                rows.append({"run": run, "arm": arm, "face": "all", "shell_vox": int(shell), "phi": v, "ratio": v / mean if mean else float("nan")})
+            for key in ("phi_by_face_shell", "by_face", "faces"):          # per-face block, name differs between versions
+                if isinstance(A.get(key), dict):
+                    for face, sh in A[key].items():
+                        shells = sh.get("phi_by_shell", sh) if isinstance(sh, dict) else {}
+                        for shell, v in shells.items():
+                            try: rows.append({"run": run, "arm": arm, "face": face, "shell_vox": int(shell), "phi": v, "ratio": v / mean if mean else float("nan")})
+                            except Exception: pass
+    RIM = pd.DataFrame(rows)
+    if RIM.empty:
+        unavailable("rim results", "results.json with arms/phi_by_shell")
+    else:
+        display(RIM[RIM.face == "all"].pivot_table(index=["run", "arm"], columns="shell_vox", values="ratio").round(3))
+        fig = make_subplots(rows=1, cols=3, subplot_titles=["real neighbours", "generated neighbours", "mixed (3 present + 3 missing)"])
+        for i, run in enumerate(("real", "generated", "mixed"), 1):
+            for arm, g in RIM[(RIM.run == run) & (RIM.face == "all")].groupby("arm"):
+                fig.add_trace(go.Scatter(x=g["shell_vox"], y=g["ratio"], mode="lines+markers", name=f"{run}: {arm}"), row=1, col=i)
+            fig.add_hline(y=1.0, line_dash="dash", line_color="grey", row=1, col=i)
+        fig.update_layout(height=380, title="φ(shell)/φ(window) by distance from the face (all faces pooled)"); fig.show()
+        PF = RIM[RIM.face != "all"]
+        if not PF.empty:
+            display(PF[PF.shell_vox == 0].pivot_table(index=["run", "arm"], columns="face", values="ratio").round(3))
+            note("Per-face row at shell 0: in the mixed run the UNKNOWN (+) faces are the depleted ones; the EXISTS (−) faces are not. The z row is not interpretable (a single depth).")
+''')
+    md("""
+**What to look for.** In the *real* run the dip is small (≤ 16 % in the first shell) and barely changes with s_nb: a single
+window beside consistent neighbours is fine. In the *mixed* run the per-face table shows the mechanism: faces with
+nothing behind them lose almost all their pores (0.05–0.15), faces with a neighbour do not. This is what happens at every
+chunk frontier, and it is why the fix is either "do not show the model a mixed set" (drop the neighbour arm for those
+windows) or "teach it mixed sets" (per-face dropout in training).
+""")
+
 
 def build_real_floor() -> None:
     section("Real floors", "what every metric scores on real held-out scans, by volume shape")
@@ -2284,9 +2461,9 @@ else:
 def build_all() -> None:
     build_setup()
     CELLS.append(("index", ""))          # placeholder, filled after sections are known
-    build_config(); build_progress(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
-    build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
-    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_microstructure()
+    build_config(); build_progress(); build_research_log(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
+    build_rungs(); build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
+    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_microstructure()
     build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream()
     build_summary(); build_preview()
 
