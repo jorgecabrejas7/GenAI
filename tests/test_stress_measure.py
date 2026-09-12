@@ -10,6 +10,8 @@ deliberately.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -84,7 +86,10 @@ def measured(tmp_path_factory):
                             tuple(s // 64 for s in SHAPE)).copy()
     _write(tmp_path, "gradient_spots_ddim50", field=field)
     from poregen.eval_v4.measure import measure_stress_geometry
-    return measure_stress_geometry(tmp_path, repo_root())
+    res = measure_stress_geometry(tmp_path, repo_root())
+    for row in res["per_case"]:
+        row["_root"] = str(tmp_path)
+    return res
 
 
 class TestMeasurer:
@@ -153,3 +158,27 @@ class TestMeasurer:
         res = measured
         assert set(res["summary"]) == {"cube1024", "two_coupons", "gradient_spots"}
         assert res["summary"]["cube1024"]["n"] == 1
+
+
+class TestReporter:
+    """An assessment with no reporter is silently dropped from the findings, so
+    the reporter runs here and is not only registered."""
+
+    def test_findings_and_the_montage_are_written(self, measured, tmp_path_factory):
+        from poregen.eval_v4.io import write_results
+        from poregen.eval_v4.report import report_one
+
+        # The fixture measured into its own tree; re-root the results beside
+        # the volumes it built so report_one can find both.
+        root = Path(measured["per_case"][0]["_root"])
+        write_results(root, "stress_geometry", measured)
+        path = report_one(root, "stress_geometry")
+        text = path.read_text()
+        assert "EXPLORATORY" in text
+        assert "### two_coupons" in text and "### gradient_spots" in text
+        # The requests are listed in the designed order, not alphabetically.
+        assert text.index("### gradient_spots") < text.index("### two_coupons")
+        assert "could not be measured" in text
+        pngs = sorted((root / "inspection").glob("stress_geometry__*.png"))
+        assert len(pngs) == 3
+        assert (root / "stress_geometry" / "figures" / "stress_overview.png").exists()

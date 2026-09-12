@@ -1332,6 +1332,217 @@ def _fig_assembly_modes(res, root) -> list[str]:
     return savefig(fig, figures_dir(root, "assembly_modes"), "per_chunk_series")
 
 
+# ---------------------------------------------------------------------------
+# 12 - stress geometries (EXPLORATORY)
+# ---------------------------------------------------------------------------
+
+def _request_order(res) -> list[str]:
+    """The designed order, not the alphabet.
+
+    The list runs from the requests nearest the training coupons to the ones
+    furthest from them, and read in that order the table says where the
+    conditioning stops. Sorted alphabetically it says nothing.
+    """
+    from poregen.eval_v4.cases import STRESS_GEOMETRIES  # noqa: PLC0415
+
+    designed = [g[0] for g in STRESS_GEOMETRIES]
+    seen = list(res.get("summary") or {})
+    return ([r for r in designed if r in seen]
+            + sorted(r for r in seen if r not in designed))
+
+
+def _stress_rows(rows) -> list[list[str]]:
+    out = []
+    for r in sorted(rows, key=lambda r: r.get("ddim_steps") or 0):
+        band = r.get("chunk_band") or {}
+        geo = r.get("geometry_agreement") or {}
+        surf = r.get("surface_agreement") or {}
+        out.append([
+            fmt(r.get("ddim_steps")),
+            "x".join(str(v) for v in r["volume_shape"]),
+            fmt((r.get("phase_fractions") or {}).get("phi_pore")),
+            fmt((r.get("phase_fractions") or {}).get("air_fraction_all"), 3),
+            fmt(geo.get("dice_air"), 3) if geo.get("available") is not False else "n/a",
+            fmt(band.get("ratio_-8"), 2),
+            fmt(band.get("ratio_+0"), 2),
+            fmt(band.get("ratio_-8_terminal"), 2),
+            fmt(((r.get("seams") or {}).get("seam_chunk_xct_ratio")), 3),
+            fmt((surf.get("lower") or {}).get("error_abs_mean"), 1),
+            fmt((surf.get("upper") or {}).get("error_abs_mean"), 1),
+            fmt((r.get("failure_flags") or {}).get("failed")),
+        ])
+    return out
+
+
+STRESS_HEADER = ["DDIM", "shape", "phi pore", "air frac", "air Dice",
+                 "band -8", "band +0", "band -8 term", "chunk seam grey",
+                 "err lo", "err hi", "failed"]
+
+
+def report_stress_geometry(res, root, floor) -> tuple[str, list[str]]:
+    by_request: dict[str, list] = {}
+    for r in res["per_case"]:
+        by_request.setdefault(r.get("request"), []).append(r)
+    text = [
+        "## Requests the training material never contained",
+        "",
+        "**EXPLORATORY. Nothing here is gated and no threshold is applied.** "
+        + res["off_gates_because"],
+        "",
+        "`band -8` and `band +0` are the material porosity in the 8 voxels "
+        "either side of a chunk frontier, as a ratio to the volume's own mean, "
+        "over NON-TERMINAL planes; 1.00 is flat. `band -8 term` is the last "
+        "plane on each axis, whose successor's far face is the volume edge - "
+        "the one frontier configuration the model was trained on, and so the "
+        "anchor the other columns are read against. `err lo` / `err hi` are the "
+        "mean absolute distance in voxels between the generated specimen "
+        "surface and the requested one, over the columns the request fills.",
+        "",
+    ]
+    for request in _request_order(res):
+        rows = by_request.get(request) or []
+        if not rows:
+            continue
+        note = (rows[0].get("geometry_note") or "").strip()
+        text += [f"### {request}", ""]
+        if note:
+            text += [note, ""]
+        text += [table(STRESS_HEADER, _stress_rows(rows)), ""]
+        text += _stress_extras(rows)
+
+    # The reason itself is one sentence repeated per row, so it is stated once
+    # above and the table carries only what differs: the shape that prevented
+    # the reading. The full sentence stays in results.json, where a reader has
+    # no note beside it.
+    missing = [[r["case"],
+                "x".join(str(v) for v in ((r["layup_recovery"] or {})
+                                          .get("in_plane") or []))]
+               for r in res["per_case"]
+               if (r.get("layup_recovery") or {}).get("available") is False]
+    if missing:
+        text += [
+            "## What could not be measured, and why",
+            "",
+            res["layup_window_note"],
+            "",
+            table(["case with no layup reading", "in-plane shape"], missing),
+            "",
+        ]
+    figs = _fig_stress_geometry(res, root) + _stress_montage(res, root)
+    return "\n".join(text) + "\n", figs
+
+
+def _stress_extras(rows) -> list[str]:
+    """The blocks only some requests carry: the painted ramp and the two legs."""
+    out = []
+    ramp_rows = [[fmt(r.get("ddim_steps")),
+                  fmt((r["ramp"] or {}).get("requested_slope_per_tile"), 5),
+                  fmt((r["ramp"] or {}).get("delivered_slope_per_tile"), 5),
+                  fmt((r["ramp"] or {}).get("slope_ratio"), 2),
+                  fmt((r.get("local_obedience") or {}).get("within_volume_slope"), 2),
+                  fmt((r.get("local_obedience") or {}).get("within_volume_r2"), 3)]
+                 for r in sorted(rows, key=lambda r: r.get("ddim_steps") or 0)
+                 if r.get("ramp")]
+    if ramp_rows:
+        out += [
+            "The painted field, read two ways: as a slope along y (the ramp the "
+            "request carries) and as the within-volume tile fit assessment 3 "
+            "uses. A model that delivers its own mean everywhere scores near "
+            "zero on both.",
+            "",
+            table(["DDIM", "requested slope/tile", "delivered slope/tile",
+                   "slope ratio", "within-vol slope", "within-vol R2"], ramp_rows),
+            "",
+        ]
+    leg_rows = []
+    for r in sorted(rows, key=lambda r: r.get("ddim_steps") or 0):
+        for name, leg in (r.get("legs") or {}).items():
+            leg_rows.append([fmt(r.get("ddim_steps")), name,
+                             "x".join(str(v) for v in leg["shape"]),
+                             fmt(leg.get("phi_pore")),
+                             fmt(leg.get("air_fraction_inside_material"), 4),
+                             fmt((leg.get("layup_recovery") or {}).get("available"))])
+    if leg_rows:
+        out += [
+            "The two legs, cropped apart with the corner in neither: no ply "
+            "orientation is defined through a corner, so a reader run across it "
+            "would score the model against a request that does not exist there.",
+            "",
+            table(["DDIM", "leg", "shape", "phi pore", "air inside material",
+                   "layup read"], leg_rows),
+            "",
+        ]
+    return out
+
+
+def _fig_stress_geometry(res, root) -> list[str]:
+    """Two panels: how well each shape was carved, and the band at its frontiers."""
+    set_style()
+    order = _request_order(res)
+    s = res["summary"]
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.8))
+    x = np.arange(len(order))
+
+    ax = axes[0]
+    dice = [((s[r] or {}).get("dice_air") or {}).get("mean") for r in order]
+    ax.bar(x, [d if d is not None else np.nan for d in dice],
+           color=SERIES_COLORS[0])
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("air Dice vs the requested shape")
+    ax.set_title("Was the shape carved where it was asked for?")
+
+    ax = axes[1]
+    for i, key in enumerate(("chunk_band_ratio_-8", "chunk_band_ratio_+0")):
+        v = [((s[r] or {}).get(key) or {}).get("mean") for r in order]
+        ax.bar(x + (i - 0.5) * 0.38,
+               [b if b is not None else np.nan for b in v], width=0.38,
+               color=SERIES_COLORS[i + 1], label=key.split("_")[-1])
+    ax.axhline(1.0, color=FLOOR_COLOR, ls="--", lw=1.0, label="flat")
+    ax.set_ylabel("band phi / volume phi")
+    ax.set_title("The chunk-plane band, by request")
+    ax.legend()
+
+    for ax in axes:
+        ax.set_xticks(x)
+        ax.set_xticklabels(order, rotation=30, ha="right")
+    fig.tight_layout()
+    return savefig(fig, figures_dir(root, "stress_geometry"), "stress_overview")
+
+
+def _stress_montage(res, root) -> list[str]:
+    """Three mid-slices per case, grey over label, into ``<root>/inspection``.
+
+    ``eval_v4_inspection_pack.render_case`` already draws exactly this panel for
+    the gated assessments, and it is imported rather than reproduced: a second
+    renderer would drift from the first and a reader comparing a stress case
+    with a gated one would be comparing two different figures. The import is
+    late because the pack is a script, not a package module.
+    """
+    import sys  # noqa: PLC0415
+
+    analysis = Path(__file__).resolve().parents[3] / "scripts" / "analysis"
+    if str(analysis) not in sys.path:
+        sys.path.insert(0, str(analysis))
+    try:
+        import eval_v4_inspection_pack as pack  # noqa: PLC0415
+    except Exception as exc:                    # noqa: BLE001
+        logger.warning("stress montage skipped: %s", exc)
+        return []
+
+    out = Path(root) / "inspection"
+    out.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for r in res["per_case"]:
+        case_dir = Path(root) / "stress_geometry" / "volumes" / r["case"]
+        if not (case_dir / "manifest.json").exists():
+            continue
+        why = (r.get("geometry_note") or r.get("request") or "")[:90]
+        info = pack.render_case(case_dir, "stress_geometry", r["case"], why, out)
+        if info:
+            paths.append(info["png"])
+    return paths
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -1346,6 +1557,7 @@ REPORTERS = {
     "field_stats": report_field_stats,
     "assembly_modes": report_assembly_modes,
     "real_floor": report_real_floor,
+    "stress_geometry": report_stress_geometry,
 }
 
 
