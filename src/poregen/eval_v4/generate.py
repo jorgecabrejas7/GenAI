@@ -345,6 +345,8 @@ class VolumeRunner:
             por_log_stats=self.por_log_stats,
             theta_deg=theta,
             chunk_tiles=spec.chunk_tiles,
+            chunk_overlap=spec.chunk_overlap,
+            chunk_overlap_blend=spec.chunk_overlap_blend,
             window_stride=spec.window_stride,
             decode_stride=spec.decode_stride,
             neighbour_mode=spec.neighbour_mode,
@@ -434,6 +436,11 @@ class VolumeRunner:
                 "autocast_dtype": str(self.autocast_dtype),
                 "conditioned_phi_after_clamp": clamped,
                 "neighbour_mode": spec.neighbour_mode,
+                # A sampler setting that changes the result must be in the
+                # manifest, or a trial volume is indistinguishable from a
+                # production one.
+                "chunk_overlap": spec.chunk_overlap,
+                "chunk_overlap_blend": spec.chunk_overlap_blend,
                 "reference_latents": reference_note,
                 "request_offset": list(spec.request_offset),
                 "specimen_box": (

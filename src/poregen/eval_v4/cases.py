@@ -70,6 +70,14 @@ class CaseSpec:
     target_phi: float | None = None
     ddim_steps: int = DDIM_DEFAULT
     chunk_tiles: tuple[int, int, int] = CHUNK_TILES
+    #: Chunk overlap in voxels, and how the shared strip is written.  0 is the
+    #: production partition.  Non-zero exists for the chunk-band trial: the
+    #: strip is pinned RePaint-style while the successor denoises, then written
+    #: as a cosine blend of both chunks' outputs — or restored to the
+    #: predecessor's value when ``chunk_overlap_blend`` is False, which does NOT
+    #: remove the band and is kept in order to show that.
+    chunk_overlap: int = 0
+    chunk_overlap_blend: bool = True
     window_stride: int = WINDOW_STRIDE
     decode_stride: int = DECODE_STRIDE
     s_por: float = 1.0
