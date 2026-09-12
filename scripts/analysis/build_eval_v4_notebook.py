@@ -1008,12 +1008,18 @@ else:
         return (x or {}).get("phi") if isinstance(x, dict) else x
     def _short(vid):
         return (vid.replace("MedidasDB__", "").replace("_volume_eq_aligned", "").replace("Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_", "")
-                   .replace("Juan_Ignacio_probetas_", "JI_").replace("Airbus_Panel_Pegaso_probetas_", "Pegaso_"))
+                   .replace("Juan_Ignacio_probetas_", "JI_").replace("Airbus_Panel_Pegaso_probetas_", "")
+                   .replace("_volume_eq_rotated_aligned", "").replace("_volume_eq_cleaned_aligned", "").replace("_volumen_eq_aligned", ""))
     PV = pd.DataFrame([{"volume": _short(v["volume_id"]), "panel": v.get("panel"), "split": v.get("split"), "depth": (v.get("shape") or [None])[0], "n_patches": v.get("n_patches"), "phi_whole": v["phi_whole"],
                         **{f"{ax}_{p}": _phi(v["regions"][ax][p]) for ax in ("z", "y", "x") for p in ("front", "middle", "back")}} for v in D["per_volume"]]).sort_values(["panel", "volume"])
     pd.set_option("display.max_rows", 200)
-    display(PV.set_index("volume").round(4))            # the per-volume report: one row per real scan, whole and the nine thirds
+    PCT = PV.set_index("volume").drop(columns=["split"])
+    num = [c for c in PCT.columns if c.startswith(("phi", "z_", "y_", "x_"))]
+    PCT[num] = PCT[num] * 100                             # percent, as the author reads porosity
+    PCT = PCT.rename(columns={c: (c + "_%") for c in num})
+    display(PCT.round(2))                                 # the per-volume report: one row per real scan, whole and the nine thirds, in %
     pd.reset_option("display.max_rows")
+    print("tab-separated copy:"); print(PCT.round(2).to_csv(sep="\t"))
     fig = make_subplots(rows=1, cols=3, subplot_titles=["through-thickness (z)", "in-plane y", "in-plane x"])
     for i, ax in enumerate(("z", "y", "x"), 1):
         for p in ("front", "middle", "back"):
@@ -1690,7 +1696,16 @@ knows, at every latent cell, which fibre direction the texture around it should 
 texture direction of each in-plane grey slice with a Fourier transform; `pore_axes` fits the elongation direction of
 pores in the label (pores are elongated along the fibres). Their errors on real volumes with known layup are the floors
 (median error 8.2° / 4.2°, strict 4-class accuracy 74 % / 86 %). Scoring is direct: no shift, no sign flip allowed.
-Three layups are tested at panel width and 200 steps: A and C are training sequences, B16 is an unseen permutation.
+Three layups are tested at panel width and 200 steps. Angles are listed from one face to the other (expert's sign
+convention), from `data/layup_ground_truth.json`:
+
+| name | plies | count | pitch | in training? |
+|---|---|---|---|---|
+| **A** | 45 / −45 / 90 / 0 / 45 / −45 / 0 / 90 / −45 / 45 | 10 | 0.508 mm = 19.6 vox | yes: 74 of 80 volumes (Pegaso, Na_01–Na_10; Hexcel 0.508 CPT) |
+| **B16** | −45 / 90 / 45 / 0 / −45 / 90 / 45 / 0 / 0 / 45 / 90 / −45 / 0 / 45 / 90 / −45 | 16 | 0.25 mm = 10 vox | rare: 4 volumes (JI_4, JI_5, JI_10 in train, JI_12 in val; IM7/M56). JI_7, JI_8 have no recorded sequence |
+| **C** | 90 / 45 / −45 / 45 / 0 / 90 / −45 / 0 / 45 / −45 | 10 | 19.6 vox | **no**: a permutation of A with the same ply population, made for this test so recovery measures the order, not the mix |
+
+So C is the unseen sequence here; B16 is seen but rare and thinner. Further unseen sequences are in campaign 20.
 
 Nothing can be shown before `eval_v4 measure layup`, except which cases exist and the sampler statistics.
 """)
