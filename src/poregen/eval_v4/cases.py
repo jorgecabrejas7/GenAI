@@ -21,6 +21,7 @@ from functools import partial
 
 import numpy as np
 
+from poregen.eval_v4 import stress_geometry as SG
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, TILE, repo_root
 
 SEEDS = (101, 202, 303)
@@ -971,6 +972,80 @@ def microstructure_cases(repo=None) -> list[CaseSpec]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# 12 - stress geometry (EXPLORATORY, off the gates)
+# ---------------------------------------------------------------------------
+
+#: Both step counts for every geometry.  A shape the model has never seen is
+#: exactly where the step count might decide whether it holds at all, so
+#: running one and inferring the other would be guessing about the case that
+#: matters most.
+#: One seed: this is a boundary probe, not a distribution.
+STRESS_SEED = 101
+
+STRESS_DDIM = (50, 200)
+
+#: (name, shape, material_fn, field_fn, note).  Shapes are (z, y, x) and every
+#: axis is a whole number of 64-voxel tiles.
+STRESS_GEOMETRIES: tuple = (
+    ("tube", (448, 448, 1024), SG.material_tube, None,
+     "hollow cylinder, axis along x; outer r 200, wall 120 vox (5 mm / 3 mm)"),
+    ("lbracket", (640, 640, 192), SG.material_l_bracket, None,
+     "two 192-thick legs, 512 long, inner fillet r 96, outer round r 288"),
+    ("taper", (192, 1024, 384), SG.material_taper, None,
+     "thickness 192 -> 80 vox linearly along y"),
+    ("gradient_spots", (192, 1024, 1024), None, SG.field_ramp_and_spots,
+     "flat plate; requested phi ramps 0.005 -> 0.08 along y plus two "
+     "sigma-96 spots peaking at 0.10"),
+    ("cube1024", (1024, 1024, 1024), None, None,
+     "full material at phi 0.03; production chunking on all three axes"),
+    ("gyroid", (512, 512, 512), SG.material_gyroid, None,
+     "triply periodic, 80-vox struts at period 512 (48 % material); no flat "
+     "face and no outer surface"),
+    ("hollow_sphere", (512, 512, 512), SG.material_hollow_sphere, None,
+     "outer r 224, shell 80 vox; the interior is AIR, which no coupon has"),
+    ("two_coupons", (192, 1024, 1024), SG.material_two_coupons, None,
+     "two 448-wide plates with a 128-vox air gap along x: one request, two "
+     "disconnected bodies"),
+    ("letters", (192, 1024, 1024), SG.material_letters, None,
+     "'PoreGen' cut through the plate as air, font size 256 (cap height "
+     "~194 vox); pure controllability"),
+)
+
+
+def stress_geometry_cases(repo=None) -> list[CaseSpec]:
+    """12 - shapes the training material never contained.  EXPLORATORY.
+
+    Off the gates by construction: a model asked for a tube when every training
+    coupon was a plate may fail in ways that say nothing about the material it
+    was trained to make.  What the assessment establishes is the boundary of
+    the specimen-envelope conditioning — which requests it honours at all.
+    """
+    plies, pitch = layup_a(repo)
+    out = []
+    for name, shape, mat_fn, field_fn, note in STRESS_GEOMETRIES:
+        for ddim in STRESS_DDIM:
+            out.append(CaseSpec(
+                name=f"{name}_ddim{ddim}",
+                assessment="stress_geometry",
+                volume_shape=shape,
+                seed=STRESS_SEED,
+                layup=plies,
+                ply_thickness_vox=pitch,
+                target_phi=TARGET_DEFAULT,
+                ddim_steps=ddim,
+                material_fn=mat_fn,
+                field_fn=field_fn,
+                notes={"layup": "A", "request": name, "geometry": note,
+                       "exploratory": True,
+                       "off_gates_because":
+                           "the request is a shape no training coupon "
+                           "resembles; a failure here is not a defect of the "
+                           "kind the gated assessments report"},
+            ))
+    return out
+
+
 ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "sampler": sampler_cases,
     "porosity_global": porosity_global_cases,
@@ -983,6 +1058,7 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "multichunk": multichunk_cases,
     "microstructure": microstructure_cases,
     "assembly_modes": assembly_modes_cases,
+    "stress_geometry": stress_geometry_cases,
 }
 
 #: Assessments whose measure step also reads another assessment's volumes.
