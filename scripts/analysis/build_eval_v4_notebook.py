@@ -1033,9 +1033,13 @@ def build_ood_conditioning() -> None:
 thickness, porosities between about 0.3 % and 10.7 %, and porosity fields with real correlation lengths. This campaign
 asks for things the data never showed, while staying inside what the conditioning *can* express:
 1. **Unseen stacking sequences** of the same four angles (four permutations, none equal to a trained one).
-2. **Ply thickness** 8 and 32 voxels (trained ≈ 19; layup B16 at 16 was measured in the main eval) and **ply counts** 6 and 24.
-3. **Porosity extremes**: 0, 0.001, 0.002; and 0.15, 0.20 with the conditioning clamp lifted (in production the request is
-   clamped at the training maximum 0.107; lifting it shows what the model does when truly extrapolating).
+2. **Ply pitch** 8 and 32 voxels, i.e. 24 thin or 6 thick plies filling the 192-voxel depth (the trained pitches are about
+   10 and 19.6 voxels, so 8 sits just below the thinner one and 32 well above the thicker one).
+3. **Porosity extremes**: 0, 0.001 and 0.15, 0.20 with the conditioning clamp lifted, and 0.002 as the in-distribution
+   anchor (in production every request is clamped to the training range 0.002–0.107; lifting it shows what the model does
+   when truly extrapolating). The two ends are not symmetric: the conditioning is log(φ + 0.001), so the low pair is
+   further off the training range (0.9 sd) than the high pair (0.5 sd). Every such volume carries `porosity_clamped: false`
+   in its manifest so it can never be mistaken for an in-range one.
 4. **Field correlation lengths** 16, 64 and 512 voxels on the coherent-field case.
 The readers and metrics are the ones of the main eval; their floors are printed. Pore sizes and shapes are analysed
 separately with the author's own program, not here.
