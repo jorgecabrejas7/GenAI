@@ -190,6 +190,9 @@ def verdict(rows: list[dict]) -> dict:
         v = [r[k] for r in rows if r.get(k) is not None]
         return float(np.mean(v)) if v else None
 
+    def n_with(k):
+        return sum(1 for r in rows if r.get(k) is not None)
+
     r8, r0 = mean("ratio_-8"), mean("ratio_+0")      # NON-TERMINAL planes
     grey, phi_err = mean("grey_chunk_ratio"), mean("phi_error")
     band_ok = (r8 is not None and r0 is not None
@@ -203,6 +206,11 @@ def verdict(rows: list[dict]) -> dict:
             "grey_chunk_ratio": grey,
             "pore_chunk_ratio": mean("pore_chunk_ratio"),
             "phi_volume": mean("phi_volume"), "phi_error": phi_err,
+            # A volume with ONE chunk end per axis has no non-terminal plane at
+            # all: 384 without overlap is such a case. Those cases contribute
+            # nothing to `ratio_-8`, so the case count beside it would otherwise
+            # claim more evidence than there is.
+            "n_cases_with_nonterminal": n_with("ratio_-8"),
             "wall_time_s": mean("wall_time_s"),
             "band_ok": band_ok, "grey_ok": grey_ok, "phi_ok": phi_ok,
             "PASS": bool(band_ok and grey_ok and phi_ok)}
@@ -246,7 +254,7 @@ def main() -> int:
         flags = ("band " if not s["band_ok"] else "") + \
                 ("grey " if not s["grey_ok"] else "") + \
                 ("phi" if not s["phi_ok"] else "")
-        print(f"{name[:24]:<24}{len(blk['per_case']):>3}{f('phi_volume', 8, 4)}"
+        print(f"{name[:24]:<24}{s['n_cases_with_nonterminal']:>3}{f('phi_volume', 8, 4)}"
               f"{f('phi_error', 8, 4)}{f('ratio_-8', 8)}{f('worst_-8', 8)}"
               f"{f('ratio_+0', 8)}{f('terminal_-8', 8)}"
               f"{f('grey_chunk_ratio', 7)}{f('pore_chunk_ratio', 7)}"
@@ -255,6 +263,9 @@ def main() -> int:
     print(f"\ncriterion: -8 AND +0 within +/-{BAND_TOL:.0%} of the volume mean, over "
           f"NON-TERMINAL planes; grey chunk seam >= {GREY_CHUNK_FLOOR - 0.05:.3f} "
           f"(real floor {GREY_CHUNK_FLOOR}); |phi - request| <= {POROSITY_GATE}.")
+    print("n = cases that HAVE a non-terminal plane: an axis with one chunk end "
+          "has none,\nso 384 without overlap contributes nothing to the -8/+0 "
+          "columns.")
     print("'worst' is the single worst non-terminal plane. 'term-8' is the LAST "
           "plane on each axis,\nwhose successor's far face is the volume edge "
           "(OOB) — the trained state, and so the in-distribution anchor.")
