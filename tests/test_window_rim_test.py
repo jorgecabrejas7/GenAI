@@ -161,3 +161,62 @@ class TestFaceProfile:
         for fc, shells in prof.items():
             vals = [v for v in shells.values() if v is not None]
             assert max(vals) - min(vals) < 0.02, fc
+
+
+class TestFaceNeighbourSplit:
+    """Is a window's dip at a face INHERITED from what lies across it?
+
+    A window conditioned on a pore-poor neighbour may be depleted because of
+    what it was shown, not because of which face it was. That matters: if the
+    depletion is inherited, fixing one chunk strip lifts the other, and a fix
+    scoped to mixed-set windows can still clear the whole profile. The
+    statistic has to distinguish "own phi follows the neighbour's" from "own
+    phi is unrelated to it", so both are planted here.
+    """
+
+    def _striped(self, axis: int):
+        """Tiles alternate pore / material along `axis`.
+
+        Along that axis a tile's neighbour is always its opposite, so own phi
+        ANTI-tracks the neighbour. Along the other two axes the neighbour is
+        the same kind, so own phi TRACKS it. One volume, both signs.
+        """
+        lab = canvas()
+        n = W.TILE
+        for tz in range(TILES[0]):
+            for ty in range(TILES[1]):
+                for tx in range(TILES[2]):
+                    if (tz, ty, tx)[axis] % 2 == 0:
+                        lab[tz * n:(tz + 1) * n, ty * n:(ty + 1) * n,
+                            tx * n:(tx + 1) * n] = PORE
+        return lab
+
+    def test_it_sees_a_dip_that_tracks_the_neighbour(self):
+        sp = W.face_neighbour_split(self._striped(1), TILES)
+        for fc in ("+x", "-x", "+z", "-z"):          # neighbour is the same kind
+            v = sp[fc]
+            assert v["own_phi_facing_pore_poor"] == pytest.approx(0.0)
+            assert v["own_phi_facing_pore_rich"] == pytest.approx(1.0)
+
+    def test_it_sees_a_dip_that_does_not_track_the_neighbour(self):
+        sp = W.face_neighbour_split(self._striped(1), TILES)
+        for fc in ("+y", "-y"):                       # neighbour is the opposite
+            v = sp[fc]
+            assert v["own_phi_facing_pore_poor"] == pytest.approx(1.0)
+            assert v["own_phi_facing_pore_rich"] == pytest.approx(0.0)
+
+    def test_a_uniform_volume_splits_into_two_equal_halves(self):
+        """No relationship to find, and none reported."""
+        rng = np.random.default_rng(0)
+        lab = np.where(rng.random(SHAPE) < 0.25, PORE, MATERIAL).astype(np.uint8)
+        sp = W.face_neighbour_split(lab, TILES)
+        for fc, v in sp.items():
+            assert v["own_phi_facing_pore_poor"] == pytest.approx(
+                v["own_phi_facing_pore_rich"], abs=0.02), fc
+
+    def test_a_window_with_no_neighbour_on_that_face_is_not_paired(self):
+        """Only in-bounds neighbours; an OOB face has nothing across it."""
+        sp = W.face_neighbour_split(self._striped(1), TILES)
+        interior = W.n_interior(TILES)
+        for fc, v in sp.items():
+            assert v["n"] == interior      # every interior tile has all six

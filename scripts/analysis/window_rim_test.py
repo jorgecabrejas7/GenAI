@@ -149,6 +149,67 @@ def face_profile(label: np.ndarray, tiles=TILES, core: int = 16) -> dict:
     return out
 
 
+def face_neighbour_split(label: np.ndarray, tiles=TILES, core: int = 16,
+                         shell: int = SLAB) -> dict:
+    """Does a window's dip at a face follow what lies ON THE OTHER SIDE of it?
+
+    A window whose neighbour face is itself pore-poor may be depleted because
+    it is conditioned on pore-poor material — inherited, not generated. That
+    would mean fixing one strip lifts the other, and it is separable: pair each
+    window's own phi in the `shell` voxels at a face with the NEIGHBOUR tile's
+    phi in its own `shell` voxels across the same plane, then split the windows
+    at the median neighbour value.
+
+    If the dip is inherited, the windows facing pore-poor neighbours are much
+    more depleted than those facing pore-rich ones. If it is a property of the
+    face's availability alone, both halves look the same.
+    """
+    n = TILE
+    rz, ry, rx = interior_range(tiles)
+    out: dict[str, dict] = {}
+    for name, axis, sign in FACES:
+        pairs = []
+        for tz in rz:
+            for ty in ry:
+                for tx in rx:
+                    t = [tz, ty, tx]
+                    nb = list(t)
+                    nb[axis] += sign
+                    if not 0 <= nb[axis] < tiles[axis]:
+                        continue
+
+                    def block(ti):
+                        return label[ti[0] * n:(ti[0] + 1) * n,
+                                     ti[1] * n:(ti[1] + 1) * n,
+                                     ti[2] * n:(ti[2] + 1) * n]
+
+                    own_sl = [slice(core, n - core)] * 3
+                    nb_sl = [slice(core, n - core)] * 3
+                    # The two `shell`-thick slabs either side of the shared plane.
+                    own_sl[axis] = (slice(0, shell) if sign < 0
+                                    else slice(n - shell, n))
+                    nb_sl[axis] = (slice(n - shell, n) if sign < 0
+                                   else slice(0, shell))
+                    a, b = block(t)[tuple(own_sl)], block(nb)[tuple(nb_sl)]
+                    pa, pb = phi_of(a), phi_of(b)
+                    if pa is not None and pb is not None:
+                        pairs.append((pb, pa))
+        if not pairs:
+            continue
+        nb_phi = np.array([p[0] for p in pairs])
+        own = np.array([p[1] for p in pairs])
+        med = float(np.median(nb_phi))
+        poor, rich = nb_phi <= med, nb_phi > med
+        out[name] = {
+            "n": len(pairs),
+            "neighbour_phi_median": med,
+            "own_phi_facing_pore_poor": float(own[poor].mean()) if poor.any() else None,
+            "own_phi_facing_pore_rich": float(own[rich].mean()) if rich.any() else None,
+            "neighbour_phi_poor": float(nb_phi[poor].mean()) if poor.any() else None,
+            "neighbour_phi_rich": float(nb_phi[rich].mean()) if rich.any() else None,
+        }
+    return out
+
 def build(runner, reference, s_nb: float, ddim: int, theta,
           neighbour_mode: str = "reference"):
     from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator
@@ -271,6 +332,7 @@ def main() -> int:
             "phi_interior_windows": interior_phi(lab, tiles),
             "phi_by_shell": rim_profile(lab, tiles),
             "phi_by_face": face_profile(lab, tiles),
+            "face_neighbour_split": face_neighbour_split(lab, tiles),
             "wall_s": round(time.perf_counter() - t0, 1),
         }
         np.save(args.out / f"label_snb{s_nb:g}.npy", lab)
@@ -290,6 +352,22 @@ def main() -> int:
             (f"{a['phi_by_shell'][s]:>9.4f}" if a["phi_by_shell"].get(s) is not None
              else f"{'-':>9}") for s in shells)
         print(f"{arm:<22}{a['phi_interior_windows']:>11.4f}{cells}")
+    for arm, a in results["arms"].items():
+        sp = a.get("face_neighbour_split")
+        if not sp:
+            continue
+        print(f"\nis the dip INHERITED? own phi in the 8 voxels at a face, "
+              f"split by the neighbour's own phi across it — {arm}")
+        print(f"{'face':<8}{'n':>5}{'nb phi poor':>13}{'own phi':>10}"
+              f"{'nb phi rich':>13}{'own phi':>10}")
+        for fc, v in sp.items():
+            def f(x):
+                return "-" if x is None else f"{x:.4f}"
+            print(f"{fc:<8}{v['n']:>5}{f(v['neighbour_phi_poor']):>13}"
+                  f"{f(v['own_phi_facing_pore_poor']):>10}"
+                  f"{f(v['neighbour_phi_rich']):>13}"
+                  f"{f(v['own_phi_facing_pore_rich']):>10}")
+
     faces = [f[0] for f in FACES]
     for arm, a in results["arms"].items():
         if "phi_by_face" not in a:
