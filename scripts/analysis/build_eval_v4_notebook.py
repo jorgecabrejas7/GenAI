@@ -2114,13 +2114,15 @@ def to_notebook() -> nbformat.NotebookNode:
     nb = new_notebook()
     nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
     nb.metadata["language_info"] = {"name": "python"}
-    for kind, text in CELLS:
+    for i, (kind, text) in enumerate(CELLS):
         if kind == "index":
-            nb.cells.append(new_markdown_cell(index_cell_text()))
+            cell = new_markdown_cell(index_cell_text())
         elif kind == "md":
-            nb.cells.append(new_markdown_cell(text))
+            cell = new_markdown_cell(text)
         else:
-            nb.cells.append(new_code_cell(text))
+            cell = new_code_cell(text)
+        cell["id"] = f"cell-{i:03d}"  # stable ids: a rebuild must not churn the committed copy
+        nb.cells.append(cell)
     nbformat.validate(nb)
     return nb
 
