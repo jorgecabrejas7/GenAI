@@ -53,6 +53,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="generate only these case names")
     g.add_argument("--dry-run", action="store_true",
                    help="list the cases and what each one asks for, generate nothing")
+    # Sampler overrides for a whole-campaign regeneration.  They apply only to
+    # cases on the PRODUCTION neighbour path ("canvas"); the joint and
+    # teacher-forced arms of assembly_modes keep their own settings, because
+    # those settings are what those arms ARE and overriding them would destroy
+    # the comparison rather than re-run it.
+    g.add_argument("--chunk-overlap", type=int, default=None,
+                   help="override the case's chunk_overlap, in voxels")
+    g.add_argument("--chunk-overlap-pinned", type=int, default=None,
+                   help="voxels of the overlap held at the predecessor's value")
+    g.add_argument("--chunk-overlap-write", default=None,
+                   choices=("blend", "pin", "successor"),
+                   help="how the free part of the overlap is written")
     g.add_argument("--save-latents", action="store_true",
                    help="also write latents.npy per case — the finished latent canvas the "
                         "decoder consumed. Required by the decoder fine-tune gate, which "
@@ -92,6 +104,37 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _apply_sampler_overrides(specs, args):
+    """Apply --chunk-overlap* to the PRODUCTION-path cases only.
+
+    A case whose ``neighbour_mode`` is not ``"canvas"`` is an assembly_modes
+    arm: joint sees every face as the CFG null, teacher_forced sees real
+    material at every face.  Those settings are the definition of the arm, not
+    a choice about how to sample it, so an override would silently turn the
+    comparison into four copies of one thing.
+    """
+    import dataclasses  # noqa: PLC0415
+
+    changes = {k: v for k, v in (
+        ("chunk_overlap", args.chunk_overlap),
+        ("chunk_overlap_pinned", args.chunk_overlap_pinned),
+        ("chunk_overlap_write", args.chunk_overlap_write),
+    ) if v is not None}
+    if not changes:
+        return specs
+    out, skipped = [], 0
+    for spec in specs:
+        if spec.neighbour_mode != "canvas":
+            out.append(spec)
+            skipped += 1
+            continue
+        out.append(dataclasses.replace(spec, **changes))
+    log.info("sampler override %s applied to %d case(s); %d left on their own "
+             "settings (neighbour_mode != canvas)",
+             changes, len(out) - skipped, skipped)
+    return out
+
+
 def cmd_generate(args) -> int:
     from tqdm import tqdm  # noqa: PLC0415
 
@@ -123,6 +166,7 @@ def cmd_generate(args) -> int:
         args.model, args.ckpt, weights=args.weights, repo=repo,
         save_latents=args.save_latents,
     )
+    specs = _apply_sampler_overrides(specs, args)
     todo = [s for s in specs
             if not (case_dir(args.out, args.assessment, s.name) / "manifest.json").exists()]
     log.info("%d of %d cases still to generate", len(todo), len(specs))

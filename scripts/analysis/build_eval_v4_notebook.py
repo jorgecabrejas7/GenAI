@@ -2486,15 +2486,27 @@ def to_notebook() -> nbformat.NotebookNode:
 
 
 def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--root", type=Path, default=CAMPAIGN,
+                    help="campaign directory to write the notebook and its "
+                         "requirements into (default: the 12-eval-v4 campaign). "
+                         "The committed copy under notebooks/ is written either "
+                         "way, so a regenerated campaign gets its own notebook "
+                         "without either copy going missing.")
+    args = ap.parse_args()
+
     build_all()
     nb = to_notebook()
-    OUT_CAMPAIGN.parent.mkdir(parents=True, exist_ok=True)
-    nbformat.write(nb, OUT_CAMPAIGN)
-    OUT_REQ.write_text(REQUIREMENTS)
+    out_campaign = args.root / OUT_CAMPAIGN.name
+    out_campaign.parent.mkdir(parents=True, exist_ok=True)
+    nbformat.write(nb, out_campaign)
+    (args.root / OUT_REQ.name).write_text(REQUIREMENTS)
     OUT_REPO.parent.mkdir(parents=True, exist_ok=True)
     nbformat.write(nb, OUT_REPO)
     n_md = sum(1 for c in nb.cells if c.cell_type == "markdown"); n_code = len(nb.cells) - n_md
-    print(f"wrote {OUT_CAMPAIGN} and {OUT_REPO}: {len(nb.cells)} cells ({n_md} markdown, {n_code} code), {len(SECTIONS)} sections")
+    print(f"wrote {out_campaign} and {OUT_REPO}: {len(nb.cells)} cells ({n_md} markdown, {n_code} code), {len(SECTIONS)} sections")
 
 
 if __name__ == "__main__":
