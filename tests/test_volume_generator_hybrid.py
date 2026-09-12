@@ -24,6 +24,7 @@ from poregen.diffusion.conditioning import (
 )
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.diffusion.sampler import (
+    chunk_blend_weight,
     DDIMSampler,
     VolumeGenerator,
     region_noise_field,
@@ -984,15 +985,15 @@ class TestChunkOverlap:
         assert ranges[-1][1] == 4 * LAT               # the axis is covered
         assert ranges[1][0] < ranges[0][1]            # and they really overlap
 
-    def test_the_overlap_strip_comes_out_of_the_run_unchanged(self):
-        """The finished chunk is preserved EXACTLY, not approximately.
+    def test_the_finished_chunk_is_untouched_outside_the_strip(self):
+        """Everything chunk 0 wrote away from the seam is bit-identical.
 
         Run the same request twice from the same seed: once with the chunk list
         cut to the first chunk only, once in full. The noise field is drawn
-        canvas-sized from the seed, so chunk 0 solves identically in both. Every
-        cell chunk 0 wrote must be bit-identical afterwards — if the successor
-        can move them, the overlap is rewriting finished material rather than
-        re-covering it.
+        canvas-sized from the seed, so chunk 0 solves identically in both.
+        Outside the overlap strip its cells must be untouched — a successor that
+        moves them is rewriting finished material, not re-covering a seam. The
+        strip itself IS meant to change: that is the blend.
         """
         gen, size_mm = self._gen(P // 2)
         shape = gen._volume_shape(size_mm)
@@ -1014,8 +1015,13 @@ class TestChunkOverlap:
         object.__setattr__(gen2, "_chunk_ranges", lambda n, per: [full(n, per)[0]])
         z_one = latents(gen2, 0)
 
-        np.testing.assert_array_equal(
-            z_full[:, :, :, lo:hi].cpu().numpy(), z_one[:, :, :, lo:hi].cpu().numpy())
+        strip = gen.chunk_overlap // DS
+        a = z_full[:, :, :, lo:hi - strip].cpu().numpy()
+        b = z_one[:, :, :, lo:hi - strip].cpu().numpy()
+        np.testing.assert_array_equal(a, b)
+        # And the strip did change, or the blend did nothing at all.
+        assert not np.array_equal(z_full[:, :, :, hi - strip:hi].cpu().numpy(),
+                                  z_one[:, :, :, hi - strip:hi].cpu().numpy())
 
     def test_the_former_frontier_gains_window_coverage(self):
         """The point of the change, as a count rather than a claim."""
@@ -1046,3 +1052,89 @@ class TestChunkOverlap:
     def test_an_overlap_the_geometry_cannot_honour_is_refused(self, bad, msg):
         with pytest.raises(ValueError, match=msg):
             self._gen(bad)
+
+
+class TestChunkBlendWeight:
+    """The ramp that decides which side's prediction survives in the strip.
+
+    Each chunk's outermost voxels are its own rim, and a rim beside a neighbour
+    under-predicts pores. In the strip one chunk holds the region as rim and
+    the other as interior — the other one each time — so the weight must run
+    from 1 where the solved content is interior to 0 where it is rim. Getting
+    this backwards would keep exactly the depleted voxels the change exists to
+    replace.
+    """
+
+    def test_it_runs_from_one_at_the_strip_start_to_zero_at_its_end(self):
+        w = chunk_blend_weight((48, 4, 4), 8, (True, False, False))
+        assert w[0, 0, 0] == pytest.approx(1.0)
+        assert w[8, 0, 0] == pytest.approx(0.0)
+        col = w[:8, 0, 0]
+        assert np.all(np.diff(col) < 0)                 # monotone, no plateau
+
+    def test_it_is_zero_everywhere_outside_the_strip(self):
+        w = chunk_blend_weight((48, 4, 4), 8, (True, False, False))
+        assert w[8:, :, :].max() == pytest.approx(0.0)
+
+    def test_an_axis_that_does_not_overlap_carries_no_ramp(self):
+        w = chunk_blend_weight((48, 48, 48), 8, (False, False, False))
+        assert w.max() == pytest.approx(0.0)
+
+    def test_each_overlapping_axis_gets_its_own_ramp(self):
+        w = chunk_blend_weight((48, 48, 4), 8, (True, True, False))
+        assert w[0, 20, 0] == pytest.approx(1.0)        # axis 0 strip
+        assert w[20, 0, 0] == pytest.approx(1.0)        # axis 1 strip
+        assert w[20, 20, 0] == pytest.approx(0.0)       # neither
+
+    def test_a_corner_keeps_the_finished_chunk(self):
+        """Where two strips meet neither side holds the cell as interior.
+
+        The larger weight wins, so settled material is not rewritten on the
+        evidence of a rim.
+        """
+        w = chunk_blend_weight((48, 48, 4), 8, (True, True, False))
+        assert w[0, 7, 0] == pytest.approx(1.0)
+        assert w[7, 0, 0] == pytest.approx(1.0)
+
+    def test_zero_overlap_is_all_zero(self):
+        assert chunk_blend_weight((48, 48, 48), 0, (True, True, True)).max() == 0.0
+
+
+class TestPinnedOnlyOverlap:
+    """`chunk_overlap_blend=False` — the variant that does NOT fix the band.
+
+    Kept deliberately. Pinning the strip preserves the finished chunk exactly,
+    and the depleted voxels at a seam ARE the finished chunk's own rim, so
+    pinning alone cannot remove the band. The paper needs to show that rather
+    than assert it, so the variant has to stay runnable and has to keep its
+    defining property: bit-identity of everything the predecessor wrote.
+    """
+
+    def test_the_finished_chunk_is_bit_identical_including_the_strip(self):
+        def run(cut_to_first):
+            gen, size_mm = _generator(
+                _SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
+                chunk_overlap=P // 2, chunk_overlap_blend=False)
+            shape = gen._volume_shape(size_mm)
+            full = gen._chunk_ranges
+            if cut_to_first:
+                object.__setattr__(gen, "_chunk_ranges",
+                                   lambda n, per: [full(n, per)[0]])
+            g = torch.Generator(device="cpu").manual_seed(0)
+            with torch.no_grad():
+                z = gen._generate_latents(
+                    shape, target_porosity=0.03, local_por_map=None,
+                    material_map=None, specimen_box=((0, 0, 0), shape),
+                    autocast_dtype=torch.float32, window_batch=8, generator=g)
+            return z, full(4, 2)[0]
+
+        z_full, (lo, hi) = run(False)
+        z_one, _ = run(True)
+        np.testing.assert_array_equal(z_full[:, :, :, lo:hi].cpu().numpy(),
+                                      z_one[:, :, :, lo:hi].cpu().numpy())
+
+    def test_it_builds_no_blend_weight_at_all(self):
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
+                            chunk_overlap=P // 2, chunk_overlap_blend=False)
+        assert gen.chunk_overlap == P // 2
+        assert gen.chunk_overlap_blend is False

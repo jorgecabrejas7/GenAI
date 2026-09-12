@@ -95,6 +95,7 @@ __all__ = [
     "AXIS_NAMES",
     "DDIMSampler",
     "NEIGHBOUR_MODES",
+    "chunk_blend_weight",
     "VolumeGenerator",
     "porosity_to_cond",
     "region_noise_field",
@@ -283,6 +284,48 @@ def window_weight(win_cells: int) -> torch.Tensor:
     i = torch.arange(L, dtype=torch.float32) + 0.5
     w1 = torch.sin(np.pi * i / L) ** 2
     return w1[:, None, None] * w1[None, :, None] * w1[None, None, :]
+
+
+def chunk_blend_weight(
+    chunk_cells: tuple[int, int, int],
+    overlap_cells: int,
+    at_lo: tuple[bool, bool, bool],
+) -> np.ndarray:
+    """Weight of the ALREADY-SOLVED content over a chunk's overlap strip.
+
+    Each chunk's outermost ``overlap`` voxels are its own rim, and a rim next to
+    a neighbour under-predicts pores.  Where two chunks overlap, one of them
+    holds the region as rim and the other as window interior — and it is the
+    OTHER one each time:
+
+        |<-- strip -->|
+        A interior    A RIM        (A ends at the right of the strip)
+        B RIM         B interior   (B starts at the left of the strip)
+
+    So the blend ramps from 1 at the strip's start, where the solved content is
+    interior and the newcomer's is rim, to 0 at its end, where it is the other
+    way round.  A cosine ramp, matching the window fusion.
+
+    ``at_lo[a]`` says whether this chunk starts inside its predecessor on axis
+    ``a``; only those axes carry a strip.  Where strips from two axes meet, the
+    larger weight wins: at such a corner NEITHER side holds the cell as clean
+    interior, and keeping the finished chunk is the choice that cannot rewrite
+    settled material on the evidence of a rim.
+    """
+    w = np.zeros(chunk_cells, dtype=np.float32)
+    if overlap_cells <= 0:
+        return w
+    for axis in range(3):
+        if not at_lo[axis] or chunk_cells[axis] < overlap_cells:
+            continue
+        n = int(overlap_cells)
+        ramp = 0.5 * (1.0 + np.cos(np.pi * np.arange(n, dtype=np.float32) / n))
+        line = np.zeros(chunk_cells[axis], dtype=np.float32)
+        line[:n] = ramp
+        shape = [1, 1, 1]
+        shape[axis] = chunk_cells[axis]
+        w = np.maximum(w, line.reshape(shape))
+    return w
 
 
 def seam_discontinuity(
@@ -664,6 +707,7 @@ class VolumeGenerator:
         theta_deg: np.ndarray | None = None,
         chunk_tiles: tuple[int, int, int] = (3, 3, 3),
         chunk_overlap: int = 0,
+        chunk_overlap_blend: bool = True,
         window_stride: int = 32,
         decode_stride: int = 32,
         neighbour_mode: str = "canvas",
@@ -685,6 +729,7 @@ class VolumeGenerator:
         self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
         self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
         self.chunk_overlap = int(chunk_overlap)
+        self.chunk_overlap_blend = bool(chunk_overlap_blend)
         self.window_stride = int(window_stride)
         self.decode_stride = int(decode_stride)
         self.downsample    = self.patch_size // self.latent_size
@@ -941,6 +986,12 @@ class VolumeGenerator:
             known = torch.from_numpy(
                 available[chunk_sl].astype(np.float32)).to(self.device)[None, None]
             known_z = z_clean[(slice(None), *chunk_sl)].unsqueeze(0).clone()
+            blend_w = None
+            if self.chunk_overlap and self.chunk_overlap_blend:
+                blend_w = torch.from_numpy(chunk_blend_weight(
+                    chunk_cells, self.chunk_overlap // ds,
+                    tuple(lo[a] > 0 for a in range(3)),
+                )).to(self.device)[None, None] * known
 
             origins = window_origins(chunk_cells, L, s_cells)
             g_origins = [tuple(lo[a] + o[a] for a in range(3)) for o in origins]
@@ -1054,10 +1105,21 @@ class VolumeGenerator:
                     progress.update(1)
 
             if self.chunk_overlap:
-                # The last ddim_step moved the pinned strip off its known value
-                # by one step; restore it exactly, so "the finished chunk is
-                # preserved" is a fact and not an approximation.
-                x = x * (1 - known) + known * known_z
+                if blend_w is None:
+                    # Pinned only: the strip is restored exactly, so the
+                    # finished chunk is preserved to the bit.  This does NOT
+                    # remove the porosity band — the depleted voxels are the
+                    # previous chunk's own rim and pinning is what keeps them —
+                    # and it exists to show that in the paper.
+                    x = x * (1 - known) + known * known_z
+                else:
+                    # Blend: each side's rim is replaced by the other side's
+                    # window interior, which is the point.  `x` here is this
+                    # chunk's own prediction over the strip: the RePaint pinning
+                    # held the strip at its known value while the windows ran,
+                    # so this prediction is coherent with the finished chunk
+                    # rather than an independent draw of it.
+                    x = x * (1 - blend_w) + blend_w * known_z
             z_clean[(slice(None), *chunk_sl)] = x[0]
             available[chunk_sl] = True
             logger.info("Chunk %d/%d done (tiles %s)", chunk_idx + 1, len(chunks), chunk)
