@@ -28,6 +28,9 @@ import numpy as np
 from poregen.eval_v4 import field_stats as FS
 from poregen.eval_v4 import metrics as M
 from poregen.eval_v4 import stress_geometry as SG
+from poregen.diffusion.conditioning import POR_MAX as OOD_POR_MAX
+from poregen.diffusion.conditioning import porosity_to_cond
+from poregen.diffusion.conditioning import POR_MIN as OOD_POR_MIN
 from poregen.eval_v4.cases import (
     ASSEMBLY_OFFSETS,
     ASSEMBLY_REGION,
@@ -1582,6 +1585,185 @@ def measure_stress_geometry(root, repo) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 13 - conditioning out of distribution (EXPLORATORY, off the gates)
+# ---------------------------------------------------------------------------
+
+#: The train-split (mean, std) of log(phi + 1e-3), read from the latent store's
+#: metadata so the reported conditioning value is the one the model actually
+#: received rather than a constant copied into source.
+def _por_log_stats(repo: Path) -> tuple[float, float] | None:
+    meta = Path(repo) / "data" / "split_v3" / "latents_r08z8" / "metadata.json"
+    if not meta.exists():
+        return None
+    try:
+        st = json.loads(meta.read_text())["conditioning"]["por_standardisation"]
+        return float(st["mean"]), float(st["std"])
+    except Exception as exc:                              # noqa: BLE001
+        logger.warning("could not read por_standardisation from %s: %s", meta, exc)
+        return None
+
+
+def _ply_hits(layup: dict) -> dict:
+    """Per-ply agreement, per reader, as the table the report prints.
+
+    `layup_recovery` already returns `per_ply_hit` for each reader; this pulls
+    the two readers side by side and counts them, because the question the
+    group asks is not "what was the median error" but "which plies came back".
+    """
+    out = {}
+    for name, r in (layup.get("readers") or {}).items():
+        if not r.get("available"):
+            out[name] = {"available": False}
+            continue
+        hits = r.get("per_ply_hit") or []
+        out[name] = {
+            "available": True,
+            "per_ply_hit": hits,
+            "n_plies": len(hits),
+            "n_hit": int(sum(bool(h) for h in hits)),
+            "class_accuracy": (float(np.mean(hits)) if hits else None),
+            "median_abs_error_deg": r.get("median_abs_error_deg"),
+            "max_abs_error_deg": r.get("max_abs_error_deg"),
+            "frac_within_10": r.get("frac_within_10"),
+            "recovered_ply_count": r.get("recovered_ply_count"),
+        }
+    return out
+
+
+def measure_ood_conditioning(root, repo) -> dict:
+    """13 - what the conditioning does when asked for what it never saw.
+
+    EXPLORATORY. Four groups, each probing one axis of the conditioning with
+    the others held at their trained values. Pore size and shape are NOT
+    measured here; the author analyses those with an external program.
+    """
+    cases = load_cases(root, "ood_conditioning")
+    if not cases:
+        raise FileNotFoundError(f"no ood_conditioning volumes under {root}")
+    stats = _por_log_stats(Path(repo))
+    rows = []
+    for case in cases:
+        m = case.manifest
+        notes = m.notes or {}
+        group = notes.get("group")
+        material = case.material_voxels()
+        label = case.label
+
+        row = measure_core(case)
+        row["group"] = group
+        row["ddim_steps"] = m.ddim_steps
+        row["failure_flags"] = row["failure"]
+        row["seam_metrics"] = row["seams"]
+        row["phase_fractions"] = M.phase_fractions(label, material, manifest=m)
+        # measure_core writes `porosity` when a global phi was requested; the
+        # brief names it porosity_error, so both names point at one object.
+        if "porosity" in row:
+            row["porosity_error"] = row["porosity"]
+
+        # What the model was actually conditioned on, and whether the clamp
+        # touched it. Without this a row at phi 0.20 cannot be told from one
+        # at 0.107, which is what the clamp would have made of it.
+        if m.requested_global_phi is not None:
+            phi = float(m.requested_global_phi)
+            held = float(np.clip(phi, OOD_POR_MIN, OOD_POR_MAX))
+            row["conditioning"] = {
+                "requested_phi": phi,
+                "porosity_clamped": m.porosity_clamped,
+                "phi_conditioned": phi if not m.porosity_clamped else held,
+                "phi_if_clamped": held,
+                "clamp_changed_the_request": bool(
+                    not m.porosity_clamped and abs(held - phi) > 1e-12),
+                "cond_por": (float(porosity_to_cond(
+                    phi if not m.porosity_clamped else held, stats))
+                    if stats else None),
+                "cond_por_units": (
+                    "standard deviations of log(phi + 1e-3) over the train split"
+                    if stats else None),
+            }
+
+        if group in ("sequence", "pitch"):
+            row["layup_recovery"] = _layup_block(
+                case.xct, label, manifest=m, repo=repo, what=group)
+            row["ply_hits"] = (_ply_hits(row["layup_recovery"])
+                               if row["layup_recovery"].get("available") else {})
+            row["requested_ply_blocks"] = int(np.ceil(
+                m.volume_shape[0] / float(m.requested_ply_thickness_vox)))
+
+        if group == "correlation":
+            # The question is whether the DELIVERED field carries the
+            # correlation length that was asked for, so the field is read back
+            # out of the label and measured with the same estimator campaign 01
+            # measured the real lengths with.
+            field = FS.delivered_field(label, material)
+            row["field"] = FS.field_statistics(field)
+            row["requested_corr_vox"] = notes.get("corr_length_vox")
+            try:
+                row["local_obedience"] = M.local_obedience(
+                    label, material, manifest=m,
+                    requested_tiles=case.requested_field)
+            except ValueError as exc:
+                row["local_obedience"] = {"available": False, "reason": str(exc)}
+        rows.append(row)
+        case.release()
+
+    summary = {}
+    for group, sel in _group(rows, lambda r: r["group"]).items():
+        block = {"n_cases": len(sel), **_failure_rate(sel),
+                 "phi_pore": _agg(sel, ("phase_fractions", "phi_pore")),
+                 **_seam_summary(sel)}
+        if group in ("sequence", "pitch"):
+            for reader in ("fft_slice", "pore_axes"):
+                block[f"{reader}_class_accuracy"] = _agg(
+                    sel, ("ply_hits", reader, "class_accuracy"))
+                block[f"{reader}_median_abs_error_deg"] = _agg(
+                    sel, ("ply_hits", reader, "median_abs_error_deg"))
+        if group == "porosity":
+            block["phi_error"] = _agg(sel, ("porosity_error", "error"))
+            block["delivered_phi"] = _agg(sel, ("porosity_error", "delivered_phi"))
+            block["abs_error"] = _agg(sel, ("porosity_error", "abs_error"))
+            block["within_gate_rate"] = float(np.mean(
+                [bool((r.get("porosity_error") or {}).get("within_gate"))
+                 for r in sel]))
+        if group == "correlation":
+            block["delivered_corr_by_axis"] = {
+                ax: _agg(sel, ("field", "per_axis", ax, "corr_length_vox"))
+                for ax in ("z", "y", "x")
+            }
+        summary[group] = block
+
+    return {
+        "assessment": "ood_conditioning",
+        "question": ("What does the conditioning do when it is asked for what "
+                     "the training set does not contain?"),
+        "exploratory": True,
+        "off_gates_because": (
+            "every request here is outside the conditioning distribution the "
+            "model was trained on. A failure is the boundary of the "
+            "conditioning, not a defect of the kind the gated assessments "
+            "report, and no threshold is applied to anything in this file."
+        ),
+        "clamp_note": (
+            "cond_por is log(phi + 1e-3) standardised, and the training-range "
+            f"clamp holds a request inside [{OOD_POR_MIN}, {OOD_POR_MAX}] before "
+            "conditioning. The clamp is LIFTED for the four extreme requests and "
+            "each says so in `conditioning.porosity_clamped`. It had to be lifted "
+            "at the bottom as well as the top: clamped, 0.000, 0.001 and 0.002 "
+            "all condition identically, so the low row would be one request run "
+            "nine times. The two ends are not symmetric — a log transform "
+            "compresses the top, so the clamp erases 0.87 sd at the bottom and "
+            "0.49 at the top, and 0.150 sits only +0.26 sd beyond the ceiling."
+        ),
+        "not_measured": (
+            "pore size and pore shape. The author analyses those with an "
+            "external program, so measuring them here would be a second answer "
+            "to a question that already has one."
+        ),
+        "per_case": rows,
+        "summary": summary,
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -1596,6 +1778,7 @@ MEASURERS = {
     "field_stats": measure_field_stats,
     "assembly_modes": measure_assembly_modes,
     "stress_geometry": measure_stress_geometry,
+    "ood_conditioning": measure_ood_conditioning,
 }
 
 

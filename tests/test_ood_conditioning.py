@@ -175,3 +175,131 @@ class TestCaseList:
             assert c.notes["isotropic"] is True
             assert c.notes["corr_length_vox"] in OOD_CORR_VOX
             assert c.field_fn is not None
+
+
+# ---------------------------------------------------------------------------
+# The measurer and reporter, end to end on a small fake campaign
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+from poregen.eval_v4.io import FIELD_NPY  # noqa: E402
+from poregen.eval_v4.io import case_dir as case_path  # noqa: E402
+from poregen.eval_v4.io import repo_root, save_case  # noqa: E402
+from poregen.eval_v4.manifest import Manifest  # noqa: E402
+
+COMMIT = "0" * 40
+LABEL_MATERIAL, LABEL_PORE, LABEL_AIR = 0, 1, 2
+FAKE_SHAPE = (192, 192, 192)
+
+
+def _write_ood(root, name, *, group, phi, clamped=True, pitch=19.6,
+               layup=(45, -45, 90, 0), field=None, notes=None, seed=101):
+    rng = np.random.default_rng(seed)
+    xct = np.clip(120 + 6 * rng.standard_normal(FAKE_SHAPE), 0, 255).astype(np.uint8)
+    lab = np.where(rng.random(FAKE_SHAPE) < max(phi, 1e-4),
+                   LABEL_PORE, LABEL_MATERIAL).astype(np.uint8)
+    m = Manifest(
+        assessment="ood_conditioning", case=name, volume_shape=FAKE_SHAPE,
+        git_commit=COMMIT, model_run="runs/ldm/x", checkpoint_step=1,
+        weights="ema", ddim_steps=50, chunk_tiles=(3, 3, 3), window_stride=32,
+        decode="overlapped", decode_overlap=32, s_por=1.0, s_nb=1.0, seed=seed,
+        objective="v", cfg_rescale=0.0, requested_global_phi=phi,
+        requested_layup=layup, requested_ply_thickness_vox=pitch,
+        requested_material="full", porosity_clamped=clamped,
+        requested_field=None if field is None else FIELD_NPY,
+        wall_time_s=1.0, peak_gpu_memory_bytes=1 << 30,
+        notes={"group": group, "exploratory": True,
+               "off_gates_because": "test", **(notes or {})},
+    )
+    save_case(case_path(root, "ood_conditioning", name), m, xct, lab,
+              requested_field=field)
+
+
+@pytest.fixture(scope="module")
+def ood_measured(tmp_path_factory):
+    """One case per group, built and measured ONCE."""
+    root = tmp_path_factory.mktemp("ood")
+    _write_ood(root, "seq_crossply_seed101", group="sequence", phi=0.03,
+               layup=(0, 90, 90, 0), notes={"sequence": "seq_crossply"})
+    _write_ood(root, "pitch32_seed101", group="pitch", phi=0.03, pitch=32.0,
+               notes={"pitch_vox": 32.0})
+    _write_ood(root, "phi0_seed101", group="porosity", phi=0.0, clamped=False,
+               notes={"clamp_lifted": True})
+    _write_ood(root, "phi0.2_seed101", group="porosity", phi=0.2, clamped=False,
+               notes={"clamp_lifted": True})
+    _write_ood(root, "phi0.002_seed101", group="porosity", phi=0.002,
+               clamped=True, notes={"clamp_lifted": False})
+    grid = tuple(s // 64 for s in FAKE_SHAPE)
+    _write_ood(root, "corr16", group="correlation", phi=0.03,
+               field=np.full(grid, 0.03, np.float32),
+               notes={"corr_length_vox": 16.0, "isotropic": True})
+    from poregen.eval_v4.measure import measure_ood_conditioning
+    res = measure_ood_conditioning(root, repo_root())
+    res["_root"] = str(root)
+    return res
+
+
+class TestMeasurer:
+
+    def test_every_block_the_report_reads_is_present(self, ood_measured):
+        assert ood_measured["exploratory"] is True
+        assert len(ood_measured["per_case"]) == 6
+        for row in ood_measured["per_case"]:
+            for key in ("phase_fractions", "seam_metrics", "failure_flags",
+                        "conditioning", "wall_time_s", "porosity_error"):
+                assert key in row, f"{row['case']} is missing {key}"
+
+    def test_the_clamp_is_reported_per_case_and_not_inferred(self, ood_measured):
+        by = {r["case"]: r["conditioning"] for r in ood_measured["per_case"]}
+        assert by["phi0_seed101"]["porosity_clamped"] is False
+        assert by["phi0_seed101"]["phi_conditioned"] == 0.0
+        assert by["phi0_seed101"]["phi_if_clamped"] == POR_MIN
+        assert by["phi0_seed101"]["clamp_changed_the_request"] is True
+        # 0.002 IS POR_MIN, so holding it changes nothing.
+        assert by["phi0.002_seed101"]["porosity_clamped"] is True
+        assert by["phi0.002_seed101"]["phi_conditioned"] == pytest.approx(0.002)
+
+    def test_cond_por_says_how_far_off_the_manifold_each_request_is(self, ood_measured):
+        by = {r["case"]: r["conditioning"]["cond_por"]
+              for r in ood_measured["per_case"] if r["group"] == "porosity"}
+        assert by["phi0_seed101"] < by["phi0.002_seed101"] < by["phi0.2_seed101"]
+
+    def test_the_layup_groups_report_a_reason_when_too_narrow(self, ood_measured):
+        """The fake volumes are 192 wide, under the 1024 T-I window."""
+        for r in ood_measured["per_case"]:
+            if r["group"] not in ("sequence", "pitch"):
+                continue
+            assert r["layup_recovery"]["available"] is False
+            assert "1024" in r["layup_recovery"]["reason"]
+            assert r["requested_ply_blocks"] > 0
+
+    def test_the_correlation_case_measures_the_field_back(self, ood_measured):
+        r = next(r for r in ood_measured["per_case"] if r["group"] == "correlation")
+        assert r["requested_corr_vox"] == 16.0
+        assert set(r["field"]["per_axis"]) >= {"z", "y", "x"}
+        assert r["local_obedience"]["requested"] is True
+
+    def test_the_summary_has_one_entry_per_group(self, ood_measured):
+        assert set(ood_measured["summary"]) == {
+            "sequence", "pitch", "porosity", "correlation"}
+
+
+class TestReporter:
+
+    def test_findings_carry_all_four_groups(self, ood_measured):
+        from poregen.eval_v4.io import write_results
+        from poregen.eval_v4.report import report_one
+
+        root = Path(ood_measured["_root"])
+        write_results(root, "ood_conditioning", ood_measured)
+        text = report_one(root, "ood_conditioning").read_text()
+        assert "EXPLORATORY" in text
+        for heading in ("stacking sequences", "ply pitch", "requested porosity",
+                        "correlation length"):
+            assert heading in text, heading
+        # The clamp must be visible in the table, not only in the prose.
+        assert "lifted" in text and "held" in text
+        assert "stated failure mode" in text
+        assert (root / "ood_conditioning" / "figures"
+                / "porosity_extremes.png").exists()

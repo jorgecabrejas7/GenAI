@@ -1543,6 +1543,190 @@ def _stress_montage(res, root) -> list[str]:
     return paths
 
 
+# ---------------------------------------------------------------------------
+# 13 - conditioning out of distribution (EXPLORATORY)
+# ---------------------------------------------------------------------------
+
+def _hit_string(hits) -> str:
+    """Per-ply agreement as a row of marks, which reads faster than a list."""
+    if not hits:
+        return "--"
+    return "".join("#" if h else "." for h in hits)
+
+
+def _ood_layup_table(rows) -> str:
+    out = []
+    for r in sorted(rows, key=lambda r: r["case"]):
+        lr = r.get("layup_recovery") or {}
+        if not lr.get("available"):
+            out.append([r["case"], "--", "no reading", "--", "--", "--"])
+            continue
+        for reader in ("fft_slice", "pore_axes"):
+            h = (r.get("ply_hits") or {}).get(reader) or {}
+            if not h.get("available"):
+                out.append([r["case"], reader, "unavailable", "--", "--", "--"])
+                continue
+            out.append([
+                r["case"], reader,
+                f"{h['n_hit']}/{h['n_plies']}",
+                fmt(h.get("class_accuracy"), 2),
+                fmt(h.get("median_abs_error_deg"), 1),
+                _hit_string(h.get("per_ply_hit")),
+            ])
+    return table(["case", "reader", "plies hit", "class acc",
+                  "median |err| deg", "per ply"], out)
+
+
+def report_ood_conditioning(res, root, floor) -> tuple[str, list[str]]:
+    groups: dict[str, list] = {}
+    for r in res["per_case"]:
+        groups.setdefault(r.get("group"), []).append(r)
+
+    text = [
+        "## Conditioning asked for what the training set does not contain",
+        "",
+        "**EXPLORATORY. Nothing here is gated and no threshold is applied.** "
+        + res["off_gates_because"],
+        "",
+        "Four groups. Each moves ONE axis of the conditioning and holds the "
+        "others at their trained values, so a failure can be attributed.",
+        "",
+        f"*Not measured here:* {res['not_measured']}",
+        "",
+    ]
+
+    if groups.get("sequence"):
+        text += [
+            "### 1 — stacking sequences the training set does not contain",
+            "",
+            "Every angle is inside the trained set {0, 45, -45, 90}: what is out "
+            "of distribution is the ORDER, so a failure cannot be blamed on an "
+            "orientation the model never saw. `per ply` reads from the z = 0 "
+            "face, `#` for a ply whose class came back and `.` for one that did "
+            "not.",
+            "",
+            _ood_layup_table(groups["sequence"]),
+            "",
+        ]
+
+    if groups.get("pitch"):
+        blocks = sorted({(r.get("requested_ply_blocks"),
+                          (r.get("notes") or {}).get("pitch_vox"))
+                         for r in groups["pitch"]})
+        made = ", ".join(f"{p:g} vox -> {n} plies" for n, p in blocks if p)
+        text += [
+            "### 2 — ply pitch above and below the trained ones",
+            "",
+            f"Trained pitches are 10.0 and 19.6 voxels. Here: {made}. "
+            "The two requests are the same thing as \"6 thick plies and 24 thin "
+            "plies filling the depth\", so they are one set of two cases.",
+            "",
+            _ood_layup_table(groups["pitch"]),
+            "",
+        ]
+
+    if groups.get("porosity"):
+        rows = []
+        for r in sorted(groups["porosity"], key=lambda r: (
+                (r.get("conditioning") or {}).get("requested_phi") or 0, r["case"])):
+            c = r.get("conditioning") or {}
+            pe = r.get("porosity_error") or {}
+            rows.append([
+                r["case"],
+                fmt(c.get("requested_phi"), 3),
+                "lifted" if c.get("porosity_clamped") is False else "held",
+                fmt(c.get("phi_conditioned"), 3),
+                fmt(c.get("cond_por"), 2),
+                fmt(pe.get("delivered_phi"), 4),
+                fmt(pe.get("error"), 4),
+                fmt((r.get("failure_flags") or {}).get("failed")),
+            ])
+        text += [
+            "### 3 — requested porosity outside the clamped range",
+            "",
+            res["clamp_note"],
+            "",
+            "`cond_por` is in standard deviations of the training "
+            "distribution's own log-porosity, so it says HOW FAR off the "
+            "manifold each request is rather than only that it is off.",
+            "",
+            table(["case", "requested", "clamp", "conditioned", "cond_por (sd)",
+                   "delivered", "error", "failed"], rows),
+            "",
+            "**The 0.150 and 0.200 rows are a stated failure mode, not a "
+            "target.** They ask for a porosity no training volume has, and a "
+            "large error there is the answer rather than a defect.",
+            "",
+        ]
+
+    if groups.get("correlation"):
+        rows = []
+        for r in sorted(groups["correlation"],
+                        key=lambda r: r.get("requested_corr_vox") or 0):
+            per = ((r.get("field") or {}).get("per_axis") or {})
+            lo = r.get("local_obedience") or {}
+            rows.append([
+                r["case"], fmt(r.get("requested_corr_vox"), 0),
+                *[fmt((per.get(ax) or {}).get("corr_length_vox"), 0)
+                  for ax in ("z", "y", "x")],
+                fmt(lo.get("within_volume_slope"), 2),
+                fmt(lo.get("within_volume_r2"), 3),
+            ])
+        text += [
+            "### 4 — the field's correlation length",
+            "",
+            "The request is ISOTROPIC, which is itself off the manifold: the "
+            "measured lengths are (79, 414, 901) voxels in (z, y, x), because a "
+            "laminate is not isotropic. So each case asks two things at once — "
+            "a length the model never saw AND the same length on every axis — "
+            "and the delivered lengths are reported per axis for that reason.",
+            "",
+            table(["case", "requested (vox)", "delivered z", "delivered y",
+                   "delivered x", "obedience slope", "R2"], rows),
+            "",
+        ]
+
+    figs = _fig_ood_conditioning(res, root)
+    return "\n".join(text) + "\n", figs
+
+
+def _fig_ood_conditioning(res, root) -> list[str]:
+    """Delivered against requested porosity, with the clamp drawn on it."""
+    from poregen.diffusion.conditioning import POR_MAX, POR_MIN  # noqa: PLC0415
+
+    sel = [r for r in res["per_case"] if r.get("group") == "porosity"]
+    if not sel:
+        return []
+    set_style()
+    fig, ax = plt.subplots(figsize=(5.4, 4.2))
+    req = np.array([(r["conditioning"] or {}).get("requested_phi") or 0.0 for r in sel])
+    got = np.array([
+        (v if (v := (r.get("porosity_error") or {}).get("delivered_phi")) is not None
+         else np.nan) for r in sel])
+    if not np.isfinite(got).any():
+        logger.warning("ood_conditioning: no delivered porosity to plot")
+        plt.close(fig)
+        return []
+    lifted = np.array([(r["conditioning"] or {}).get("porosity_clamped") is False
+                       for r in sel])
+    lo, hi = 0.0, max(float(np.nanmax(req)), float(np.nanmax(got))) * 1.08
+    ax.axvspan(POR_MIN, POR_MAX, color=FLOOR_COLOR, alpha=0.12,
+               label=f"training range [{POR_MIN}, {POR_MAX}]")
+    ax.plot([lo, hi], [lo, hi], ls="--", lw=1.0, color=FLOOR_COLOR,
+            label="delivered = requested")
+    ax.scatter(req[~lifted], got[~lifted], s=34, color=SERIES_COLORS[0],
+               label="clamp held")
+    ax.scatter(req[lifted], got[lifted], s=34, marker="^",
+               color=SERIES_COLORS[1], label="clamp lifted")
+    ax.set_xlabel("requested porosity")
+    ax.set_ylabel("delivered porosity (pore / material)")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    return savefig(fig, figures_dir(root, "ood_conditioning"), "porosity_extremes")
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -1558,6 +1742,7 @@ REPORTERS = {
     "assembly_modes": report_assembly_modes,
     "real_floor": report_real_floor,
     "stress_geometry": report_stress_geometry,
+    "ood_conditioning": report_ood_conditioning,
 }
 
 

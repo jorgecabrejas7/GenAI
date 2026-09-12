@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The GPU order after the facedrop trial, as the supervisor set it:
 #
-#   campaign 18 regen -> stress DDIM-50 -> downstream_utility -> stress DDIM-200
+#   campaign 18 regen -> stress DDIM-50 -> ood_conditioning
+#   -> downstream_utility -> stress DDIM-200
 #
 # and then it STOPS. The decoder fine-tune is next in that order, but its gate
 # (`runs/campaigns/decoder_ft_go`, which `facedrop_post.sh` is already blocked
@@ -30,10 +31,11 @@ FT_GO="$REPO/runs/campaigns/decoder_ft_go"
 FD_LOG="$REPO/runs/campaigns/09-r08-latent-sweep/post_ldm06.log"
 C18="$REPO/runs/campaigns/18-eval-v4-final"
 C19="$REPO/runs/campaigns/19-stress-geometry"
+C20="$REPO/runs/campaigns/20-ood-conditioning"
 C14="$REPO/runs/campaigns/14-downstream-utility"
 S="/tmp/claude-1001/-home-jorgecabrejas-Dev-GenAI/ce0b3db0-2aa0-4a97-9bc4-7bb0db078739/scratchpad"
 LOG="$REPO/runs/campaigns/eval_queue.log"
-mkdir -p "$S" "$C14"; cd "$REPO" || exit 1
+mkdir -p "$S" "$C14" "$C20"; cd "$REPO" || exit 1
 say() { printf '%s  EVALQ %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
 
 say "armed"
@@ -69,7 +71,37 @@ CKPT_RUN="$CKPT_RUN" SAMPLER="$SAMPLER" PASS=ddim50 \
     bash scripts/run_stress_geometry.sh > "$S/evalq_stress50.log" 2>&1
 say "STRESS ddim50 done rc=$? -> $C19"
 
-# ── 3. downstream utility, on the set campaign 18 just wrote ───────────────
+# ── 3. campaign 20 — conditioning out of distribution ──────────────────────
+# One pass, DDIM-50 throughout, so there is no second visit to schedule. Per
+# case for the same reason as the stress requests: a case the sampler cannot
+# hold costs that case and not the 35 after it.
+#
+# It runs on the PRODUCTION sampler whatever SAMPLER says. All four axes it
+# moves are in the CONDITIONING, and generating them under an overlap sampler
+# would mean a failure at phi 0.20 could be the request or could be the
+# assembly, with no way to tell which.
+say "OOD start (campaign 20)"
+mapfile -t OOD_CASES < <(python - <<'PYCASES'
+from poregen.eval_v4.cases import build_cases
+for c in build_cases("ood_conditioning"):
+    print(c.name)
+PYCASES
+)
+say "OOD ${#OOD_CASES[@]} cases"
+for c in "${OOD_CASES[@]}"; do
+    python -m poregen.eval_v4.cli generate ood_conditioning \
+        --model "$CKPT_RUN" --ckpt "$CKPT" --out "$C20" --only "$c" \
+        > "$S/evalq_ood_${c}.log" 2>&1
+    say "OOD GEN $c rc=$?"
+done
+python -m poregen.eval_v4.cli measure ood_conditioning --root "$C20" \
+    > "$S/evalq_ood_measure.log" 2>&1
+say "OOD MEASURE rc=$?"
+python -m poregen.eval_v4.cli report --root "$C20" --assessment ood_conditioning \
+    > "$S/evalq_ood_report.log" 2>&1
+say "OOD done rc=$? -> $C20/ood_conditioning/findings.md"
+
+# ── 4. downstream utility, on the set campaign 18 just wrote ───────────────
 # It reads the `sampler`, `porosity_global`, `microstructure` and `surface`
 # volumes and REFUSES to start, naming the missing cases, if any are absent —
 # which is the check that says the regen finished, so it is not repeated here.
@@ -78,7 +110,7 @@ python scripts/analysis/downstream_utility.py --campaign-root "$C18" \
     --out "$C14" > "$S/evalq_downstream.log" 2>&1
 say "DOWNSTREAM done rc=$? -> $C14"
 
-# ── 4. campaign 19 — the DDIM-200 pass ─────────────────────────────────────
+# ── 5. campaign 19 — the DDIM-200 pass ─────────────────────────────────────
 say "STRESS ddim200 start"
 CKPT_RUN="$CKPT_RUN" SAMPLER="$SAMPLER" PASS=ddim200 \
     bash scripts/run_stress_geometry.sh > "$S/evalq_stress200.log" 2>&1
