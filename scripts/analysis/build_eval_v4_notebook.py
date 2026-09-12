@@ -134,6 +134,7 @@ rsync -avP --partial $H/runs/campaigns/13-label-uncertainty  ./campaigns/
 rsync -avP --partial $H/runs/campaigns/10-eval-v4-real-floor ./campaigns/
 rsync -avP $H/runs/ldm/ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04/convergence_check.jsonl ./campaigns/ldm06_convergence_check.jsonl
 # these two appear later in the queue; the commands fail harmlessly until then
+rsync -avP --partial $H/runs/campaigns/17-chunk-band-trial   ./campaigns/
 rsync -avP --partial $H/runs/campaigns/11-decoder-ft         ./campaigns/
 rsync -avP --partial $H/runs/campaigns/14-downstream-utility ./campaigns/
 ```
@@ -225,6 +226,7 @@ LABEL_ROOT = CAMPAIGNS / "13-label-uncertainty"
 FLOOR10_ROOT = CAMPAIGNS / "10-eval-v4-real-floor"
 DECODER_FT_ROOT = CAMPAIGNS / "11-decoder-ft"
 DOWNSTREAM_ROOT = CAMPAIGNS / "14-downstream-utility"
+TRIAL_ROOT = CAMPAIGNS / "17-chunk-band-trial"
 CONV_JSONL = next((p for p in [CAMPAIGNS / "ldm06_convergence_check.jsonl",
                                ROOT.parents[2] / "ldm" / "ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04" / "convergence_check.jsonl"]
                    if p.exists()), CAMPAIGNS / "ldm06_convergence_check.jsonl")
@@ -1653,6 +1655,176 @@ else:
 ''')
 
 
+def build_chunk_band() -> None:
+    section("The chunk-plane pore band: defect, cause, fix trial",
+            "what eval v4 found after the tables: a pore-free band at every chunk frontier, its root cause in training, and the sampler fixes tried (campaign 17)")
+    md("""
+**Read this section before trusting any chunk-plane number above.** When the assembly tables were read, two numbers
+looked odd at once: the *pore-logit* seam ratio at chunk planes was far **below** 1 (0.39 at 1024 width) while the grey
+ratio sat at the real floor, and the pore Dice across chunk planes was low. Both turned out to be one defect of the
+generated volumes: **the model leaves a pore-depleted band in the ~32 voxels on each side of every chunk plane.**
+
+**Important caveat on the checkpoint.** Every table in campaign 12 was generated with `best.ckpt` = step **119 000**
+(minimum validation loss), because the runner hard-coded `--ckpt best`. The final weights are step 130 000. The
+training-time gates (section "ldm06 training-time diagnostics") are on 130k. The band trial below runs on 130k. The next
+full generation will be on 130k.
+""")
+    md("""
+**How the band is measured.** For each chunk plane (every 192 voxels, the chunk size the production sampler uses) we take
+8-voxel-thick slabs at offsets −32 … +24 from the plane (negative = the chunk generated *earlier*, the trailing side;
+positive = the chunk generated *later*, the leading side). In each slab we compute the porosity as pore voxels / material
+voxels, and divide by the volume's overall porosity. A flat line at 1.0 means the plane is invisible. The same profile is
+computed on a **real** test volume at the same plane positions: real laminate is flat, so anything not flat is the model's.
+""")
+    code(r'''
+PROF = ROOT / "chunk_plane_profile.json"; PROF_REAL = ROOT / "chunk_plane_profile_realfloor.json"
+OFFS = ["-32", "-24", "-16", "-8", "0", "8", "16", "24"]
+def _profile_rows(path, label=None):
+    """Flatten a chunk_plane_profile json into rows: case, arm, axis, plane, offset, phi/phi_volume."""
+    d = load_json(path); rows = []
+    cases = d if isinstance(d, list) else d.get("per_case", [])        # two file generations: a bare list, or {"per_case": [...]}
+    for c in cases:
+        pv = c.get("phi_volume") or c.get("phi_whole_volume") or float("nan")
+        if "axes" in c:                                                   # newer layout: axes -> {ax: {per_plane: [{plane, phi}]}}
+            axes = [(ax, A.get("per_plane", []), "phi") for ax, A in (c.get("axes") or {}).items()]
+        else:                                                             # older layout: profiles -> [{axis, per_plane: [{plane, phi_by_offset}]}]
+            axes = [(str(pr.get("axis")), pr.get("per_plane", []), "phi_by_offset") for pr in c.get("profiles", []) if not pr.get("skipped")]
+        for ax, per_plane, key in axes:
+            for pp in per_plane:
+                for o in OFFS:
+                    v = (pp.get(key) or {}).get(o)
+                    if v is not None:
+                        rows.append({"case": c["case"], "arm": c.get("arm") or label or "generated", "s_nb": c.get("s_nb"),
+                                     "axis": ax, "plane": pp["plane"], "offset": int(o), "phi": v, "ratio": v / pv if pv else float("nan")})
+    return pd.DataFrame(rows)
+if not PROF.exists():
+    unavailable("chunk_plane_profile.json", "scripts/analysis/chunk_plane_profile.py on the campaign (see campaign README)")
+else:
+    P = _profile_rows(PROF, "generated (campaign 12)")
+    if PROF_REAL.exists(): P = pd.concat([P, _profile_rows(PROF_REAL, "real test crop")])
+    G = P.groupby(["arm", "case", "offset"], as_index=False)["ratio"].mean()
+    fig = go.Figure()
+    for (arm, case), g in G.groupby(["arm", "case"]):
+        fig.add_trace(go.Scatter(x=g["offset"], y=g["ratio"], mode="lines+markers", name=f"{arm}: {case.split('/')[-1]}",
+                                 line=dict(dash="dot" if "real" in arm else "solid")))
+    fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.08, line_width=0); fig.add_vline(x=0, line_dash="dash", line_color="grey")
+    fig.update_layout(title="Porosity by offset from the chunk plane, relative to the volume mean (mean over planes and in-plane axes)",
+                      xaxis_title="offset from chunk plane (voxels; negative = earlier chunk)", yaxis_title="φ slab / φ volume", height=450)
+    fig.show()
+    display(P[P.offset == -8].groupby(["arm", "case"])["ratio"].agg(["mean", "min", "count"]).round(3))
+''')
+    md("""
+**How to read it.** The dashed line is real material: flat at 1.0 within noise. The generated volumes dip to roughly
+0.2 at −8 (the last 8 voxels of the earlier chunk) and recover to 1.0 about 24 voxels into the later chunk. The green band
+is the ±20 % tolerance used later as the pass criterion. The count column says how many plane×axis profiles were averaged.
+
+**Why it matters.** (1) It is why the pore-logit seam ratio was below 1: where there are no pores, slice-to-slice change
+is small. (2) It is why the hybrid sampler delivered 0.025 for a request of 0.030 at 1024 width: the missing pores are
+the band. (3) It is not drift: the band is the same depth at the first and the last plane of a volume.
+""")
+    md("""
+**Finding the cause: the four sampler arms.** The same profile was computed on the assembly-mode ablation volumes, which
+share one request and differ only in how neighbours are fed: *joint* (one chunk, every neighbour face UNKNOWN), *hybrid*
+(neighbours from finished chunks, the frontier face UNKNOWN), *autoregressive* (one tile at a time), *teacher-forced*
+(real neighbours on every face), plus the guidance pair from the cfg assessment (s_nb 0 = neighbour signal off, s_nb 1 =
+on). A line that is flat in one arm and banded in another tells you which ingredient makes the band.
+""")
+    code(r'''
+files = {"assembly-mode arms @1024": ROOT / "chunk_plane_profile_arms1024.json", "assembly-mode arms @384": ROOT / "chunk_plane_profile_arms384.json",
+         "cfg pair s_nb 0 vs 1": ROOT / "chunk_plane_profile_snb.json"}
+have_any = False
+for title, f in files.items():
+    if not f.exists(): continue
+    have_any = True
+    P = _profile_rows(f)
+    P["label"] = P["arm"] + P["s_nb"].map(lambda v: f" (s_nb={v})" if "cfg" in title else "")
+    G = P.groupby(["label", "offset"], as_index=False)["ratio"].mean()
+    fig = go.Figure()
+    for lab, g in G.groupby("label"):
+        fig.add_trace(go.Scatter(x=g["offset"], y=g["ratio"], mode="lines+markers", name=lab))
+    fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.08, line_width=0); fig.add_vline(x=0, line_dash="dash", line_color="grey")
+    fig.update_layout(title=f"{title}: φ slab / φ volume by offset from the chunk plane", xaxis_title="offset (voxels)", yaxis_title="ratio", height=400); fig.show()
+if not have_any:
+    unavailable("chunk_plane_profile_arms*.json / _snb.json", "scripts/analysis/chunk_plane_profile.py on assembly_modes and cfg")
+''')
+    md("""
+**What the arms say.** Joint (no neighbour signal anywhere) is flat. Turning the neighbour guidance off (s_nb 0) is flat.
+Every arm that feeds a neighbour signal is banded, deepest with generated neighbours, shallower with real ones. So the
+band is caused by the neighbour conditioning itself, not by re-noising, not by window fusion at the edge, and not by the
+frontier being unknown as such.
+
+**The single-window test** (64 real validation windows denoised one at a time, three neighbour faces present and three
+missing) showed the mechanism inside one window: pores move **away from the missing face** (porosity at that face 0.05–0.15
+of the window mean) while faces with a neighbour are untouched. A window conditioned on a pore-poor neighbour face is
+also poorer at that face (inheritance), which is why the later chunk's first voxels are depleted too.
+
+**Root cause, in the training code.** Neighbour dropout in ldm06 dropped all six faces *together* per sample. In the
+training data 64 % of windows have five neighbours and one missing, and that missing face is **always the specimen
+surface** (outside the sample). "Five present, one unknown" never occurred. The model therefore learned: *a face with
+nothing behind it is a surface; real laminates have few pores near the surface; put the pores elsewhere.* At a chunk
+frontier the not-yet-generated side looks exactly like that. The one healthy chunk plane in every volume is the last one,
+where the next chunk's far face really is the volume edge, i.e. the trained configuration. The fix in training is one
+line: per-face independent dropout (prepared as `configs/experiments/ldm06/facedrop.yaml`, a short warm-started run).
+""")
+    md("""
+**The fix trial (campaign 17).** Sampler-side candidates, each generated on the **130k** weights at 1024×1024×192 (2 seeds)
+and 384³ (3 seeds), scored on the *non-terminal* planes (the terminal plane is healthy for the reason above and would
+flatter small volumes): **(a)** chunks overlap by 32 voxels and the shared strip is blended; **(b)** neighbour guidance
+s_nb 0.5; **(c)** both; **(e)** overlap with the strip pinned (control); **(f)** drop the neighbour arm only for windows
+whose neighbour set is mixed (some faces present, some missing), which is exactly the null condition the model was
+trained on; **(g)** (f) + overlap. Pass = φ in both strips (−8 trailing, +0 leading) within ±20 % of the volume mean,
+grey seam at the real floor, delivered φ within the 0.005 gate. *Cost* is minutes per volume relative to production.
+""")
+    code(r'''
+TR = TRIAL_ROOT / "trial_report.json"
+if not TR.exists():
+    unavailable("campaign 17 trial_report.json", "the chunk-band fix trial (runs after the VAE rung reports)")
+else:
+    R = load_json(TR); rows = []
+    for arm, A in R.items():
+        S = A.get("summary") or {}
+        rows.append({"arm": arm, "φ": S.get("phi_volume"), "φ error": S.get("phi_error"), "trailing −8": S.get("ratio_-8"), "worst −8": S.get("worst_-8"),
+                     "leading +0": S.get("ratio_+0"), "terminal −8": S.get("terminal_-8"), "grey seam": S.get("grey_chunk_ratio"), "pore seam": S.get("pore_chunk_ratio"),
+                     "min/vol (1024)": (S.get("wall_time_s") or float("nan")) / 60, "n": S.get("n_cases_with_nonterminal"), "PASS": S.get("PASS")})
+    T = pd.DataFrame(rows).set_index("arm")
+    display(T.round(3))
+    fig = make_subplots(rows=1, cols=2, subplot_titles=["band: φ(slab)/φ(volume) on non-terminal planes", "cost, min per volume"])
+    fig.add_trace(go.Bar(x=T.index, y=T["trailing −8"], name="trailing strip (−8)"), row=1, col=1)
+    fig.add_trace(go.Bar(x=T.index, y=T["leading +0"], name="leading strip (+0)"), row=1, col=1)
+    fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0, row=1, col=1)
+    fig.add_trace(go.Bar(x=T.index, y=T["min/vol (1024)"], name="min/volume", showlegend=False), row=1, col=2)
+    fig.update_layout(height=420, barmode="group"); fig.show()
+''')
+    md("""
+**How to read the trial table.** Columns "trailing −8" and "leading +0" are the two single-window strips; 1.0 is perfect,
+the green band is the pass zone. "worst −8" is the worst single plane (a fix must hold everywhere). "terminal −8" is the
+last plane, shown separately because it is in-distribution and healthy by construction. Grey and pore seams are ratios to
+interior texture change; the real floor is about 0.91 at the chunk period, so near 1 is right. Cost is GPU minutes for
+one 1024×1024×192 volume at DDIM-50 (production is 5.8). The per-plane series below shows that the band does not grow
+along the generation order and that only the terminal plane differs.
+""")
+    code(r'''
+if TR.exists():
+    R = load_json(TR)
+    arms = [a for a in R if R[a].get("per_case")]
+    w_arm = W.Dropdown(options=arms, value=arms[-1] if arms else None, description="arm")
+    out_pp = W.Output()
+    def _pp(*_):
+        with out_pp:
+            out_pp.clear_output(wait=True)
+            fig = make_subplots(rows=1, cols=2, subplot_titles=["trailing strip (−8), per plane in generation order", "leading strip (+0), per plane"])
+            for c in R[w_arm.value]["per_case"]:
+                pv = c.get("phi_volume") or float("nan")
+                for side, col in (("trailing", 1), ("leading", 2)):
+                    for ax, S in (c.get("per_plane") or {}).get(side, {}).items():
+                        fig.add_trace(go.Scatter(x=S["planes"], y=[v / pv for v in S["phi"]], mode="lines+markers", name=f"{c['case']} axis {ax}"), row=1, col=col)
+            for col in (1, 2): fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0, row=1, col=col)
+            fig.update_layout(height=400, title=f"{w_arm.value}: φ(slab)/φ(volume) at every chunk plane"); fig.show()
+    w_arm.observe(_pp, names="value")
+    show_widget(W.VBox([w_arm, out_pp]), _pp)
+''')
+
+
 def build_microstructure() -> None:
     section("Microstructure statistics and memorisation", "S2, pore-size distribution, Ripley's K, FID vs real, and nearest-neighbour search of the whole training store")
     md("""
@@ -2114,7 +2286,7 @@ def build_all() -> None:
     CELLS.append(("index", ""))          # placeholder, filled after sections are known
     build_config(); build_progress(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
     build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
-    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_microstructure()
+    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_microstructure()
     build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream()
     build_summary(); build_preview()
 
