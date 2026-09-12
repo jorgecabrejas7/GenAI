@@ -158,6 +158,11 @@ def cmd_generate(args) -> int:
                 f"seed={s.seed} phi={s.target_phi} "
                 f"field={'yes' if s.field_fn else 'no'} "
                 f"material={'painted' if s.material_fn else 'full'}"
+                # The dry run exists so the request list can be checked BEFORE
+                # the GPU is spent on it, and a lifted porosity clamp is the
+                # setting most worth catching there: it is what makes a case
+                # off-manifold, and it was invisible here.
+                + (" CLAMP-LIFTED" if not s.clamp_porosity else "")
             )
         print(f"\n{len(specs)} cases")
         return 0
