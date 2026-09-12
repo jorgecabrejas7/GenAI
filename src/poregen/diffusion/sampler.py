@@ -663,6 +663,7 @@ class VolumeGenerator:
         por_log_stats: tuple[float, float] | None = None,
         theta_deg: np.ndarray | None = None,
         chunk_tiles: tuple[int, int, int] = (3, 3, 3),
+        chunk_overlap: int = 0,
         window_stride: int = 32,
         decode_stride: int = 32,
         neighbour_mode: str = "canvas",
@@ -683,6 +684,7 @@ class VolumeGenerator:
         self.por_log_stats = por_log_stats
         self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
         self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
+        self.chunk_overlap = int(chunk_overlap)
         self.window_stride = int(window_stride)
         self.decode_stride = int(decode_stride)
         self.downsample    = self.patch_size // self.latent_size
@@ -705,6 +707,29 @@ class VolumeGenerator:
             )
         if any(c < 1 for c in self.chunk_tiles):
             raise ValueError(f"chunk_tiles must all be >= 1, got {self.chunk_tiles}.")
+        if self.chunk_overlap:
+            chunk_vox = min(self.chunk_tiles) * self.patch_size
+            if not 0 < self.chunk_overlap < chunk_vox:
+                raise ValueError(
+                    f"chunk_overlap={self.chunk_overlap} must be in "
+                    f"(0, {chunk_vox}) — a chunk cannot overlap the whole of "
+                    "the one before it, and a non-positive overlap is just the "
+                    "unoverlapped partition."
+                )
+            if self.chunk_overlap % self.downsample:
+                raise ValueError(
+                    f"chunk_overlap={self.chunk_overlap} must be a multiple of "
+                    f"the VAE downsampling factor {self.downsample}: the "
+                    "overlap is pasted in LATENT cells."
+                )
+            if self.chunk_overlap % self.window_stride:
+                raise ValueError(
+                    f"chunk_overlap={self.chunk_overlap} must be a multiple of "
+                    f"window_stride={self.window_stride}, or the new chunk's "
+                    "window grid does not line up with the strip it re-covers "
+                    "and the former frontier gets no window interior — which is "
+                    "the whole point of the overlap."
+                )
         for name, stride in (("window_stride", self.window_stride),
                              ("decode_stride", self.decode_stride)):
             if stride <= 0 or self.patch_size % stride or stride % self.downsample:
@@ -735,11 +760,32 @@ class VolumeGenerator:
         return shape  # type: ignore[return-value]
 
     def _chunk_ranges(self, n_tiles: int, per_chunk: int) -> list[tuple[int, int]]:
-        """[(tile_lo, tile_hi), …] partition of one axis into chunks."""
-        return [
-            (i, min(i + per_chunk, n_tiles))
-            for i in range(0, n_tiles, per_chunk)
-        ]
+        """[(cell_lo, cell_hi), …] cover of one axis by chunks, in LATENT CELLS.
+
+        With :attr:`chunk_overlap` 0 this is the tile-aligned partition it has
+        always been, expressed in cells rather than tiles.  With an overlap the
+        chunks ADVANCE by ``size - overlap`` and therefore intersect: the strip
+        a chunk shares with the one before it is already solved, and
+        :meth:`_generate_latents` keeps it fixed (RePaint-style) while the new
+        chunk's window grid covers it.  That is what gives the former frontier
+        voxels a window INTERIOR prediction from both sides instead of a rim
+        prediction from one.
+
+        Cells, not tiles, because a useful overlap is half a tile: the windows
+        step by ``window_stride`` (32 voxels by default) and the overlap has to
+        be a multiple of that, not of the 64-voxel tile.
+        """
+        L = self.latent_size
+        total, size = n_tiles * L, per_chunk * L
+        step = size - self.chunk_overlap // self.downsample
+        out, start = [], 0
+        while start < total:
+            hi = min(start + size, total)
+            out.append((start, hi))
+            if hi >= total:
+                break
+            start += step
+        return out
 
     # ── per-window conditioning ──────────────────────────────────────────────
 
@@ -867,8 +913,8 @@ class VolumeGenerator:
         )
 
         for chunk_idx, chunk in enumerate(chunks):
-            lo = tuple(chunk[a][0] * L for a in range(3))           # cell lo
-            hi = tuple(chunk[a][1] * L for a in range(3))           # cell hi
+            lo = tuple(chunk[a][0] for a in range(3))              # cell lo
+            hi = tuple(chunk[a][1] for a in range(3))              # cell hi
             chunk_cells = tuple(hi[a] - lo[a] for a in range(3))
             ctx_lo = tuple(max(lo[a] - L, 0) for a in range(3))
             ctx_hi = tuple(min(hi[a] + L, canvas_cells[a]) for a in range(3))
@@ -889,6 +935,12 @@ class VolumeGenerator:
                 visible = available.copy()
                 visible[chunk_sl] = True
             done_mask = torch.from_numpy(available[ctx_sl].astype(np.float32)).to(self.device)
+            # The strip this chunk shares with the one before it. Captured
+            # before `available[chunk_sl] = True` at the end of the chunk, so it
+            # is exactly what a PREVIOUS chunk solved and nothing of this one.
+            known = torch.from_numpy(
+                available[chunk_sl].astype(np.float32)).to(self.device)[None, None]
+            known_z = z_clean[(slice(None), *chunk_sl)].unsqueeze(0).clone()
 
             origins = window_origins(chunk_cells, L, s_cells)
             g_origins = [tuple(lo[a] + o[a] for a in range(3)) for o in origins]
@@ -953,6 +1005,19 @@ class VolumeGenerator:
                 # neighbour_mode == "unknown" builds no context at all: every
                 # face is UNKNOWN, so nb_slices is all None and nothing reads it.
 
+                # RePaint: the overlap strip is already solved, so it is pinned
+                # to its known value re-noised to t rather than re-denoised.
+                # The windows still SEE it and still predict over it — that is
+                # what gives the former frontier an interior prediction — but
+                # their output there is discarded, so the finished chunk cannot
+                # be rewritten by its successor.
+                if self.chunk_overlap:
+                    paste_noise = region_noise_field(
+                        C, canvas_cells, offset_cells, self.device, generator
+                    )[(slice(None), *chunk_sl)].unsqueeze(0)
+                    x = x * (1 - known) + known * schedule.q_sample(
+                        known_z, t_one, noise=paste_noise)
+
                 out_sum = torch.zeros_like(x)
                 for start in range(0, n_win, B_max):
                     idx = list(range(start, min(start + B_max, n_win)))
@@ -988,6 +1053,11 @@ class VolumeGenerator:
                 if progress is not None:
                     progress.update(1)
 
+            if self.chunk_overlap:
+                # The last ddim_step moved the pinned strip off its known value
+                # by one step; restore it exactly, so "the finished chunk is
+                # preserved" is a fact and not an approximation.
+                x = x * (1 - known) + known * known_z
             z_clean[(slice(None), *chunk_sl)] = x[0]
             available[chunk_sl] = True
             logger.info("Chunk %d/%d done (tiles %s)", chunk_idx + 1, len(chunks), chunk)

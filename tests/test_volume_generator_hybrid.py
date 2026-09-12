@@ -948,3 +948,101 @@ class TestDefaultMaterialMap:
         m = self._gen()._default_material_map((4, 4, 4), (3, 0, 7), (14, 16, 9))
         assert m.dtype == np.float32
         assert float(m.min()) >= 0.0 and float(m.max()) <= 1.0
+
+
+# ── chunk overlap ────────────────────────────────────────────────────────────
+
+class TestChunkOverlap:
+    """Chunks that advance by less than their size, RePaint-style.
+
+    The chunk-plane porosity band comes from the neighbour conditioning: the
+    voxels at a chunk boundary are covered only by the RIM of the last window,
+    and a window's rim next to a neighbour under-predicts pores. Overlapping
+    the chunks gives those voxels a window INTERIOR prediction from the next
+    chunk as well. Two things have to hold for that to be a fix rather than a
+    rewrite: the already-solved strip must come out unchanged, and the former
+    frontier must really gain window coverage.
+    """
+
+    def _gen(self, overlap, tiles=(1, 1, 4), chunk_tiles=(1, 1, 2), **kw):
+        return _generator(_SpyModel(), _ConstVAE(), chunk_tiles,
+                          tiles=tiles, chunk_overlap=overlap, **kw)
+
+    def test_zero_overlap_is_the_partition_it_always_was(self):
+        gen, _ = self._gen(0)
+        # 4 tiles of LAT cells, chunks of 2 tiles: two disjoint chunks.
+        assert gen._chunk_ranges(4, 2) == [(0, 2 * LAT), (2 * LAT, 4 * LAT)]
+
+    def test_chunks_advance_by_size_minus_overlap_and_still_reach_the_end(self):
+        gen, _ = self._gen(P // 2)                    # half a tile
+        ranges = gen._chunk_ranges(4, 2)
+        size, step = 2 * LAT, 2 * LAT - (P // 2) // DS
+        assert ranges[0] == (0, size)
+        assert all(b - a <= size for a, b in ranges)
+        assert all(ranges[i + 1][0] - ranges[i][0] == step
+                   for i in range(len(ranges) - 2))
+        assert ranges[-1][1] == 4 * LAT               # the axis is covered
+        assert ranges[1][0] < ranges[0][1]            # and they really overlap
+
+    def test_the_overlap_strip_comes_out_of_the_run_unchanged(self):
+        """The finished chunk is preserved EXACTLY, not approximately.
+
+        Run the same request twice from the same seed: once with the chunk list
+        cut to the first chunk only, once in full. The noise field is drawn
+        canvas-sized from the seed, so chunk 0 solves identically in both. Every
+        cell chunk 0 wrote must be bit-identical afterwards — if the successor
+        can move them, the overlap is rewriting finished material rather than
+        re-covering it.
+        """
+        gen, size_mm = self._gen(P // 2)
+        shape = gen._volume_shape(size_mm)
+        box = ((0, 0, 0), shape)
+        full = gen._chunk_ranges
+        lo, hi = full(4, 2)[0]
+
+        def latents(g, seed):
+            gen_t = torch.Generator(device="cpu").manual_seed(seed)
+            with torch.no_grad():
+                return g._generate_latents(
+                    shape, target_porosity=0.03, local_por_map=None,
+                    material_map=None, specimen_box=box,
+                    autocast_dtype=torch.float32, window_batch=8,
+                    generator=gen_t)
+
+        z_full = latents(gen, 0)
+        gen2, _ = self._gen(P // 2)
+        object.__setattr__(gen2, "_chunk_ranges", lambda n, per: [full(n, per)[0]])
+        z_one = latents(gen2, 0)
+
+        np.testing.assert_array_equal(
+            z_full[:, :, :, lo:hi].cpu().numpy(), z_one[:, :, :, lo:hi].cpu().numpy())
+
+    def test_the_former_frontier_gains_window_coverage(self):
+        """The point of the change, as a count rather than a claim."""
+        gen_o, _ = self._gen(P // 2)
+        gen_n, _ = self._gen(0)
+        n_tiles, per_chunk = 4, 2
+
+        def coverage(gen):
+            total = n_tiles * LAT
+            cov = np.zeros(total, np.int64)
+            for lo, hi in gen._chunk_ranges(n_tiles, per_chunk):
+                for o in range(0, (hi - lo) - LAT + 1, gen.window_stride // DS):
+                    cov[lo + o:lo + o + LAT] += 1
+            return cov
+
+        frontier = 2 * LAT                      # the plane between the chunks
+        cov_n, cov_o = coverage(gen_n), coverage(gen_o)
+        assert cov_n[frontier - 1] >= 1
+        assert cov_o[frontier - 1] >= 2         # covered from both sides now
+        assert cov_o[frontier - 1] > cov_n[frontier - 1]
+        assert (cov_o >= 1).all()               # nothing is left uncovered
+
+    @pytest.mark.parametrize("bad,msg", [
+        (2 * P, "cannot overlap the whole"),
+        (-8, "cannot overlap the whole"),
+        (P // 2 + 1, "multiple of"),
+    ])
+    def test_an_overlap_the_geometry_cannot_honour_is_refused(self, bad, msg):
+        with pytest.raises(ValueError, match=msg):
+            self._gen(bad)
