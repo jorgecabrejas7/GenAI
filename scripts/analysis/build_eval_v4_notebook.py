@@ -1012,6 +1012,10 @@ else:
             fig.add_trace(go.Box(y=PV[f"{ax}_{p}"], name=p, showlegend=(i == 1)), row=1, col=i)
     fig.update_layout(height=400, title="Porosity per third of each volume, one point per real volume (80)", yaxis_title="φ = pore / material"); fig.show()
     fig2 = go.Figure(go.Histogram(x=PV["phi_whole"], nbinsx=40)); fig2.update_layout(title="Whole-volume porosity of the 80 real scans", xaxis_title="φ", height=320); fig2.show()
+    if D.get("z_slabs"):
+        ZS = pd.DataFrame([{"slab": k, "z range": f"{v['z_range'][0]}–{v['z_range'][1]}", "n volumes": v["n_volumes"], "mean": v["mean"], "median": v["median"], "voxel-pooled": v["voxel_pooled_phi"]} for k, v in D["z_slabs"].items()]).set_index("slab")
+        display(ZS.round(5))
+        note("z by 64-voxel SLAB from the z=0 face: slab 0 means the same physical depth in every volume, whereas a 'third' of a 185–332-voxel axis holds only 2–5 slabs and is empty in 10 volumes (see <code>empty_regions</code>). Slabs 3 and 4 rest on 3 and 1 volumes and are not a trend.")
 ''')
     md("""
 **How to read it.** The box plots show the spread across coupons for each third. If the z boxes differ (front vs back),
