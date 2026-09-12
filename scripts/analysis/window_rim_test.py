@@ -46,12 +46,25 @@ REPO = Path(__file__).resolve().parents[2]
 
 TILE = 64
 LABEL_PORE, LABEL_AIR = 1, 2
-#: 6 tiles a side: the 4x4x4 interior tiles have all six faces in bounds.
-TILES_PER_AXIS = 6
-SHAPE = (TILE * TILES_PER_AXIS,) * 3
-#: Windows with all six faces in bounds, and so all six EXISTS.
-TILES_PER_AXIS_INTERIOR_COUNT = (TILES_PER_AXIS - 2) ** 3
+#: Tiles per axis.  NOT cubic: no val or test volume holds a 384-deep block —
+#: the store's patches reach z0 = 128 — so depth is 3 tiles and the width
+#: carries the count.  (3, 10, 10) leaves 1 x 8 x 8 = 64 interior tiles, which
+#: are the windows with all six faces in bounds and so all six EXISTS.
+TILES = (3, 10, 10)
 SLAB = 8
+
+
+def shape_of(tiles) -> tuple[int, int, int]:
+    return tuple(TILE * int(t) for t in tiles)
+
+
+def interior_range(tiles):
+    """Tile indices whose window has all six faces in bounds, per axis."""
+    return [range(1, int(t) - 1) for t in tiles]
+
+
+def n_interior(tiles) -> int:
+    return int(np.prod([max(0, int(t) - 2) for t in tiles]))
 
 
 def phi_of(block: np.ndarray) -> float | None:
@@ -60,7 +73,7 @@ def phi_of(block: np.ndarray) -> float | None:
     return pore / solid if solid else None
 
 
-def rim_profile(label: np.ndarray) -> dict[str, float | None]:
+def rim_profile(label: np.ndarray, tiles=TILES) -> dict[str, float | None]:
     """phi by distance from the window face, pooled over the 64 interior tiles.
 
     Shell `d` is every voxel whose distance to the NEAREST face of its own
@@ -77,9 +90,10 @@ def rim_profile(label: np.ndarray) -> dict[str, float | None]:
     for d in range(0, n // 2, SLAB):
         mask = (d3 >= d) & (d3 < d + SLAB)
         pore = solid = 0
-        for tz in range(1, TILES_PER_AXIS - 1):
-            for ty in range(1, TILES_PER_AXIS - 1):
-                for tx in range(1, TILES_PER_AXIS - 1):
+        rz, ry, rx = interior_range(tiles)
+        for tz in rz:
+            for ty in ry:
+                for tx in rx:
                     blk = label[tz * n:(tz + 1) * n,
                                 ty * n:(ty + 1) * n,
                                 tx * n:(tx + 1) * n]
@@ -90,12 +104,11 @@ def rim_profile(label: np.ndarray) -> dict[str, float | None]:
     return shells
 
 
-def interior_phi(label: np.ndarray) -> float | None:
+def interior_phi(label: np.ndarray, tiles=TILES) -> float | None:
     n = TILE
+    rz, ry, rx = interior_range(tiles)
     blocks = [label[tz * n:(tz + 1) * n, ty * n:(ty + 1) * n, tx * n:(tx + 1) * n]
-              for tz in range(1, TILES_PER_AXIS - 1)
-              for ty in range(1, TILES_PER_AXIS - 1)
-              for tx in range(1, TILES_PER_AXIS - 1)]
+              for tz in rz for ty in ry for tx in rx]
     return phi_of(np.concatenate([b.ravel() for b in blocks]))
 
 
@@ -131,6 +144,9 @@ def main() -> int:
     ap.add_argument("--target-phi", type=float, default=0.03)
     ap.add_argument("--seed", type=int, default=101)
     ap.add_argument("--split", default="val")
+    ap.add_argument("--tiles", type=int, nargs=3, default=list(TILES),
+                    help="tiles per axis; the interior ones are the windows "
+                         "with all six faces EXISTS")
     ap.add_argument("--s-nb", type=float, nargs="+", default=[1.0, 0.0])
     ap.add_argument("--neighbours", type=Path, default=None,
                     help="a latents.npy to use as the neighbour canvas instead "
@@ -149,12 +165,17 @@ def main() -> int:
               + ", ".join(f"{p} ({n})" for p, n in busy), flush=True)
         return 3
 
+    tiles = tuple(args.tiles)
+    shape = shape_of(tiles)
+    if n_interior(tiles) < 1:
+        print(f"REFUSING: tiles {tiles} leave no interior window", flush=True)
+        return 2
     args.out.mkdir(parents=True, exist_ok=True)
     runner = VolumeRunner(args.model, args.ckpt, weights="ema", repo=REPO)
     # The same layup the sampler assessment uses, so the orientation
     # conditioning is the production one and not a constant this test invented.
     spec0 = build_cases("sampler")[0]
-    theta = theta_for_canvas(SHAPE[0], spec0.layup, spec0.ply_thickness_vox, 0)
+    theta = theta_for_canvas(shape[0], spec0.layup, spec0.ply_thickness_vox, 0)
 
     if args.neighbours:
         canvas = np.load(args.neighbours).astype(np.float32)
@@ -162,12 +183,12 @@ def main() -> int:
     else:
         from poregen.eval_v4.teacher import reference_latent_canvas
         canvas, note = reference_latent_canvas(
-            runner.latents_root, SHAPE, seed=args.seed, split=args.split)
+            runner.latents_root, shape, seed=args.seed, split=args.split)
         note = {**note, "kind": "real"}
     reference = torch.from_numpy(np.ascontiguousarray(canvas)).to(runner.device)
 
-    results = {"shape": list(SHAPE), "tiles_per_axis": TILES_PER_AXIS,
-               "n_interior_windows": TILES_PER_AXIS_INTERIOR_COUNT,
+    results = {"shape": list(shape), "tiles": list(tiles),
+               "n_interior_windows": n_interior(tiles),
                "ddim": args.ddim, "target_phi": args.target_phi,
                "checkpoint_step": runner.checkpoint_step,
                "neighbours": note, "arms": {}}
@@ -176,12 +197,14 @@ def main() -> int:
     # comparison is window-vs-window and not model-vs-scanner.
     gen0 = build(runner, reference, args.s_nb[0], args.ddim, theta)
     with torch.no_grad():
-        xct, label = gen0._decode_canvas(
-            reference, SHAPE, runner.autocast_dtype, 64)
-    lab = np.asarray(label)
+        xct, probs = gen0._decode_canvas(
+            reference, shape, runner.autocast_dtype, 64)
+    # `_decode_canvas` hands back CLASS PROBABILITIES (3, D, H, W), not a
+    # label: taking it for a label indexes the 3-channel axis as if it were z.
+    lab = np.asarray(probs).argmax(0).astype(np.uint8)
     results["arms"]["reference_decoded"] = {
-        "phi_interior_windows": interior_phi(lab),
-        "phi_by_shell": rim_profile(lab),
+        "phi_interior_windows": interior_phi(lab, tiles),
+        "phi_by_shell": rim_profile(lab, tiles),
         "note": "the neighbour canvas itself, decoded — no denoising",
     }
 
@@ -190,7 +213,7 @@ def main() -> int:
         t0 = time.perf_counter()
         with torch.no_grad():
             out = gen.generate(
-                volume_size_mm=tuple(s * VOXEL_SIZE_MM for s in SHAPE),
+                volume_size_mm=tuple(v * VOXEL_SIZE_MM for v in shape),
                 target_porosity=args.target_phi,
                 autocast_dtype=runner.autocast_dtype,
                 window_batch=32, decode_batch_size=64,
@@ -198,8 +221,8 @@ def main() -> int:
             )
         lab = np.asarray(out[1])
         results["arms"][f"s_nb={s_nb:g}"] = {
-            "phi_interior_windows": interior_phi(lab),
-            "phi_by_shell": rim_profile(lab),
+            "phi_interior_windows": interior_phi(lab, tiles),
+            "phi_by_shell": rim_profile(lab, tiles),
             "wall_s": round(time.perf_counter() - t0, 1),
         }
         np.save(args.out / f"label_snb{s_nb:g}.npy", lab)
