@@ -91,6 +91,26 @@ def material_l_bracket(shape, *, leg: float = 512.0, thick: float = 192.0,
     return np.broadcast_to(mask2d[:, :, None], (d, h, w)).copy()
 
 
+def l_bracket_legs(shape, *, leg: float = 512.0, thick: float = 192.0,
+                   corner: float = 288.0) -> dict:
+    """The two legs of :func:`material_l_bracket`, as slice triples.
+
+    The legs are measured SEPARATELY and the corner is measured in neither.  No
+    ply orientation is defined through a corner — the plies turn — so a layup
+    reader run across it would score the model against a request that does not
+    exist there.  ``corner`` is the outer round's radius, and everything inside
+    that square is dropped from both legs.
+    """
+    d, h, _ = shape
+    t, L, c = int(thick), int(leg), int(corner)
+    return {
+        # The leg along y: 192 thick in z, running from the corner out to 512.
+        "leg_y": (slice(0, min(t, d)), slice(c, min(L, h)), slice(None)),
+        # The leg along z: 192 thick in y, running from the corner out to 512.
+        "leg_z": (slice(c, min(L, d)), slice(0, min(t, h)), slice(None)),
+    }
+
+
 def material_taper(shape, *, t0: float = 192.0, t1: float = 80.0) -> np.ndarray:
     """A plate whose thickness falls linearly along y, centred on z.
 

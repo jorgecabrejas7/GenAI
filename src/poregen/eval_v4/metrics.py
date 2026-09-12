@@ -1278,7 +1278,12 @@ def surface_agreement(
         rough = surface_roughness(h)
         req = np.asarray(requested, dtype=np.float64)
         req_field = req if req.ndim == 2 else np.full(h.shape, float(req))
-        ok = np.isfinite(h)
+        # A column the REQUEST leaves empty carries no requested interface, so
+        # it is dropped rather than differenced against a NaN. On a box request
+        # every column has material and nothing is dropped; on a tube or a
+        # gyroid most of them do not, and without this the position error is
+        # NaN for the whole face.
+        ok = np.isfinite(h) & np.isfinite(req_field)
         finite = h[ok]
         # Error against the REQUESTED FIELD, per column. Against a plane, a
         # correctly-followed rough request would read as position error equal to
@@ -1299,6 +1304,7 @@ def surface_agreement(
             "error_abs_mean": (float(np.abs(err).mean()) if err.size else None),
             "error_max_abs": (float(np.abs(err).max()) if err.size else None),
             "columns_without_material": int(np.isnan(h).sum()),
+            "columns_scored": int(ok.sum()),
             **{f"roughness_{k}": v for k, v in rough.items()},
             "outliers": _surface_outliers(h, req_field, label, face),
         }
@@ -1510,3 +1516,124 @@ def pore_dice_across_planes(label: np.ndarray, period, *,
             "only `ratio_to_interior` is readable: ~1 means the plane is like "
             "ordinary material, well below 1 means less pore agreement there."),
     }
+
+
+# ---------------------------------------------------------------------------
+# The chunk-plane porosity band
+# ---------------------------------------------------------------------------
+
+#: Slab depth for the band readings, in voxels.  The depletion measured in
+#: campaign 17 sits in the 32 single-covered voxels at each chunk edge; 8 reads
+#: the worst of it without averaging the recovery back in.
+BAND_SLAB_VOX = 8
+
+
+def chunk_bounds(n_vox: int, chunk_vox: int,
+                 overlap_vox: int = 0) -> tuple[list[int], list[int]]:
+    """(chunk ENDS, chunk STARTS) in voxels for one axis, the volume's excluded.
+
+    THE PLANES MOVE WITH THE OVERLAP and the measurement has to move with them.
+    Chunks advance by ``chunk - overlap``, so at overlap 32 a 1024 axis has its
+    chunk ends at 192/352/512/672/832/992 and its starts at
+    160/320/480/640/800/960 — not at the 192/384/576/768/960 an unoverlapped run
+    uses.  Scoring an overlap arm at the baseline's planes measures chunk
+    INTERIORS for most of them and reports a band that has simply been looked
+    for in the wrong place.
+    """
+    step = chunk_vox - overlap_vox
+    if step <= 0:
+        raise ValueError(
+            f"chunk {chunk_vox} with overlap {overlap_vox} does not advance")
+    bounds, s = [], 0
+    while s < n_vox:
+        hi = min(s + chunk_vox, n_vox)
+        bounds.append((s, hi))
+        if hi >= n_vox:
+            break
+        s += step
+    return ([hi for _, hi in bounds[:-1]], [lo for lo, _ in bounds[1:]])
+
+
+def chunk_band_profile(label: np.ndarray, period, *, overlap_vox: int = 0,
+                       slab: int = BAND_SLAB_VOX) -> dict:
+    """phi in the ``slab`` voxels before each chunk END and after each chunk START.
+
+    THE LAST PLANE ON EACH AXIS IS REPORTED SEPARATELY.  Its successor is the
+    terminal clamped chunk, whose far face is the VOLUME EDGE — OOB, the one
+    neighbour configuration the model was trained on — so that boundary is
+    healthy while every other is depleted.  Averaging it in makes the same
+    sampler score 0.80 on a 2-chunk axis and 0.66 on a 6-chunk axis, which is a
+    property of the shape and not of the sampler.  It is kept as the
+    in-distribution anchor: it says what the band would look like if the
+    neighbour state at a frontier were one the model had seen.
+
+    phi is MATERIAL porosity, pore / (pore + material), so a slab that is mostly
+    requested air is measured on the little material it has rather than diluted
+    by the air; a slab with no material at all is dropped.  The reading is the
+    ``ratio_*`` set: a band at 1.0 is flat, and campaign 12's hybrid sampler
+    reads 0.19 at 1024.
+    """
+    per = period if isinstance(period, (tuple, list)) else (period,) * 3
+
+    def phi_of(block) -> float | None:
+        pore = int((block == LABEL_PORE).sum())
+        solid = int((block != LABEL_AIR).sum())
+        return pore / solid if solid else None
+
+    series = {"trailing": {}, "leading": {}}
+    inner_t, inner_l, term_t, term_l = [], [], [], []
+    axes = []
+    for axis, p_ in enumerate(per):
+        n = label.shape[axis]
+        if not p_ or n <= p_:
+            continue                     # a single chunk has no frontier
+        axes.append(axis)
+        ends, starts = chunk_bounds(n, int(p_), overlap_vox)
+        t = [(e, v) for e in ends if e - slab >= 0
+             and (v := phi_of(np.take(label, range(e - slab, e), axis=axis))) is not None]
+        l = [(s, v) for s in starts if s + slab <= n
+             and (v := phi_of(np.take(label, range(s, s + slab), axis=axis))) is not None]
+        series["trailing"][f"axis{axis}"] = {"planes": [e for e, _ in t],
+                                             "phi": [v for _, v in t]}
+        series["leading"][f"axis{axis}"] = {"planes": [s for s, _ in l],
+                                            "phi": [v for _, v in l]}
+        if t:
+            inner_t += [v for _, v in t[:-1]]
+            term_t.append(t[-1][1])
+        if l:
+            inner_l += [v for _, v in l[:-1]]
+            term_l.append(l[-1][1])
+
+    phi_vol = phi_of(label)
+
+    def agg(vals, fn=np.mean):
+        return float(fn(vals)) if vals else None
+
+    def ratio(v):
+        return (v / phi_vol) if (v is not None and phi_vol) else None
+
+    out = {
+        "slab_vox": int(slab),
+        "overlap_vox": int(overlap_vox),
+        "axes_with_planes": axes,
+        "phi_volume": phi_vol,
+        "phi_-8": agg(inner_t),
+        "phi_+0": agg(inner_l),
+        "phi_-8_worst": agg(inner_t, np.min),
+        "phi_+0_worst": agg(inner_l, np.min),
+        "phi_-8_terminal": agg(term_t),
+        "phi_+0_terminal": agg(term_l),
+        "n_trailing_planes": len(inner_t),
+        "n_leading_planes": len(inner_l),
+        "per_plane": series,
+        "definition": (
+            "Material porosity in the 8 voxels before each chunk end and after "
+            "each chunk start, over NON-TERMINAL planes only; `*_terminal` is "
+            "the last plane on each axis, whose successor's far face is the "
+            "volume edge and is therefore in-distribution. Read `ratio_*`: 1.0 "
+            "is flat."),
+    }
+    for k in ("phi_-8", "phi_+0", "phi_-8_worst", "phi_+0_worst",
+              "phi_-8_terminal", "phi_+0_terminal"):
+        out["ratio_" + k[4:]] = ratio(out[k])
+    return out

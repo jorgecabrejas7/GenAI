@@ -27,6 +27,7 @@ import numpy as np
 
 from poregen.eval_v4 import field_stats as FS
 from poregen.eval_v4 import metrics as M
+from poregen.eval_v4 import stress_geometry as SG
 from poregen.eval_v4.cases import (
     ASSEMBLY_OFFSETS,
     ASSEMBLY_REGION,
@@ -1363,6 +1364,219 @@ def measure_assembly_modes(root, repo) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 12 - stress geometries (EXPLORATORY, off the gates)
+# ---------------------------------------------------------------------------
+
+#: The T-I readers use one centred window of this size per slice, and the
+#: campaign-08 floor they are scored against was measured at it.  A volume
+#: narrower than this is not read with a smaller window: the floor would not
+#: apply and the comparison would be to an invented number.
+LAYUP_WINDOW_VOX = 1024
+
+
+def _layup_block(xct, label, *, manifest, repo, what: str) -> dict:
+    """Layup recovery on one array, or the reason it could not be read."""
+    h, w = xct.shape[1], xct.shape[2]
+    if min(h, w) < LAYUP_WINDOW_VOX:
+        return {
+            "available": False,
+            "what": what,
+            "in_plane": [int(h), int(w)],
+            "reason": (
+                f"the T-I readers need a {LAYUP_WINDOW_VOX}x{LAYUP_WINDOW_VOX} "
+                f"in-plane window and this is {h}x{w}. A smaller window would "
+                "read angles against a floor measured at 1024, so the shortfall "
+                "is reported instead of a number that cannot be judged."),
+        }
+    out = M.layup_recovery(xct, label, manifest=manifest, repo=repo)
+    out["available"] = True
+    out["what"] = what
+    return out
+
+
+def _ramp_fit(label, material, requested_tiles) -> dict | None:
+    """Delivered vs requested porosity along y, in tile rows.
+
+    The ramp is the part of the painted field a slope can describe, and a slope
+    is what says whether the gradient was followed or merely averaged: a model
+    that delivers the volume mean everywhere scores a within-volume R-squared
+    near zero AND a ramp slope near zero, while one that follows the request
+    has both.
+    """
+    if requested_tiles is None:
+        return None
+    pore = M.block_sum((label == M.LABEL_PORE) & material)
+    mat = M.block_sum(material)
+    req = np.asarray(requested_tiles, float)
+    if req.shape != mat.shape:
+        return None
+    usable = mat > 0.5 * M.TILE ** 3
+    rows_d, rows_r, rows_y = [], [], []
+    for j in range(mat.shape[1]):
+        sel = usable[:, j, :]
+        if sel.sum() < 3:
+            continue
+        rows_d.append(float(pore[:, j, :][sel].sum() / mat[:, j, :][sel].sum()))
+        rows_r.append(float(req[:, j, :][sel].mean()))
+        rows_y.append(float(j))
+    if len(rows_y) < 3:
+        return None
+    fd = M.fit_ols(np.array(rows_y), np.array(rows_d))
+    fr = M.fit_ols(np.array(rows_y), np.array(rows_r))
+    return {
+        "n_tile_rows": len(rows_y),
+        "delivered_slope_per_tile": fd["slope"],
+        "requested_slope_per_tile": fr["slope"],
+        "slope_ratio": (fd["slope"] / fr["slope"]) if fr["slope"] else None,
+        "delivered_r2_vs_y": fd["r2"],
+        "delivered_row_phi": rows_d,
+        "requested_row_phi": rows_r,
+        "definition": (
+            "OLS of tile-row material porosity against the tile row index along "
+            "y, delivered and requested. `slope_ratio` near 1 means the ramp was "
+            "followed; near 0 means the volume is flat whatever was asked."),
+    }
+
+
+def measure_stress_geometry(root, repo) -> dict:
+    """Requests no training coupon resembles.  EXPLORATORY - no gate, ever.
+
+    Every metric here is one the gated assessments already use, run on a shape
+    the model was never trained to make.  That is the whole design: the numbers
+    are only readable BESIDE the gated ones, and a number that is poor here is
+    evidence about the request, not about the material.
+    """
+    cases = load_cases(root, "stress_geometry")
+    if not cases:
+        raise FileNotFoundError(f"no stress_geometry volumes under {root}")
+    rows = []
+    for case in cases:
+        m = case.manifest
+        notes = m.notes or {}
+        request = notes.get("request")
+        material = case.material_voxels()
+        label, xct = case.label, case.xct
+
+        row = measure_core(case)
+        row["request"] = request
+        row["ddim_steps"] = m.ddim_steps
+        row["geometry_note"] = notes.get("geometry")
+        # measure_core's own names, aliased to the ones this assessment is read
+        # by. Same objects, so the file carries them once each and the reader
+        # does not have to know two vocabularies.
+        row["failure_flags"] = row["failure"]
+        row["seam_metrics"] = row["seams"]
+        row["phase_fractions"] = M.phase_fractions(label, material, manifest=m)
+
+        # -- the requested shape ------------------------------------------
+        if case.requested_material is None:
+            row["geometry_agreement"] = {
+                "available": False,
+                "reason": ("this case requests 'full' material, so there is no "
+                           "requested air to score the predicted air against"),
+            }
+        else:
+            row["geometry_agreement"] = M.geometry_agreement(
+                label, material, manifest=m)
+
+        # -- where the interface landed -----------------------------------
+        # The request is read back as a height field from the material map
+        # itself: for a tube or a gyroid there is no plane to compare to, and
+        # rebuilding one from the generator's parameters would score the model
+        # against what was meant rather than against what it was shown.
+        row["surface_agreement"] = M.surface_agreement(
+            label, material,
+            z_lo=M.height_map(material, face="lower"),
+            z_hi=M.height_map(material, face="upper"),
+            xct=xct)
+
+        # -- the chunk-plane band -----------------------------------------
+        row["chunk_band"] = M.chunk_band_profile(
+            label, M.chunk_period(m),
+            overlap_vox=int(notes.get("chunk_overlap", 0) or 0))
+
+        # -- the painted field --------------------------------------------
+        try:
+            row["local_obedience"] = M.local_obedience(
+                label, material, manifest=m,
+                requested_tiles=case.requested_field)
+        except ValueError as exc:
+            row["local_obedience"] = {"available": False, "reason": str(exc)}
+        row["ramp"] = _ramp_fit(label, material, case.requested_field)
+
+        # -- the plies ----------------------------------------------------
+        row["layup_recovery"] = _layup_block(
+            xct, label, manifest=m, repo=repo, what="whole canvas")
+        if request == "lbracket":
+            # No ply orientation is defined through the corner, so the legs are
+            # read apart and the corner is read in neither.
+            row["legs"] = {}
+            for name, sl in SG.l_bracket_legs(m.volume_shape).items():
+                sub_mat, sub_lab = material[sl], label[sl]
+                row["legs"][name] = {
+                    "shape": list(sub_lab.shape),
+                    "phi_pore": float(
+                        (sub_lab[sub_mat] == M.LABEL_PORE).mean())
+                    if sub_mat.any() else None,
+                    "air_fraction_inside_material": float(
+                        (sub_lab[sub_mat] == M.LABEL_AIR).mean())
+                    if sub_mat.any() else None,
+                    "layup_recovery": _layup_block(
+                        xct[sl], sub_lab, manifest=m, repo=repo, what=name),
+                }
+        rows.append(row)
+        case.release()
+
+    by_request = {}
+    for request, sel in _group(rows, lambda r: r["request"]).items():
+        by_request[request] = {
+            "n_cases": len(sel),
+            "phi_pore": _agg(sel, ("phase_fractions", "phi_pore")),
+            "air_fraction": _agg(sel, ("phase_fractions", "air_fraction")),
+            "dice_air": _agg(sel, ("geometry_agreement", "dice_air")),
+            "chunk_band_ratio_-8": _agg(sel, ("chunk_band", "ratio_-8")),
+            "chunk_band_ratio_+0": _agg(sel, ("chunk_band", "ratio_+0")),
+            "chunk_band_ratio_-8_terminal": _agg(
+                sel, ("chunk_band", "ratio_-8_terminal")),
+            "seam_chunk_xct_ratio": _agg(sel, ("seams", "seam_chunk_xct_ratio")),
+            "lower_surface_error_abs_mean": _agg(
+                sel, ("surface_agreement", "lower", "error_abs_mean")),
+            "upper_surface_error_abs_mean": _agg(
+                sel, ("surface_agreement", "upper", "error_abs_mean")),
+            **_failure_rate(sel),
+        }
+
+    return {
+        "assessment": "stress_geometry",
+        "question": ("Which requested shapes does the specimen-envelope "
+                     "conditioning honour at all, and where does it stop?"),
+        "exploratory": True,
+        "off_gates_because": (
+            "every request here is a shape no training coupon resembles. A model "
+            "asked for a tube when every coupon was a plate may fail in ways "
+            "that say nothing about the material it was trained to make, so "
+            "nothing in this file is a gated result and no threshold is applied "
+            "to it."
+        ),
+        "layup_window_note": (
+            f"Layup recovery is reported only where the volume holds the "
+            f"{LAYUP_WINDOW_VOX}-voxel T-I window in both in-plane axes. The "
+            "narrower requests carry `available: false` and the shape that "
+            "prevented it, because reading them at a smaller window would score "
+            "the angles against a floor measured at 1024."
+        ),
+        "surface_note": (
+            "The requested interface is the height field of the requested "
+            "material map itself, so a curved or interrupted request is scored "
+            "against its own surface. Columns the request leaves empty carry no "
+            "interface and are dropped; `columns_scored` says how many remain."
+        ),
+        "per_case": rows,
+        "summary": by_request,
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -1376,6 +1590,7 @@ MEASURERS = {
     "microstructure": measure_microstructure,
     "field_stats": measure_field_stats,
     "assembly_modes": measure_assembly_modes,
+    "stress_geometry": measure_stress_geometry,
 }
 
 

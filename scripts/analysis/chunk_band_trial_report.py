@@ -28,6 +28,8 @@ from pathlib import Path
 
 import numpy as np
 
+from poregen.eval_v4 import metrics as M
+
 REPO = Path(__file__).resolve().parents[2]
 
 TILE = 64
@@ -42,75 +44,28 @@ POROSITY_GATE = 0.005
 BAND_TOL = 0.20
 
 
+#: ``phi_of``, ``chunk_bounds`` and the band reading itself now live in
+#: ``poregen.eval_v4.metrics``: assessment 12 (stress_geometry) reads the same
+#: band, and two copies of a measurement are two measurements.
+def band_slabs(label: np.ndarray, axes, chunk_vox: int, overlap_vox: int) -> dict:
+    """The trial report's view of :func:`metrics.chunk_band_profile`.
+
+    ``axes`` is accepted and ignored — the metric drops an axis that holds one
+    chunk by itself, which is what the caller computed ``axes`` for.
+    """
+    b = M.chunk_band_profile(label, chunk_vox, overlap_vox=overlap_vox, slab=SLAB)
+    return {"-8": b["phi_-8"], "0": b["phi_+0"],
+            "-8_worst": b["phi_-8_worst"], "0_worst": b["phi_+0_worst"],
+            "-8_terminal": b["phi_-8_terminal"], "0_terminal": b["phi_+0_terminal"],
+            "n_trailing": b["n_trailing_planes"], "n_leading": b["n_leading_planes"],
+            "per_plane": b["per_plane"]}
+
+
 def phi_of(block: np.ndarray) -> float | None:
-    pore = int((block == LABEL_PORE).sum())
-    solid = int((block != LABEL_AIR).sum())
+    pore = int((block == 1).sum())
+    solid = int((block != 2).sum())
     return pore / solid if solid else None
 
-
-def chunk_bounds(n_vox: int, chunk_vox: int, overlap_vox: int) -> tuple[list, list]:
-    """(chunk ENDS, chunk STARTS) in voxels for one axis, excluding the volume's.
-
-    THE PLANES MOVE WITH THE OVERLAP and the measurement has to move with them.
-    Chunks advance by ``chunk - overlap``, so at overlap 32 a 1024 axis has its
-    chunk ends at 192/352/512/672/832/992 and its starts at
-    160/320/480/640/800/960 — not at the 192/384/576/768/960 an unoverlapped
-    run uses.  Scoring an overlap arm at the baseline's planes measures chunk
-    INTERIORS for most of them and reports a band that has simply been looked
-    for in the wrong place.
-    """
-    step = chunk_vox - overlap_vox
-    bounds, s = [], 0
-    while s < n_vox:
-        hi = min(s + chunk_vox, n_vox)
-        bounds.append((s, hi))
-        if hi >= n_vox:
-            break
-        s += step
-    return ([hi for _, hi in bounds[:-1]], [lo for lo, _ in bounds[1:]])
-
-
-def band_slabs(label: np.ndarray, axes, chunk_vox: int, overlap_vox: int) -> dict:
-    """phi in the 8 voxels before each chunk END and after each chunk START.
-
-    THE LAST PLANE ON EACH AXIS IS REPORTED SEPARATELY.  Its successor is the
-    terminal clamped chunk, whose far face is the VOLUME EDGE — OOB, the
-    configuration the model was trained on — so that one boundary is healthy
-    while every other is depleted.  Averaging it in makes the same sampler
-    score 0.80 on a 2-chunk axis and 0.66 on a 6-chunk axis, which is a
-    property of the shape and not of the sampler.  It is kept as the
-    in-distribution anchor: it says what the band would look like if the
-    neighbour state at a frontier were one the model had seen.
-    """
-    series = {"trailing": {}, "leading": {}}
-    inner_t, inner_l, term_t, term_l = [], [], [], []
-    for axis in axes:
-        n = label.shape[axis]
-        ends, starts = chunk_bounds(n, chunk_vox, overlap_vox)
-        t_vals = [phi_of(np.take(label, range(e - SLAB, e), axis=axis))
-                  for e in ends if e - SLAB >= 0]
-        l_vals = [phi_of(np.take(label, range(st, st + SLAB), axis=axis))
-                  for st in starts if st + SLAB <= n]
-        t_vals = [v for v in t_vals if v is not None]
-        l_vals = [v for v in l_vals if v is not None]
-        series["trailing"][str(axis)] = {"planes": ends, "phi": t_vals}
-        series["leading"][str(axis)] = {"planes": starts, "phi": l_vals}
-        if t_vals:
-            inner_t += t_vals[:-1]
-            term_t.append(t_vals[-1])
-        if l_vals:
-            inner_l += l_vals[:-1]
-            term_l.append(l_vals[-1])
-
-    def agg(vals):
-        return float(np.mean(vals)) if vals else None
-
-    return {"-8": agg(inner_t), "0": agg(inner_l),
-            "-8_worst": (float(np.min(inner_t)) if inner_t else None),
-            "0_worst": (float(np.min(inner_l)) if inner_l else None),
-            "-8_terminal": agg(term_t), "0_terminal": agg(term_l),
-            "n_trailing": len(inner_t), "n_leading": len(inner_l),
-            "per_plane": series}
 
 
 def seams(xct: np.ndarray, pore_logit: np.ndarray | None, period: int) -> dict:
