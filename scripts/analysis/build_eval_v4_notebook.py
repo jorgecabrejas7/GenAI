@@ -1131,6 +1131,8 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-12 04:00 | **Root cause in the training code:** neighbour dropout dropped all six faces per sample; 64 % of training windows have one missing face and it is always the specimen surface; "present + unknown" never occurred. Learned rule: nothing behind a face = surface = no pores. The one healthy plane per volume is the terminal one (next chunk's far face = volume edge = trained case). | same; `12-eval-v4/README.md` |
 | 09-12 04:00–08:49 | Fix trial (campaign 17) on 130k, scored on non-terminal planes (trailing / leading strip, worst plane, cost): overlap+blend (a) 0.31 fail; s_nb 0.5 (b) 0.51 fail; both (c) 0.56 fail at 3.8×; drop-neighbours-when-mixed (f) 0.85 / 0.75 fail at 1×; **(g) = (f)+overlap 0.82 / 1.00, worst 0.74, PASS on the mean at 1.36×**; **(a2s) overlap 64 with 32 pinned, successor writes the strip: 0.95 / 0.91, worst 0.84, PASS on every plane at 2.05×**; (a2b) blend ≈ a2s. Pinned-only (e) 0.19 = the steering control. | section *chunk-plane band*, trial table |
 | 09-12 09:00–12:00 | Author's additions queued behind the regeneration: campaign 19 stress geometries (nine shapes × DDIM 50/200), campaign 20 out-of-distribution conditioning (unseen sequences of the four trained angles, ply thickness 8/32, porosity 0–0.002 and 0.15–0.20 with the clamp lifted, field scales 16/64/512), campaign 21 real porosity by region (CPU, all 80 scans). Regeneration script (campaign 18) prepared, waits for the checkpoint+sampler choice. | sections *stress geometries*, *out-of-distribution conditioning*, *real porosity by region* |
+| 09-12 17:13 | `ldm06/facedrop` finished (15k steps, 8 h 17 m, val loss flat = no damage). **Production sampler on the new weights clears the band:** trailing strip 0.19 → 1.04, worst plane 0.13 → 0.89, leading strip 0.59 → 0.85, φ error 0.0004, at 1× cost. a2s on the new weights is the only configuration with every plane inside ±20 % (0.81 / 0.84) at 2.05×. Rim test: per-face contrast spread 2.40 → 0.54, window φ back to its neighbour context. **Mechanism verified three ways.** | section *chunk-plane band* (trial table, fd rows), *rim tests* |
+| 09-12 18:15 | **Author's decisions (D44):** regenerate everything as campaign 18 on the fine-tuned weights with the production sampler; decoder fine-tune approved, to run after the regeneration. Both `regen_go` and `decoder_ft_go` written. `scripts/final_queue.sh` owns the rest: 18 → stress DDIM-50 → OOD → decoder-ft + redecode(18) → downstream → stress DDIM-200 → rf-2/rf-64 → notebook. Expected end Sep 16 ~17:00. | vault Decisions Log D44 |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
@@ -1140,10 +1142,11 @@ the memorisation check searches the full store and the multi-chunk volumes; `ref
 stays on 119k and is documented as such, the next generation is on 130k; band criterion = mean over non-terminal planes
 plus worst plane; downstream utility runs last so it trains on the regenerated set.
 
-**Decisions that belong to the author and are open:**
-1. Visual inspection of the pack → go / no-go for the decoder fine-tune (D43). Recommendation: judge it on the regenerated set.
-2. Which band fix: sampler rule (f) or (g) today, or the per-face fine-tune (mechanism-clean, ≈ 7 h), or both.
-3. Regenerate campaign 12 on 130k with the chosen fix (≈ 12 h generation + measure). Recommended.
+**Decisions taken by the author on 2026-09-12 (D44):** the paper's model is the per-face-dropout fine-tune with the
+production sampler; the whole evaluation is regenerated as campaign 18 on it; the decoder fine-tune (D43) is approved and
+runs after the regeneration. Campaign 12 stays as the record of the defect.
+
+**Still open for the author:**
 4. Whether the "hybrid unifies joint and autoregressive" claim is withdrawn: on seams hybrid = joint = teacher-forced at the real floor; it beats autoregressive; it does not beat joint. Framing v2 says withdraw; replace with "unbounded size at joint quality, no drift".
 5. Train longer (vault L2): parked; the exit gates did not move between 74k and 130k.
 
