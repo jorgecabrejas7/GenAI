@@ -98,6 +98,12 @@ class Manifest:
     requested_layup: tuple[int, ...] | None = None
     requested_ply_thickness_vox: float | None = None
     requested_material: str | None = None
+    #: False when the POR_MIN/POR_MAX clamp was LIFTED for this case, so the
+    #: request reached the model unheld.  Recorded rather than inferred: a
+    #: volume generated outside the training range is not comparable with one
+    #: generated inside it, and nothing downstream should have to guess which
+    #: it is holding.  True everywhere but assessment 13.
+    porosity_clamped: bool = True
 
     # The sub-block of the generated canvas the case is ABOUT.  Assessment 6
     # asks for the same region assembled on two different window grids, which

@@ -779,6 +779,7 @@ class VolumeGenerator:
         decode_stride: int = 32,
         neighbour_mode: str = "canvas",
         reference_latents: torch.Tensor | None = None,
+        clamp_porosity: bool = True,
     ) -> None:
         if patch_size % latent_size:
             raise ValueError(
@@ -794,6 +795,20 @@ class VolumeGenerator:
         self.voxel_size_mm = float(voxel_size_mm)
         self.por_log_stats = por_log_stats
         self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
+        #: Hold the porosity request inside the training range [POR_MIN,
+        #: POR_MAX] before it is conditioned on.  ON by default, and it must
+        #: stay on for anything gated: outside that range the model was never
+        #: trained and the number it returns describes nothing.  Turning it OFF
+        #: is how assessment 13 asks for a porosity the training set does not
+        #: contain, and every case that does records it in its manifest.
+        #:
+        #: The clamp is not symmetric in effect.  cond_por is log(phi + 1e-3)
+        #: standardised, so at the bottom it is severe -- a request of 0.000
+        #: conditions at -1.81 sd unclamped against -0.95 clamped, and 0.000,
+        #: 0.001 and 0.002 all collapse to ONE request with it on -- while at
+        #: the top it is mild: 0.150 is only +0.26 sd beyond POR_MAX and 0.200
+        #: only +0.49.
+        self.clamp_porosity = bool(clamp_porosity)
         self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
         self.chunk_overlap = int(chunk_overlap)
         #: How much of the overlap is held at the predecessor's value while the
@@ -1003,7 +1018,7 @@ class VolumeGenerator:
         box_lo, box_hi = specimen_box
 
         por_default = (
-            float(np.clip(target_porosity, POR_MIN, POR_MAX))
+            self._clamp_por(target_porosity)
             if target_porosity is not None else 0.05
         )
         if material_map is None:
@@ -1229,6 +1244,17 @@ class VolumeGenerator:
 
         return z_clean
 
+    def _clamp_por(self, phi) -> float:
+        """The porosity request, held inside the training range or not.
+
+        With the clamp OFF the value still cannot go below zero: cond_por is
+        log(phi + 1e-3), which is finite at phi = 0 but not below it, and a
+        negative porosity is not a request a reader could interpret.
+        """
+        if not self.clamp_porosity:
+            return float(max(float(phi), 0.0))
+        return float(np.clip(phi, POR_MIN, POR_MAX))
+
     def _default_material_map(
         self,
         canvas_cells: tuple[int, int, int],
@@ -1327,7 +1353,7 @@ class VolumeGenerator:
             # is a legal 0.1, not a clipped 0.107) and before porosity_to_cond,
             # which is a log — scaling after it would be an offset, not a scale.
             phi *= float(block.mean())
-            phi = float(np.clip(phi, POR_MIN, POR_MAX))
+            phi = self._clamp_por(phi)
             por.append(float(porosity_to_cond(phi, self.por_log_stats)))
             d, d6 = self._window_position(ov, box_lo, box_hi)
             depth.append(d)
@@ -1554,7 +1580,7 @@ class VolumeGenerator:
         actual_por = float((label == 1).mean())
         actual_air = float((label == 2).mean())
         clamped_por = (
-            float(np.clip(target_porosity, POR_MIN, POR_MAX))
+            self._clamp_por(target_porosity)
             if target_porosity is not None else 0.05
         )
         logger.info(

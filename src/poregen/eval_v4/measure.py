@@ -64,6 +64,11 @@ def case_identity(case: Case) -> dict:
         "weights": m.weights,
         "checkpoint_step": m.checkpoint_step,
         "requested_global_phi": m.requested_global_phi,
+        # False when the training-range clamp was lifted. In every row of every
+        # assessment, because a volume generated outside the training range is
+        # not comparable with one generated inside it and no reader should have
+        # to go back to the manifest to find out which it is holding.
+        "porosity_clamped": m.porosity_clamped,
         "wall_time_s": m.wall_time_s,
         "peak_gpu_memory_bytes": m.peak_gpu_memory_bytes,
         "git_commit": m.git_commit,

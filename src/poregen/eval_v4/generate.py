@@ -353,6 +353,7 @@ class VolumeRunner:
             decode_stride=spec.decode_stride,
             neighbour_mode=spec.neighbour_mode,
             reference_latents=reference,
+            clamp_porosity=spec.clamp_porosity,
         )
         snapped = generator._volume_shape(size_mm)
         if tuple(snapped) != shape:
@@ -395,8 +396,13 @@ class VolumeRunner:
         p_pore = np.clip(probs[1], 1e-6, 1.0 - 1e-6)
         pore_logit = (np.log(p_pore) - np.log1p(-p_pore)).astype(np.float32)
 
+        # What the model was ACTUALLY conditioned on. With the clamp lifted
+        # that is the request itself, so the note below must not keep saying it
+        # was held — a manifest that claims a clamp which did not happen is
+        # worse than one that says nothing.
         clamped = (
-            float(np.clip(spec.target_phi, POR_MIN, POR_MAX))
+            (float(np.clip(spec.target_phi, POR_MIN, POR_MAX))
+             if spec.clamp_porosity else float(max(spec.target_phi, 0.0)))
             if spec.target_phi is not None else None
         )
         manifest = Manifest(
@@ -425,6 +431,7 @@ class VolumeRunner:
             requested_material=(
                 "requested_material.npy" if voxel_material is not None else "full"
             ),
+            porosity_clamped=spec.clamp_porosity,
             region_offset=spec.region_offset,
             region_shape=spec.region_shape,
             wall_time_s=wall,

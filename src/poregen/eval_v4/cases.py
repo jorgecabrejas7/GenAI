@@ -22,6 +22,7 @@ from functools import partial
 import numpy as np
 
 from poregen.eval_v4 import stress_geometry as SG
+from poregen.diffusion.conditioning import POR_MAX, POR_MIN
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, TILE, repo_root
 
 SEEDS = (101, 202, 303)
@@ -95,6 +96,13 @@ class CaseSpec:
     #: :data:`poregen.diffusion.sampler.NEIGHBOUR_MODES`.  ``"canvas"`` is the
     #: production path; only :func:`assembly_modes_cases` asks for another.
     neighbour_mode: str = "canvas"
+    #: Hold the porosity request inside the training range before conditioning
+    #: on it.  ON everywhere but assessment 13, whose whole point is to ask for
+    #: a porosity the training set does not contain.  The clamp is not
+    #: symmetric: at the bottom 0.000, 0.001 and 0.002 all collapse to ONE
+    #: request with it on, and at the top 0.150 is only +0.26 sd of cond_por
+    #: beyond POR_MAX.
+    clamp_porosity: bool = True
     #: builds the requested phi per 64-voxel TILE, given the tile grid and seed
     field_fn: Callable[[tuple[int, int, int], int], np.ndarray] | None = None
     #: builds the requested specimen envelope at VOXEL resolution
@@ -1051,6 +1059,154 @@ def stress_geometry_cases(repo=None) -> list[CaseSpec]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 13 - conditioning out of distribution (EXPLORATORY, off the gates)
+# ---------------------------------------------------------------------------
+
+#: A coherent field at an ISOTROPIC correlation length, which is itself off the
+#: manifold: the measured lengths are (79, 414, 901) voxels in (z, y, x),
+#: because a laminate is not isotropic. The request here is the same length on
+#: all three axes, so the case asks two things at once and the reporter says so.
+def field_coherent_iso(grid, seed, length: float, target: float = TARGET_DEFAULT):
+    """The production coherent field with every correlation length replaced."""
+    from poregen.diffusion.porosity_field import (  # noqa: PLC0415
+        DEFAULT_TE_RESULTS,
+        build_porosity_field,
+        load_sampler,
+    )
+
+    root = repo_root()
+    return build_porosity_field(
+        grid_shape=tuple(grid),
+        target=float(target),
+        sampler=load_sampler(root / DEFAULT_TE_RESULTS),
+        corr_lengths_voxels=(float(length),) * 3,
+        stride_voxels=TILE,
+        seed=int(seed),
+    ).astype(np.float32)
+
+
+#: Four stacking sequences built ONLY from the trained angle set
+#: {0, 45, -45, 90}. No new angle appears anywhere: what is out of distribution
+#: is the ORDER, not the orientations, so a failure cannot be blamed on an
+#: angle the model never saw.
+OOD_SEQUENCES = {
+    "seq_interleaved": (0, 90, 45, -45, 0, 90, 45, -45, 0, 90),
+    "seq_blocked":     (45, -45, 45, -45, 0, 0, 90, 90, 45, -45),
+    #: quasi-isotropic [0/45/90/-45]s
+    "seq_quasi_iso":   (0, 45, 90, -45, -45, 90, 45, 0),
+    #: cross-ply [0/90]s, repeated cyclically to fill the depth
+    "seq_crossply":    (0, 90, 90, 0),
+}
+
+#: Ply pitches, in voxels. Trained: 19.6 (sequence A, 74 of 78 training
+#: volumes) and 10.0 (sequence B, 0.25 mm). 8 is just BELOW the thinner trained
+#: pitch and 32 is well above the thicker one, so the pair brackets the
+#: training range rather than sitting on one side of it.
+#: At 192 deep these give 24 and 6 ply blocks - which is the same request as
+#: "6 thick plies and 24 thin plies filling the depth", so that is one set of
+#: two cases and not two sets.
+OOD_PITCH_VOX = (8.0, 32.0)
+
+#: (requested phi, is the clamp lifted).  The clamp holds a request inside
+#: [POR_MIN, POR_MAX] = [0.002, 0.107] before conditioning.
+#:
+#: IT IS LIFTED FOR ALL FOUR EXTREMES, NOT ONLY THE HIGH PAIR.  cond_por is
+#: log(phi + 1e-3) standardised, and with the clamp ON the three low requests
+#: are not three requests: 0.000, 0.001 and 0.002 all condition at -0.948 sd,
+#: so the row would be one case run nine times. Lifted, they separate cleanly
+#: to -1.814 / -1.268 / -0.948 sd.
+#:
+#: 0.002 keeps the clamp because there the clamp is a no-op, which makes it the
+#: in-distribution anchor the other four are read against.
+#:
+#: The clamp is far milder at the top: 0.150 conditions at +0.264 sd beyond
+#: POR_MAX and 0.200 at +0.489. So the high pair probes a shorter distance off
+#: the manifold than the low pair does, and the two must not be read as
+#: symmetric extremes.
+OOD_POROSITY = ((0.000, False), (0.001, False), (0.002, True),
+                (0.150, False), (0.200, False))
+
+#: Isotropic correlation lengths, voxels. Production is (79, 414, 901).
+OOD_CORR_VOX = (16.0, 64.0, 512.0)
+
+#: 192 cubed: one production chunk, so the porosity extremes measure the
+#: conditioning and not the assembly. A failure at 0.20 that turned out to be a
+#: chunk-frontier artefact would say nothing about the request.
+SHAPE_CHUNK = (192, 192, 192)
+
+OOD_DDIM = 50
+
+_OOD_OFF_GATE = (
+    "the request is outside the conditioning distribution the model was "
+    "trained on; a failure here is the boundary of the conditioning and not a "
+    "defect of the kind the gated assessments report"
+)
+
+
+def ood_conditioning_cases(repo=None) -> list[CaseSpec]:
+    """13 - conditioning asked for what the training set does not contain.
+
+    EXPLORATORY. Four groups, and each asks about ONE axis of the conditioning
+    with the others held at their trained values:
+
+      1. stacking ORDER, with every angle inside the trained set
+      2. ply PITCH, above and below the two trained pitches
+      3. requested POROSITY, below and above the clamped training range
+      4. the field's CORRELATION LENGTH
+
+    Pore size and shape are NOT measured here; the author analyses those with
+    an external program.
+    """
+    plies_a, pitch_a = layup_a(repo)
+    out: list[CaseSpec] = []
+
+    def add(name, group, **kw):
+        notes = {"group": group, "exploratory": True,
+                 "off_gates_because": _OOD_OFF_GATE, **kw.pop("notes", {})}
+        out.append(CaseSpec(name=name, assessment="ood_conditioning",
+                            ddim_steps=OOD_DDIM, notes=notes, **kw))
+
+    # -- 1. stacking sequences the training set does not contain -------------
+    for seq_name, plies in OOD_SEQUENCES.items():
+        for seed in SEEDS:
+            add(f"{seq_name}_seed{seed}", "sequence",
+                volume_shape=SHAPE_LARGE, seed=seed, layup=plies,
+                ply_thickness_vox=pitch_a, target_phi=TARGET_DEFAULT,
+                notes={"sequence": seq_name, "n_plies_in_request": len(plies),
+                       "angles": sorted(set(plies))})
+
+    # -- 2. ply pitch, either side of the two trained ones -------------------
+    for pitch in OOD_PITCH_VOX:
+        for seed in SEEDS:
+            add(f"pitch{pitch:g}_seed{seed}", "pitch",
+                volume_shape=SHAPE_LARGE, seed=seed, layup=plies_a,
+                ply_thickness_vox=pitch, target_phi=TARGET_DEFAULT,
+                notes={"pitch_vox": pitch,
+                       "n_ply_blocks": int(np.ceil(SHAPE_LARGE[0] / pitch)),
+                       "trained_pitches_vox": [10.0, pitch_a]})
+
+    # -- 3. requested porosity, below and above the clamped range ------------
+    for phi, clamped in OOD_POROSITY:
+        for seed in SEEDS:
+            add(f"phi{phi:g}_seed{seed}", "porosity",
+                volume_shape=SHAPE_CHUNK, seed=seed, layup=plies_a,
+                ply_thickness_vox=pitch_a, target_phi=phi,
+                clamp_porosity=clamped,
+                notes={"requested_phi": phi, "clamp_lifted": not clamped,
+                       "in_training_range": POR_MIN <= phi <= POR_MAX})
+
+    # -- 4. the field's correlation length -----------------------------------
+    for length in OOD_CORR_VOX:
+        add(f"corr{length:g}", "correlation",
+            volume_shape=SHAPE_LARGE, seed=SEEDS[0], layup=plies_a,
+            ply_thickness_vox=pitch_a, target_phi=TARGET_DEFAULT,
+            field_fn=partial(field_coherent_iso, length=length),
+            notes={"corr_length_vox": length, "isotropic": True,
+                   "production_corr_vox": [79.4, 413.6, 900.9]})
+    return out
+
+
 ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "sampler": sampler_cases,
     "porosity_global": porosity_global_cases,
@@ -1064,6 +1220,7 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "microstructure": microstructure_cases,
     "assembly_modes": assembly_modes_cases,
     "stress_geometry": stress_geometry_cases,
+    "ood_conditioning": ood_conditioning_cases,
 }
 
 #: Assessments whose measure step also reads another assessment's volumes.
