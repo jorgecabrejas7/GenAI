@@ -211,6 +211,15 @@ _cands = [_here, _here / "campaigns" / "12-eval-v4", Path.home() / "Dev" / "pore
           Path.home() / "Dev" / "GenAI" / "runs" / "campaigns" / "12-eval-v4"]
 ROOT = next((p for p in _cands if (p / "real_floor").exists() or (p / "sampler").exists()), _cands[1])
 ROOT = Path(os.environ.get("EVAL_V4_ROOT", ROOT)).resolve()
+# EVAL_V4_HEADLESS=1 is set only by the headless verification run (nbconvert): widget cells then build
+# their controls but do not display them, because nbclient can stall waiting on widget comm traffic.
+# In JupyterLab this variable is unset and every widget shows as normal.
+HEADLESS = bool(os.environ.get("EVAL_V4_HEADLESS"))
+def show_widget(box, first_draw):
+    if HEADLESS:
+        print("headless run: widget built but not displayed (set by EVAL_V4_HEADLESS)")
+        return
+    display(box); first_draw()
 CAMPAIGNS = ROOT.parent
 LABEL_ROOT = CAMPAIGNS / "13-label-uncertainty"
 FLOOR10_ROOT = CAMPAIGNS / "10-eval-v4-real-floor"
@@ -632,7 +641,7 @@ else:
     w_case.observe(lambda c: (_sync_range(), _draw()), names="value"); w_axis.observe(lambda c: (_sync_range(), _draw()), names="value")
     for w in (w_idx, w_mode, w_alpha): w.observe(_draw, names="value")
     b_chunk.on_click(_chunk); b_mid.on_click(_mid)
-    _sync_range(); display(W.VBox([w_case, W.HBox([w_axis, w_mode, w_alpha]), W.HBox([w_idx, b_chunk, b_mid]), out])); _draw()
+    _sync_range(); show_widget(W.VBox([w_case, W.HBox([w_axis, w_mode, w_alpha]), W.HBox([w_idx, b_chunk, b_mid]), out]), _draw)
 ''')
     md("""
 **Three orthogonal middle slices of one case, in one figure.** The same rendering the inspection pack uses:
@@ -747,7 +756,7 @@ else:
             compare_figure(list(c_cases.value)[:4], c_axis.value, c_idx.value, c_mode.value, c_diff.value).show()
     c_preset.observe(lambda c: (_apply_preset(), _cdraw()), names="value")
     for w in (c_cases, c_axis, c_idx, c_mode, c_diff): w.observe(_cdraw, names="value")
-    _apply_preset(); display(W.VBox([c_preset, c_cases, W.HBox([c_axis, c_mode, c_diff]), c_idx, c_out])); _cdraw()
+    _apply_preset(); show_widget(W.VBox([c_preset, c_cases, W.HBox([c_axis, c_mode, c_diff]), c_idx, c_out]), _cdraw)
 ''')
 
 
