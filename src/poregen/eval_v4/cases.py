@@ -74,10 +74,14 @@ class CaseSpec:
     #: production partition.  Non-zero exists for the chunk-band trial: the
     #: strip is pinned RePaint-style while the successor denoises, then written
     #: as a cosine blend of both chunks' outputs — or restored to the
-    #: predecessor's value when ``chunk_overlap_blend`` is False, which does NOT
-    #: remove the band and is kept in order to show that.
+    #: predecessor's value when ``chunk_overlap_write`` is "pin", which does
+    #: NOT remove the band and is kept in order to show that.
+    #: ``chunk_overlap_pinned`` (None = the whole overlap) is how much of the
+    #: strip is held fixed while the successor denoises; a shorter pin frees
+    #: the predecessor's own depleted rim for the successor to redraw.
     chunk_overlap: int = 0
-    chunk_overlap_blend: bool = True
+    chunk_overlap_pinned: int | None = None
+    chunk_overlap_write: str = "blend"
     #: Arm (f): for windows whose neighbour set is MIXED (some faces solved,
     #: the face toward the next chunk not), predict with the neighbour arm
     #: dropped. One model call, so it costs production time.

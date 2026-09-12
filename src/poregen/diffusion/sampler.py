@@ -85,6 +85,13 @@ AXIS_NAMES = ("z", "y", "x")
 #: ``"canvas"`` is the production path and the other two are measurement arms.
 NEIGHBOUR_MODES = ("canvas", "unknown", "reference")
 
+#: How the FREE part of a chunk overlap is written to the canvas.  "blend" is
+#: the cosine mix of both chunks' outputs; "pin" keeps the predecessor, which
+#: does NOT remove the band and exists to show that; "successor" takes the new
+#: chunk's prediction outright, which is what isolates whether that prediction
+#: is any less depleted than the one it replaces.
+OVERLAP_WRITES = ("blend", "pin", "successor")
+
 # The decode blend window must never be exactly zero: a volume's own outer face
 # is covered by a single decode window, and a zero weight there would leave the
 # face undefined (0/0).  The floor lifts the Tukey taper off zero without
@@ -95,7 +102,9 @@ __all__ = [
     "AXIS_NAMES",
     "DDIMSampler",
     "NEIGHBOUR_MODES",
+    "OVERLAP_WRITES",
     "chunk_blend_weight",
+    "overlap_prefix_mask",
     "drop_mixed_neighbours",
     "VolumeGenerator",
     "porosity_to_cond",
@@ -312,6 +321,34 @@ def drop_mixed_neighbours(avail: torch.Tensor) -> torch.Tensor:
     mixed = exists.any(dim=1) & (avail == NB_UNKNOWN).any(dim=1)
     return torch.where(mixed[:, None] & exists,
                        torch.full_like(avail, NB_UNKNOWN), avail)
+
+
+def overlap_prefix_mask(
+    chunk_cells: tuple[int, int, int],
+    pin_cells: int,
+    at_lo: tuple[bool, bool, bool],
+) -> np.ndarray:
+    """1 over the first ``pin_cells`` of the overlap on each overlapping axis.
+
+    The overlap strip holds two different things: its leading part is the
+    predecessor's window INTERIOR, which is pore-normal and worth keeping
+    fixed, and its trailing part is that chunk's own rim, which is the depleted
+    material the successor is there to redraw.  Pinning only the prefix gives
+    the successor a pore-normal context on its trailing face while leaving the
+    rim free.
+    """
+    m = np.zeros(chunk_cells, dtype=np.float32)
+    if pin_cells <= 0:
+        return m
+    for axis in range(3):
+        if not at_lo[axis] or chunk_cells[axis] < pin_cells:
+            continue
+        line = np.zeros(chunk_cells[axis], dtype=np.float32)
+        line[:pin_cells] = 1.0
+        shape = [1, 1, 1]
+        shape[axis] = chunk_cells[axis]
+        m = np.maximum(m, line.reshape(shape))
+    return m
 
 
 def chunk_blend_weight(
@@ -735,7 +772,8 @@ class VolumeGenerator:
         theta_deg: np.ndarray | None = None,
         chunk_tiles: tuple[int, int, int] = (3, 3, 3),
         chunk_overlap: int = 0,
-        chunk_overlap_blend: bool = True,
+        chunk_overlap_pinned: int | None = None,
+        chunk_overlap_write: str = "blend",
         drop_neighbours_when_mixed: bool = False,
         window_stride: int = 32,
         decode_stride: int = 32,
@@ -758,7 +796,16 @@ class VolumeGenerator:
         self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
         self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
         self.chunk_overlap = int(chunk_overlap)
-        self.chunk_overlap_blend = bool(chunk_overlap_blend)
+        #: How much of the overlap is held at the predecessor's value while the
+        #: successor denoises.  None = all of it.  A SHORTER pin leaves the
+        #: predecessor's own depleted rim FREE for the successor to redraw,
+        #: which is the point: pinning the whole strip pastes that rim into the
+        #: successor's windows at every step, so its prediction is steered to
+        #: reproduce the depletion and the blend mixes depleted with depleted.
+        self.chunk_overlap_pinned = (int(chunk_overlap) if chunk_overlap_pinned is None
+                                     else int(chunk_overlap_pinned))
+        #: What is written to the canvas over the FREE part of the overlap.
+        self.chunk_overlap_write = str(chunk_overlap_write)
         self.drop_neighbours_when_mixed = bool(drop_neighbours_when_mixed)
         self.window_stride = int(window_stride)
         self.decode_stride = int(decode_stride)
@@ -796,6 +843,21 @@ class VolumeGenerator:
                     f"chunk_overlap={self.chunk_overlap} must be a multiple of "
                     f"the VAE downsampling factor {self.downsample}: the "
                     "overlap is pasted in LATENT cells."
+                )
+            if not 0 <= self.chunk_overlap_pinned <= self.chunk_overlap:
+                raise ValueError(
+                    f"chunk_overlap_pinned={self.chunk_overlap_pinned} must be "
+                    f"in [0, chunk_overlap={self.chunk_overlap}]."
+                )
+            if self.chunk_overlap_pinned % self.downsample:
+                raise ValueError(
+                    f"chunk_overlap_pinned={self.chunk_overlap_pinned} must be a "
+                    f"multiple of the VAE downsampling factor {self.downsample}."
+                )
+            if self.chunk_overlap_write not in OVERLAP_WRITES:
+                raise ValueError(
+                    f"chunk_overlap_write must be one of {OVERLAP_WRITES}, got "
+                    f"{self.chunk_overlap_write!r}."
                 )
             if self.chunk_overlap % self.window_stride:
                 raise ValueError(
@@ -1016,11 +1078,18 @@ class VolumeGenerator:
             known = torch.from_numpy(
                 available[chunk_sl].astype(np.float32)).to(self.device)[None, None]
             known_z = z_clean[(slice(None), *chunk_sl)].unsqueeze(0).clone()
-            blend_w = None
-            if self.chunk_overlap and self.chunk_overlap_blend:
+            blend_w = pin_mask = None
+            if self.chunk_overlap:
+                at_lo = tuple(lo[a] > 0 for a in range(3))
+                # Only the PREFIX of the overlap is held fixed. The rest is the
+                # predecessor's own rim, and leaving it free is what lets the
+                # successor draw it with a pore-normal trailing context instead
+                # of being steered back onto the depleted values.
+                pin_cells = self.chunk_overlap_pinned // ds
+                pin_mask = torch.from_numpy(overlap_prefix_mask(
+                    chunk_cells, pin_cells, at_lo)).to(self.device)[None, None] * known
                 blend_w = torch.from_numpy(chunk_blend_weight(
-                    chunk_cells, self.chunk_overlap // ds,
-                    tuple(lo[a] > 0 for a in range(3)),
+                    chunk_cells, self.chunk_overlap // ds, at_lo,
                 )).to(self.device)[None, None] * known
 
             origins = window_origins(chunk_cells, L, s_cells)
@@ -1092,11 +1161,11 @@ class VolumeGenerator:
                 # what gives the former frontier an interior prediction — but
                 # their output there is discarded, so the finished chunk cannot
                 # be rewritten by its successor.
-                if self.chunk_overlap:
+                if self.chunk_overlap and pin_mask is not None:
                     paste_noise = region_noise_field(
                         C, canvas_cells, offset_cells, self.device, generator
                     )[(slice(None), *chunk_sl)].unsqueeze(0)
-                    x = x * (1 - known) + known * schedule.q_sample(
+                    x = x * (1 - pin_mask) + pin_mask * schedule.q_sample(
                         known_z, t_one, noise=paste_noise)
 
                 out_sum = torch.zeros_like(x)
@@ -1137,21 +1206,23 @@ class VolumeGenerator:
                     progress.update(1)
 
             if self.chunk_overlap:
-                if blend_w is None:
-                    # Pinned only: the strip is restored exactly, so the
-                    # finished chunk is preserved to the bit.  This does NOT
-                    # remove the porosity band — the depleted voxels are the
-                    # previous chunk's own rim and pinning is what keeps them —
-                    # and it exists to show that in the paper.
-                    x = x * (1 - known) + known * known_z
-                else:
-                    # Blend: each side's rim is replaced by the other side's
-                    # window interior, which is the point.  `x` here is this
-                    # chunk's own prediction over the strip: the RePaint pinning
-                    # held the strip at its known value while the windows ran,
-                    # so this prediction is coherent with the finished chunk
-                    # rather than an independent draw of it.
-                    x = x * (1 - blend_w) + blend_w * known_z
+                # The pinned prefix is restored exactly whatever the write mode:
+                # it was held fixed all the way down, so the predecessor owns it.
+                w = pin_mask
+                if self.chunk_overlap_write == "pin":
+                    # Keep the predecessor across the WHOLE overlap. This does
+                    # NOT remove the band — the depleted voxels are that chunk's
+                    # own rim and pinning is what keeps them — and it exists to
+                    # show exactly that.
+                    w = known
+                elif self.chunk_overlap_write == "blend":
+                    # Each side's rim replaced by the other side's interior, so
+                    # the free part is a cosine mix of the two predictions.
+                    w = torch.maximum(pin_mask, blend_w)
+                # "successor": the free part is this chunk's own prediction
+                # outright, which is what shows whether that prediction is any
+                # less depleted than the one it replaces.
+                x = x * (1 - w) + w * known_z
             z_clean[(slice(None), *chunk_sl)] = x[0]
             available[chunk_sl] = True
             logger.info("Chunk %d/%d done (tiles %s)", chunk_idx + 1, len(chunks), chunk)

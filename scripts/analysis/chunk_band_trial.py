@@ -47,15 +47,22 @@ CHUNK_TILES = (3, 3, 3)
 #: the 64-voxel tile.  See `VolumeGenerator.chunk_overlap`.
 OVERLAP = 32
 
-#: (label, s_nb, chunk_overlap, blend, drop_neighbours_when_mixed)
+#: (label, s_nb, chunk_overlap, chunk_overlap_pinned, chunk_overlap_write,
+#:  drop_neighbours_when_mixed)
 ARMS = {
-    "b": ("s_nb 0.5", 0.5, 0, True, False),
-    "a": ("overlap 32 blended", 1.0, OVERLAP, True, False),
-    "c": ("both", 0.5, OVERLAP, True, False),
+    "b":  ("s_nb 0.5", 0.5, 0, None, "blend", False),
+    "a":  ("overlap 32 blended", 1.0, OVERLAP, None, "blend", False),
+    "c":  ("both", 0.5, OVERLAP, None, "blend", False),
     # (f) keeps s_nb at 1, so the sampler stays on its ONE-pass path and the
     # neighbour arm is dropped per window instead of globally: production cost.
-    "f": ("drop nb on mixed sets", 1.0, 0, True, True),
-    "e": ("overlap 32 pinned only", 1.0, OVERLAP, False, False),
+    "f":  ("drop nb on mixed sets", 1.0, 0, None, "blend", True),
+    "e":  ("overlap 32 pinned only", 1.0, OVERLAP, None, "pin", False),
+    # (a2): overlap 64 with only the leading 32 pinned, so the predecessor's own
+    # rim is FREE for the successor to redraw against a pore-normal context.
+    # `a2b` blends the free part, `a2s` takes the successor outright — together
+    # with (e) they give A_final, B_final and the mix over the same strip.
+    "a2b": ("overlap 64, pin 32, blend", 1.0, 2 * OVERLAP, OVERLAP, "blend", False),
+    "a2s": ("overlap 64, pin 32, successor", 1.0, 2 * OVERLAP, OVERLAP, "successor", False),
 }
 
 #: The hybrid cases campaign 12 already has, so every arm has a like-for-like
@@ -69,7 +76,7 @@ CASES_E = [((192, 1024, 1024), 101)]
 def specs(arm: str, only_1024: bool = False):
     from poregen.eval_v4.cases import CaseSpec, build_cases
 
-    _, s_nb, overlap, blend, drop_mixed = ARMS[arm]
+    _, s_nb, overlap, pinned, write, drop_mixed = ARMS[arm]
     base = build_cases("sampler")[0]
     out = []
     for shape, seed in (CASES_E if arm == "e" else CASES):
@@ -87,7 +94,8 @@ def specs(arm: str, only_1024: bool = False):
             ddim_steps=50,
             chunk_tiles=CHUNK_TILES,
             chunk_overlap=overlap,
-            chunk_overlap_blend=blend,
+            chunk_overlap_pinned=pinned,
+            chunk_overlap_write=write,
             drop_neighbours_when_mixed=drop_mixed,
             s_nb=s_nb,
             notes={"trial_arm": arm, "trial_label": ARMS[arm][0]},
@@ -121,7 +129,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     log = []
     for arm in args.arms:
-        label, s_nb, overlap, blend, drop_mixed = ARMS[arm]
+        label, s_nb, overlap, pinned, write, drop_mixed = ARMS[arm]
         for spec in specs(arm, args.only_1024):
             d = case_dir(args.out, spec.assessment, spec.name)
             if (Path(d) / "manifest.json").exists():
@@ -129,13 +137,15 @@ def main() -> int:
                 continue
             t0 = time.perf_counter()
             print(f"  arm {arm} ({label}) {spec.name}: s_nb={s_nb} "
-                  f"overlap={overlap} blend={blend} drop_mixed={drop_mixed}",
+                  f"overlap={overlap} pinned={pinned} write={write} "
+                  f"drop_mixed={drop_mixed}",
                   flush=True)
             m = runner.run(spec, d)
             wall = time.perf_counter() - t0
             log.append({"arm": arm, "label": label, "case": spec.name,
                         "shape": list(spec.volume_shape), "seed": spec.seed,
-                        "s_nb": s_nb, "chunk_overlap": overlap, "blend": blend,
+                        "s_nb": s_nb, "chunk_overlap": overlap,
+                        "chunk_overlap_pinned": pinned, "chunk_overlap_write": write,
                         "drop_neighbours_when_mixed": drop_mixed,
                         "wall_s": round(wall, 1),
                         "checkpoint_step": m.checkpoint_step})

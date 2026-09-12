@@ -25,6 +25,7 @@ from poregen.diffusion.conditioning import (
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.diffusion.sampler import (
     chunk_blend_weight,
+    overlap_prefix_mask,
     drop_mixed_neighbours,
     DDIMSampler,
     VolumeGenerator,
@@ -1017,12 +1018,16 @@ class TestChunkOverlap:
         z_one = latents(gen2, 0)
 
         strip = gen.chunk_overlap // DS
-        a = z_full[:, :, :, lo:hi - strip].cpu().numpy()
-        b = z_one[:, :, :, lo:hi - strip].cpu().numpy()
-        np.testing.assert_array_equal(a, b)
-        # And the strip did change, or the blend did nothing at all.
-        assert not np.array_equal(z_full[:, :, :, hi - strip:hi].cpu().numpy(),
-                                  z_one[:, :, :, hi - strip:hi].cpu().numpy())
+        np.testing.assert_array_equal(
+            z_full[:, :, :, lo:hi - strip].cpu().numpy(),
+            z_one[:, :, :, lo:hi - strip].cpu().numpy())
+        # NOT asserted: that the strip itself changed. With the strip pinned all
+        # the way down, the successor's prediction over it is steered onto the
+        # predecessor's values, so a blend of the two can be the predecessor
+        # again — with this deterministic toy denoiser it is, exactly. That is
+        # the effect the shorter pin exists to avoid, and it is a property of
+        # the model rather than of the write, so the write is tested on the
+        # masks instead (TestChunkBlendWeight, TestOverlapPrefixPin).
 
     def test_the_former_frontier_gains_window_coverage(self):
         """The point of the change, as a count rather than a claim."""
@@ -1102,7 +1107,7 @@ class TestChunkBlendWeight:
 
 
 class TestPinnedOnlyOverlap:
-    """`chunk_overlap_blend=False` — the variant that does NOT fix the band.
+    """`chunk_overlap_write="pin"` — the variant that does NOT fix the band.
 
     Kept deliberately. Pinning the strip preserves the finished chunk exactly,
     and the depleted voxels at a seam ARE the finished chunk's own rim, so
@@ -1115,7 +1120,7 @@ class TestPinnedOnlyOverlap:
         def run(cut_to_first):
             gen, size_mm = _generator(
                 _SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
-                chunk_overlap=P // 2, chunk_overlap_blend=False)
+                chunk_overlap=P // 2, chunk_overlap_write="pin")
             shape = gen._volume_shape(size_mm)
             full = gen._chunk_ranges
             if cut_to_first:
@@ -1136,9 +1141,10 @@ class TestPinnedOnlyOverlap:
 
     def test_it_builds_no_blend_weight_at_all(self):
         gen, _ = _generator(_SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
-                            chunk_overlap=P // 2, chunk_overlap_blend=False)
+                            chunk_overlap=P // 2, chunk_overlap_write="pin")
         assert gen.chunk_overlap == P // 2
-        assert gen.chunk_overlap_blend is False
+        assert gen.chunk_overlap_write == "pin"
+        assert gen.chunk_overlap_pinned == P // 2   # None means all of it
 
 
 class TestDropMixedNeighbours:
@@ -1211,3 +1217,71 @@ class TestDropMixedNeighbours:
         for av in seen:
             both = ((av == NB_EXISTS).any(dim=1) & (av == NB_UNKNOWN).any(dim=1))
             assert not bool(both.any())
+
+
+class TestOverlapPrefixPin:
+    """Pin only the LEADING part of the overlap, freeing the predecessor's rim.
+
+    Pinning the whole strip pastes the predecessor's depleted rim into the
+    successor's windows at every step, so the successor is steered to reproduce
+    the depletion and a blend mixes depleted with depleted. Pinning only the
+    prefix — the predecessor's window INTERIOR, which is pore-normal — leaves
+    the rim free to be redrawn against a healthy trailing context.
+    """
+
+    def test_the_mask_covers_the_prefix_and_stops(self):
+        m = overlap_prefix_mask((48, 4, 4), 8, (True, False, False))
+        assert m[:8, 0, 0].min() == pytest.approx(1.0)
+        assert m[8:, :, :].max() == pytest.approx(0.0)
+
+    def test_a_zero_pin_frees_the_whole_overlap(self):
+        m = overlap_prefix_mask((48, 4, 4), 0, (True, False, False))
+        assert m.max() == pytest.approx(0.0)
+
+    def test_an_axis_that_does_not_overlap_is_not_pinned(self):
+        m = overlap_prefix_mask((48, 48, 48), 8, (False, False, False))
+        assert m.max() == pytest.approx(0.0)
+
+    def test_the_pin_is_a_subset_of_the_blend_strip(self):
+        """Or the pinned cells would sit outside the region being blended."""
+        pin = overlap_prefix_mask((48, 4, 4), 8, (True, False, False))
+        blend = chunk_blend_weight((48, 4, 4), 16, (True, False, False))
+        assert np.all((pin > 0) <= (blend > 0))
+
+    @pytest.mark.parametrize("bad", [-8, 40])
+    def test_a_pin_outside_the_overlap_is_refused(self, bad):
+        with pytest.raises(ValueError, match="chunk_overlap_pinned"):
+            _generator(_SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
+                       chunk_overlap=P // 2, chunk_overlap_pinned=bad)
+
+    def test_an_unknown_write_mode_is_refused(self):
+        with pytest.raises(ValueError, match="chunk_overlap_write"):
+            _generator(_SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
+                       chunk_overlap=P // 2, chunk_overlap_write="whatever")
+
+    def test_successor_write_keeps_the_pinned_prefix_and_nothing_else(self):
+        """The successor owns the free part; the predecessor owns the prefix."""
+        def run(write):
+            gen, size_mm = _generator(
+                _SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
+                # This fixture's chunk is 2 tiles on one axis and 1 on the
+                # others, so the overlap must stay under 64: half a tile
+                # overlap with a quarter-tile pin.
+                chunk_overlap=P // 2, chunk_overlap_pinned=P // 4,
+                chunk_overlap_write=write)
+            shape = gen._volume_shape(size_mm)
+            g = torch.Generator(device="cpu").manual_seed(0)
+            with torch.no_grad():
+                return gen._generate_latents(
+                    shape, target_porosity=0.03, local_por_map=None,
+                    material_map=None, specimen_box=((0, 0, 0), shape),
+                    autocast_dtype=torch.float32, window_batch=8, generator=g), gen
+
+        (z_s, gen), (z_p, _) = run("successor"), run("pin")
+        lo = gen._chunk_ranges(4, 2)[1][0]
+        pin_cells = (P // 4) // DS
+        # The pinned prefix is identical under both write modes: it was held
+        # fixed all the way down, so the predecessor owns it either way.
+        np.testing.assert_array_equal(
+            z_s[:, :, :, lo:lo + pin_cells].cpu().numpy(),
+            z_p[:, :, :, lo:lo + pin_cells].cpu().numpy())
