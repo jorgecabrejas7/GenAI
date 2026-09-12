@@ -25,6 +25,7 @@ from poregen.diffusion.conditioning import (
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.diffusion.sampler import (
     chunk_blend_weight,
+    drop_mixed_neighbours,
     DDIMSampler,
     VolumeGenerator,
     region_noise_field,
@@ -1138,3 +1139,75 @@ class TestPinnedOnlyOverlap:
                             chunk_overlap=P // 2, chunk_overlap_blend=False)
         assert gen.chunk_overlap == P // 2
         assert gen.chunk_overlap_blend is False
+
+
+class TestDropMixedNeighbours:
+    """Arm (f): drop the neighbour arm for windows whose set is MIXED.
+
+    A mixed set — some faces solved, the face toward the next chunk not — is
+    where the band is deepest (trailing strip 0.19 of the volume mean against
+    the leading strip's 0.60, both single-covered). Dropping the neighbour arm
+    for exactly those windows is `s_nb=0` per window, which at `s_por=1` is one
+    model call rather than the three a global `s_nb` change costs.
+    """
+
+    def test_a_complete_set_is_untouched(self):
+        av = torch.full((1, 6), NB_EXISTS)
+        assert torch.equal(drop_mixed_neighbours(av), av)
+
+    def test_an_all_unknown_set_is_untouched(self):
+        av = torch.full((1, 6), NB_UNKNOWN)
+        assert torch.equal(drop_mixed_neighbours(av), av)
+
+    def test_a_mixed_set_loses_its_exists_faces(self):
+        av = torch.tensor([[NB_EXISTS] * 5 + [NB_UNKNOWN]])
+        assert torch.equal(drop_mixed_neighbours(av), torch.full((1, 6), NB_UNKNOWN))
+
+    def test_oob_faces_survive(self):
+        """The canvas edge is geometry, not neighbour content.
+
+        A literal global s_nb=0 marks every face UNKNOWN, OOB included, which
+        would tell an edge window the volume continues there — trading one
+        artefact for another at every volume face.
+        """
+        av = torch.tensor([[NB_EXISTS, NB_UNKNOWN, NB_OOB, NB_OOB, NB_OOB, NB_OOB]])
+        out = drop_mixed_neighbours(av)
+        assert out[0, 0] == NB_UNKNOWN          # the EXISTS face was dropped
+        assert (out[0, 2:] == NB_OOB).all()     # the edges were not
+
+    def test_only_the_mixed_rows_change(self):
+        av = torch.stack([
+            torch.full((6,), NB_EXISTS),
+            torch.tensor([NB_EXISTS] * 3 + [NB_UNKNOWN] * 3),
+            torch.full((6,), NB_UNKNOWN),
+        ])
+        out = drop_mixed_neighbours(av)
+        assert torch.equal(out[0], av[0])
+        assert torch.equal(out[1], torch.full((6,), NB_UNKNOWN))
+        assert torch.equal(out[2], av[2])
+
+    def test_the_option_is_off_by_default(self):
+        gen, _ = _generator(_SpyModel(), _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4))
+        assert gen.drop_neighbours_when_mixed is False
+
+    def test_the_denoiser_never_sees_a_mixed_set_when_it_is_on(self):
+        """The property the arm exists for, checked where it is used.
+
+        A spy records the availability of every window the model is called
+        with; with the option on, no call may carry both an EXISTS and an
+        UNKNOWN face.
+        """
+        model = _SpyModel()
+        gen, size_mm = _generator(model, _ConstVAE(), (1, 1, 2), tiles=(1, 1, 4),
+                                  drop_neighbours_when_mixed=True)
+        shape = gen._volume_shape(size_mm)
+        with torch.no_grad():
+            gen._generate_latents(
+                shape, target_porosity=0.03, local_por_map=None,
+                material_map=None, specimen_box=((0, 0, 0), shape),
+                autocast_dtype=torch.float32, window_batch=8)
+        seen = [c["nb_avail"] for c in model.calls]
+        assert seen, "the spy recorded nothing"
+        for av in seen:
+            both = ((av == NB_EXISTS).any(dim=1) & (av == NB_UNKNOWN).any(dim=1))
+            assert not bool(both.any())

@@ -347,6 +347,7 @@ class VolumeRunner:
             chunk_tiles=spec.chunk_tiles,
             chunk_overlap=spec.chunk_overlap,
             chunk_overlap_blend=spec.chunk_overlap_blend,
+            drop_neighbours_when_mixed=spec.drop_neighbours_when_mixed,
             window_stride=spec.window_stride,
             decode_stride=spec.decode_stride,
             neighbour_mode=spec.neighbour_mode,
@@ -441,6 +442,7 @@ class VolumeRunner:
                 # production one.
                 "chunk_overlap": spec.chunk_overlap,
                 "chunk_overlap_blend": spec.chunk_overlap_blend,
+                "drop_neighbours_when_mixed": spec.drop_neighbours_when_mixed,
                 "reference_latents": reference_note,
                 "request_offset": list(spec.request_offset),
                 "specimen_box": (

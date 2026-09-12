@@ -12,14 +12,18 @@ outcome rather than the mechanism, because the outcome is what the paper needs:
   b  s_nb = 0.5          the only intervention that has moved the band
   a  chunk overlap 32, blended   each chunk's rim replaced by the other's interior
   c  both
+  f  drop the neighbour arm for MIXED-set windows only, at production cost
   e  chunk overlap 32, PINNED    kept to show that pinning alone does NOT work
 
 Every arm runs the production path — `VolumeRunner` with a `CaseSpec` — so a
 trial volume carries a manifest naming the settings that produced it and cannot
 be mistaken for a production one.
 
-Success, per the supervisor: the -8 slab phi within +/-20 % of the volume mean,
-AND the grey chunk seam still at the real floor, AND delivered phi in the gate.
+Success: the -8 AND +0 slab phi within +/-20 % of the volume mean — the
+depletion sits on both single-covered strips, 32 voxels each side of a plane,
+so clearing only the deep one is not clearing the band — AND the grey chunk
+seam still at the real floor, AND delivered phi inside the gate.  Wall time per
+volume is reported with them: the regeneration decision needs the cost.
 
 Usage:
     python scripts/analysis/chunk_band_trial.py --model runs/ldm/ldm06-run-... \
@@ -43,12 +47,15 @@ CHUNK_TILES = (3, 3, 3)
 #: the 64-voxel tile.  See `VolumeGenerator.chunk_overlap`.
 OVERLAP = 32
 
-#: (label, s_nb, chunk_overlap, blend)
+#: (label, s_nb, chunk_overlap, blend, drop_neighbours_when_mixed)
 ARMS = {
-    "b": ("s_nb 0.5", 0.5, 0, True),
-    "a": ("overlap 32 blended", 1.0, OVERLAP, True),
-    "c": ("both", 0.5, OVERLAP, True),
-    "e": ("overlap 32 pinned only", 1.0, OVERLAP, False),
+    "b": ("s_nb 0.5", 0.5, 0, True, False),
+    "a": ("overlap 32 blended", 1.0, OVERLAP, True, False),
+    "c": ("both", 0.5, OVERLAP, True, False),
+    # (f) keeps s_nb at 1, so the sampler stays on its ONE-pass path and the
+    # neighbour arm is dropped per window instead of globally: production cost.
+    "f": ("drop nb on mixed sets", 1.0, 0, True, True),
+    "e": ("overlap 32 pinned only", 1.0, OVERLAP, False, False),
 }
 
 #: The hybrid cases campaign 12 already has, so every arm has a like-for-like
@@ -62,7 +69,7 @@ CASES_E = [((192, 1024, 1024), 101)]
 def specs(arm: str, only_1024: bool = False):
     from poregen.eval_v4.cases import CaseSpec, build_cases
 
-    _, s_nb, overlap, blend = ARMS[arm]
+    _, s_nb, overlap, blend, drop_mixed = ARMS[arm]
     base = build_cases("sampler")[0]
     out = []
     for shape, seed in (CASES_E if arm == "e" else CASES):
@@ -81,6 +88,7 @@ def specs(arm: str, only_1024: bool = False):
             chunk_tiles=CHUNK_TILES,
             chunk_overlap=overlap,
             chunk_overlap_blend=blend,
+            drop_neighbours_when_mixed=drop_mixed,
             s_nb=s_nb,
             notes={"trial_arm": arm, "trial_label": ARMS[arm][0]},
         ))
@@ -92,7 +100,7 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--ckpt", default="latest")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--arms", nargs="+", default=["b", "a", "c", "e"],
+    ap.add_argument("--arms", nargs="+", default=["b", "a", "c", "f", "e"],
                     choices=sorted(ARMS))
     ap.add_argument("--only-1024", action="store_true")
     ap.add_argument("--allow-busy-gpu", action="store_true")
@@ -113,7 +121,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     log = []
     for arm in args.arms:
-        label, s_nb, overlap, blend = ARMS[arm]
+        label, s_nb, overlap, blend, drop_mixed = ARMS[arm]
         for spec in specs(arm, args.only_1024):
             d = case_dir(args.out, spec.assessment, spec.name)
             if (Path(d) / "manifest.json").exists():
@@ -121,12 +129,14 @@ def main() -> int:
                 continue
             t0 = time.perf_counter()
             print(f"  arm {arm} ({label}) {spec.name}: s_nb={s_nb} "
-                  f"overlap={overlap} blend={blend}", flush=True)
+                  f"overlap={overlap} blend={blend} drop_mixed={drop_mixed}",
+                  flush=True)
             m = runner.run(spec, d)
             wall = time.perf_counter() - t0
             log.append({"arm": arm, "label": label, "case": spec.name,
                         "shape": list(spec.volume_shape), "seed": spec.seed,
                         "s_nb": s_nb, "chunk_overlap": overlap, "blend": blend,
+                        "drop_neighbours_when_mixed": drop_mixed,
                         "wall_s": round(wall, 1),
                         "checkpoint_step": m.checkpoint_step})
             print(f"    done in {wall / 60:.1f} min", flush=True)

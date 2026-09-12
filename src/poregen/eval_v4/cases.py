@@ -78,6 +78,10 @@ class CaseSpec:
     #: remove the band and is kept in order to show that.
     chunk_overlap: int = 0
     chunk_overlap_blend: bool = True
+    #: Arm (f): for windows whose neighbour set is MIXED (some faces solved,
+    #: the face toward the next chunk not), predict with the neighbour arm
+    #: dropped. One model call, so it costs production time.
+    drop_neighbours_when_mixed: bool = False
     window_stride: int = WINDOW_STRIDE
     decode_stride: int = DECODE_STRIDE
     s_por: float = 1.0

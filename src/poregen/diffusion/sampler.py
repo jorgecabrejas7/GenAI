@@ -96,6 +96,7 @@ __all__ = [
     "DDIMSampler",
     "NEIGHBOUR_MODES",
     "chunk_blend_weight",
+    "drop_mixed_neighbours",
     "VolumeGenerator",
     "porosity_to_cond",
     "region_noise_field",
@@ -284,6 +285,33 @@ def window_weight(win_cells: int) -> torch.Tensor:
     i = torch.arange(L, dtype=torch.float32) + 0.5
     w1 = torch.sin(np.pi * i / L) ** 2
     return w1[:, None, None] * w1[None, :, None] * w1[None, None, :]
+
+
+def drop_mixed_neighbours(avail: torch.Tensor) -> torch.Tensor:
+    """Mark a window's EXISTS faces UNKNOWN when its neighbour set is MIXED.
+
+    A set is mixed when at least one face is EXISTS and at least one is
+    UNKNOWN.  That is the situation at a chunk frontier — some sides solved,
+    the side facing the next chunk not — and it is where the porosity band is
+    deepest: the trailing strip of a chunk reads 0.19 of the volume mean, the
+    leading strip, whose set is complete, reads 0.60.
+
+    Dropping the neighbour arm for exactly those windows is ``s_nb=0`` applied
+    per window, and at ``s_por=1`` that is algebraically ``out_por`` — a single
+    model call with the neighbours marked absent.  So this costs production
+    time, unlike a global ``s_nb`` change, which leaves the one unguided
+    special case and pays three forward passes per window.
+
+    OOB FACES ARE LEFT ALONE.  A literal global ``s_nb=0`` marks every face
+    UNKNOWN, OOB included, and would tell a window at the canvas edge that the
+    volume continues there.  The edge is geometry, not neighbour content, and
+    the sampler keeps it in all three neighbour modes; dropping it here would
+    trade one artefact for another at every volume face.
+    """
+    exists = (avail == NB_EXISTS)
+    mixed = exists.any(dim=1) & (avail == NB_UNKNOWN).any(dim=1)
+    return torch.where(mixed[:, None] & exists,
+                       torch.full_like(avail, NB_UNKNOWN), avail)
 
 
 def chunk_blend_weight(
@@ -708,6 +736,7 @@ class VolumeGenerator:
         chunk_tiles: tuple[int, int, int] = (3, 3, 3),
         chunk_overlap: int = 0,
         chunk_overlap_blend: bool = True,
+        drop_neighbours_when_mixed: bool = False,
         window_stride: int = 32,
         decode_stride: int = 32,
         neighbour_mode: str = "canvas",
@@ -730,6 +759,7 @@ class VolumeGenerator:
         self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
         self.chunk_overlap = int(chunk_overlap)
         self.chunk_overlap_blend = bool(chunk_overlap_blend)
+        self.drop_neighbours_when_mixed = bool(drop_neighbours_when_mixed)
         self.window_stride = int(window_stride)
         self.decode_stride = int(decode_stride)
         self.downsample    = self.patch_size // self.latent_size
@@ -1083,6 +1113,8 @@ class VolumeGenerator:
                             if sl is not None:
                                 nb[k, f] = ctx[(0, slice(None), *sl)]
                     av = avail_t[idx]
+                    if self.drop_neighbours_when_mixed:
+                        av = drop_mixed_neighbours(av)
                     nb_t = torch.where(
                         av == NB_EXISTS,
                         torch.full_like(av, t_val),
