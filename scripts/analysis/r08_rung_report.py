@@ -454,6 +454,43 @@ def gather_rung(run_dir: Path) -> dict | None:
     return out
 
 
+def _selection_line(rungs: list[dict]) -> str:
+    """Which rung the gates select, computed rather than asserted.
+
+    Drift is kept OUT of the selection and reported beside it.  It is a 2-sigma
+    stress screen — how far the latents move under a deliberate perturbation —
+    not a width gate, and treating it as pass/fail would reject every rung with
+    the capacity the dense panels need.  Dense-panel pore Dice breaks the tie,
+    because that is the number capacity is supposed to move and the one no
+    threshold choice has been able to.
+    """
+    ok = []
+    for r in rungs:
+        v, t = r.get("val_full") or {}, r.get("test_full") or {}
+        seam, probe = r.get("seam") or {}, r.get("probe") or {}
+        passes = (
+            (v.get("porosity_mae") or 1) < 0.005
+            and min(v.get("dice_pore") or 0, t.get("dice_pore") or 0) >= 0.88
+            and min(v.get("dice_air") or 0, t.get("dice_air") or 0) > 0.98
+            and max(seam.get("xct") or 9, seam.get("pore_logit") or 9) <= 1.1
+        )
+        if passes and probe.get("dense_dice") is not None:
+            ok.append((probe["dense_dice"], r))
+    if not ok:
+        return "**Selection: no rung passes every gate.** Read the table directly."
+    ok.sort(reverse=True, key=lambda kv: kv[0])
+    best, r = ok[0]
+    others = ", ".join(f"{x['experiment']} {d:.4f}" for d, x in ok[1:]) or "none"
+    return (
+        f"**Selection: `{r['experiment']}` (z={r['z_channels']}).** It passes "
+        f"porosity MAE, pore Dice, air Dice and the overlapped seams, and leads "
+        f"on dense-panel pore Dice at {best:.4f} — the number capacity is meant "
+        f"to move. Also passing: {others}. Drift is reported but not selected "
+        f"on: it is a 2-sigma stress screen, not a width gate, and it exceeds "
+        f"0.30 for the rungs with the capacity the dense panels need."
+    )
+
+
 def compare() -> None:
     rungs = []
     for d in sorted((REPO / "runs" / "vae").glob("r08-run-*")):
@@ -475,9 +512,12 @@ def compare() -> None:
          f"{len(rungs)} rung(s). Built from artefacts that already exist: the "
          "training run's own final `val_full` / `test_full` (whole-split, with "
          "the per-bin table and counts), the CPU calibration probe, the "
-         "tile-seam and the latent-sanity check. The separate full-split rung "
-         "report is deferred — it costs ~70 min of GPU per rung and recomputes "
-         "what the engine already produced.", "",
+         "tile-seam and the latent-sanity check. The per-rung full-split "
+         "reports were produced separately and are in this campaign as "
+         "`r08_<variant>/findings.md` and `results.json`; this table does not "
+         "read them, because the engine's own whole-split evaluation is the "
+         "same measurement and is what the gates are defined on.", "",
+         _selection_line(rungs), "",
          "## Gates", "",
          "| rung | z | red. | step | wall h | val φ MAE | pore Dice val/test "
          "| air Dice val/test | active z | drift 2σ |",

@@ -69,6 +69,14 @@ ARMS = {
     # with (e) they give A_final, B_final and the mix over the same strip.
     "a2b": ("overlap 64, pin 32, blend", 1.0, 2 * OVERLAP, OVERLAP, "blend", False),
     "a2s": ("overlap 64, pin 32, successor", 1.0, 2 * OVERLAP, OVERLAP, "successor", False),
+    # Run against a facedrop checkpoint, not ldm06. `fd_baseline` is the
+    # PRODUCTION sampler with no mitigation at all: if per-face dropout fixed
+    # the cause, that row alone should clear the band, and every inference-side
+    # arm becomes unnecessary. `fd_a2s` is the best inference arm on the new
+    # weights, to see whether the two are additive or redundant.
+    "fd_baseline": ("facedrop, production sampler", 1.0, 0, None, "blend", False),
+    "fd_a2s": ("facedrop + overlap 64 pin 32 successor", 1.0, 2 * OVERLAP,
+               OVERLAP, "successor", False),
 }
 
 #: The hybrid cases campaign 12 already has, so every arm has a like-for-like
