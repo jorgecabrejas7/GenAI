@@ -138,6 +138,8 @@ rsync -avP --partial $H/runs/campaigns/17-chunk-band-trial   ./campaigns/
 rsync -avP --partial $H/runs/campaigns/16-window-rim          ./campaigns/
 rsync -avP --partial $H/runs/campaigns/19-stress-geometry     ./campaigns/
 rsync -avP --partial $H/runs/campaigns/18-eval-v4-final       ./campaigns/
+rsync -avP --partial $H/runs/campaigns/20-ood-conditioning    ./campaigns/
+rsync -avP --partial $H/runs/campaigns/21-real-porosity-by-region ./campaigns/
 rsync -avP --partial --exclude 'r08_*' --exclude 'calibration_probe*' --exclude 'gate_*' $H/runs/campaigns/09-r08-latent-sweep ./campaigns/
 rsync -avP --partial $H/runs/campaigns/11-decoder-ft         ./campaigns/
 rsync -avP --partial $H/runs/campaigns/14-downstream-utility ./campaigns/
@@ -234,6 +236,8 @@ TRIAL_ROOT = CAMPAIGNS / "17-chunk-band-trial"
 RIM_ROOT = CAMPAIGNS / "16-window-rim"
 STRESS_ROOT = CAMPAIGNS / "19-stress-geometry"
 FINAL_ROOT = CAMPAIGNS / "18-eval-v4-final"
+OOD_ROOT = CAMPAIGNS / "20-ood-conditioning"
+REALPOR_ROOT = CAMPAIGNS / "21-real-porosity-by-region"
 RUNGS_ROOT = CAMPAIGNS / "09-r08-latent-sweep"
 CONV_JSONL = next((p for p in [CAMPAIGNS / "ldm06_convergence_check.jsonl",
                                ROOT.parents[2] / "ldm" / "ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04" / "convergence_check.jsonl"]
@@ -976,6 +980,101 @@ slice viewer (section 5) like any other case.
 """)
 
 
+def build_real_porosity() -> None:
+    section("Real porosity by region (campaign 21): what the 80 scans actually contain",
+            "mean, median and spread of porosity over all real volumes, whole and by front / middle / back third along each axis")
+    md("""
+**What this is.** Before judging any generated porosity, it helps to know what the real coupons contain. This table
+pools **all 80 real volumes** (train, validation and test together, no split breakdown) and reports the porosity of each
+volume, φ = pore voxels / material voxels, computed from the labelled, non-overlapping 64³ windows of the data store.
+Then each volume is cut into thirds along each axis (**z** = through-thickness, front = z index 0; **y** and **x** = the
+in-plane axes) and φ is computed in the front, middle and back third. Across the 80 volumes we report mean, median,
+standard deviation, min and max. Use it to answer: is porosity concentrated near a surface? is it uniform in plane? how
+wide is the spread between coupons that a "requested porosity" has to cover?
+""")
+    code(r'''
+RP = REALPOR_ROOT / "results.json"
+if not RP.exists():
+    unavailable("campaign 21 results.json", "real_porosity_by_region (CPU, reads the split_v3 patch index)")
+else:
+    D = load_json(RP); S = D["summary"]
+    rows = [{"region": "whole volume", **S["whole"]}]
+    for ax in ("z", "y", "x"):
+        for part in ("front", "middle", "back"):
+            rows.append({"region": f"{ax} {part}", **S["regions"][ax][part]})
+    T = pd.DataFrame(rows).set_index("region"); display(T.round(5))
+    print("voxel-pooled φ over all volumes:", round(S.get("voxel_pooled_phi", float("nan")), 5)); print("definition:", D.get("definition"))
+    PV = pd.DataFrame([{"volume": v["volume_id"][-40:], "panel": v.get("panel"), "phi_whole": v["phi_whole"],
+                        **{f"{ax}_{p}": v["regions"][ax][p] for ax in ("z", "y", "x") for p in ("front", "middle", "back")}} for v in D["per_volume"]])
+    fig = make_subplots(rows=1, cols=3, subplot_titles=["through-thickness (z)", "in-plane y", "in-plane x"])
+    for i, ax in enumerate(("z", "y", "x"), 1):
+        for p in ("front", "middle", "back"):
+            fig.add_trace(go.Box(y=PV[f"{ax}_{p}"], name=p, showlegend=(i == 1)), row=1, col=i)
+    fig.update_layout(height=400, title="Porosity per third of each volume, one point per real volume (80)", yaxis_title="φ = pore / material"); fig.show()
+    fig2 = go.Figure(go.Histogram(x=PV["phi_whole"], nbinsx=40)); fig2.update_layout(title="Whole-volume porosity of the 80 real scans", xaxis_title="φ", height=320); fig2.show()
+''')
+    md("""
+**How to read it.** The box plots show the spread across coupons for each third. If the z boxes differ (front vs back),
+porosity is not uniform through the thickness, which the depth conditioning of the model can express. If the y or x boxes
+differ, there is an in-plane trend inside coupons, which only the local porosity field can express. The histogram is the
+range a global porosity request has to cover; the model's training range ends where these volumes end.
+""")
+
+
+def build_ood_conditioning() -> None:
+    section("Out-of-distribution conditioning (campaign 20): unseen stacking sequences, ply thickness, porosity extremes, field scales",
+            "does the model follow requests outside what the data contained: new sequences of the same four angles, thinner and thicker plies, porosity below and above the trained range, field correlation lengths far from real")
+    md("""
+**What this is.** The training coupons contain the angles 0°, +45°, −45° and 90° in two stacking sequences, one ply
+thickness, porosities between about 0.3 % and 10.7 %, and porosity fields with real correlation lengths. This campaign
+asks for things the data never showed, while staying inside what the conditioning *can* express:
+1. **Unseen stacking sequences** of the same four angles (four permutations, none equal to a trained one).
+2. **Ply thickness** 8 and 32 voxels (trained ≈ 19; layup B16 at 16 was measured in the main eval) and **ply counts** 6 and 24.
+3. **Porosity extremes**: 0, 0.001, 0.002; and 0.15, 0.20 with the conditioning clamp lifted (in production the request is
+   clamped at the training maximum 0.107; lifting it shows what the model does when truly extrapolating).
+4. **Field correlation lengths** 16, 64 and 512 voxels on the coherent-field case.
+The readers and metrics are the ones of the main eval; their floors are printed. Pore sizes and shapes are analysed
+separately with the author's own program, not here.
+""")
+    code(r'''
+OR = OOD_ROOT / "results.json"
+if not OR.exists():
+    unavailable("campaign 20 results.json", "ood_conditioning generation (after stress DDIM-50) and measure")
+else:
+    D = load_json(OR); rows = []
+    for c in D.get("per_case", []):
+        L = c.get("layup") or c.get("layup_recovery") or {}; P = c.get("porosity") or {}; pf = c.get("phase_fractions") or c
+        rows.append({"case": c.get("case"), "group": (c.get("notes") or {}).get("group", c.get("group")), "seed": c.get("seed"),
+                     "φ req": c.get("requested_global_phi"), "φ delivered": P.get("delivered_phi", pf.get("phi_pore")), "|err|": P.get("abs_error"), "clamp lifted": (c.get("notes") or {}).get("clamp_lifted"),
+                     "fft |err| deg": (L.get("fft_slice") or {}).get("median_abs_error_deg"), "fft 4-class": (L.get("fft_slice") or {}).get("strict_class_accuracy"),
+                     "pore_axes |err| deg": (L.get("pore_axes") or {}).get("median_abs_error_deg"), "pore_axes 4-class": (L.get("pore_axes") or {}).get("strict_class_accuracy"),
+                     "local slope": (c.get("local") or {}).get("slope"), "local R2": (c.get("local") or {}).get("r2"), "failed": (c.get("failure") or {}).get("failed")})
+    OT = pd.DataFrame(rows); display(OT.round(4))
+    note("Layup floors on real scans: fft_slice 8.2° / 74 %, pore_axes 4.2° / 86 %. Porosity gate ±0.005. A clamp-lifted row is a failure mode by design.")
+    lay = OT[OT["fft |err| deg"].notna()]
+    if len(lay):
+        fig = go.Figure()
+        for reader in ("fft", "pore_axes"):
+            g = lay.groupby("case")[f"{reader} |err| deg"].mean()
+            fig.add_trace(go.Bar(x=g.index, y=g.values, name=reader))
+        fig.add_hline(y=8.2, line_dash="dash", annotation_text="fft floor"); fig.add_hline(y=4.2, line_dash="dot", annotation_text="pore_axes floor")
+        fig.update_layout(title="Ply-angle recovery on unseen sequences / thicknesses (median |error|, mean over seeds)", yaxis_title="degrees", height=380); fig.show()
+    por = OT[OT["φ req"].notna() & OT["fft |err| deg"].isna()]
+    if len(por):
+        fig = go.Figure(go.Scatter(x=por["φ req"], y=por["φ delivered"], mode="markers", text=por["case"], marker=dict(size=9)))
+        fig.add_trace(go.Scatter(x=[0, 0.2], y=[0, 0.2], mode="lines", name="y = x", line=dict(dash="dash")))
+        fig.update_layout(title="Porosity extremes: delivered vs requested (clamp lifted where marked)", xaxis_title="requested", yaxis_title="delivered", height=380); fig.show()
+''')
+    md("""
+**How to read it.** Unseen sequences should read back as well as the trained ones if the orientation conditioning is
+genuinely continuous (it is fed as cos 2θ and sin 2θ per depth plane, so nothing in the model ties it to the two trained
+orders). Thinner plies push against the readers' own resolution: compare with B16 at 16 voxels in the main layup table.
+For porosity, the dots should follow the dashed line down to 0; above 0.107 with the clamp lifted we expect saturation
+or artefacts, and either is a result to report. For the field scales, a 16-voxel field is below the window size and cannot
+be followed; 512 is above the chunk and tests the sampled-field path at part scale.
+""")
+
+
 def build_research_log() -> None:
     section("Research log since the ldm06 training finished",
             "a dated account of everything that happened after step 130k: results, defects found, decisions taken and pending, queue state")
@@ -1009,6 +1108,7 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-12 03:30 | Single-window test with 3 present + 3 missing faces: **pores move away from the missing face** (0.05–0.15 of the window mean), present faces untouched; inheritance from a pore-poor neighbour 1.7–2.5×. | same |
 | 09-12 04:00 | **Root cause in the training code:** neighbour dropout dropped all six faces per sample; 64 % of training windows have one missing face and it is always the specimen surface; "present + unknown" never occurred. Learned rule: nothing behind a face = surface = no pores. The one healthy plane per volume is the terminal one (next chunk's far face = volume edge = trained case). | same; `12-eval-v4/README.md` |
 | 09-12 04:00–08:49 | Fix trial (campaign 17) on 130k, scored on non-terminal planes (trailing / leading strip, worst plane, cost): overlap+blend (a) 0.31 fail; s_nb 0.5 (b) 0.51 fail; both (c) 0.56 fail at 3.8×; drop-neighbours-when-mixed (f) 0.85 / 0.75 fail at 1×; **(g) = (f)+overlap 0.82 / 1.00, worst 0.74, PASS on the mean at 1.36×**; **(a2s) overlap 64 with 32 pinned, successor writes the strip: 0.95 / 0.91, worst 0.84, PASS on every plane at 2.05×**; (a2b) blend ≈ a2s. Pinned-only (e) 0.19 = the steering control. | section *chunk-plane band*, trial table |
+| 09-12 09:00–12:00 | Author's additions queued behind the regeneration: campaign 19 stress geometries (nine shapes × DDIM 50/200), campaign 20 out-of-distribution conditioning (unseen sequences of the four trained angles, ply thickness 8/32, porosity 0–0.002 and 0.15–0.20 with the clamp lifted, field scales 16/64/512), campaign 21 real porosity by region (CPU, all 80 scans). Regeneration script (campaign 18) prepared, waits for the checkpoint+sampler choice. | sections *stress geometries*, *out-of-distribution conditioning*, *real porosity by region* |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
@@ -2668,8 +2768,8 @@ def build_all() -> None:
     build_setup()
     CELLS.append(("index", ""))          # placeholder, filled after sections are known
     build_config(); build_progress(); build_primer(); build_research_log(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
-    build_rungs(); build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
-    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_stress_geometry(); build_microstructure()
+    build_rungs(); build_real_porosity(); build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
+    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_stress_geometry(); build_ood_conditioning(); build_microstructure()
     build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream()
     build_summary(); build_preview()
 
