@@ -1,0 +1,227 @@
+"""Does the model under-predict pores in the rim of a window next to a neighbour?
+
+The chunk-plane porosity band is caused by the neighbour conditioning: turning
+`s_nb` to 0 removes it, and the teacher-forced arm — which never has an UNKNOWN
+face — still shows it.  The proposed mechanism is a RIM effect.  A window is 64
+voxels; inside a chunk the windows step by 32, so every voxel is also covered by
+a window that holds it in its interior and the fusion averages any rim bias
+away.  At a chunk boundary the last voxels are covered by rim predictions only,
+and whatever the rim does survives into the volume.
+
+This tests the mechanism directly, with no fusion to average anything:
+
+* A canvas of REAL latents, 6x6x6 tiles.  Each tile is its own chunk AND its
+  own single window (`chunk_tiles=(1,1,1)`, `window_stride=64`), so nothing
+  overlaps and every window is decided once.
+* `neighbour_mode="reference"` makes every in-bounds face EXISTS, fed real
+  material re-noised to t exactly as in training.  The 4x4x4 = 64 INTERIOR
+  tiles are the windows with all six faces EXISTS; the 152 boundary tiles have
+  at least one OOB face and are excluded.
+* The same canvas decoded directly is the control: what the real material in
+  those windows actually looks like, through the same VAE.
+
+Prediction under the rim hypothesis: at ``s_nb=1`` phi is depleted in the 0-16
+voxel rim of the window on every face and flat in the interior; at ``s_nb=0``
+it is flat throughout.  Generated neighbours (``--neighbours <latents.npy>``)
+should deepen it relative to real ones.
+
+CPU-impossible: needs the GPU.  It must not run while a CUDA job holds the card
+(see docs/DEVELOPMENT.md on unified memory) — it refuses if one does.
+
+Usage:
+    python scripts/analysis/window_rim_test.py --model runs/ldm/ldm06-run-... \
+        --out runs/campaigns/16-window-rim
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+
+REPO = Path(__file__).resolve().parents[2]
+
+TILE = 64
+LABEL_PORE, LABEL_AIR = 1, 2
+#: 6 tiles a side: the 4x4x4 interior tiles have all six faces in bounds.
+TILES_PER_AXIS = 6
+SHAPE = (TILE * TILES_PER_AXIS,) * 3
+#: Windows with all six faces in bounds, and so all six EXISTS.
+TILES_PER_AXIS_INTERIOR_COUNT = (TILES_PER_AXIS - 2) ** 3
+SLAB = 8
+
+
+def phi_of(block: np.ndarray) -> float | None:
+    pore = int((block == LABEL_PORE).sum())
+    solid = int((block != LABEL_AIR).sum())
+    return pore / solid if solid else None
+
+
+def rim_profile(label: np.ndarray) -> dict[str, float | None]:
+    """phi by distance from the window face, pooled over the 64 interior tiles.
+
+    Shell `d` is every voxel whose distance to the NEAREST face of its own
+    tile is in [d, d+SLAB).  A rim effect shows as a low phi in the first
+    shells and a flat tail; anything that is simply a porosity difference moves
+    every shell together.
+    """
+    n = TILE
+    idx = np.arange(n)
+    dist1d = np.minimum(idx, n - 1 - idx)
+    d3 = np.minimum(np.minimum(dist1d[:, None, None], dist1d[None, :, None]),
+                    dist1d[None, None, :])
+    shells = {}
+    for d in range(0, n // 2, SLAB):
+        mask = (d3 >= d) & (d3 < d + SLAB)
+        pore = solid = 0
+        for tz in range(1, TILES_PER_AXIS - 1):
+            for ty in range(1, TILES_PER_AXIS - 1):
+                for tx in range(1, TILES_PER_AXIS - 1):
+                    blk = label[tz * n:(tz + 1) * n,
+                                ty * n:(ty + 1) * n,
+                                tx * n:(tx + 1) * n]
+                    sel = blk[mask]
+                    pore += int((sel == LABEL_PORE).sum())
+                    solid += int((sel != LABEL_AIR).sum())
+        shells[str(d)] = (pore / solid) if solid else None
+    return shells
+
+
+def interior_phi(label: np.ndarray) -> float | None:
+    n = TILE
+    blocks = [label[tz * n:(tz + 1) * n, ty * n:(ty + 1) * n, tx * n:(tx + 1) * n]
+              for tz in range(1, TILES_PER_AXIS - 1)
+              for ty in range(1, TILES_PER_AXIS - 1)
+              for tx in range(1, TILES_PER_AXIS - 1)]
+    return phi_of(np.concatenate([b.ravel() for b in blocks]))
+
+
+def build(runner, reference, s_nb: float, ddim: int, theta):
+    from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator
+    from poregen.eval_v4.generate import LATENT_SIZE, PATCH_SIZE, VOXEL_SIZE_MM
+
+    sampler = DDIMSampler(
+        runner.model, runner.schedule, runner.device,
+        n_steps=ddim, s_por=1.0, s_nb=s_nb, cfg_rescale=runner.cfg_rescale,
+    )
+    return VolumeGenerator(
+        sampler=sampler, vae=runner.vae, device=runner.device,
+        patch_size=PATCH_SIZE, latent_size=LATENT_SIZE,
+        latent_mean=runner.latent_mean, latent_std=runner.latent_std,
+        voxel_size_mm=VOXEL_SIZE_MM, por_log_stats=runner.por_log_stats,
+        theta_deg=theta,
+        # One tile per chunk and a window per tile: NO overlap, so nothing
+        # averages the rim away and each window is decided exactly once.
+        chunk_tiles=(1, 1, 1), window_stride=TILE, decode_stride=32,
+        neighbour_mode="reference", reference_latents=reference,
+    )
+
+
+def main() -> int:
+    import torch
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--model", required=True, help="the ldm run directory")
+    ap.add_argument("--ckpt", default="latest")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--ddim", type=int, default=50)
+    ap.add_argument("--target-phi", type=float, default=0.03)
+    ap.add_argument("--seed", type=int, default=101)
+    ap.add_argument("--split", default="val")
+    ap.add_argument("--s-nb", type=float, nargs="+", default=[1.0, 0.0])
+    ap.add_argument("--neighbours", type=Path, default=None,
+                    help="a latents.npy to use as the neighbour canvas instead "
+                         "of real material — the generated-neighbour arm")
+    ap.add_argument("--allow-busy-gpu", action="store_true")
+    args = ap.parse_args()
+
+    from poregen.eval_v4.cases import build_cases
+    from poregen.eval_v4.generate import VOXEL_SIZE_MM, VolumeRunner, theta_for_canvas
+    from poregen.eval_v4.memorisation import gpu_jobs_other_than
+
+    import os
+    busy = [] if args.allow_busy_gpu else gpu_jobs_other_than(os.getpid())
+    if busy:
+        print("REFUSING: the card is busy with "
+              + ", ".join(f"{p} ({n})" for p, n in busy), flush=True)
+        return 3
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    runner = VolumeRunner(args.model, args.ckpt, weights="ema", repo=REPO)
+    # The same layup the sampler assessment uses, so the orientation
+    # conditioning is the production one and not a constant this test invented.
+    spec0 = build_cases("sampler")[0]
+    theta = theta_for_canvas(SHAPE[0], spec0.layup, spec0.ply_thickness_vox, 0)
+
+    if args.neighbours:
+        canvas = np.load(args.neighbours).astype(np.float32)
+        note = {"source": str(args.neighbours), "kind": "generated"}
+    else:
+        from poregen.eval_v4.teacher import reference_latent_canvas
+        canvas, note = reference_latent_canvas(
+            runner.latents_root, SHAPE, seed=args.seed, split=args.split)
+        note = {**note, "kind": "real"}
+    reference = torch.from_numpy(np.ascontiguousarray(canvas)).to(runner.device)
+
+    results = {"shape": list(SHAPE), "tiles_per_axis": TILES_PER_AXIS,
+               "n_interior_windows": TILES_PER_AXIS_INTERIOR_COUNT,
+               "ddim": args.ddim, "target_phi": args.target_phi,
+               "checkpoint_step": runner.checkpoint_step,
+               "neighbours": note, "arms": {}}
+
+    # The control: the SAME real latents through the same decoder, so the
+    # comparison is window-vs-window and not model-vs-scanner.
+    gen0 = build(runner, reference, args.s_nb[0], args.ddim, theta)
+    with torch.no_grad():
+        xct, label = gen0._decode_canvas(
+            reference, SHAPE, runner.autocast_dtype, 64)
+    lab = np.asarray(label)
+    results["arms"]["reference_decoded"] = {
+        "phi_interior_windows": interior_phi(lab),
+        "phi_by_shell": rim_profile(lab),
+        "note": "the neighbour canvas itself, decoded — no denoising",
+    }
+
+    for s_nb in args.s_nb:
+        gen = build(runner, reference, s_nb, args.ddim, theta)
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            out = gen.generate(
+                volume_size_mm=tuple(s * VOXEL_SIZE_MM for s in SHAPE),
+                target_porosity=args.target_phi,
+                autocast_dtype=runner.autocast_dtype,
+                window_batch=32, decode_batch_size=64,
+                return_class_probs=False, seed=args.seed,
+            )
+        lab = np.asarray(out[1])
+        results["arms"][f"s_nb={s_nb:g}"] = {
+            "phi_interior_windows": interior_phi(lab),
+            "phi_by_shell": rim_profile(lab),
+            "wall_s": round(time.perf_counter() - t0, 1),
+        }
+        np.save(args.out / f"label_snb{s_nb:g}.npy", lab)
+        print(f"  s_nb={s_nb:g} done in {results['arms'][f's_nb={s_nb:g}']['wall_s']} s",
+              flush=True)
+
+    (args.out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+
+    shells = sorted({k for a in results["arms"].values() for k in a["phi_by_shell"]},
+                    key=int)
+    print(f"\nphi by distance from the window face, pooled over "
+          f"{results['n_interior_windows']} interior windows "
+          f"(all six faces EXISTS), neighbours = {note['kind']}")
+    print(f"{'arm':<22}{'phi window':>11}" + "".join(f"{'d=' + s:>9}" for s in shells))
+    for arm, a in results["arms"].items():
+        cells = "".join(
+            (f"{a['phi_by_shell'][s]:>9.4f}" if a["phi_by_shell"].get(s) is not None
+             else f"{'-':>9}") for s in shells)
+        print(f"{arm:<22}{a['phi_interior_windows']:>11.4f}{cells}")
+    print(f"\nWrote {args.out / 'results.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
