@@ -891,3 +891,100 @@ def test_every_assessment_has_cases_a_measurer_and_a_reporter():
 
     assert not set(ASSESSMENTS) - set(MEASURERS), "assessment without a measurer"
     assert not set(ASSESSMENTS) - set(REPORTERS), "assessment without a reporter"
+
+
+# --------------------------------------------------------------------------- #
+# the cross-plane pore Dice is only readable against its own interior
+# --------------------------------------------------------------------------- #
+class TestPoreDiceAcrossPlanes:
+    """The bare number is uninterpretable and must never be quoted alone.
+
+    It is the Dice between two ADJACENT SLICES. Adjacent slices of any porous
+    medium disagree, because a pore is finite along the axis, and the value
+    falls with pore fraction whether or not anything is broken: real 1024-wide
+    test material scores 0.25-0.34 at every plane, chunk or not. Only the ratio
+    to the same volume's interior says anything.
+
+    Several tests pass a per-axis period with zeros to isolate one axis. A
+    structure that is broken along z is untouched along y and x, and averaging
+    all three would hide the very thing being asserted.
+    """
+
+    def _box(self, shape=(192, 192, 192)):
+        """Pore everywhere: adjacent slices are identical on every axis, so
+        every plane scores 1 and nothing about the geometry can confound it.
+        A pore box with faces INSIDE the volume would put those faces in the
+        interior set and pull the baseline off 1 for a reason unrelated to the
+        thing under test."""
+        return np.full(shape, M.LABEL_PORE, np.uint8)
+
+    def test_a_volume_continuous_along_every_axis_scores_one_everywhere(self):
+        out = M.pore_dice_across_planes(self._box(), 64)
+        assert out["mean"] == pytest.approx(1.0)
+        assert out["interior_mean"] == pytest.approx(1.0)
+        assert out["ratio_to_interior"] == pytest.approx(1.0)
+
+    def test_structure_that_does_not_continue_drops_the_ratio(self):
+        """Pore stripes that shift sideways exactly at the chunk plane.
+
+        Either side is ordinary striped material — the interior scores 1 — but
+        the two sides do not line up where they meet, which is what an
+        assembly failure looks like.
+        """
+        # 128 deep, so period 64 gives exactly ONE chunk plane and the mean is
+        # that plane rather than an average over an untouched second one.
+        lab = np.zeros((128, 64, 64), np.uint8)
+        y = np.arange(64)
+        a = ((y // 8) % 2 == 0)[None, :, None]       # stripes
+        b = ((y // 8) % 2 == 1)[None, :, None]       # the complement
+        lab[:64] = np.where(a, M.LABEL_PORE, M.LABEL_MATERIAL)
+        lab[64:] = np.where(b, M.LABEL_PORE, M.LABEL_MATERIAL)
+        out = M.pore_dice_across_planes(lab, (64, 0, 0))
+        assert out["mean"] == pytest.approx(0.0)     # no overlap at the plane
+        assert out["interior_mean"] == pytest.approx(1.0)
+        assert out["ratio_to_interior"] == pytest.approx(0.0)
+
+    def test_a_plane_with_no_pores_on_either_side_is_dropped_not_scored_zero(self):
+        """A KNOWN LIMITATION, pinned so it is not mistaken for a pass.
+
+        Dice is undefined when both slices are empty, so the plane leaves the
+        average instead of scoring 0. A seam the model left completely
+        pore-free is therefore INVISIBLE to this metric — which is exactly the
+        direction the ldm06 chunk planes fail in, and why the porosity profile
+        beside it is not optional.
+        """
+        lab = self._box((192, 64, 64))
+        lab[62:66, :, :] = M.LABEL_MATERIAL          # clear a band over plane 64
+        out = M.pore_dice_across_planes(lab, (64, 0, 0))
+        assert out["n_planes"] == 1                  # plane 128 only
+        assert out["per_axis"]["axis0"] == [pytest.approx(1.0)]
+
+    def test_a_low_mean_with_an_equally_low_interior_is_NOT_a_seam_defect(self):
+        """The real-material case: everything disagrees, planes included.
+
+        Alternating pore slices make every adjacent pair along z disagree
+        completely, at the chunk planes and between them alike. A reader
+        quoting the mean alone would call this a total assembly failure; the
+        ratio says correctly that the planes are no worse than the interior.
+        """
+        lab = np.zeros((192, 192, 192), np.uint8)
+        lab[::2, 8:184, 8:184] = M.LABEL_PORE
+        out = M.pore_dice_across_planes(lab, (64, 0, 0))
+        assert out["mean"] == pytest.approx(0.0)
+        assert out["interior_mean"] == pytest.approx(0.0)
+        assert out["ratio_to_interior"] is None       # 0/0 is not a verdict
+
+    def test_the_interior_excludes_the_window_planes_as_well(self):
+        """Otherwise the baseline is another seam, not ordinary material."""
+        lab = self._box((384, 64, 64))
+        out = M.pore_dice_across_planes(lab, (192, 0, 0), window_period=64)
+        assert out["n_planes"] == 1                      # the chunk plane at 192
+        assert out["n_interior_planes"] > 0
+        # 64, 128, 256 and 320 are window planes and must not be in the baseline.
+        chosen = {int(i) for i in range(1, 384)
+                  if i % 192 and i % 64 == 0}
+        assert chosen and out["n_interior_planes"] <= 384 - 1 - len(chosen) - 1
+
+    def test_the_definition_says_the_bare_number_is_not_readable(self):
+        out = M.pore_dice_across_planes(self._box(), 64)
+        assert "ratio_to_interior" in out["definition"]

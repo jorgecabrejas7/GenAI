@@ -455,12 +455,22 @@ def measure_assembly(root, repo) -> dict:
     return {
         "assessment": "assembly",
         "question": "Is the volume one object, or a grid of independently drawn blocks?",
+        # `per_case` is the SAMPLER volumes this assessment reads, not its own
+        # 9 cases — those generate the `window_phase` offset triple. Counting
+        # per_case against assembly's case list printed "18 of 9".
+        "per_case_population": (
+            "the sampler volumes, which is where seams and cross-head "
+            "disagreement are measured; assembly's own cases produce the "
+            "`window_phase` offset triple instead"
+        ),
         "detector": {
             "t_abs": detector.t_abs, "min_cc": detector.min_cc,
             "edge_vox": detector.edge_vox, "source": detector.source,
         },
         "per_case": rows,
         "cells": cells,
+        "n_cases_measured": len(rows),
+        "n_cases_expected": len(rows),
         "window_phase": phase,
         "vae_tile_decode_control": M.vae_tile_decode_control(repo),
     }
@@ -595,6 +605,16 @@ def measure_geometry(root, repo) -> dict:
         "question": "Does the model carve air where the material map asks for it?",
         "sphere_exploratory": sphere_block,
         "per_case": rows,
+        # `per_case` holds the GATED notch/hole rows only; the sphere cases are
+        # measured too but kept in `sphere_exploratory`, so the generic
+        # "measured N of M" counter would read as though cases were missing.
+        "n_cases_measured": len(rows) + len(sphere_rows),
+        "n_cases_expected": len(cases),
+        "per_case_population": (
+            f"{len(rows)} gated notch/hole cases. The {len(sphere_rows)} sphere "
+            "cases are measured and reported in `sphere_exploratory`, apart from "
+            "the gate, because a curved specimen is off-manifold and descriptive."
+        ),
         "summary": {
             "n_seeds": len(rows),
             "dice_air": _agg(rows, ("geometry", "dice_air")),
@@ -832,10 +852,10 @@ def measure_multichunk(root, repo) -> dict:
             "evidence about thick-specimen microstructure."
         ),
         "chunk_plane_note": (
-            "The chunk period is derived per case from chunk_tiles. With the "
-            "2-tile chunks used here it is 128 voxels, so the planes fall at 128 "
-            "and 256 in a 384 canvas — not at 192, which would be the 3-tile "
-            "chunk the production sampler defaults to."
+            "The chunk period is derived per case from the manifest's "
+            "chunk_tiles, never assumed. These cases use the PRODUCTION 3-tile "
+            "chunk, so the period is 192 voxels and a 384 canvas has one chunk "
+            "plane per axis at 192."
         ),
         "per_case": rows,
         "summary": {k: by_request(k) for k in ("box", "sphere", "rough")},
@@ -1370,13 +1390,18 @@ def measure(root: str | Path, assessment: str, repo: str | Path | None = None,
     # one measurer is honest; giving every measurer a flag it ignores is not.
     extra = {"allow_busy_gpu": allow_busy_gpu} if assessment == "microstructure" else {}
     results = MEASURERS[assessment](Path(root), repo, **extra)
-    results["n_cases_measured"] = len(results["per_case"])
+    # A measurer whose `per_case` is not one row per case of its own assessment
+    # sets these itself: `assembly` reads the SAMPLER volumes, and `geometry`
+    # keeps its sphere rows in a separate block. Deriving the counters from
+    # `per_case` there printed "18 of 9" and "3 of 8", which reads as cases
+    # missing rather than as two different populations.
+    results.setdefault("n_cases_measured", len(results["per_case"]))
     # A measure-only assessment generates nothing, so there is no case list to
     # be short of: what it measures is whatever the assessments it reads wrote.
-    results["n_cases_expected"] = (
+    results.setdefault("n_cases_expected", (
         len(build_cases(assessment, repo)) if assessment in ASSESSMENTS
         else results["n_cases_measured"]
-    )
+    ))
     write_results(root, assessment, results)
     logger.info(
         "%s: measured %d of %d cases",

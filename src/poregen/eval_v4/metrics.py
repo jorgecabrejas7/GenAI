@@ -1438,38 +1438,75 @@ def sphere_agreement(
     return out
 
 
-def pore_dice_across_planes(label: np.ndarray, period) -> dict:
-    """Pore agreement between the slabs either side of each chunk plane.
+def pore_dice_across_planes(label: np.ndarray, period, *,
+                            window_period: int = TILE,
+                            n_interior: int = 64, seed: int = 0) -> dict:
+    """Pore agreement between the slices either side of each chunk plane,
+    AGAINST the same quantity away from any plane.
 
-    The two slabs are produced by different chunk solves, so a pore structure
-    that stops dead at the plane is an assembly failure rather than texture.
-    Compared as the Dice between the last slice before the plane and the first
-    slice after it, per axis, which is the cheapest statement of "does the
-    structure continue".
+    The two sides of a chunk plane come from different chunk solves, so pore
+    structure that stops dead there is an assembly failure rather than texture.
+
+    THE BARE NUMBER MEANS NOTHING AND MUST NOT BE QUOTED ALONE.  This is the
+    Dice between two ADJACENT SLICES, and adjacent slices of any porous medium
+    disagree, because a pore is finite along the axis: real 1024-wide test
+    material scores 0.25-0.34 here at every plane, chunk or not.  It is also
+    strongly driven by pore fraction — a slab with few pores scores low whether
+    or not anything is broken.  So the interior baseline is computed on the
+    SAME volume and returned beside it, and the ratio is the reading.
+
+    Interior planes exclude the window period as well as the chunk period, so
+    the baseline is ordinary material rather than a different seam.
     """
     per = period if isinstance(period, (tuple, list)) else (period,) * 3
     pore = label == LABEL_PORE
+    rng = np.random.default_rng(seed)
+
+    def dice_at(axis: int, idx: int) -> float | None:
+        a = np.take(pore, idx - 1, axis=axis)
+        b = np.take(pore, idx, axis=axis)
+        n = float(a.sum() + b.sum())
+        return 2.0 * float((a & b).sum()) / n if n else None
+
     vals: list[float] = []
+    base: list[float] = []
     detail: dict[str, list[float]] = {}
+    base_detail: dict[str, float] = {}
     for axis, p_ in enumerate(per):
         if not p_:
             continue
-        axis_vals = []
-        for idx in range(int(p_), label.shape[axis], int(p_)):
-            a = np.take(pore, idx - 1, axis=axis)
-            b = np.take(pore, idx, axis=axis)
-            n = float(a.sum() + b.sum())
-            if n == 0:
-                continue
-            axis_vals.append(2.0 * float((a & b).sum()) / n)
+        p_ = int(p_)
+        axis_vals = [d for idx in range(p_, label.shape[axis], p_)
+                     if (d := dice_at(axis, idx)) is not None]
+        inner = [i for i in range(1, label.shape[axis])
+                 if i % p_ and (not window_period or i % window_period)]
+        if len(inner) > n_interior:
+            inner = rng.choice(inner, n_interior, replace=False).tolist()
+        axis_base = [d for i in inner if (d := dice_at(axis, int(i))) is not None]
         if axis_vals:
             detail[f"axis{axis}"] = axis_vals
             vals.extend(axis_vals)
+        if axis_base:
+            base_detail[f"axis{axis}"] = float(np.mean(axis_base))
+            base.extend(axis_base)
+
+    mean = float(np.mean(vals)) if vals else None
+    base_mean = float(np.mean(base)) if base else None
     return {
-        "mean": float(np.mean(vals)) if vals else None,
+        "mean": mean,
         "min": float(np.min(vals)) if vals else None,
         "n_planes": len(vals),
         "per_axis": detail,
-        "definition": ("Dice between the slices either side of each chunk plane; "
-                       "low means pore structure stops at the plane"),
+        "interior_mean": base_mean,
+        "interior_sd": float(np.std(base)) if base else None,
+        "n_interior_planes": len(base),
+        "interior_per_axis": base_detail,
+        "ratio_to_interior": (mean / base_mean
+                              if mean is not None and base_mean else None),
+        "definition": (
+            "Dice between the two slices either side of each chunk plane, and "
+            "the same statistic at interior planes of the SAME volume. Adjacent "
+            "slices always disagree and the value falls with pore fraction, so "
+            "only `ratio_to_interior` is readable: ~1 means the plane is like "
+            "ordinary material, well below 1 means less pore agreement there."),
     }
