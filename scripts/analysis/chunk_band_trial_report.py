@@ -48,22 +48,52 @@ def phi_of(block: np.ndarray) -> float | None:
     return pore / solid if solid else None
 
 
-def band_slabs(label: np.ndarray, axes, period: int) -> dict:
-    """phi in the 8-voxel slabs either side of every chunk plane."""
-    out = {}
-    for off in (-8, 0):
-        vals = []
-        for axis in axes:
-            n = label.shape[axis]
-            for p in range(period, n, period):
-                lo, hi = p + off, p + off + SLAB
-                if lo < 0 or hi > n:
-                    continue
-                v = phi_of(np.take(label, range(lo, hi), axis=axis))
+def chunk_bounds(n_vox: int, chunk_vox: int, overlap_vox: int) -> tuple[list, list]:
+    """(chunk ENDS, chunk STARTS) in voxels for one axis, excluding the volume's.
+
+    THE PLANES MOVE WITH THE OVERLAP and the measurement has to move with them.
+    Chunks advance by ``chunk - overlap``, so at overlap 32 a 1024 axis has its
+    chunk ends at 192/352/512/672/832/992 and its starts at
+    160/320/480/640/800/960 — not at the 192/384/576/768/960 an unoverlapped
+    run uses.  Scoring an overlap arm at the baseline's planes measures chunk
+    INTERIORS for most of them and reports a band that has simply been looked
+    for in the wrong place.
+    """
+    step = chunk_vox - overlap_vox
+    bounds, s = [], 0
+    while s < n_vox:
+        hi = min(s + chunk_vox, n_vox)
+        bounds.append((s, hi))
+        if hi >= n_vox:
+            break
+        s += step
+    return ([hi for _, hi in bounds[:-1]], [lo for lo, _ in bounds[1:]])
+
+
+def band_slabs(label: np.ndarray, axes, chunk_vox: int, overlap_vox: int) -> dict:
+    """phi in the 8 voxels before each chunk END and after each chunk START.
+
+    With no overlap those are the two sides of one plane, which is what the
+    baseline reports.  With an overlap they are different places, and both are
+    single-covered strips that have to be clear for the band to be gone.
+    """
+    trailing, leading = [], []
+    for axis in axes:
+        n = label.shape[axis]
+        ends, starts = chunk_bounds(n, chunk_vox, overlap_vox)
+        for e in ends:
+            if e - SLAB >= 0:
+                v = phi_of(np.take(label, range(e - SLAB, e), axis=axis))
                 if v is not None:
-                    vals.append(v)
-        out[str(off)] = float(np.mean(vals)) if vals else None
-    return out
+                    trailing.append(v)
+        for st in starts:
+            if st + SLAB <= n:
+                v = phi_of(np.take(label, range(st, st + SLAB), axis=axis))
+                if v is not None:
+                    leading.append(v)
+    return {"-8": float(np.mean(trailing)) if trailing else None,
+            "0": float(np.mean(leading)) if leading else None,
+            "n_trailing": len(trailing), "n_leading": len(leading)}
 
 
 def seams(xct: np.ndarray, pore_logit: np.ndarray | None, period: int) -> dict:
@@ -76,6 +106,9 @@ def seams(xct: np.ndarray, pore_logit: np.ndarray | None, period: int) -> dict:
     g = seam_discontinuity(xct.astype(np.float32) / 255.0, period,
                            prefix="grey", interior_exclude=TILE)
     out["grey_chunk_ratio"] = g.get("grey_ratio")
+    # NOTE: seam_discontinuity takes a PERIOD, so for an overlap arm (whose
+    # boundaries are not evenly spaced) it scores the unoverlapped grid. The
+    # phi slabs above are the ones that follow the real boundaries.
     if pore_logit is not None:
         p = seam_discontinuity(pore_logit, period, prefix="pore",
                                interior_exclude=TILE)
@@ -91,6 +124,7 @@ def measure(case_dir: Path) -> dict:
     notes = m.get("notes") or {}
     tiles = m.get("chunk_tiles") or [3, 3, 3]
     period = int(tiles[0]) * TILE
+    overlap = int(notes.get("chunk_overlap", 0) or 0)
     # z carries no chunk plane at 1024 (192 deep = one chunk), so the axes with
     # planes are read per volume rather than assumed.
     axes = [a for a in range(3) if label.shape[a] > period]
@@ -102,7 +136,7 @@ def measure(case_dir: Path) -> dict:
         pl = np.load(p)["pore_logit"]
 
     phi_vol = phi_of(label)
-    band = band_slabs(label, axes, period)
+    band = band_slabs(label, axes, period, overlap)
     row = {
         "case": case_dir.name,
         "shape": list(label.shape),
@@ -114,6 +148,8 @@ def measure(case_dir: Path) -> dict:
         "phi_volume": phi_vol,
         "phi_-8": band["-8"],
         "phi_+0": band["0"],
+        "n_trailing_planes": band["n_trailing"],
+        "n_leading_planes": band["n_leading"],
         "wall_time_s": m.get("wall_time_s"),
         **seams(xct, pl, period),
     }
