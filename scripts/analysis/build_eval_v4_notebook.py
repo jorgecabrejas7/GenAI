@@ -136,6 +136,8 @@ rsync -avP $H/runs/ldm/ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04/conv
 # these two appear later in the queue; the commands fail harmlessly until then
 rsync -avP --partial $H/runs/campaigns/17-chunk-band-trial   ./campaigns/
 rsync -avP --partial $H/runs/campaigns/16-window-rim          ./campaigns/
+rsync -avP --partial $H/runs/campaigns/19-stress-geometry     ./campaigns/
+rsync -avP --partial $H/runs/campaigns/18-eval-v4-final       ./campaigns/
 rsync -avP --partial --exclude 'r08_*' --exclude 'calibration_probe*' --exclude 'gate_*' $H/runs/campaigns/09-r08-latent-sweep ./campaigns/
 rsync -avP --partial $H/runs/campaigns/11-decoder-ft         ./campaigns/
 rsync -avP --partial $H/runs/campaigns/14-downstream-utility ./campaigns/
@@ -230,6 +232,8 @@ DECODER_FT_ROOT = CAMPAIGNS / "11-decoder-ft"
 DOWNSTREAM_ROOT = CAMPAIGNS / "14-downstream-utility"
 TRIAL_ROOT = CAMPAIGNS / "17-chunk-band-trial"
 RIM_ROOT = CAMPAIGNS / "16-window-rim"
+STRESS_ROOT = CAMPAIGNS / "19-stress-geometry"
+FINAL_ROOT = CAMPAIGNS / "18-eval-v4-final"
 RUNGS_ROOT = CAMPAIGNS / "09-r08-latent-sweep"
 CONV_JSONL = next((p for p in [CAMPAIGNS / "ldm06_convergence_check.jsonl",
                                ROOT.parents[2] / "ldm" / "ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04" / "convergence_check.jsonl"]
@@ -618,6 +622,12 @@ def all_case_options():
     for a in ASSESSMENT_ORDER + ["real_floor"]:
         for d in case_dirs(a):
             opts.append((f"{a} / {d.name}", str(d)))
+    # volumes of the other campaigns on disk (stress geometries, the regenerated final set, the band trial arms)
+    for label, root in (("stress", STRESS_ROOT / "volumes"), ("final", FINAL_ROOT), ("trial", TRIAL_ROOT)):
+        if root.exists():
+            for d in sorted(root.rglob("manifest.json")):
+                if (d.parent / "label.tif").exists():
+                    opts.append((f"{label} / {d.parent.relative_to(root)}", str(d.parent)))
     return opts
 
 _OPTS = all_case_options()
@@ -769,6 +779,202 @@ else:
 # ===========================================================================
 # 6. real floors, 7. sampler, 8. porosity global, 9. porosity local
 # ===========================================================================
+
+def build_primer() -> None:
+    section("Primer: what this work is, for a reader with no background",
+            "the problem, the data, the model, the sampler and the evaluation philosophy, at the level of the paper's introduction and methods")
+    md("""
+**The problem.** Carbon-fibre laminates (CFRP) are made of stacked layers ("plies") of parallel fibres in resin, each ply
+oriented at an angle (0°, 45°, 90°, 135° …). During manufacturing, small gas pockets stay trapped: **pores**. Porosity (the
+pore volume fraction) degrades strength, and industry inspects parts with **X-ray computed tomography (CT)**: a 3D grey
+image where material is bright, pores and the air around the part are dark. Our scans are at 25 µm per voxel; a coupon
+5 mm thick is about 192 voxels deep. Training a pore detector, or studying how porosity affects a part, needs many scans
+with known pores. Real scans are expensive, few, and come with **no ground truth**: the pore label is itself the output of
+a thresholding algorithm (Sauvola, local adaptive threshold) whose uncertainty we measure in campaign 13.
+
+**What PoreGen does.** It generates synthetic CT volumes of laminates **together with a voxel-aligned label** (material /
+pore / air), at any size, with the porosity, the local porosity field, the ply stacking sequence and the part geometry
+chosen by the user. The label comes from the same model as the grey image, so a generated volume is a complete training
+example, not an image that still needs labelling.
+""")
+    md("""
+**The data (split_v3).** 80 CT volumes from 12 laminate panels, three manufacturing families, two ply stacking sequences.
+Each volume is cut into overlapping 64³-voxel windows (1.6 million windows at stride 32, about 220 k without overlap).
+The split is by **panel**, not by volume, so a test panel is never seen in training: test = three panels, validation =
+three, train = the rest. Registration holes drilled in the coupons were removed (dilated by 32 voxels) because a model
+trained with them learned to invent air inside material. Every window carries its porosity, the ply angle at each depth,
+its depth in the stack, the distance to the six faces of the coupon, and a material map (what is inside the part).
+
+**The model, in two stages.**
+1. **Compressor (VAE r08).** A convolutional autoencoder squeezes a 64³ grey+label window into a latent block of 16³ cells
+   with 8 numbers each (8× fewer numbers than the grey voxels). Its decoder outputs the grey image and a 3-class
+   probability per voxel (material / pore / air). Campaign 09 chose 8 channels: pore Dice saturates between 8× and 4×
+   reduction. The latent is regularised to be roughly Gaussian so the second stage can model it.
+2. **Diffusion model (ldm06).** A 3D U-Net (83 M parameters) learns to turn Gaussian noise into latent blocks, step by step
+   ("denoising"), *conditioned* on what we ask for: porosity (a number), the ply-angle profile per depth plane, the depth,
+   the six face distances, the material map, and the latents of the **six neighbouring windows** so that adjacent windows
+   agree. It predicts "v" (a mix of noise and signal) on a cosine noise schedule; sampling uses DDIM with 50–200 steps.
+""")
+    md("""
+**The sampler: how a window becomes a part.** The model only knows 64³ windows. To make a 1024×1024×192 plate:
+- **Windows** of 64 voxels are placed every 32 voxels (so each voxel is inside up to 8 windows) and denoised *together*:
+  at every step each window predicts its content, and the predictions are averaged with cosine weights (MultiDiffusion).
+  This is the **joint** mode; it keeps neighbouring windows consistent but needs the whole region in memory.
+- **Chunks** of 192³ (3×3×3 windows) are solved one after another in raster order. A finished chunk is re-noised to the
+  current noise level and fed to the next chunk as its neighbours (RePaint rule), so the new chunk continues the old one.
+  This is the **hybrid** mode the paper proposes: joint inside a chunk, sequential between chunks, unbounded size.
+- **Decoding** runs the VAE decoder on overlapping 64³ tiles with a Tukey window, because tile-by-tile decoding leaves
+  visible seams in the label (campaign 08).
+- **Classifier-free guidance**: the model is trained sometimes without the porosity input and sometimes without the
+  neighbours, so at sampling time either can be turned off (the "null" condition) or amplified (s_por, s_nb > 1).
+
+**The evaluation philosophy (eval v4).** Three rules: every generated volume carries a manifest that records exactly
+what was asked and with which code; every metric declares what it needs and refuses a volume that lacks it; and every
+table has a **real floor** row: the same metric computed on real held-out volumes, because a seam measure or a texture
+statistic is only meaningful against what real material scores. We never claim realism from appearance. We ask: does the
+delivered porosity follow the requested one (dose response)? do pores land where the field asked (local obedience)? can
+the requested ply sequence be read back (two independent angle readers with known floors)? are window and chunk joins
+invisible (seam ratios vs real)? does the model carve air where the material map says (geometry Dice)? are the surfaces
+as rough as real ones? are the pore statistics (two-point correlation S2, pore-size distribution, Ripley's K, slice FID)
+within the real-vs-real floor? does it copy training windows (nearest neighbour over the full train store)? and, the
+test of use: does a segmentation network trained on synthetic data work on real scans (downstream utility)?
+""")
+    md("""
+**The competitor and the claims.** The closest prior work generates porous rock with a latent diffusion model conditioned
+on porosity (Naiff et al., *Computers & Geosciences* 2026; a field-controlled follow-up at 1024³ is a 2026 preprint). It
+emits a binary phase, not grey + multi-class label, and does not condition on part geometry or through-thickness ply
+structure. PoreGen's contributions, as framed for the paper: joint grey+label generation of a layered, non-stationary
+material; explicit structural and geometric conditioning; realism measured by statistics and by use against real floors;
+local porosity and unbounded assembly as measured requirements; and the small-dataset practices reported as findings
+(panel split, hole removal, latent-spread gate, external code audit, retraction of earlier over-claims, and the
+chunk-plane band with its root cause).
+
+**How to read the rest of this notebook.** Sections 6 onwards are one per assessment: each says what it asks, how the
+number is computed, what the floor is, and what good and bad look like, then shows the data. The research log (next)
+tells what happened in which order. The chunk-band section is the one finding you must know before quoting any
+chunk-plane number.
+""")
+
+
+def build_stress_geometry() -> None:
+    section("Stress geometries (campaign 19): tubes, brackets, tapers, gradients, a cube, a gyroid, letters",
+            "nine geometries far from the training data, each at DDIM 50 and 200: does porosity, ply placement, air and surface control survive?")
+    md("""
+**Why this campaign exists.** Everything in campaigns 12 and 18 is a flat plate or a simple cut (notch, hole, sphere).
+Real parts are tubes, brackets and tapered skins. The model has never seen any of them: every training window comes from
+a flat 5 mm coupon. This campaign asks the model for nine shapes it cannot have memorised and measures the same things
+as the paper's tables: delivered porosity, where the pores are, whether the ply sequence can be read back, whether air
+is carved exactly where the material map says, how the surfaces sit, and whether the chunk joins show. It is
+**exploratory and off the gates**: a failure here is a finding about the limits of the conditioning, not a bug.
+
+**What each geometry tests.** *Tube* and *hollow sphere*: curved surfaces on both sides of a thin wall, interior air the
+data never has. *L-bracket*: a corner — the ply conditioning is per depth plane, so the plies cannot bend around it;
+expect flat plies cutting the corner. *Tapered plate*: thickness changing along the part, stressing the depth and face
+distance inputs. *Gradient + hot spots*: local porosity control at part scale. *Cube 1024³*: five times the volume of
+anything else, chunk joins on all three axes, eight chunks deep. *Gyroid*: surfaces everywhere, no interior far from a
+face. *Two coupons*: independence of two parts with clean air between. *Letters*: controllability, for the figure.
+
+**Why DDIM 50 and 200.** Fifty steps is the production setting; two hundred is the slow, careful one. Where they differ,
+the difference is the sampler's, not the model's. Each geometry is generated once at each.
+""")
+    code(r'''
+SR = STRESS_ROOT / "results.json"
+if not SR.exists():
+    unavailable("campaign 19 results.json", "stress_geometry generation (after the regeneration) and measure")
+else:
+    D = load_json(SR); rows = []
+    for c in D.get("per_case", []):
+        pf = c.get("phase_fractions") or c; ga = c.get("geometry_agreement") or {}; sm = c.get("seams") or {}; band = c.get("band") or c.get("chunk_band") or {}
+        rows.append({"case": c.get("case"), "geometry": c.get("geometry") or (c.get("notes") or {}).get("geometry"), "ddim": c.get("ddim_steps"),
+                     "shape": "×".join(map(str, c.get("volume_shape") or [])), "φ requested": c.get("requested_global_phi"), "φ delivered": pf.get("phi_pore"),
+                     "air inside material": pf.get("air_fraction_interior", pf.get("air_fraction")), "air Dice": ga.get("dice"), "air precision": ga.get("precision"), "air recall": ga.get("recall"),
+                     "seam window grey": sm.get("seam_xct_ratio"), "seam chunk grey": sm.get("seam_chunk_xct_ratio"), "seam chunk pore": sm.get("seam_chunk_pore_ratio"),
+                     "band −8": band.get("ratio_-8"), "band +0": band.get("ratio_+0"), "failed": (c.get("failure") or {}).get("failed"), "min": (c.get("wall_time_s") or float("nan")) / 60})
+    ST = pd.DataFrame(rows).sort_values(["geometry", "ddim"])
+    display(ST.round(4))
+    fig = make_subplots(rows=1, cols=3, subplot_titles=["delivered φ vs requested", "air Dice vs requested geometry", "chunk-plane band (−8), 1 = none"])
+    for dd, g in ST.groupby("ddim"):
+        fig.add_trace(go.Bar(x=g["geometry"], y=g["φ delivered"], name=f"DDIM {dd}"), row=1, col=1)
+        fig.add_trace(go.Bar(x=g["geometry"], y=g["air Dice"], name=f"DDIM {dd}", showlegend=False), row=1, col=2)
+        fig.add_trace(go.Bar(x=g["geometry"], y=g["band −8"], name=f"DDIM {dd}", showlegend=False), row=1, col=3)
+    if ST["φ requested"].notna().any(): fig.add_hline(y=float(ST["φ requested"].dropna().iloc[0]), line_dash="dash", row=1, col=1)
+    fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0, row=1, col=3)
+    fig.update_layout(height=420, barmode="group"); fig.show()
+''')
+    md("""
+**Reading the first table.** φ delivered should sit at the requested 0.03 in every shape; a shape where it drifts tells you
+the conditioning (depth, face distances) is being misread. Air Dice near 1 with air-inside-material near 0 means the
+material map is obeyed; watch the thin-wall cases (tube, gyroid, shell). The band column shows whether the chunk-plane
+fix holds on shapes where many windows touch a surface *and* a chunk frontier at once.
+""")
+    code(r'''
+if SR.exists():
+    D = load_json(SR); rows = []
+    for c in D.get("per_case", []):
+        L = c.get("layup") or c.get("layup_recovery") or {}
+        for reader, r in L.items():
+            if isinstance(r, dict) and ("median_abs_error_deg" in r or "median_abs_error" in r):
+                rows.append({"case": c.get("case"), "ddim": c.get("ddim_steps"), "region": r.get("region", "whole"), "reader": reader,
+                             "median |err| deg": r.get("median_abs_error_deg", r.get("median_abs_error")), "4-class acc": r.get("strict_class_accuracy"), "plies recovered": r.get("n_recovered")})
+        S = c.get("surface") or c.get("surface_agreement") or {}
+        for face, f in (S.items() if isinstance(S, dict) else []):
+            if isinstance(f, dict):
+                rows.append({"case": c.get("case"), "ddim": c.get("ddim_steps"), "region": face, "reader": "surface", "position error vox": f.get("error_abs_mean", f.get("radial_error_vox")), "Sa vox": f.get("roughness_sa")})
+    LS = pd.DataFrame(rows)
+    if LS.empty: note("no layup / surface rows yet in results.json")
+    else:
+        display(LS.round(3))
+        note("Layup floors on real volumes: fft_slice 8.2° / 74 %, pore_axes 4.2° / 86 %. On the L-bracket each leg is read separately; the corner is expected to fail because plies are conditioned per depth plane.")
+''')
+    md("""
+**Reading the second table.** Ply recovery should match the flat-plate numbers of section *layup* on the plates and the
+bracket legs. The corner of the bracket is the known limit: a per-depth-plane ply conditioning cannot bend. Surface
+rows: radial error of the tube and the shell, per-column thickness error of the taper, and position error of the plate
+faces, all in voxels (25 µm).
+""")
+    code(r'''
+if SR.exists():
+    D = load_json(SR)
+    grad = [c for c in D.get("per_case", []) if "gradient" in str(c.get("case", "")) or "gradient" in str(c.get("geometry", ""))]
+    if not grad: note("gradient + hot-spot case not measured yet")
+    for c in grad:
+        lo = c.get("local") or c.get("local_obedience") or {}
+        print(c.get("case"), "DDIM", c.get("ddim_steps"), "| within-volume slope", lo.get("slope"), "R²", lo.get("r2"), "| per-cell |err|", lo.get("cell_abs_error_mean"), "| ramp slope delivered/requested", lo.get("ramp_slope_ratio"))
+        req, dlv = lo.get("requested_cells"), lo.get("delivered_cells")
+        if req and dlv:
+            fig = make_subplots(rows=1, cols=2, subplot_titles=["requested field (mid-depth tiles)", "delivered field"])
+            fig.add_trace(go.Heatmap(z=np.asarray(req), colorscale="Viridis", zmin=0, zmax=0.1), row=1, col=1)
+            fig.add_trace(go.Heatmap(z=np.asarray(dlv), colorscale="Viridis", zmin=0, zmax=0.1), row=1, col=2)
+            fig.update_layout(height=380, title=f"{c.get('case')}: gradient + hot spots, DDIM {c.get('ddim_steps')}"); fig.show()
+''')
+    md("""
+**Reading the gradient maps.** Left is the porosity asked per 64-voxel tile, right what was delivered. A good result keeps
+the ramp direction, reaches the 10 % spots, and stays at 0.5 % in the low corner. Recall from section *porosity local*
+that tile-scale contrast is halved by the overlapping windows; a smooth ramp is the regime where local control works.
+""")
+    code(r'''
+# Inspection montage for campaign 19 (three mid-slices per case, grey + label) if the reporter wrote it
+INS = STRESS_ROOT / "inspection"
+if INS.exists():
+    pngs = sorted(INS.glob("*.png"))
+    print(len(pngs), "montages")
+    w_p = W.Dropdown(options=[(p.name, str(p)) for p in pngs], description="case")
+    out_p = W.Output()
+    def _showp(*_):
+        with out_p:
+            out_p.clear_output(wait=True); display(Image(filename=w_p.value))
+    w_p.observe(_showp, names="value")
+    show_widget(W.VBox([w_p, out_p]), _showp)
+else:
+    unavailable("campaign 19 inspection montages", "eval_v4 report stress_geometry")
+''')
+    md("""
+**What to look for in the montages.** Crisp air/material boundaries on curved walls; plies visible as layers in the grey;
+flat plies cutting through the bracket corner (the known limitation); clean air in the gap between the two coupons; the
+letters readable in the label. The full volumes are in `campaigns/19-stress-geometry/volumes/<case>/` and open in the
+slice viewer (section 5) like any other case.
+""")
+
 
 def build_research_log() -> None:
     section("Research log since the ldm06 training finished",
@@ -2461,9 +2667,9 @@ else:
 def build_all() -> None:
     build_setup()
     CELLS.append(("index", ""))          # placeholder, filled after sections are known
-    build_config(); build_progress(); build_research_log(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
+    build_config(); build_progress(); build_primer(); build_research_log(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
     build_rungs(); build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
-    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_microstructure()
+    build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_stress_geometry(); build_microstructure()
     build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream()
     build_summary(); build_preview()
 
