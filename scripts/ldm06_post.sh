@@ -115,7 +115,7 @@ if [ -e "$GO" ]; then
     for a in "${ASSESSMENTS[@]}"; do
         say "EVALV4 generate $a start"
         python -m poregen.eval_v4.cli generate "$a" \
-            --model "$LDM_RUN" --ckpt best --out "$EVAL_CAMP" --save-latents \
+            --model "$LDM_RUN" --ckpt latest --out "$EVAL_CAMP" --save-latents \
             > "$SCRATCH/evalv4_gen_${a}.log" 2>&1
         say "EVALV4 generate $a done rc=$?"
     done

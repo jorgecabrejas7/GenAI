@@ -91,7 +91,7 @@ gen() {
     local a="$1"
     say "GEN $a start"
     python -m poregen.eval_v4.cli generate "$a" \
-        --model "$LDM_RUN" --ckpt best --out "$EVAL_CAMP" --save-latents \
+        --model "$LDM_RUN" --ckpt latest --out "$EVAL_CAMP" --save-latents \
         > "$SCRATCH/tail_gen_${a}.log" 2>&1
     say "GEN $a done rc=$?"
 }
