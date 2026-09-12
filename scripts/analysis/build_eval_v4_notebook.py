@@ -1004,8 +1004,16 @@ else:
             rows.append({"region": f"{ax} {part}", **S["regions"][ax][part]})
     T = pd.DataFrame(rows).set_index("region"); display(T.round(5))
     print("voxel-pooled φ over all volumes:", round(S.get("voxel_pooled_phi", float("nan")), 5)); print("definition:", D.get("definition"))
-    PV = pd.DataFrame([{"volume": v["volume_id"][-40:], "panel": v.get("panel"), "phi_whole": v["phi_whole"],
-                        **{f"{ax}_{p}": v["regions"][ax][p] for ax in ("z", "y", "x") for p in ("front", "middle", "back")}} for v in D["per_volume"]])
+    def _phi(x):                      # a region is {"phi": ..., "n_patches": ...}, or null when the third holds no patch centre
+        return (x or {}).get("phi") if isinstance(x, dict) else x
+    def _short(vid):
+        return (vid.replace("MedidasDB__", "").replace("_volume_eq_aligned", "").replace("Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_", "")
+                   .replace("Juan_Ignacio_probetas_", "JI_").replace("Airbus_Panel_Pegaso_probetas_", "Pegaso_"))
+    PV = pd.DataFrame([{"volume": _short(v["volume_id"]), "panel": v.get("panel"), "split": v.get("split"), "depth": (v.get("shape") or [None])[0], "n_patches": v.get("n_patches"), "phi_whole": v["phi_whole"],
+                        **{f"{ax}_{p}": _phi(v["regions"][ax][p]) for ax in ("z", "y", "x") for p in ("front", "middle", "back")}} for v in D["per_volume"]]).sort_values(["panel", "volume"])
+    pd.set_option("display.max_rows", 200)
+    display(PV.set_index("volume").round(4))            # the per-volume report: one row per real scan, whole and the nine thirds
+    pd.reset_option("display.max_rows")
     fig = make_subplots(rows=1, cols=3, subplot_titles=["through-thickness (z)", "in-plane y", "in-plane x"])
     for i, ax in enumerate(("z", "y", "x"), 1):
         for p in ("front", "middle", "back"):
