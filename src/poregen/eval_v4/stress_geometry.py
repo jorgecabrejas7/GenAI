@@ -29,9 +29,13 @@ VOXEL_MM = 0.025
 def _grid(shape: tuple[int, int, int]):
     """Centred coordinate grids, one per axis, broadcastable against `shape`."""
     d, h, w = shape
-    z = (np.arange(d) - (d - 1) / 2.0)[:, None, None]
-    y = (np.arange(h) - (h - 1) / 2.0)[None, :, None]
-    x = (np.arange(w) - (w - 1) / 2.0)[None, None, :]
+    z = (np.arange(d, dtype=np.float32) - (d - 1) / 2.0)[:, None, None]
+    y = (np.arange(h, dtype=np.float32) - (h - 1) / 2.0)[None, :, None]
+    x = (np.arange(w, dtype=np.float32) - (w - 1) / 2.0)[None, None, :]
+    # float32, not float64. A 512-cubed r2 is 536 MB rather than 1.07 GB, and
+    # the coordinates are half-integers whose squares and sums are exact well
+    # inside a 24-bit mantissa, so nothing is lost. This machine shares 121 GB
+    # between host and device with a training run in it.
     return z, y, x
 
 
@@ -184,17 +188,51 @@ def material_gyroid(shape, *, period: float = GYROID_PERIOD_VOX,
     """
     d, h, w = shape
     k = 2.0 * np.pi / period
-    z = (np.arange(d) * k)[:, None, None]
-    y = (np.arange(h) * k)[None, :, None]
-    x = (np.arange(w) * k)[None, None, :]
+    level = _gyroid_surface_gradient(k) * (thickness / 2.0)
+    z = (np.arange(d, dtype=np.float32) * k)[:, None, None]
+    y = (np.arange(h, dtype=np.float32) * k)[None, :, None]
+    x = (np.arange(w, dtype=np.float32) * k)[None, None, :]
     f = (np.sin(z) * np.cos(y) + np.sin(y) * np.cos(x) + np.sin(x) * np.cos(z))
-    near = np.abs(f) < 0.05
-    if not near.any():
-        raise ValueError(f"no gyroid surface inside {shape} at period {period}")
-    grad = np.gradient(f)
-    gmag = np.sqrt(sum(g ** 2 for g in grad))
-    level = float(np.median(gmag[near])) * (thickness / 2.0)
     return np.abs(f) <= level
+
+
+#: Points per period for the gradient calibration.  Well above what the median
+#: needs and still 8 MB.
+GYROID_CAL_POINTS = 128
+
+
+def _gyroid_surface_gradient(k: float) -> float:
+    """Median ``|grad f|`` on the gyroid surface, from ONE period.
+
+    f depends on position only through ``k * coordinate``, so the distribution
+    of ``|grad f|`` over the surface is a property of the PERIOD and not of the
+    canvas the surface is cut out of.  Measuring it on a 128-cubed period costs
+    8 MB; measuring it on the canvas with ``np.gradient`` allocates three more
+    arrays the size of the field plus the temporaries of the sum, which for a
+    512-cubed request is about 8 GB.  On a machine that shares 121 GB between
+    host and device with a training run already in it, that is the difference
+    between running and being killed — and it was, the first time.
+
+    The derivatives are the closed form, not a difference: ``np.gradient`` on a
+    field this smooth agrees with it to four figures and costs the memory the
+    closed form exists to avoid.
+    """
+    t = np.linspace(0.0, 2.0 * np.pi, GYROID_CAL_POINTS, endpoint=False,
+                    dtype=np.float32)
+    z, y, x = t[:, None, None], t[None, :, None], t[None, None, :]
+    sz, cz = np.sin(z), np.cos(z)
+    sy, cy = np.sin(y), np.cos(y)
+    sx, cx = np.sin(x), np.cos(x)
+    near = np.abs(sz * cy + sy * cx + sx * cz) < 0.05
+    if not near.any():
+        raise ValueError("no gyroid surface found in one period")
+    gz = k * (cz * cy - sx * sz)
+    gy = k * (cy * cx - sz * sy)
+    gx = k * (cx * cz - sy * sx)
+    gmag = np.sqrt(np.broadcast_to(gz, near.shape) ** 2
+                   + np.broadcast_to(gy, near.shape) ** 2
+                   + np.broadcast_to(gx, near.shape) ** 2)
+    return float(np.median(gmag[near]))
 
 
 def material_letters(shape, text: str = "PoreGen", *,

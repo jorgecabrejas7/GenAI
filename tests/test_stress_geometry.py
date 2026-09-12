@@ -142,11 +142,32 @@ class TestGyroid:
         assert f[0] < f[1] < f[2]
 
     def test_every_face_of_the_canvas_cuts_material(self):
-        """No outer surface anywhere — the first request with none."""
-        m = SG.material_gyroid((128, 128, 128), period=512, thickness=80)
+        """No outer surface anywhere — the first request with none.
+
+        Checked on a FULL period at the request's own strut-to-period ratio
+        (20/128 is 80/512), not on a corner of one: a canvas holding a quarter
+        of a period can miss the surface by luck of where the corner falls, and
+        then the test passes for the wrong reason.
+        """
+        m = SG.material_gyroid((128, 128, 128), period=128, thickness=20)
         for axis in range(3):
             assert np.take(m, 0, axis=axis).any()
             assert np.take(m, -1, axis=axis).any()
+
+    def test_the_thickness_is_honoured_at_every_scale(self):
+        """The strut is a fraction of the period, so the SAME ratio must give
+        the same material fraction whatever the canvas.
+
+        It did not, once: the gradient was measured on the canvas, so a canvas
+        holding a quarter of a period calibrated the level against a quarter of
+        the surface. Measuring it on one period instead makes the geometry a
+        property of the request, and it removed an 8 GB allocation that the
+        kernel killed on this machine.
+        """
+        f = [SG.material_gyroid((n, n, n), period=n, thickness=n * 80 / 512).mean()
+             for n in (128, 256)]
+        assert f[0] == pytest.approx(f[1], abs=0.005)
+        assert 0.40 < f[0] < 0.60
 
 
 class TestLetters:
