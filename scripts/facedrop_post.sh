@@ -69,31 +69,13 @@ python scripts/analysis/window_rim_test.py --model "$FD" --ckpt latest \
     > "$S/fd_rim.log" 2>&1
 say "RIM mixed-set done rc=$? — REPORT TO SUPERVISOR"
 
-# ── 3. the gate, then the bracket rungs ─────────────────────────────────────
-if [ ! -e "$FT_GO" ]; then
-    say "GATE blocked: waiting for $FT_GO (polling 60 s, no timeout)"
-    while [ ! -e "$FT_GO" ]; do sleep 60; done
-fi
-say "GATE released: $FT_GO present"
-say "DECODER-FT start (r08/decoder-ft)"
-python scripts/train_vae.py run r08/decoder-ft > "$S/decoder_ft.log" 2>&1
-ft_rc=$?
-say "DECODER-FT done rc=$ft_rc"
-FT_RUN=$(run_dir_for decoder-ft)
-BASE_CKPT="$(run_dir_for reduction-factor-8)best.ckpt"
-if [ "$ft_rc" -eq 0 ] && [ -n "$FT_RUN" ] && [ -f "${FT_RUN}best.ckpt" ]; then
-    say "REDECODE start"
-    python scripts/analysis/decoder_ft_redecode.py \
-        --baseline "$BASE_CKPT" --finetuned "${FT_RUN}best.ckpt" \
-        --latents "$REPO/runs/campaigns/12-eval-v4/*/*/latents.npy" \
-        --out "$FT_CAMP/redecode" > "$S/redecode.log" 2>&1
-    say "REDECODE done rc=$? — GATE TABLE to $FT_CAMP/redecode/results.json"
-else
-    say "REDECODE skipped: fine-tune rc=$ft_rc, run=${FT_RUN:-<none>}"
-fi
-for exp in "${TAIL_RUNGS[@]}"; do
-    say "START r08/$exp"
-    python scripts/train_vae.py run "r08/$exp" > "$S/r08_${exp}.log" 2>&1
-    say "DONE r08/$exp rc=$?"
-done
-say "FACEDROP POST COMPLETE — downstream_utility NOT run, awaiting the author's regeneration choice"
+# ── 3. STOP. ────────────────────────────────────────────────────────────────
+# The decoder fine-tune and the r08 rungs USED to run here, behind
+# runs/campaigns/decoder_ft_go. They moved to scripts/final_queue.sh, which puts
+# them after the campaign-18 regeneration the gate table has to be read on.
+# The GATE ITSELF is not deleted: final_queue.sh stage 5 waits on the same file.
+#
+# Keeping them here as well would mean whichever script saw the gate file first
+# ran the fine-tune, and this one would always win by hours.
+say "RIM done — STOPPING. decoder-ft and the r08 rungs belong to final_queue.sh now."
+say "FACEDROP POST COMPLETE — trial arms and rim test only, by design."
