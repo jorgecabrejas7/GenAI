@@ -160,6 +160,7 @@ def noise_neighbours(
     *,
     nb_t_mix: float,
     drop_nb_p: float,
+    drop_nb_face_p: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Noise each neighbour to its own timestep (ldm06 training).
 
@@ -205,6 +206,19 @@ def noise_neighbours(
         drop = (torch.rand(B, 1, device=device) < drop_nb_p).expand(B, K)
         nb_avail = torch.where(drop, torch.full_like(nb_avail, NB_UNKNOWN), nb_avail)
 
+    if drop_nb_face_p > 0.0:
+        # PER FACE, independently, and only on faces that EXIST.  The store
+        # serves EXISTS or OOB, and the all-six drop above turns items into the
+        # null arm, so without this the model never sees "some neighbours
+        # present, one missing" with UNKNOWN in it: every mixed set it trains on
+        # has OOB as the missing face, which means the specimen ends there.
+        # That is the whole reason the sampler's chunk frontier is off the
+        # training manifold.  OOB faces are left alone: turning an edge into
+        # UNKNOWN would claim the specimen continues where it does not.
+        face = ((torch.rand(B, K, device=device) < drop_nb_face_p)
+                & (nb_avail == NB_EXISTS))
+        nb_avail = torch.where(face, torch.full_like(nb_avail, NB_UNKNOWN), nb_avail)
+
     exists = nb_avail == NB_EXISTS
     nb_t = torch.where(exists, nb_t, torch.zeros_like(nb_t))
 
@@ -227,6 +241,7 @@ def ldm_train_step(
     sample_posterior: bool = True,
     drop_por_p: float = 0.0,
     drop_nb_p: float = 0.0,
+    drop_nb_face_p: float = 0.0,
     nb_t_mix: float = 0.5,
     decoded_aux: "DecodedAuxLoss | None" = None,
 ) -> dict[str, float]:
@@ -281,6 +296,7 @@ def ldm_train_step(
     nb_latents, nb_avail, nb_t = noise_neighbours(
         schedule, nb, c["nb_avail"], t,
         nb_t_mix=nb_t_mix, drop_nb_p=drop_nb_p,
+        drop_nb_face_p=drop_nb_face_p,
     )
 
     optimizer.zero_grad(set_to_none=True)
@@ -654,6 +670,9 @@ def ldm_train_loop(
     # CFG dropout rates and the neighbour-timestep mixture (see noise_neighbours)
     drop_por_p = float(training_cfg.get("drop_por", 0.0))
     drop_nb_p  = float(training_cfg.get("drop_nb", 0.0))
+    #: Per-FACE independent dropout, on EXISTS faces only.  0.0 reproduces the
+    #: ldm06 behaviour exactly, so no existing run changes.
+    drop_nb_face_p = float(training_cfg.get("drop_nb_face", 0.0))
     nb_t_mix   = float(training_cfg.get("nb_t_mix", 0.5))
 
     # Guidance scales for in-training sample visualisation (default 1.0 = un-guided)
@@ -663,8 +682,9 @@ def ldm_train_loop(
     cfg_rescale  = float(guidance_cfg.get("cfg_rescale", 0.0))
 
     _logger.info(
-        "CFG dropout — drop_por=%.2f  drop_nb=%.2f  |  nb_t_mix=%.2f",
-        drop_por_p, drop_nb_p, nb_t_mix,
+        "CFG dropout — drop_por=%.2f  drop_nb=%.2f  drop_nb_face=%.2f  |  "
+        "nb_t_mix=%.2f",
+        drop_por_p, drop_nb_p, drop_nb_face_p, nb_t_mix,
     )
     if s_por_scale != 1.0 or s_nb_scale != 1.0:
         _logger.info(
@@ -733,7 +753,8 @@ def ldm_train_loop(
                 step=step, device=device, autocast_dtype=autocast_dtype,
                 max_grad_norm=max_grad_norm, scheduler=scheduler,
                 sample_posterior=sample_posterior, drop_por_p=drop_por_p,
-                drop_nb_p=drop_nb_p, nb_t_mix=nb_t_mix,
+                drop_nb_p=drop_nb_p, drop_nb_face_p=drop_nb_face_p,
+                nb_t_mix=nb_t_mix,
                 decoded_aux=decoded_aux,
             )
             ema.update(model)

@@ -183,6 +183,44 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
+def _init_from_checkpoint(cfg: dict, model, device, repo_root) -> None:
+    """Warm-start the WEIGHTS from another run, with a fresh optimiser.
+
+    ``training.init_from`` is not ``resume``.  Resume continues one run: same
+    directory, same step counter, same optimiser and scheduler state.  This
+    starts a NEW run that happens to begin from trained weights — its own
+    schedule, step budget and dropout — which is what a short corrective
+    fine-tune is.
+
+    The EMA weights are preferred when the checkpoint has them, because they
+    are the weights generation uses and therefore the ones a fine-tune should
+    start from.  Nothing else is carried over, and a missing file is an error
+    rather than a silent train-from-scratch that would still call itself a
+    fine-tune.
+    """
+    ref = (cfg.get("training") or {}).get("init_from")
+    if not ref:
+        return
+    path = Path(ref)
+    if not path.is_absolute():
+        path = Path(repo_root) / path
+    if not path.exists():
+        raise FileNotFoundError(
+            f"training.init_from names {path}, which does not exist."
+        )
+    raw = torch.load(path, map_location=device, weights_only=False)
+    which = "ema" if raw.get("ema") else "model"
+    state = raw.get("ema") or raw.get("model")
+    if state is None:
+        raise KeyError(f"{path} carries neither 'ema' nor 'model' weights.")
+    state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+    model.load_state_dict({k: v.to(device) for k, v in state.items()})
+    logger.info(
+        "Warm start from %s (step %s, %s weights); optimiser, scheduler and "
+        "step counter are fresh.", path, raw.get("step", "?"), which,
+    )
+
+
 def run_ldm_experiment(
     experiment_ref: str | Path,
     *,
@@ -213,6 +251,9 @@ def run_ldm_experiment(
     save_resolved_config(run_ctx.run_dir, cfg)
 
     model     = _build_model(cfg, device)
+    # Fresh runs only: a resume already has its weights, its optimiser and its
+    # step counter from the checkpoint it is continuing.
+    _init_from_checkpoint(cfg, model, device, resolved.repo_root)
     schedule  = DDPMSchedule.from_cfg(cfg, device)
     optimizer = _build_optimizer(cfg, model)
     scheduler = _build_scheduler(cfg, optimizer)

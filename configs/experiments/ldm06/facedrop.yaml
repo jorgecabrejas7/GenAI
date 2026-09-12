@@ -1,0 +1,185 @@
+experiment:
+  name: ldm06
+  variant: facedrop
+  description: >-
+    A PROPOSAL, not a launched run.  A short corrective fine-tune of ldm06/base
+    that puts the sampler's chunk-frontier neighbour state into the training
+    distribution.
+
+    THE DEFECT.  Every chunk of a generated volume is pore-depleted in the 32
+    voxels before its trailing face and the 32 after its leading face: at 1024
+    the trailing slab holds 0.19 of the volume mean.  Real material is flat
+    across the same planes.  It accounts for most of the delivered-porosity
+    deficit.
+
+    THE CAUSE, measured three ways and not inferred.
+    (1) ldm06 drops neighbours PER ITEM: `torch.rand(B, 1).expand(B, K)` sends
+        all six faces to UNKNOWN together or none of them.  The latent store
+        serves only EXISTS or OOB.  So of 1,598,000 training windows, 75.65 %
+        have a mixed set and EVERY non-EXISTS face in all of them is OOB —
+        63.68 % are exactly five EXISTS and one OOB.  The model never once saw
+        five EXISTS and one UNKNOWN.
+    (2) Denoising single windows with three faces EXISTS and three UNKNOWN puts
+        phi at 0.15 and 0.05 of the window mean on the UNKNOWN faces against
+        0.89 and 1.63 on the EXISTS faces: a one-sided effect on the missing
+        face, not a rim effect on all six.
+    (3) In every generated volume exactly ONE chunk boundary is healthy — the
+        last, whose successor's far face is the volume edge, i.e. OOB.  The one
+        frontier that is in-distribution is the one that behaves.
+
+    Every "one face missing" the model learned from meant "the specimen ends
+    here", where real material genuinely has fewer pores.  At a chunk frontier
+    the sampler shows that pattern with UNKNOWN, and the model applies the rule
+    it has.
+
+    THE CHANGE.  `drop_nb_face: 0.1` drops each EXISTS face independently.
+    Over the store's own OOB distribution that makes a mixed EXISTS/UNKNOWN set
+    in 41.6 % of items, or 39.5 % once the all-six draw takes its 5 % —
+    against 46.9 % for a fully-interior item and 0 % today.  `drop_nb: 0.05`
+    stays so the pure null arm — all six UNKNOWN, which the guided sampler's
+    neighbour-null pass uses — keeps being trained.  OOB faces are never
+    dropped: turning an edge into UNKNOWN would claim the specimen continues
+    where it does not, trading this artefact for one at every surface.
+
+    Nothing else changes.  Same store, same batch, same architecture, same
+    schedule and objective.  The inference-side mitigations in campaign 17
+    (s_nb, chunk overlap) each recover part of the band and none clears it;
+    they are not a substitute for training the state the sampler produces.
+
+loss: {}
+
+model:
+  type: unet3d
+  z_channels: 8
+  base_channels: 128
+  channel_mult: [1, 2, 4]
+  n_res_blocks: 2
+  attn_at_bottleneck: false
+  bottleneck_downsample: true
+  cond_embed_dim: 512
+  nb_avail_embed_dim: 8
+  nb_t_embed_dim: 8
+  n_attn_heads: 8
+  dropout: 0.0
+
+noise_schedule:
+  type: cosine
+  T: 1000
+  s: 0.008
+  objective: v
+  zero_terminal_snr: true
+
+vae:
+  checkpoint: runs/vae/r08-run-0004-20260904-035134-archv2-conv_noattn_dualbranch_cls-z8-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt
+
+training:
+  seed: 42
+  batch_size: 256
+
+  # Warm start from the finished ldm06 run.  NOT a resume: this is a new run
+  # with its own step budget, schedule and dropout, beginning from trained
+  # weights.  The EMA weights are preferred when present, because they are the
+  # weights generation uses.  The optimiser, scheduler and step counter are
+  # fresh.
+  init_from: runs/ldm/ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04/checkpoints/latest.ckpt
+
+  # Constant and small.  A cosine decay over 15k steps would spend most of the
+  # budget at a rate too low to move anything, and this is a correction to a
+  # conditioning behaviour rather than a continuation of training.
+  lr: 2.0e-5
+  # "none" is this codebase's value for a constant rate: _build_scheduler
+  # returns None for anything but "cosine", so the optimiser keeps `lr`.
+  scheduler: none
+  warmup_steps: 0
+  weight_decay: 0.01
+  total_steps: 15000
+  max_grad_norm: 1.0
+
+  # 0.999, not base's 0.9999: over 15k steps a 0.9999 EMA has a horizon of
+  # ~10k and would still be averaging in the pre-fine-tune weights at the end.
+  ema_decay: 0.999
+
+  log_every: 10
+  eval_every: 500
+  val_batches: 50
+  full_val_every: 2000
+  save_every: 2000
+  compile: true
+
+  # Periodic diagnostics OFF.  They cost GPU and answer questions about
+  # convergence; this run is judged by regenerating the trial arms on its
+  # checkpoint and re-scoring the band, not by its own samples.  The values
+  # below the *_every switches are kept at base so turning them back on is a
+  # one-line change and cannot resurrect a different setting by accident.
+  gen_eval_every: 0
+  gen_eval_samples: 64
+  gen_eval_ddim_steps: 50
+  sample_every: 0
+  sample_ddim_steps: 50
+  sample_grid: [3, 3, 3]
+  sample_global_por: 0.02
+  sample_layup: [45, -45, 90, 0, 45, -45, 0, 90, -45, 45]
+  sample_ply_thickness_vox: 19.6
+
+  drop_por: 0.1
+  # The all-six null arm, kept so the guided sampler's neighbour-null pass
+  # stays trained — at a lower rate, because the per-face draw now supplies
+  # most of the neighbour dropout.
+  drop_nb: 0.05
+  # THE CHANGE: each EXISTS face dropped independently.
+  drop_nb_face: 0.1
+  nb_t_mix: 0.5
+
+guidance:
+  s_por: 1.0
+  s_nb: 1.0
+  cfg_rescale: 0.0
+
+generation:
+  chunk_tiles: [3, 3, 3]
+  window_stride: 32
+  decode_stride: 32
+  window_batch: 32
+
+data:
+  latents_root: data/split_v3/latents_r08z8
+  latent_mode: sampled
+  sample_stride: 32
+  generation_stride: 64
+  neighbour_offset: 64
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+runtime:
+  runs_root: runs/ldm
+  device:
+    gpu_id: null
+  checkpoints:
+    save_latest: true
+    save_best: true
+    best_metric: val.loss
+    best_mode: min
+  resume:
+    prune_jsonl: true
+  metadata:
+    capture_git: true
+    capture_machine: true
+    capture_environment: true
+  run_name:
+    timestamp_format: "%Y%m%d-%H%M%S"
+    run_index_width: 4
+    fields:
+      - label: z
+        path: model.z_channels
+      - label: c
+        path: model.base_channels
+      - label: bs
+        path: training.batch_size
+      - label: lr
+        path: training.lr
+        transform: sci
+  machine:
+    name: dgx_spark
+    accelerator: NVIDIA GB10 Blackwell
