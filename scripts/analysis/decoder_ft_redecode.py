@@ -325,6 +325,37 @@ def generated_arm(base, ft, device, latent_files: list[Path], real_sharp: float)
     return {"per_volume": rows, "by_ddim_steps": _group_by_steps(rows)}
 
 
+def _at_ddim(files: list[Path], steps: int) -> list[Path]:
+    """Keep the canvases whose CASE MANIFEST records ``steps``.
+
+    The directory name is not the selector and must not be used as one. Case
+    names carry the step count only when the assessment varies it: in campaign
+    12, 55 of the 72 DDIM-50 cases say "ddim50" in their name but only 45 of the
+    99 DDIM-200 cases say "ddim200". Globbing on the name would have built the
+    DDIM-200 gate row out of less than half its volumes and reported it as the
+    whole thing.
+
+    A canvas whose manifest is missing or unreadable is DROPPED and named, not
+    silently kept: the gate compares two decoders on identical input, and a
+    canvas whose sampling settings cannot be established is not identical to
+    anything.
+    """
+    keep = []
+    for f in files:
+        mf = f.parent / "manifest.json"
+        if not mf.exists():
+            logger.warning("no manifest beside %s — dropped", f)
+            continue
+        try:
+            got = json.loads(mf.read_text()).get("ddim_steps")
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("unreadable manifest %s (%s) — dropped", mf, exc)
+            continue
+        if got == steps:
+            keep.append(f)
+    return keep
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -333,6 +364,12 @@ def main() -> int:
     ap.add_argument("--latents", default=None,
                     help="glob for latents.npy files from generate_volumes.py --save-latents. "
                          "Omit to run the val arm only.")
+    ap.add_argument("--ddim-steps", type=int, default=None,
+                    help="keep only canvases whose case manifest records this "
+                         "ddim_steps. Selection comes from the MANIFEST and never "
+                         "from the directory name: in campaign 12 only 45 of the 99 "
+                         "DDIM-200 cases carry 'ddim200' in their name, so a name "
+                         "glob silently drops more than half the row.")
     ap.add_argument("--real-sharpness", type=float, default=None,
                     help="sharpness_proxy of real volumes, the denominator of the generated "
                          "arm's ratio. Default: measured on the val arm's ground truth.")
@@ -382,7 +419,14 @@ def main() -> int:
         files = [Path(p) for p in sorted(glob.glob(args.latents))]
         if not files:
             raise SystemExit(f"--latents matched nothing: {args.latents}")
-        logger.info("generated arm: %d latent canvases", len(files))
+        if args.ddim_steps is not None:
+            files = _at_ddim(files, args.ddim_steps)
+            if not files:
+                raise SystemExit(
+                    f"--latents matched canvases but none at ddim_steps="
+                    f"{args.ddim_steps}: {args.latents}")
+        logger.info("generated arm: %d latent canvases%s", len(files),
+                    f" at DDIM-{args.ddim_steps}" if args.ddim_steps else "")
         results["generated"] = generated_arm(base, ft, device, files, real_sharp)
     else:
         results["generated"] = {"skipped": "no --latents given"}

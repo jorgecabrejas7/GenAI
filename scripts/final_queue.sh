@@ -138,11 +138,17 @@ BASE_CKPT="$(run_dir_for reduction-factor-8)best.ckpt"
 if [ "$ft_rc" -eq 0 ] && [ -n "$FT_RUN" ] && [ -f "${FT_RUN}best.ckpt" ]; then
     # CAMPAIGN 18, not 12: the gate must be read on the volumes the paper will
     # report, and on the checkpoint and sampler those were made with.
+    #
+    # The step count comes from --ddim-steps, which reads each case's MANIFEST.
+    # A name glob was the obvious way to write this and it is wrong: case names
+    # carry the step count only where the assessment varies it, so on campaign
+    # 12 `*ddim200*` matches 45 of the 99 DDIM-200 canvases. The gate row would
+    # have been built from less than half its volumes and reported as whole.
     for steps in 50 200; do
         say "STAGE 5 redecode DDIM-$steps start"
         python scripts/analysis/decoder_ft_redecode.py \
             --baseline "$BASE_CKPT" --finetuned "${FT_RUN}best.ckpt" \
-            --latents "$C18/*/volumes/*ddim${steps}*/latents.npy" \
+            --latents "$C18/*/volumes/*/latents.npy" --ddim-steps "$steps" \
             --out "$FT_CAMP/redecode_ddim${steps}" \
             > "$S/q_redecode_${steps}.log" 2>&1
         say "STAGE 5 redecode DDIM-$steps done rc=$? -> $FT_CAMP/redecode_ddim${steps}"
