@@ -100,7 +100,24 @@ done
 MEASURERS=$(python -c "
 from poregen.eval_v4.measure import MEASURERS
 print(' '.join(sorted(MEASURERS)))")
+#: Assessments that generate nothing and re-measure what another assessment
+#: wrote. They have no volumes of their own BY DESIGN and must not be skipped.
+MEASURE_ONLY=$(python -c "
+from poregen.eval_v4.cases import MEASURE_ONLY
+print(' '.join(MEASURE_ONLY))")
+
 for a in $MEASURERS; do
+    # An assessment this campaign never generated belongs to another campaign —
+    # stress_geometry is campaign 19, ood_conditioning is campaign 20. Measuring
+    # it here raises FileNotFoundError, which the loop survives but which puts
+    # two rc=1 lines in the log that mean nothing is wrong.
+    case " $MEASURE_ONLY " in
+        *" $a "*) ;;
+        *) if ! compgen -G "$OUT/$a/volumes/*/manifest.json" > /dev/null; then
+               say "MEASURE $a SKIPPED — no volumes here; it belongs to another campaign"
+               continue
+           fi ;;
+    esac
     if [ "$a" = microstructure ]; then
         say "MEASURE microstructure start (carries the FULL memorisation pass, cap ${MEMO_MAX_MIN} min)"
         timeout --signal=KILL "$(( MEMO_MAX_MIN * 60 ))" \
