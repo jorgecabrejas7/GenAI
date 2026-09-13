@@ -216,6 +216,26 @@ The failure rate is the share of a cell's seeds that failed.
 volume that fails outright and a volume where a tenth of its tiles fail are
 described on one scale. Tiles holding less than half material are excluded.
 
+#### `phi_collapsed` is request-aware
+
+The flag asks "did this generation collapse". A volume asked for zero porosity
+and delivering zero has not collapsed — it has obeyed. Assessment 13 requests
+φ = 0.000 and delivers 1.6 × 10⁻⁵ of material as pore, and flagging that would
+have put three correct volumes into a failure rate.
+
+So `phi_collapsed` fires only when the delivered porosity is below
+`FAIL_PHI_LOW` = 1e-4 **and** the manifest's requested porosity is not itself
+below that threshold. When it is suppressed the row says so, in
+`phi_collapse_check_suppressed` and `phi_collapse_suppressed_because`, so a
+`false` in that column is never mistaken for an unchecked one.
+
+**No other campaign's failure rate can change, and this was checked rather than
+assumed.** Minimum requested porosity per campaign: 12 → 0.0050 (177 cases),
+18 → 0.0050 (177), 19 → 0.0300 (9), 20 → 0.0000 (36, of which 3 below the
+threshold). The three assessment-13 cases are the only sub-threshold requests
+in the project — every other request is at least 0.005, fifty times the
+threshold.
+
 ### Local obedience — the within-volume fit
 
 Per 64-voxel tile: `delivered[c] = pore voxels / material voxels`, `requested[c]`

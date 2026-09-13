@@ -258,3 +258,17 @@ The GPU is shared. Analysis and diagnostic scripts must set
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, use small batches, and retry
 on OOM — a training run's validation passes can otherwise starve them.
 Long jobs belong in a tmux session, not in a foreground shell.
+
+## `phi_collapsed` and requests of zero porosity
+
+`metrics.failure_flags` suppresses `phi_collapsed` when the manifest's
+requested porosity is itself below the 1e-4 collapse threshold — a volume asked
+for zero and delivering zero has obeyed, not collapsed. Suppression is recorded
+in the row (`phi_collapse_check_suppressed`).
+
+This changed campaign 20 only, from 3 failures to 0. Verified before the change:
+the minimum requested porosity is 0.0050 in campaigns 12 and 18 (177 cases
+each) and 0.0300 in campaign 19, so no other campaign has a case that could be
+affected. If you add an assessment that requests a porosity below 1e-4, its
+failure rate will behave differently from the older campaigns — by design, but
+worth knowing.

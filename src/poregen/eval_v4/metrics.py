@@ -342,17 +342,37 @@ def failure_flags(label: np.ndarray, material: np.ndarray, *, manifest: Manifest
 
     Three ways, all from the task's definition: porosity below 1e-4, porosity
     above 0.5, or more than 20 % air inside the material the caller asked for.
+
+    ``phi_collapsed`` IS REQUEST-AWARE. It asks "did the generation collapse",
+    and a volume asked for zero porosity and delivering zero has not collapsed —
+    it has obeyed. Assessment 13 requests phi = 0.000 and gets 1.6e-5 of
+    material as pore, which is the request honoured exactly; flagging that as a
+    failure would have put three correct volumes in a failure rate.
+
+    No other campaign's failure rate can move. The flag is suppressed only when
+    the manifest records a requested porosity BELOW the collapse threshold
+    itself, and every other assessment requests a positive porosity at or above
+    0.002 — fifty times the threshold.
     """
     phi = float((label[material] == LABEL_PORE).mean())
     air = float((label[material] == LABEL_AIR).mean())
+    requested = manifest.requested_global_phi
+    collapse_expected = requested is not None and float(requested) < FAIL_PHI_LOW
     flags = {
-        "phi_collapsed": bool(phi < FAIL_PHI_LOW),
+        "phi_collapsed": bool(phi < FAIL_PHI_LOW and not collapse_expected),
         "phi_saturated": bool(phi > FAIL_PHI_HIGH),
         "air_in_material": bool(air > FAIL_AIR_IN_MATERIAL),
     }
     flags["failed"] = bool(any(flags.values()))
     flags["phi"] = phi
     flags["air"] = air
+    if collapse_expected:
+        # Said out loud, so a zero in this column is never mistaken for an
+        # unchecked one.
+        flags["phi_collapse_check_suppressed"] = True
+        flags["phi_collapse_suppressed_because"] = (
+            f"requested phi {float(requested):g} is below the collapse threshold "
+            f"{FAIL_PHI_LOW:g}; delivering zero here is obedience, not collapse")
     return flags
 
 
