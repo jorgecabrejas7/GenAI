@@ -897,7 +897,7 @@ else:
         pv = band.get("phi_volume") or float("nan")
         rows.append({"case": c.get("case"), "geometry": (c.get("notes") or {}).get("request") or c.get("request"), "ddim": c.get("ddim_steps"),
                      "shape": "×".join(map(str, c.get("volume_shape") or [])), "φ requested": c.get("requested_global_phi"), "φ delivered": pf.get("phi_pore"),
-                     "air inside material": pf.get("air_fraction_interior", pf.get("air_fraction")), "air Dice": _dice(ga), "air precision": ga.get("precision"), "air recall": ga.get("recall"),
+                     "air inside material": pf.get("air_fraction_interior", pf.get("air_fraction")), "air Dice": _dice(ga), "air precision": ga.get("precision_air", ga.get("precision")), "air recall": ga.get("recall_air", ga.get("recall")),
                      "seam window grey": sm.get("seam_xct_ratio"), "seam chunk grey": sm.get("seam_chunk_xct_ratio"), "seam chunk pore": sm.get("seam_chunk_pore_ratio"),
                      "band −8": (band.get("ratio_-8") if band.get("ratio_-8") is not None else (band.get("phi_-8") / pv if band.get("phi_-8") is not None and pv else None)),
                      "band +0": (band.get("ratio_+0") if band.get("ratio_+0") is not None else (band.get("phi_+0") / pv if band.get("phi_+0") is not None and pv else None)),
