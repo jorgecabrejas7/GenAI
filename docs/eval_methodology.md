@@ -262,6 +262,46 @@ log-odds is read from `probs.npz`; when a case did not store it the metric
 reports `pore_logit_available: false` rather than substituting the argmax, which
 is not a continuous field.
 
+#### Air in the canvas biases the plain ratio — the material-restricted column
+
+The seam statistic is a mean absolute difference between adjacent slices, taken
+over the WHOLE slice. Where the canvas contains requested air, two effects
+follow, and neither is the assembly:
+
+1. **A specimen boundary ON a chunk plane** makes the two slices differ because
+   the specimen ends there. Campaign 19's `lbracket` (192-voxel leg thickness
+   against a 192-voxel chunk period) and `two_coupons` (gap edge at
+   x = 576 = 3 × 192) read **1.854** and **1.948** against a real-material floor
+   of 0.906 for that reason alone.
+2. **Air anywhere in the canvas** dilutes both the seam and the interior planes,
+   because air–air slice pairs barely differ. This one is quieter and applies to
+   every shaped case: campaign 18's `surface` reads **0.803** plain and **1.043**
+   restricted, and `geometry` 0.876 against 1.043.
+
+`seam_discontinuity_material` restricts each adjacent pair to the voxels that
+are material on BOTH sides, which holds the geometry constant across the pair
+and leaves the model. With nothing excluded it reproduces the plain statistic
+exactly, and it still catches a genuine step at the plane — including inside a
+shaped specimen, where both effects are present at once.
+
+**THE CONVENTION.** For any case with air in the canvas — `geometry`, `surface`,
+the `multichunk` sphere and rough requests, every `stress_geometry` case with a
+painted map, and `ood_conditioning` — **the quoted chunk seam is the
+material-restricted column**, and the plain column belongs in the supplement.
+For full-material cases the two coincide by construction, so the plain column IS
+the material reading and is quoted as such.
+
+That last point is a property of the data, not only of the convention: a
+full-material case emits **no** material keys at all. It carries
+`seam_material_available: false`, and passing an all-true mask was declined on
+purpose, because two numerically identical columns invite a reader to compare
+them as though they were independent.
+
+A per-axis ratio is `null` when that axis carries no seam plane (the L-bracket
+is 192 voxels deep, so its x axis has none) or when no plane on it holds at
+least `SEAM_MIN_SHARED = 256` voxels that are material on both sides. `null`
+means "not measured here", never zero.
+
 #### The same seams, per chunk along the generation order
 
 `seam_metrics` answers "is there a seam in this volume". `chunk_profile` answers
