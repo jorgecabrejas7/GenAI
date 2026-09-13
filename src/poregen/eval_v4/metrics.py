@@ -449,12 +449,95 @@ def pooled_dose_fit(cells_requested, cells_delivered) -> dict:
 # 3 - assembly seams
 # ---------------------------------------------------------------------------
 
+#: A plane needs at least this many voxels that are material on BOTH sides
+#: before its material-restricted difference is a number rather than noise.
+SEAM_MIN_SHARED = 256
+
+
+def seam_discontinuity_material(volume: np.ndarray, material: np.ndarray, period,
+                                prefix: str = "seam",
+                                interior_exclude=None) -> dict[str, float]:
+    """:func:`seam_discontinuity`, restricted to voxels material on BOTH sides.
+
+    WHY THIS EXISTS. The seam statistic is a mean absolute difference between
+    adjacent slices. Where a REQUESTED SPECIMEN BOUNDARY lands on a chunk plane
+    the two slices differ because the specimen ends, not because two chunk
+    solves disagree, and the plain statistic cannot tell those apart. Campaign
+    19 has two requests where they coincide exactly — the L-bracket's 192-voxel
+    leg thickness against a 192-voxel chunk period, and the two-coupon gap edge
+    at x = 576 = 3 x 192 — and they read 1.85 and 1.95 against a real-material
+    floor of 0.906 for that reason alone.
+
+    Restricting each adjacent pair to the voxels that are material on both
+    sides holds the geometry constant across the pair, so what is left is the
+    model. This is an ADDITIONAL reading, never a replacement: the unrestricted
+    ratio is what campaigns 12 and 18 are quoted on, and the two must stay
+    comparable.
+
+    Computed one plane at a time on purpose. The whole-array difference of a
+    1024-cubed volume is 4.3 GB of float32, and this machine shares 121 GB
+    between host and device with generation running beside it.
+    """
+    vol = np.asarray(volume, dtype=np.float32)
+    mat = np.asarray(material, dtype=bool)
+    if vol.shape != mat.shape:
+        raise ValueError(
+            f"seam_discontinuity_material: volume {vol.shape} and material "
+            f"{mat.shape} must have the same shape.")
+    periods = (int(period),) * 3 if np.isscalar(period) else tuple(int(p) for p in period)
+    if interior_exclude is None:
+        excludes = periods
+    elif np.isscalar(interior_exclude):
+        excludes = (int(interior_exclude),) * 3
+    else:
+        excludes = tuple(int(p) for p in interior_exclude)
+
+    def plane_mad(axis: int, k: int) -> float | None:
+        """Mean |Δ| between slices k-1 and k over their SHARED material."""
+        lo = [slice(None)] * 3; lo[axis] = k - 1
+        hi = [slice(None)] * 3; hi[axis] = k
+        both = mat[tuple(lo)] & mat[tuple(hi)]
+        n = int(both.sum())
+        if n < SEAM_MIN_SHARED:
+            return None
+        return float(np.abs(vol[tuple(hi)][both] - vol[tuple(lo)][both]).mean())
+
+    metrics: dict[str, float] = {}
+    for axis, name in enumerate(AXIS_NAMES):
+        n = vol.shape[axis]
+        if n < 2:
+            continue
+        seam_vals, int_vals = [], []
+        for k in range(1, n):
+            if k % periods[axis] == 0:
+                v = plane_mad(axis, k)
+                if v is not None:
+                    seam_vals.append(v)
+            elif k % excludes[axis] != 0:
+                v = plane_mad(axis, k)
+                if v is not None:
+                    int_vals.append(v)
+        s = float(np.mean(seam_vals)) if seam_vals else float("nan")
+        i = float(np.mean(int_vals)) if int_vals else float("nan")
+        metrics[f"{prefix}_{name}_planes"] = float(len(seam_vals))
+        metrics[f"{prefix}_{name}_mad"] = s
+        metrics[f"{prefix}_{name}_interior_mad"] = i
+        metrics[f"{prefix}_{name}_ratio"] = (
+            s / i if (seam_vals and int_vals and i > 1e-12) else float("nan"))
+
+    ratios = [v for k, v in metrics.items()
+              if k.endswith("_ratio") and np.isfinite(v)]
+    metrics[f"{prefix}_ratio"] = float(np.mean(ratios)) if ratios else float("nan")
+    return metrics
+
+
 @requires("chunk_tiles", "window_stride")
 def seam_metrics(
     xct_u8: np.ndarray,
     *,
     manifest: Manifest,
     pore_logit: np.ndarray | None = None,
+    material: np.ndarray | None = None,
 ) -> dict:
     """Discontinuity at the window planes (period 64) and the chunk planes.
 
@@ -476,6 +559,19 @@ def seam_metrics(
         **seam_discontinuity(grey, TILE, prefix="seam_xct"),
         **seam_discontinuity(grey, period, prefix="seam_chunk_xct", interior_exclude=TILE),
     }
+    # The material-restricted readings sit BESIDE the plain ones and never
+    # replace them: campaigns 12 and 18 are quoted on the plain ratio and the
+    # two have to stay comparable. They are absent, not faked, when the case
+    # carries no material map.
+    if material is not None:
+        mat = np.asarray(material, bool)
+        out["seam_material_available"] = True
+        out.update(seam_discontinuity_material(
+            grey, mat, TILE, prefix="seam_xct_material"))
+        out.update(seam_discontinuity_material(
+            grey, mat, period, prefix="seam_chunk_xct_material", interior_exclude=TILE))
+    else:
+        out["seam_material_available"] = False
     if pore_logit is None:
         out["pore_logit_available"] = False
         return out
@@ -486,6 +582,12 @@ def seam_metrics(
     out.update(
         seam_discontinuity(pl, period, prefix="seam_chunk_pore", interior_exclude=TILE)
     )
+    if material is not None:
+        mat = np.asarray(material, bool)
+        out.update(seam_discontinuity_material(
+            pl, mat, TILE, prefix="seam_pore_material"))
+        out.update(seam_discontinuity_material(
+            pl, mat, period, prefix="seam_chunk_pore_material", interior_exclude=TILE))
     return out
 
 

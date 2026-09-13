@@ -94,7 +94,13 @@ def measure_core(case: Case) -> dict:
         **M.phase_fractions(label, material, manifest=m),
         "failure": M.failure_flags(label, material, manifest=m),
         "degenerate": M.degenerate_cells(label, material, manifest=m),
-        "seams": M.seam_metrics(case.xct, manifest=m, pore_logit=case.pore_logit),
+        # `material` adds the seam_*_material_* readings BESIDE the plain ones.
+        # A case requesting "full" passes None: there is no specimen boundary to
+        # hold constant, so the restricted reading would be the plain one under
+        # another name and two identical columns invite a false comparison.
+        "seams": M.seam_metrics(case.xct, manifest=m, pore_logit=case.pore_logit,
+                                material=(None if case.requested_material is None
+                                          else material)),
     }
     if m.requested_global_phi is not None:
         row["porosity"] = M.porosity_error(label, material, manifest=m)
@@ -892,7 +898,35 @@ def _micro_reference(root) -> dict[float, dict[str, list]]:
     return out
 
 
-def measure_microstructure(root, repo, *, allow_busy_gpu: bool = False) -> dict:
+def _memorisation_block(root, repo, *, allow_busy_gpu: bool, reuse: bool) -> dict:
+    """The full-store search, or the one this campaign already has.
+
+    Re-measuring an assessment to add a metric must not silently destroy a
+    result that cost a full pass over a 195 GiB store. With ``reuse`` the
+    existing block is carried forward and marked, so a reader can see that it
+    was not recomputed; without it the search runs as normal. If there is no
+    previous block, the search runs whatever ``reuse`` says — reusing nothing
+    would write an empty result and call it a reading.
+    """
+    from poregen.eval_v4.io import assessment_dir  # noqa: PLC0415
+
+    if reuse:
+        prev = Path(assessment_dir(root, "microstructure")) / "results.json"
+        if prev.exists():
+            try:
+                block = json.loads(prev.read_text()).get("memorisation")
+            except Exception as exc:                      # noqa: BLE001
+                logger.warning("could not reuse the memorisation block: %s", exc)
+                block = None
+            if block:
+                logger.info("memorisation: reusing the existing block, not re-searching")
+                return {**block, "reused_from_previous_measure": True}
+        logger.info("memorisation: --reuse asked for, but no previous block exists")
+    return MEMO.memorisation(root, repo=repo, allow_busy_gpu=allow_busy_gpu)
+
+
+def measure_microstructure(root, repo, *, allow_busy_gpu: bool = False,
+                          reuse_memorisation: bool = False) -> dict:
     """Generated microstructure against real, and real against real.
 
     Every distance here is read three ways: what the generated set scores
@@ -1005,8 +1039,9 @@ def measure_microstructure(root, repo, *, allow_busy_gpu: bool = False) -> dict:
         },
         "per_case": rows,
         "levels": levels,
-        "memorisation": MEMO.memorisation(root, repo=repo,
-                                          allow_busy_gpu=allow_busy_gpu),
+        "memorisation": _memorisation_block(
+            root, repo, allow_busy_gpu=allow_busy_gpu,
+            reuse=reuse_memorisation),
     }
 
 
@@ -1783,7 +1818,8 @@ MEASURERS = {
 
 
 def measure(root: str | Path, assessment: str, repo: str | Path | None = None,
-            *, allow_busy_gpu: bool = False) -> dict:
+            *, allow_busy_gpu: bool = False,
+            reuse_memorisation: bool = False) -> dict:
     """Measure one assessment and write ``<root>/<assessment>/results.json``."""
     if assessment not in MEASURERS:
         raise KeyError(f"unknown assessment {assessment!r}; choose from {sorted(MEASURERS)}")
@@ -1791,7 +1827,9 @@ def measure(root: str | Path, assessment: str, repo: str | Path | None = None,
     # Only microstructure carries the full-store memorisation search, so only
     # microstructure has a reason to care whether the card is busy.  Naming the
     # one measurer is honest; giving every measurer a flag it ignores is not.
-    extra = {"allow_busy_gpu": allow_busy_gpu} if assessment == "microstructure" else {}
+    extra = ({"allow_busy_gpu": allow_busy_gpu,
+              "reuse_memorisation": reuse_memorisation}
+             if assessment == "microstructure" else {})
     results = MEASURERS[assessment](Path(root), repo, **extra)
     # A measurer whose `per_case` is not one row per case of its own assessment
     # sets these itself: `assembly` reads the SAMPLER volumes, and `geometry`
