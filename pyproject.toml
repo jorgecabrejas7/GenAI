@@ -27,6 +27,12 @@ dependencies = [
 dev = ["pytest>=7.0"]
 notebook = [
     "jupyterlab>=4.0",
+    # Imported directly by scripts/analysis/build_eval_v4_notebook.py. It
+    # arrives as a jupyterlab dependency in a full install, but the machine
+    # that runs the eval campaigns has the compute stack without jupyterlab,
+    # and the notebook is the LAST step of a 16-hour run — so an undeclared
+    # import fails after everything expensive has already succeeded.
+    "nbformat>=5.9",
     "matplotlib>=3.7",
     "ipywidgets>=8.0",
     "tensorboard>=2.14",

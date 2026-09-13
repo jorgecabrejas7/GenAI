@@ -51,6 +51,12 @@ case "$SAMPLER" in
 esac
 
 mkdir -p "$OUT" "$SCRATCH"; cd "$REPO" || exit 1
+
+# Preflight. The notebook is the LAST step of a 16-hour run, so a missing import
+# there is discovered after everything expensive has already succeeded — which
+# is exactly how it was discovered the first time.
+python -c "import nbformat" 2>/dev/null \
+    || echo "WARNING: nbformat is not importable; the NOTEBOOK step at the end will fail. pip install nbformat" >&2
 LOG="$OUT/regen.log"
 say() { printf '%s  REGEN %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
 

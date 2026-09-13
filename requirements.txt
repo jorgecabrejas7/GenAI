@@ -48,6 +48,8 @@ pytest>=7.0
 
 # Notebook / monitoring
 jupyterlab>=4.0
+# imported directly by build_eval_v4_notebook.py; see pyproject.toml
+nbformat>=5.9
 ipykernel>=6.0
 matplotlib>=3.7
 ipywidgets>=8.0
