@@ -627,7 +627,7 @@ def all_case_options():
         for d in case_dirs(a):
             opts.append((f"{a} / {d.name}", str(d)))
     # volumes of the other campaigns on disk (stress geometries, the regenerated final set, the band trial arms)
-    for label, root in (("stress", STRESS_ROOT / "volumes"), ("final", FINAL_ROOT), ("trial", TRIAL_ROOT)):
+    for label, root in (("stress", STRESS_ROOT), ("ood", OOD_ROOT), ("final", FINAL_ROOT), ("trial", TRIAL_ROOT)):
         if root.exists():
             for d in sorted(root.rglob("manifest.json")):
                 if (d.parent / "label.tif").exists():
@@ -882,18 +882,26 @@ face. *Two coupons*: independence of two parts with clean air between. *Letters*
 the difference is the sampler's, not the model's. Each geometry is generated once at each.
 """)
     code(r'''
-SR = STRESS_ROOT / "results.json"
+SR = STRESS_ROOT / "stress_geometry" / "results.json"          # eval_v4 layout: <campaign>/<assessment>/results.json
 if not SR.exists():
     unavailable("campaign 19 results.json", "stress_geometry generation (after the regeneration) and measure")
 else:
     D = load_json(SR); rows = []
+    def _dice(ga):                                            # the agreement block names its Dice differently per version
+        for k, v in (ga or {}).items():
+            if "dice" in k.lower() and isinstance(v, (int, float)): return v
+        return None
     for c in D.get("per_case", []):
-        pf = c.get("phase_fractions") or c; ga = c.get("geometry_agreement") or {}; sm = c.get("seams") or {}; band = c.get("band") or c.get("chunk_band") or {}
-        rows.append({"case": c.get("case"), "geometry": c.get("geometry") or (c.get("notes") or {}).get("geometry"), "ddim": c.get("ddim_steps"),
+        if not c.get("ddim_steps"): continue                  # borrowed real-floor rows carry no request
+        pf = c.get("phase_fractions") or c; ga = c.get("geometry_agreement") or {}; sm = c.get("seams") or c.get("seam_metrics") or {}; band = c.get("chunk_band") or c.get("band") or {}
+        pv = band.get("phi_volume") or float("nan")
+        rows.append({"case": c.get("case"), "geometry": (c.get("notes") or {}).get("request") or c.get("request"), "ddim": c.get("ddim_steps"),
                      "shape": "×".join(map(str, c.get("volume_shape") or [])), "φ requested": c.get("requested_global_phi"), "φ delivered": pf.get("phi_pore"),
-                     "air inside material": pf.get("air_fraction_interior", pf.get("air_fraction")), "air Dice": ga.get("dice"), "air precision": ga.get("precision"), "air recall": ga.get("recall"),
+                     "air inside material": pf.get("air_fraction_interior", pf.get("air_fraction")), "air Dice": _dice(ga), "air precision": ga.get("precision"), "air recall": ga.get("recall"),
                      "seam window grey": sm.get("seam_xct_ratio"), "seam chunk grey": sm.get("seam_chunk_xct_ratio"), "seam chunk pore": sm.get("seam_chunk_pore_ratio"),
-                     "band −8": band.get("ratio_-8"), "band +0": band.get("ratio_+0"), "failed": (c.get("failure") or {}).get("failed"), "min": (c.get("wall_time_s") or float("nan")) / 60})
+                     "band −8": (band.get("ratio_-8") if band.get("ratio_-8") is not None else (band.get("phi_-8") / pv if band.get("phi_-8") is not None and pv else None)),
+                     "band +0": (band.get("ratio_+0") if band.get("ratio_+0") is not None else (band.get("phi_+0") / pv if band.get("phi_+0") is not None and pv else None)),
+                     "failed": (c.get("failure") or {}).get("failed"), "min": (c.get("wall_time_s") or float("nan")) / 60})
     ST = pd.DataFrame(rows).sort_values(["geometry", "ddim"])
     display(ST.round(4))
     fig = make_subplots(rows=1, cols=3, subplot_titles=["delivered φ vs requested", "air Dice vs requested geometry", "chunk-plane band (−8), 1 = none"])
@@ -915,14 +923,18 @@ fix holds on shapes where many windows touch a surface *and* a chunk frontier at
 if SR.exists():
     D = load_json(SR); rows = []
     for c in D.get("per_case", []):
+        if not c.get("ddim_steps"): continue
         L = c.get("layup") or c.get("layup_recovery") or {}
-        for reader, r in L.items():
+        readers = L.get("readers") if isinstance(L.get("readers"), dict) else L      # newer layout nests the readers
+        if L.get("available") is False:
+            rows.append({"case": c.get("case"), "ddim": c.get("ddim_steps"), "region": "—", "reader": "layup: not available", "note": L.get("what") or L.get("reason")})
+        for reader, r in (readers or {}).items():
             if isinstance(r, dict) and ("median_abs_error_deg" in r or "median_abs_error" in r):
                 rows.append({"case": c.get("case"), "ddim": c.get("ddim_steps"), "region": r.get("region", "whole"), "reader": reader,
                              "median |err| deg": r.get("median_abs_error_deg", r.get("median_abs_error")), "4-class acc": r.get("strict_class_accuracy"), "plies recovered": r.get("n_recovered")})
         S = c.get("surface") or c.get("surface_agreement") or {}
         for face, f in (S.items() if isinstance(S, dict) else []):
-            if isinstance(f, dict):
+            if isinstance(f, dict) and any(k in f for k in ("error_abs_mean", "radial_error_vox", "roughness_sa")):
                 rows.append({"case": c.get("case"), "ddim": c.get("ddim_steps"), "region": face, "reader": "surface", "position error vox": f.get("error_abs_mean", f.get("radial_error_vox")), "Sa vox": f.get("roughness_sa")})
     LS = pd.DataFrame(rows)
     if LS.empty: note("no layup / surface rows yet in results.json")
@@ -939,12 +951,14 @@ faces, all in voxels (25 µm).
     code(r'''
 if SR.exists():
     D = load_json(SR)
-    grad = [c for c in D.get("per_case", []) if "gradient" in str(c.get("case", "")) or "gradient" in str(c.get("geometry", ""))]
+    grad = [c for c in D.get("per_case", []) if c.get("ddim_steps") and "gradient" in str(c.get("case", ""))]
     if not grad: note("gradient + hot-spot case not measured yet")
     for c in grad:
-        lo = c.get("local") or c.get("local_obedience") or {}
-        print(c.get("case"), "DDIM", c.get("ddim_steps"), "| within-volume slope", lo.get("slope"), "R²", lo.get("r2"), "| per-cell |err|", lo.get("cell_abs_error_mean"), "| ramp slope delivered/requested", lo.get("ramp_slope_ratio"))
-        req, dlv = lo.get("requested_cells"), lo.get("delivered_cells")
+        lo = c.get("local_obedience") or c.get("local") or {}; ramp = c.get("ramp") or {}
+        print(c.get("case"), "DDIM", c.get("ddim_steps"))
+        print("  local obedience:", {k: (round(v, 4) if isinstance(v, float) else v) for k, v in lo.items() if not isinstance(v, (list, dict))})
+        print("  ramp:", {k: (round(v, 4) if isinstance(v, float) else v) for k, v in ramp.items() if not isinstance(v, (list, dict))})
+        req, dlv = (lo.get("requested_cells") or ramp.get("requested_cells")), (lo.get("delivered_cells") or ramp.get("delivered_cells"))
         if req and dlv:
             fig = make_subplots(rows=1, cols=2, subplot_titles=["requested field (mid-depth tiles)", "delivered field"])
             fig.add_trace(go.Heatmap(z=np.asarray(req), colorscale="Viridis", zmin=0, zmax=0.1), row=1, col=1)
@@ -1059,7 +1073,7 @@ The readers and metrics are the ones of the main eval; their floors are printed.
 separately with the author's own program, not here.
 """)
     code(r'''
-OR = OOD_ROOT / "results.json"
+OR = OOD_ROOT / "ood_conditioning" / "results.json"           # eval_v4 layout: <campaign>/<assessment>/results.json
 if not OR.exists():
     unavailable("campaign 20 results.json", "ood_conditioning generation (after stress DDIM-50) and measure")
 else:
