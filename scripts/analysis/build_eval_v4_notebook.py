@@ -899,7 +899,9 @@ else:
                      "shape": "×".join(map(str, c.get("volume_shape") or [])), "φ requested": c.get("requested_global_phi"), "φ delivered": pf.get("phi_pore"),
                      "air inside material": pf.get("air_fraction_interior", pf.get("air_fraction")), "air Dice": _dice(ga), "air precision": ga.get("precision_air", ga.get("precision")), "air recall": ga.get("recall_air", ga.get("recall")),
                      "seam window grey": sm.get("seam_xct_ratio"), "seam chunk grey": sm.get("seam_chunk_xct_ratio"), "seam chunk pore": sm.get("seam_chunk_pore_ratio"),
-                     "seam chunk grey (material only)": sm.get("seam_chunk_xct_material_ratio"), "seam chunk pore (material only)": sm.get("seam_chunk_pore_material_ratio"),
+                     # a full-material case emits no material block: its plain ratio IS the material reading (pooled keys are null-safe; never average per-axis nulls as 0)
+                     "seam chunk grey (material only)": sm.get("seam_chunk_xct_material_ratio") if sm.get("seam_material_available") else sm.get("seam_chunk_xct_ratio"),
+                     "seam chunk pore (material only)": sm.get("seam_chunk_pore_material_ratio") if sm.get("seam_material_available") else sm.get("seam_chunk_pore_ratio"),
                      "band −8": (band.get("ratio_-8") if band.get("ratio_-8") is not None else (band.get("phi_-8") / pv if band.get("phi_-8") is not None and pv else None)),
                      "band +0": (band.get("ratio_+0") if band.get("ratio_+0") is not None else (band.get("phi_+0") / pv if band.get("phi_+0") is not None and pv else None)),
                      "failed": (c.get("failure") or {}).get("failed"), "min": (c.get("wall_time_s") or float("nan")) / 60})
