@@ -1090,11 +1090,17 @@ else:
     D = load_json(OR); rows = []
     for c in D.get("per_case", []):
         L = c.get("layup") or c.get("layup_recovery") or {}; P = c.get("porosity") or {}; pf = c.get("phase_fractions") or c
-        rows.append({"case": c.get("case"), "group": (c.get("notes") or {}).get("group", c.get("group")), "seed": c.get("seed"),
-                     "φ req": c.get("requested_global_phi"), "φ delivered": P.get("delivered_phi", pf.get("phi_pore")), "|err|": P.get("abs_error"), "clamp lifted": (c.get("notes") or {}).get("clamp_lifted"),
+        if not c.get("ddim_steps"): continue
+        readers = L.get("readers") if isinstance(L.get("readers"), dict) else L
+        L = readers or {}
+        rows.append({"case": c.get("case"), "group": (c.get("notes") or {}).get("group") or str(c.get("case", "")).split("_")[0], "seed": c.get("seed"),
+                     "φ req": c.get("requested_global_phi"), "φ delivered": P.get("delivered_phi", pf.get("phi_pore")), "|err|": P.get("abs_error"),
+                     "clamp lifted": (c.get("porosity_clamped") is False) if "porosity_clamped" in c else (c.get("notes") or {}).get("clamp_lifted"),
                      "fft |err| deg": (L.get("fft_slice") or {}).get("median_abs_error_deg"), "fft 4-class": (L.get("fft_slice") or {}).get("strict_class_accuracy"),
                      "pore_axes |err| deg": (L.get("pore_axes") or {}).get("median_abs_error_deg"), "pore_axes 4-class": (L.get("pore_axes") or {}).get("strict_class_accuracy"),
-                     "local slope": (c.get("local") or {}).get("slope"), "local R2": (c.get("local") or {}).get("r2"), "failed": (c.get("failure") or {}).get("failed")})
+                     "corr req vox": c.get("requested_corr_vox"),
+                     "local slope": (c.get("local_obedience") or c.get("local") or {}).get("within_volume_slope"), "local R2": (c.get("local_obedience") or c.get("local") or {}).get("within_volume_r2"),
+                     "req cell sd": (c.get("local_obedience") or {}).get("requested_cell_sd"), "failed": (c.get("failure") or {}).get("failed")})
     OT = pd.DataFrame(rows); display(OT.round(4))
     note("Layup floors on real scans: fft_slice 8.2° / 74 %, pore_axes 4.2° / 86 %. Porosity gate ±0.005. A clamp-lifted row is a failure mode by design.")
     lay = OT[OT["fft |err| deg"].notna()]
@@ -1159,6 +1165,7 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-12 18:15 | **Author's decisions (D44):** regenerate everything as campaign 18 on the fine-tuned weights with the production sampler; decoder fine-tune approved, to run after the regeneration. Both `regen_go` and `decoder_ft_go` written. `scripts/final_queue.sh` owns the rest: 18 → stress DDIM-50 → OOD → decoder-ft + redecode(18) → downstream → stress DDIM-200 → rf-2/rf-64 → notebook. Expected end Sep 16 ~17:00. | vault Decisions Log D44 |
 | 09-13 11:15 | **Campaign 18 complete** (16 h 28 m, all rc=0, memorisation pass completed in 14 min). The paper's tables. Against campaign 12: porosity dose response slope 1.045, R² 0.9997, **100 % of volumes in the 0.005 gate** (was 90 %); 1024-wide φ error −0.0001…−0.0008 (was −0.005); pore-logit chunk seam 0.98 (was 0.39); hybrid arm φ 0.0293 for 0.030 (was 0.0251); hybrid/joint/real ref-plane seams 0.937/0.888/0.901; layup A 1.2°, C 2.0° (beyond floors), B16 at the reader floor; geometry Dice 0.992; sphere 1 vox; **zero memorisation** with real unseen scans sitting closer to train than generated ones; microstructure ratios unchanged (1.5–6× floor). Residuals: leading strip worst plane 0.66–0.77 in all nine 1024 cases; sphere r=160 pore-logit chunk seam 2.5 (one seed). | this notebook run on campaign 18; vault E10 |
 | 09-13 13:23 | **Campaign 19, DDIM-50 pass complete** (2 h 08 m, nine shapes, zero failures): every off-manifold shape delivered as requested — air Dice 0.97–1.00, requested vs delivered air to three decimals, φ at request, band absent (0.94–1.13). Two grey chunk-seam values (L-bracket 1.85, two coupons 1.95) are requested surfaces lying exactly on a chunk plane, not assembly seams; a material-only seam column is being added everywhere and campaigns 18/19 re-measured on CPU. DDIM-200 pass is stage 7. | section *stress geometries*; vault E11 |
+| 09-13 17:24 | **Campaign 20 complete** (36 cases, 4 h, all rc=0). Porosity: the model **extrapolates past the trained ceiling** monotonically (0.15 → 0.161, 0.20 → 0.215, +8–11 %), delivers exactly 0 for 0 (the collapse flag fired falsely; being made request-aware), under-delivers at the low end to ~65 % (0.002 anchor included). Unseen stacking orders of the four trained angles: 0.70–1.00 class accuracy. Pitch 32: 1.00; pitch 8: 0.50–0.67 = the readers' floor (B16 at pitch 10 sits there too); a ply-boundary estimator is being written to separate reader from model. Field correlation lengths 16/64/512: slope ≈ 1 everywhere; R² collapses only because the request's own variance vanishes → **within-volume R² is not an obedience measure when the requested field is nearly flat; the slope is** (also explains campaign 18's coherent-field R² 0.31). Decoder fine-tune (stage 5) started 17:24. | section *out-of-distribution conditioning*; vault E12 |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
