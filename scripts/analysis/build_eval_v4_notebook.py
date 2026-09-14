@@ -2730,6 +2730,40 @@ else:
     if readme.exists(): display(Markdown(readme.read_text()))
 ''')
     md("""
+**Side-by-side, same latents, two decoders.** The viewer below takes one campaign-18 case, decoded once with the original
+r08 decoder and once with the fine-tuned one, from the *same* latent canvas, and shows the same slice from both plus their
+difference. Grey: look at ply texture and pore edges (the fine-tuned decoder is sharper). Label: look at pore boundaries
+and, above all, at the specimen surface, where the two decoders disagree on a fifth of the air voxels. Use the difference
+panel to see where the change concentrates.
+""")
+    code(r'''
+DV = DECODER_FT_ROOT / "volumes"
+_pairs = []
+if DV.exists():
+    for d in sorted(DV.iterdir()):
+        b, f = d / "baseline", d / "finetuned"
+        if (b / "label.tif").exists() and (f / "label.tif").exists(): _pairs.append((d.name, str(d)))
+if not _pairs:
+    unavailable("campaign 11 redecoded volumes", "the CPU redecode of the inspection-pack cases with both decoders (11-decoder-ft/volumes/<case>/{baseline,finetuned})")
+else:
+    d_case = W.Dropdown(options=_pairs, description="case", layout=W.Layout(width="70%"))
+    d_axis = W.ToggleButtons(options=["z", "y", "x"], description="axis")
+    d_idx = W.IntSlider(value=96, min=0, max=191, description="slice", continuous_update=False, layout=W.Layout(width="60%"))
+    d_mode = W.Dropdown(options=["grey", "label", "grey + label"], description="view")
+    d_out = W.Output()
+    def _dsync(*_):
+        n = dict(zip("zyx", volume_shape(str(Path(d_case.value) / "baseline"))))[d_axis.value]
+        d_idx.max = n - 1; d_idx.value = min(d_idx.value, n - 1)
+    def _ddraw(*_):
+        with d_out:
+            d_out.clear_output(wait=True)
+            dirs = [Path(d_case.value) / "baseline", Path(d_case.value) / "finetuned"]
+            compare_figure(dirs, d_axis.value, d_idx.value, d_mode.value, diff=True).show()
+    d_case.observe(lambda c: (_dsync(), _ddraw()), names="value"); d_axis.observe(lambda c: (_dsync(), _ddraw()), names="value")
+    for w in (d_idx, d_mode): w.observe(_ddraw, names="value")
+    _dsync(); show_widget(W.VBox([d_case, W.HBox([d_axis, d_mode]), d_idx, d_out]), _ddraw)
+''')
+    md("""
 **How to read the blocks.** `val` = the VAE reconstructing real validation windows with each decoder (sharpness ratio to
 ground truth, pore/air Dice, porosity MAE). `real_sharpness` = the sharpness of real material, the reference for the
 generated ratio. `generated` = the campaign-18 canvases decoded by both decoders: sharpness ratios, agreement between the
