@@ -71,6 +71,22 @@ PATCH_VOX = LATENT_WIN * VOX_PER_CELL
 S2_SMALL_R = 4
 
 
+def _requested_material(path: Path, shape, mf) -> np.ndarray:
+    """The case's REQUESTED specimen envelope at voxel resolution.
+
+    Falls back to all-material only when the case genuinely requested "full",
+    which is what that request means. A case whose map cannot be read raises
+    rather than silently becoming a full box: S2 over the wrong envelope is a
+    number about different windows.
+    """
+    from poregen.eval_v4.io import Case  # noqa: PLC0415
+
+    if mf is not None and mf.requested_material not in (None, "full"):
+        case = Case.load(path.parent)
+        return case.material_voxels()
+    return np.ones(shape, dtype=bool)
+
+
 def _manifest_for(path: Path):
     """The case's own Manifest, or None.
 
@@ -285,12 +301,24 @@ def generated_arm(base, ft, device, latent_files: list[Path], real_sharp: float)
         # sharpness by inventing pore-scale texture moves these while leaving
         # the sharpness ratio looking healthy.
         #
-        # BOTH decoders are scored inside the BASELINE's material mask. Using
-        # each decoder's own air class would select different analysis windows
-        # for each, and two S2 curves measured over different windows are not
-        # comparable — the difference would partly be which windows were picked.
-        material = (l_b != LABEL_AIR)
+        # BOTH decoders are scored inside the REQUESTED material envelope, not
+        # inside either decoder's predicted air class.
+        #
+        # Using a decoder's own air class selects different analysis windows for
+        # each decoder, and two S2 curves over different windows are not
+        # comparable. Using the BASELINE's for both fixes that, and was what
+        # this did — but it fails for a second reason: `S2_MIN_MATERIAL` is 99 %
+        # and its own message calls the quantity "requested material". A handful
+        # of predicted air voxels in a window then disqualifies it, and on the
+        # first DDIM-50 pass that silently cost the S2 guard on 69 of 72
+        # canvases ("no 128-cubed window is at least 99 % requested material").
+        #
+        # The requested envelope is decoder-independent by construction, which
+        # is what the comparison needs, and it is what `measure_microstructure`
+        # scores S2 on — so the gate and the campaign now measure the same
+        # thing on the same windows.
         mf = _manifest_for(f)
+        material = _requested_material(f, l_b.shape, mf)
         try:
             if mf is None:
                 raise FileNotFoundError(
