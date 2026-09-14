@@ -2719,9 +2719,11 @@ else:
         J = load_json(f)
         print(f"== {tag}: encoder identical = {J.get('encoder_identical')}")
         for block in ("val", "real_sharpness", "generated"):
-            if block in J:
-                flat = pd.json_normalize(J[block], sep=".").T; flat.columns = [block]
-                display(flat[flat[block].map(lambda v: isinstance(v, (int, float, str, bool)))].head(60))
+            if block not in J: continue
+            if not isinstance(J[block], dict):                       # real_sharpness is a single number
+                print(f"{block}: {J[block]}"); continue
+            flat = pd.json_normalize(J[block], sep=".").T; flat.columns = [block]
+            display(flat[flat[block].map(lambda v: isinstance(v, (int, float, str, bool)))].head(60))
     readme = DECODER_FT_ROOT / "README.md"
     if readme.exists(): display(Markdown(readme.read_text()))
 ''')
