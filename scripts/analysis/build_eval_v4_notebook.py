@@ -1167,6 +1167,7 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-13 13:23 | **Campaign 19, DDIM-50 pass complete** (2 h 08 m, nine shapes, zero failures): every off-manifold shape delivered as requested — air Dice 0.97–1.00, requested vs delivered air to three decimals, φ at request, band absent (0.94–1.13). Two grey chunk-seam values (L-bracket 1.85, two coupons 1.95) are requested surfaces lying exactly on a chunk plane, not assembly seams; a material-only seam column is being added everywhere and campaigns 18/19 re-measured on CPU. DDIM-200 pass is stage 7. | section *stress geometries*; vault E11 |
 | 09-13 17:24 | **Campaign 20 complete** (36 cases, 4 h, all rc=0). Porosity: the model **extrapolates past the trained ceiling** monotonically (0.15 → 0.161, 0.20 → 0.215, +8–11 %), delivers exactly 0 for 0 (the collapse flag fired falsely; being made request-aware), under-delivers at the low end to ~65 % (0.002 anchor included). Unseen stacking orders of the four trained angles: 0.70–1.00 class accuracy. Pitch 32: 1.00; pitch 8: 0.50–0.67 = the readers' floor (B16 at pitch 10 sits there too); a ply-boundary estimator is being written to separate reader from model. Field correlation lengths 16/64/512: slope ≈ 1 everywhere; R² collapses only because the request's own variance vanishes → **within-volume R² is not an obedience measure when the requested field is nearly flat; the slope is** (also explains campaign 18's coherent-field R² 0.31). Decoder fine-tune (stage 5) started 17:24. | section *out-of-distribution conditioning*; vault E12 |
 | 09-13 19:00 | Ply-pitch estimator written and validated (exact on synthetic gratings 8–32 vox; real crops too low-contrast to quote a single-volume pitch; generated boundary contrast equals real). Thin-ply verdict stays "at the reader floor". `phi_collapsed` made request-aware (campaign 20: 3 → 0 false failures; no other campaign affected). Decoder fine-tune rate, sampled over steps 381–521: 2.2–2.3 s/step (a single tqdm line at step 484 had read 3.8 s after a checkpoint-save spike) → ≈ 7.5 h, ending ~01:00 on 09-14; the queue shifts by ~1.5 h against the original plan (downstream → 09-15 ~01:00, stress DDIM-200 → 09-15 ~09:00, rf-2/rf-64 → 09-16 ~15:00). | vault E12; campaign 11 README |
+| 09-13 21:44 → 09-14 00:30 | **Decoder fine-tune (D43) — negative result.** r08 run-0007 early-stopped at 6360/12000 on held-out reconstruction loss (the intended criterion). Redecode of all campaign-18 canvases with both decoders: gate 1 (reconstruction sharpness ≥ 0.95 of real) 0.614 → 0.643 FAIL; gate 3 (segmentation unchanged) porosity MAE +78 %, pore Dice 0.942 → 0.928 FAIL; gate 2 "passes" only because it is one-sided — generated samples were already 38 % *sharper* than real and the fine-tune made them 60 % sharper. The two decoders disagree on 21 % of air voxels. **The paper's decoder stays the original r08.** The refiner (option 2) is on hold; recommendation: drop it. Downstream utility runs on the original decoder since 23:02. | section *decoder fine-tune*; vault E13, D45 |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
@@ -2697,22 +2698,39 @@ labels. The VAE was trained to *reconstruct*, which makes its output slightly bl
 after the author's visual inspection, fine-tune the decoder alone (encoder frozen, so the latent space and the 272 GB
 store stay valid) with a sharpness-aware loss, then *re-decode the same eval-v4 latents*. Both decoders are reported
 with pre-registered gates read at DDIM-50 and DDIM-200: porosity error must not get worse, the pore Dice against the
-original decode must stay high, and the seam ratios must stay at the floor. This section fills in once campaign 11 exists.
+original decode must stay high, and the seam ratios must stay at the floor.
+
+**Result (2026-09-14): a negative result, and a useful one.** The fine-tune (r08 run-0007, encoder frozen, early-stopped at
+6,360 of 12,000 steps on held-out reconstruction loss) fails two of the three evaluated gates: reconstruction sharpness
+reaches only 0.64 of real (gate ≥ 0.95), and segmentation degrades (porosity MAE +78 %, pore Dice 0.942 → 0.928). The
+third gate "passes" only because it is one-sided: generated samples were *already 38 % sharper than real material* and the
+fine-tune made them 60 % sharper. The two decoders disagree on 21 % of air voxels. **The paper's decoder is the original
+r08 decoder.** The finding to keep: the VAE's reconstructions are duller than the real scans while the LDM's samples are
+sharper than them, so a decoder-only sharpening is the wrong lever for generation; the remaining texture gap in the
+microstructure statistics is not a blur.
 """)
     code(r'''
 if not DECODER_FT_ROOT.exists():
     unavailable("campaign 11-decoder-ft", "the author's visual go (runs/campaigns/decoder_ft_go) → decoder fine-tune → redecode")
 else:
-    for p in sorted(DECODER_FT_ROOT.rglob("*.md")): print("--", p.relative_to(DECODER_FT_ROOT)); display(Markdown(p.read_text()))
-    for p in sorted(DECODER_FT_ROOT.rglob("*.json"))[:10]:
-        try:
-            J = load_json(p); print("--", p.relative_to(DECODER_FT_ROOT)); display(pd.json_normalize(J, sep=".").T.head(60))
-        except Exception as exc: print(p, "unreadable:", exc)
-    for p in sorted(DECODER_FT_ROOT.rglob("*.png"))[:12]: display(Image(filename=str(p)))
-    _re = sorted(DECODER_FT_ROOT.glob("**/volumes/192_ddim200_seed101"))
-    _or = case_dir("sampler", "192_ddim200_seed101")
-    if _re and _or.exists(): compare_figure([_or, _re[0]], "z", 96, "grey", diff=True).show()
+    for tag in ("redecode_ddim50", "redecode_ddim200"):
+        f = DECODER_FT_ROOT / tag / "results.json"
+        if not f.exists(): unavailable(f"campaign 11 {tag}", "redecode stage"); continue
+        J = load_json(f)
+        print(f"== {tag}: encoder identical = {J.get('encoder_identical')}")
+        for block in ("val", "real_sharpness", "generated"):
+            if block in J:
+                flat = pd.json_normalize(J[block], sep=".").T; flat.columns = [block]
+                display(flat[flat[block].map(lambda v: isinstance(v, (int, float, str, bool)))].head(60))
+    readme = DECODER_FT_ROOT / "README.md"
+    if readme.exists(): display(Markdown(readme.read_text()))
 ''')
+    md("""
+**How to read the blocks.** `val` = the VAE reconstructing real validation windows with each decoder (sharpness ratio to
+ground truth, pore/air Dice, porosity MAE). `real_sharpness` = the sharpness of real material, the reference for the
+generated ratio. `generated` = the campaign-18 canvases decoded by both decoders: sharpness ratios, agreement between the
+two decodes (pore, air) and the texture guards (S2, PSD). The campaign README below carries the gate table with pass/fail.
+""")
 
 
 def build_downstream() -> None:
