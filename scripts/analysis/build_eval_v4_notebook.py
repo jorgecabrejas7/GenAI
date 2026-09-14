@@ -1168,6 +1168,7 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-13 17:24 | **Campaign 20 complete** (36 cases, 4 h, all rc=0). Porosity: the model **extrapolates past the trained ceiling** monotonically (0.15 → 0.161, 0.20 → 0.215, +8–11 %), delivers exactly 0 for 0 (the collapse flag fired falsely; being made request-aware), under-delivers at the low end to ~65 % (0.002 anchor included). Unseen stacking orders of the four trained angles: 0.70–1.00 class accuracy. Pitch 32: 1.00; pitch 8: 0.50–0.67 = the readers' floor (B16 at pitch 10 sits there too); a ply-boundary estimator is being written to separate reader from model. Field correlation lengths 16/64/512: slope ≈ 1 everywhere; R² collapses only because the request's own variance vanishes → **within-volume R² is not an obedience measure when the requested field is nearly flat; the slope is** (also explains campaign 18's coherent-field R² 0.31). Decoder fine-tune (stage 5) started 17:24. | section *out-of-distribution conditioning*; vault E12 |
 | 09-13 19:00 | Ply-pitch estimator written and validated (exact on synthetic gratings 8–32 vox; real crops too low-contrast to quote a single-volume pitch; generated boundary contrast equals real). Thin-ply verdict stays "at the reader floor". `phi_collapsed` made request-aware (campaign 20: 3 → 0 false failures; no other campaign affected). Decoder fine-tune rate, sampled over steps 381–521: 2.2–2.3 s/step (a single tqdm line at step 484 had read 3.8 s after a checkpoint-save spike) → ≈ 7.5 h, ending ~01:00 on 09-14; the queue shifts by ~1.5 h against the original plan (downstream → 09-15 ~01:00, stress DDIM-200 → 09-15 ~09:00, rf-2/rf-64 → 09-16 ~15:00). | vault E12; campaign 11 README |
 | 09-13 21:44 → 09-14 00:30 | **Decoder fine-tune (D43) — negative result.** r08 run-0007 early-stopped at 6360/12000 on held-out reconstruction loss (the intended criterion). Redecode of all campaign-18 canvases with both decoders: gate 1 (reconstruction sharpness ≥ 0.95 of real) 0.614 → 0.643 FAIL; gate 3 (segmentation unchanged) porosity MAE +78 %, pore Dice 0.942 → 0.928 FAIL; gate 2 "passes" only because it is one-sided — generated samples were already 38 % *sharper* than real and the fine-tune made them 60 % sharper. The two decoders disagree on 21 % of air voxels. **The paper's decoder stays the original r08.** The refiner (option 2) is on hold; recommendation: drop it. Downstream utility runs on the original decoder since 23:02. | section *decoder fine-tune*; vault E13, D45 |
+| 09-14 09:16 | **Downstream utility, first pass** (10 h 14 m, 9 runs). Segmenter trained on real / half-half / synthetic-only, tested on 20 000 real patches: pore Dice **0.841 / 0.821 / 0.514**, porosity MAE 0.0013 / 0.0013 / 0.0176, synthetic-only porosity bias +0.017. **Synthetic-only does not transfer; realistic is not useful** — the same volumes that match real material on every distributional table train a segmenter at 0.51. The half-half arm lacks its 8k-real control. Confound: synthetic labels are the decoder's, real labels are `onlypores`. Three arms ordered after stress DDIM-200: real-8k control, real+synthetic augmentation (16k+16k), synthetic relabelled with `onlypores`. | section *downstream utility*; vault E14 |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
@@ -2741,21 +2742,48 @@ def build_downstream() -> None:
 **The strongest realism test is use.** A 3-D segmentation network is trained three ways: (a) on real training volumes
 with their labels, (b) on synthetic grey + label volumes only, (c) on both; each is tested on the *real* held-out test
 panels, and pore and air Dice are reported with three seeds. If (b) approaches (a) the synthetic pairs carry the
-information a segmenter needs; if (c) beats (a) the synthetic data adds something. This is the last stage in the queue
-(it needs the GPU for training) and fills in when campaign 14 exists.
+information a segmenter needs; if (c) beats (a) the synthetic data adds something.
+
+**How it was run.** One small 3-D U-Net (32 base channels), the same optimiser, augmentation and budget in every arm:
+16 000 training patches of 64³, 8 000 steps, three seeds; the test set is 20 000 patches cut from the real held-out test
+panels. The synthetic pool is 66 285 patches from 81 campaign-18 volumes with the labels the r08 decoder produced. Arms
+in the first pass: real only; half real + half synthetic (8k + 8k); synthetic only. Second pass (queued): an 8k-real
+control, real + synthetic as augmentation (16k + 16k), and synthetic relabelled with the dataset's own `onlypores`
+segmentation, which separates a mismatch of labelling functions from image quality.
+
+**First-pass result (2026-09-14).** Synthetic-only trains a segmenter at pore Dice **0.51** where real data gives **0.84**,
+with a systematic over-prediction of pores (+0.017 porosity bias). Replacing half the real data costs 0.02 Dice and
+nothing on porosity error. So: the same volumes that match real material on every distributional table (campaign 18) are
+**not a substitute for real training data**, at least with the decoder's labels. "Realistic is not useful" is the finding,
+and the reason distributional metrics alone cannot carry a synthetic-data claim.
 """)
     code(r'''
-if not DOWNSTREAM_ROOT.exists():
-    unavailable("campaign 14-downstream-utility", "downstream_utility (last GPU stage of the queue)")
+DJ = DOWNSTREAM_ROOT / "results.json"
+if not DJ.exists():
+    unavailable("campaign 14-downstream-utility", "downstream_utility (GPU training)")
 else:
-    for p in sorted(DOWNSTREAM_ROOT.rglob("*.md")): print("--", p.relative_to(DOWNSTREAM_ROOT)); display(Markdown(p.read_text()))
-    for p in sorted(DOWNSTREAM_ROOT.rglob("results*.json"))[:5]:
-        J = load_json(p); print("--", p.relative_to(DOWNSTREAM_ROOT))
-        arms = J.get("arms") or J.get("per_arm") or J
-        try: display(pd.json_normalize(arms, sep=".").T.head(80))
-        except Exception: print(json.dumps(J, indent=1)[:3000])
-    for p in sorted(DOWNSTREAM_ROOT.rglob("*.png"))[:12]: display(Image(filename=str(p)))
+    J = load_json(DJ)
+    print("budget:", J.get("budget")); print("synthetic pool:", J.get("synthetic_pool_size"), "patches from", J.get("n_synthetic_cases"), "cases")
+    A = J.get("aggregate") or {}
+    cols = ["dice_pore", "dice_air", "dice_material", "porosity_mae", "porosity_bias", "air_mae"]
+    T = pd.DataFrame({arm: {c: f"{(m.get(c) or {}).get('mean', float('nan')):.4f} ± {(m.get(c) or {}).get('sd', float('nan')):.4f}" for c in cols} for arm, m in A.items()}).T
+    display(T)
+    R = pd.DataFrame([{"arm": r["arm"], "seed": r["seed"], "real": r.get("n_real_patches"), "synthetic": r.get("n_synthetic_patches"), **{k: r["metrics"].get(k) for k in cols}, "train min": (r.get("train_seconds") or 0) / 60} for r in J.get("runs", [])])
+    display(R.round(4))
+    fig = make_subplots(rows=1, cols=3, subplot_titles=["pore Dice on real test patches", "air Dice", "porosity MAE"])
+    for i, c in enumerate(("dice_pore", "dice_air", "porosity_mae"), 1):
+        for arm, g in R.groupby("arm"):
+            fig.add_trace(go.Box(y=g[c], name=arm, showlegend=(i == 1)), row=1, col=i)
+    fig.update_layout(height=400, title="Downstream utility: each dot is one seed"); fig.show()
+    for cv in J.get("caveats", []): note(cv)
 ''')
+    md("""
+**How to read it.** Every number is measured on real held-out scans, so the arms are directly comparable. Pore Dice is
+the metric that matters (air and material are easy). A porosity *bias* far from zero means the segmenter systematically
+over- or under-calls pores, which is what a label-function mismatch looks like. The caveat boxes are the run's own: the
+label-function confound, the fixed total patch count (so the half-half arm needs its 8k-real control), and two holes in
+the synthetic pool (no high-porosity stratum with air; air only from planar surfaces).
+""")
 
 
 def build_summary() -> None:
