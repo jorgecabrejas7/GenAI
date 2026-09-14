@@ -240,11 +240,40 @@ def _group_by_steps(rows: list[dict]) -> dict:
     return out
 
 
+def latent_normalisation(manifest_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    """``(per_channel_mean, per_channel_std)`` of the store this case used.
+
+    `latents.npy` holds the canvas in the LDM's NORMALISED space — the space the
+    diffusion model operates in. The decoder expects NATIVE latents, so the
+    production path multiplies by the store's per-channel std and adds its mean
+    before decoding (`VolumeGenerator._decode_canvas`). Decoding the saved array
+    directly feeds the decoder latents about three times too wide.
+
+    Measured, on one window of `sampler/192_ddim50_seed101` against the stored
+    volume.tif that production wrote: MAE 16.92 without this, 2.06 with it, the
+    residual being tiled-vs-overlapped decode. This function existing at all is
+    the fix for that.
+    """
+    mf = json.loads((manifest_dir / "manifest.json").read_text())
+    root = (mf.get("notes") or {}).get("latents_root")
+    if not root:
+        raise KeyError(
+            f"{manifest_dir}/manifest.json has no notes.latents_root, so the "
+            "latent normalisation cannot be resolved and the decode would be at "
+            "the wrong scale. Refusing to guess.")
+    meta = json.loads((Path(root) / "metadata.json").read_text())["normalization"]
+    return (np.asarray(meta["per_channel_mean"], np.float32),
+            np.asarray(meta["per_channel_std"], np.float32))
+
+
 def generated_arm(base, ft, device, latent_files: list[Path], real_sharp: float) -> dict:
     """ldm06 latents decoded both ways; no ground truth, so compare to each other."""
     rows = []
     for f in latent_files:
-        z_all = np.load(f).astype(np.float32)          # (C, Z, Y, X) latent cells
+        z_all = np.load(f).astype(np.float32)          # (C, Z, Y, X), NORMALISED
+        # Back to the decoder's native scale before anything touches it.
+        mean, std = latent_normalisation(f.parent)
+        z_all = z_all * std[:, None, None, None] + mean[:, None, None, None]
         C, Z, Y, X = z_all.shape
         if min(Z, Y, X) < LATENT_WIN:
             logger.warning("%s: canvas %s smaller than one %d-cell window, skipped",
