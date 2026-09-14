@@ -1175,13 +1175,41 @@ def main(argv: list[str] | None = None) -> int:
     results["caveats"] = build_caveats(results)
 
     out_dir = Path(args.out)
+
+    # MERGE, never clobber. Running a subset of the arms — which is the whole
+    # point of --arms — used to overwrite results.json with only those arms,
+    # destroying runs that cost ten hours. Runs are keyed by (arm, seed): a
+    # re-run of the same pair replaces it, anything else is kept.
+    prev_path = out_dir / "results.json"
+    if prev_path.exists():
+        try:
+            prev = json.loads(prev_path.read_text())
+        except Exception as exc:                        # noqa: BLE001
+            raise SystemExit(
+                f"{prev_path} exists but cannot be read ({exc}). Refusing to "
+                "overwrite it — move it aside if it is genuinely junk.") from exc
+        fresh = {(r["arm"], r["seed"]) for r in runs}
+        kept = [r for r in (prev.get("runs") or []) if (r["arm"], r["seed"]) not in fresh]
+        if kept:
+            print(f"merging with {len(kept)} run(s) already in {prev_path.name}")
+        runs = kept + runs
+        results["runs"] = runs
+        results["aggregate"] = aggregate(runs)
+        results["caveats"] = build_caveats(results)
+
     write_json(results, out_dir)
     write_findings(render_findings(results), out_dir)
     command = "python scripts/analysis/downstream_utility.py " + " ".join(
         argv if argv is not None else sys.argv[1:]
     )
-    (out_dir / "README.md").write_text(render_readme(results, command.strip()))
-    print(f"\nWrote {out_dir}/results.json, findings.md, README.md")
+    # README.md is WRITE-ONCE. It carries hand-written analysis once a human has
+    # been at it, and regenerating over that loses work no rerun can restore.
+    readme = out_dir / "README.md"
+    target = readme if not readme.exists() else (out_dir / "README.generated.md")
+    target.write_text(render_readme(results, command.strip()))
+    if target is not readme:
+        print(f"README.md exists and was NOT overwritten; wrote {target.name} instead")
+    print(f"\nWrote {out_dir}/results.json, findings.md, {target.name}")
     return 0
 
 
