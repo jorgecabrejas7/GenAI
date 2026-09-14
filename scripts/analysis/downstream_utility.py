@@ -170,16 +170,49 @@ class Budget:
 
 @dataclass(frozen=True)
 class Arm:
-    """One data mix.  ``real_fraction`` is the ONLY per-arm degree of freedom."""
+    """One data mix.
+
+    ``real_fraction`` was once the only per-arm degree of freedom, and the first
+    three arms still differ in nothing else. Two more were added because the
+    original design could not answer its own question, and each relaxes ONE
+    further thing, named here so it cannot be relaxed by accident:
+
+    ``total_patches``
+        ``None`` means the budget's count, which is what the first three use.
+        `real_8k` halves it and `real_plus_synthetic_aug` doubles it. THE STEP
+        BUDGET IS UNCHANGED at 8000 x 32 = 256 000 samples drawn, so changing
+        the pool size changes how often each patch is seen: 16 times at 16 000
+        patches, 32 at 8 000, 8 at 32 000. Those arms are therefore NOT clean
+        one-variable comparisons against the first three, and their rows say so.
+
+    ``label_file``
+        which label the SYNTHETIC patches carry. ``label.tif`` is the decoder's
+        own 3-class head; ``label_onlypores.tif`` is the dataset's production
+        pore segmentation over the same images, written by
+        `scripts/analysis/relabel_synthetic_onlypores.py`. Changing it isolates
+        the labelling function from image quality.
+    """
 
     name: str
     real_fraction: float
+    total_patches: int | None = None
+    label_file: str = "label.tif"
 
 
 ARMS: tuple[Arm, ...] = (
+    # The original three: identical in everything but the mix.
     Arm("real", 1.0),
     Arm("synthetic", 0.0),
     Arm("real_plus_synthetic", 0.5),
+    # The control the half/half arm needs. Without it, "half real plus half
+    # synthetic costs 0.020 pore Dice" cannot be read: the synthetic half may
+    # have helped or may merely not have hurt, and 8000 real alone is what
+    # separates those.
+    Arm("real_8k", 1.0, total_patches=8000),
+    # Augmentation rather than replacement — the arm the framing note promised.
+    Arm("real_plus_synthetic_aug", 0.5, total_patches=32000),
+    # Same images, the dataset's own pore labelling.
+    Arm("synthetic_relabelled", 0.0, label_file="label_onlypores.tif"),
 )
 
 REFERENCE_ARM = "real"
@@ -193,14 +226,19 @@ def arm_by_name(name: str) -> Arm:
 
 
 def arm_patch_counts(arm: Arm, budget: Budget) -> tuple[int, int]:
-    """``(n_real, n_synthetic)``, which ALWAYS sum to ``budget.patch_count``.
+    """``(n_real, n_synthetic)``, which sum to the ARM's total.
+
+    That total is ``budget.patch_count`` for every arm that does not override
+    it; the two that do are named in :class:`Arm` along with what the override
+    costs in comparability.
 
     The synthetic count is the remainder rather than a second rounding, so no
     arm can end up one patch short of another through a rounding difference.
     """
-    n_real = int(round(budget.patch_count * arm.real_fraction))
-    n_real = max(0, min(budget.patch_count, n_real))
-    return n_real, budget.patch_count - n_real
+    total = arm.total_patches if arm.total_patches is not None else budget.patch_count
+    n_real = int(round(total * arm.real_fraction))
+    n_real = max(0, min(total, n_real))
+    return n_real, total - n_real
 
 
 # ---------------------------------------------------------------------------
@@ -510,9 +548,11 @@ class SyntheticPatchSubset(Dataset):
     lazily, so each DataLoader worker gets its own after fork.
     """
 
-    def __init__(self, pool: SyntheticPool, rows: np.ndarray) -> None:
+    def __init__(self, pool: SyntheticPool, rows: np.ndarray,
+                 label_file: str = "label.tif") -> None:
         self.case_dirs = list(pool.case_dirs)
         self.coords = pool.coords[np.asarray(rows, np.int64)]
+        self.label_file = label_file
         self._handles: dict[int, tuple] = {}
 
     def __len__(self) -> int:
@@ -522,9 +562,15 @@ class SyntheticPatchSubset(Dataset):
         if ci not in self._handles:
             import tifffile  # noqa: PLC0415
             d = self.case_dirs[ci]
+            lab = d / self.label_file
+            if not lab.exists():
+                raise FileNotFoundError(
+                    f"{lab} does not exist. An arm asking for "
+                    f"{self.label_file!r} needs it written first: "
+                    "python scripts/analysis/relabel_synthetic_onlypores.py")
             self._handles[ci] = (
                 tifffile.memmap(str(d / "volume.tif")),
-                tifffile.memmap(str(d / "label.tif")),
+                tifffile.memmap(str(lab)),
             )
         return self._handles[ci]
 
@@ -609,17 +655,31 @@ class ArmPlan:
         return int(self.real_rows.size + self.synthetic_rows.size)
 
 
-def seed_permutation(n_real_pool: int, budget: Budget, seed: int) -> np.ndarray:
-    """The ONE real-patch draw a seed makes, shared by all three arms.
+def max_arm_total(budget: Budget, arms: tuple[Arm, ...] = ARMS) -> int:
+    """The longest real draw any arm needs, so one draw can serve them all."""
+    return max((a.total_patches if a.total_patches is not None else budget.patch_count)
+               for a in arms)
 
-    Arm (a) trains on all of it.  Arm (c) trains on its first half and asks for
-    synthetic patches matching the histogram of its second half.  Arm (b) asks
-    for synthetic patches matching the histogram of the whole thing.  So every
-    arm at a given seed targets the same real distribution, patch for patch,
-    and arm (c)'s real half is literally a subset of arm (a)'s patches.
+
+def seed_permutation(n_real_pool: int, budget: Budget, seed: int,
+                     n_draw: int | None = None) -> np.ndarray:
+    """The ONE real-patch draw a seed makes, shared by every arm.
+
+    Each arm takes a PREFIX of it for its real half and points the synthetic
+    half at the slice immediately after. `real` trains on the first 16 000;
+    `real_8k` on the first 8 000, which is literally a subset of them;
+    `real_plus_synthetic` on the first 8 000 plus synthetic patches matching
+    the histogram of the next 8 000; `synthetic` on synthetic patches matching
+    the first 16 000. So every arm at a given seed targets the same real
+    distribution, patch for patch, and the smaller arms nest inside the larger.
+
+    ``n_draw`` must cover the longest arm — `real_plus_synthetic_aug` needs
+    32 000 — or that arm silently gets an EMPTY synthetic target and trains on
+    its real half alone. The `--dry-run` plan table is what caught that.
     """
     rng = np.random.default_rng([seed, 0xD0])
-    return rng.permutation(n_real_pool)[: budget.patch_count].astype(np.int64)
+    n = n_draw if n_draw is not None else budget.patch_count
+    return rng.permutation(n_real_pool)[:n].astype(np.int64)
 
 
 def plan_arm(
@@ -638,7 +698,16 @@ def plan_arm(
         raise MissingSyntheticVolumes(
             f"arm {arm.name!r} needs {n_synth} synthetic patches but no pool was scanned."
         )
-    target_keys = real_keys[perm[n_real:]]
+    # The slice immediately AFTER this arm's real half, and exactly as long as
+    # the synthetic half. `perm[n_real:]` would be the whole remainder, which
+    # is right only when the arm's total happens to equal the draw length.
+    tail = perm[n_real:n_real + n_synth]
+    if tail.size < n_synth:
+        raise ValueError(
+            f"arm {arm.name!r} needs {n_synth} synthetic targets but the real "
+            f"draw only has {tail.size} patches left after its real half. "
+            f"seed_permutation must be called with n_draw >= {n_real + n_synth}.")
+    target_keys = real_keys[tail]
     rng = np.random.default_rng([seed, 0x5E])
     synth_rows, report = match_strata(target_keys, pool_keys, rng)
     return ArmPlan(arm.name, seed, real_rows, synth_rows, report)
@@ -710,14 +779,15 @@ class SegmentationScore:
 # ---------------------------------------------------------------------------
 
 def build_train_dataset(
-    plan: ArmPlan, real_base: MemmapPatchDataset, pool: SyntheticPool | None
+    plan: ArmPlan, real_base: MemmapPatchDataset, pool: SyntheticPool | None,
+    label_file: str = "label.tif",
 ) -> Dataset:
     parts: list[Dataset] = []
     if plan.real_rows.size:
         parts.append(RealPatchSubset(real_base, plan.real_rows))
     if plan.synthetic_rows.size:
         assert pool is not None
-        parts.append(SyntheticPatchSubset(pool, plan.synthetic_rows))
+        parts.append(SyntheticPatchSubset(pool, plan.synthetic_rows, label_file))
     base = parts[0] if len(parts) == 1 else ConcatDataset(parts)
     return FlipAugmented(base)
 
@@ -753,7 +823,7 @@ def train_and_score(
     amp_dtype = get_autocast_dtype(device)
     class_weights = torch.tensor(load_class_weights(), dtype=torch.float32, device=device)
 
-    train_ds = build_train_dataset(plan, real_base, pool)
+    train_ds = build_train_dataset(plan, real_base, pool, arm.label_file)
     loader = DataLoader(
         train_ds,
         batch_size=budget.batch_size,
@@ -1057,7 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
 
     plans: dict[tuple[str, int], ArmPlan] = {}
     for seed in budget.seeds:
-        perm = seed_permutation(len(real_train), budget, seed)
+        perm = seed_permutation(len(real_train), budget, seed,
+                                n_draw=max_arm_total(budget))
         for arm in arms:
             plans[(arm.name, seed)] = plan_arm(
                 arm, budget, seed, perm, real_keys,
