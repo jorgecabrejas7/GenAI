@@ -26,9 +26,7 @@ REPO = Path(__file__).resolve().parents[2]
 logger = logging.getLogger("ddpm3d_sample")
 
 #: 64-cubed is the model's native shape; 192-cubed is the smallest that has a
-#: fused seam to measure. No 1024-wide case: at 200 DDIM steps per window a
-#: 192x1024x1024 volume is thousands of windows, which is days. That ceiling is
-#: itself a result and the README says so rather than quietly omitting the row.
+#: fused seam to measure.
 CASES = (
     ("64_seed101", (64, 64, 64), 101),
     ("64_seed202", (64, 64, 64), 202),
@@ -37,6 +35,44 @@ CASES = (
     ("192_seed202", (192, 192, 192), 202),
     ("192_seed303", (192, 192, 192), 303),
 )
+
+#: ONE wide case, at DDIM-50, chosen by MEASUREMENT rather than by guess. The
+#: full 1024 is generated if it fits the budget; otherwise 512, and the
+#: extrapolated cost of the 1024 is recorded.
+#:
+#: The affordability argument for a latent space is stronger with a measured
+#: number than with an omission — "the pixel-space model would need N hours for
+#: the volume ldm06 makes in M" is a result; "we did not run it" is not.
+WIDE_CANDIDATES = ((192, 1024, 1024), (192, 512, 512))
+WIDE_STEPS = 50
+
+
+def window_count(shape, patch: int, stride: int) -> int:
+    def starts(n: int) -> list[int]:
+        out = list(range(0, n - patch + 1, stride))
+        if out[-1] != n - patch:
+            out.append(n - patch)
+        return out
+    z, y, x = (len(starts(n)) for n in shape)
+    return z * y * x
+
+
+def time_one_window(model, sched, device, steps: int, batch: int) -> float:
+    """Seconds per WINDOW, measured on this card with this model.
+
+    One warm-up batch first: the first CUDA call of a shape pays allocation and
+    autotune, and timing that would inflate every estimate built on it.
+    """
+    from poregen.baselines.ddpm3d.train import sample_window
+
+    sample_window(model, sched, batch, device, steps=2)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    t = time.time()
+    sample_window(model, sched, batch, device, steps=steps)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return (time.time() - t) / batch
 
 
 def git_commit() -> str:
@@ -60,6 +96,12 @@ def main() -> int:
                     default=REPO / "runs" / "campaigns" / "23-ddpm3d-baseline")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--stride", type=int, default=32)
+    ap.add_argument("--batch", type=int, default=4,
+                    help="windows denoised per forward pass")
+    ap.add_argument("--wide-budget-hours", type=float, default=6.0,
+                    help="the widest case that fits this is generated; the cost of "
+                         "the ones that do not is recorded instead")
+    ap.add_argument("--no-wide", action="store_true")
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
@@ -76,21 +118,47 @@ def main() -> int:
     model.eval()
     logger.info("model from %s (step %s), EMA weights", args.checkpoint, ck.get("step"))
 
+    # ── the wide case, decided by measurement ──────────────────────────────
+    wide = None
+    wide_report = {}
+    if not args.no_wide:
+        per_window = time_one_window(model, sched, device, WIDE_STEPS, args.batch)
+        wide_report["seconds_per_window_measured"] = per_window
+        wide_report["ddim_steps"] = WIDE_STEPS
+        for shape in WIDE_CANDIDATES:
+            n = window_count(shape, 64, args.stride)
+            hours = n * per_window / 3600.0
+            wide_report[str(list(shape))] = {"windows": n, "estimated_hours": hours}
+            logger.info("wide candidate %s: %d windows, %.1f h estimated",
+                        shape, n, hours)
+            if wide is None and hours <= args.wide_budget_hours:
+                wide = shape
+        if wide is None:
+            wide = WIDE_CANDIDATES[-1]
+            logger.info("no candidate fits %.1f h; taking the smallest, %s",
+                        args.wide_budget_hours, wide)
+        wide_report["chosen"] = list(wide)
+        logger.info("WIDE CASE: %s at DDIM-%d", wide, WIDE_STEPS)
+
     commit, written = git_commit(), []
-    for name, shape, seed in CASES:
+    todo = list(CASES)
+    if wide is not None:
+        todo.append((f"wide{wide[1]}_seed101", wide, 101))
+    for name, shape, seed in todo:
         if args.only and name not in args.only:
             continue
         g = torch.Generator(device=device).manual_seed(seed)
         t = time.time()
-        vol = sample_volume(model, sched, shape, device, steps=args.steps,
-                            stride=args.stride, generator=g)
+        steps = WIDE_STEPS if name.startswith("wide") else args.steps
+        vol = sample_volume(model, sched, shape, device, steps=steps,
+                            stride=args.stride, batch=args.batch, generator=g)
         grey, label = decode_sample(vol)
         wall = time.time() - t
         mf = Manifest(
             assessment="ddpm3d", case=name, volume_shape=tuple(shape),
             git_commit=commit, sampler="ddpm3d",
             model_run=str(args.checkpoint.parent), checkpoint_step=int(ck.get("step", 0)),
-            weights="ema", ddim_steps=args.steps, seed=seed,
+            weights="ema", ddim_steps=steps, seed=seed,
             requested_material="full", wall_time_s=wall,
             peak_gpu_memory_bytes=(int(torch.cuda.max_memory_allocated(device))
                                    if device.type == "cuda" else None),
@@ -114,6 +182,8 @@ def main() -> int:
     (args.root / "generation.json").write_text(json.dumps(
         {"checkpoint": str(args.checkpoint), "step": ck.get("step"),
          "ddim_steps": args.steps, "stride": args.stride,
+         "parameters_M": sum(p.numel() for p in model.parameters()) / 1e6,
+         "wide_case": wide_report,
          "n_cases": len(written), "cases": written}, indent=2) + "\n")
     logger.info("wrote %d cases -> %s", len(written), args.root)
     return 0

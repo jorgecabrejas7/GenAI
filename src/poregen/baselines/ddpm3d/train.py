@@ -45,10 +45,17 @@ class DDPMConfig:
     zero_terminal_snr: bool = True
     cosine_s: float = 0.008
 
-    base: int = 48
-    mults: tuple[int, ...] = (1, 2, 4)
+    # 25.3 M parameters. Sized on purpose against ldm06's 83 M denoiser: a
+    # 5.9 M baseline would invite "the baseline was too small", and the paper's
+    # compute row carries parameters beside hours and steps for all three
+    # generators so the reader can judge that for themselves.
+    base: int = 64
+    mults: tuple[int, ...] = (1, 2, 4, 4)
     lr: float = 2e-4
     weight_decay: float = 0.0
+    #: Drops to 8 if 16 will not fit — `train_ddpm3d.py --batch-size 8`. A
+    #: smaller batch at the same wall-clock cap is the honest trade; shrinking
+    #: the model to fit would undo the sizing above.
     batch_size: int = 16
     steps: int = 120_000
     ema_decay: float = 0.999
