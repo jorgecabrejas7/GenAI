@@ -293,3 +293,34 @@ editing docs, reading `results.json` — is fine.
 
 The corollary for scheduling: work that MUST read the store belongs inside the
 chain, after whatever is training, not alongside it.
+
+### The rule is wider than the store: no GPU job beside a dataloader either
+
+The paragraph above says "no store reads", and that wording let the same
+mistake happen a second time in a narrower disguise.
+
+While the `slicegan_synthetic` downstream arm was training, this session ran a
+44-second GPU sampling job beside it — nine volumes, peak 10.3 GB. The arm died
+at step 1000 of 8000 inside that window, on
+
+    RuntimeError: DataLoader worker (pid ...) is killed by signal: Bus error.
+
+`/dev/shm` was 61 GB and 1 % used, so torch's "insufficient shared memory"
+message was its generic text and not the diagnosis. The diagnosis is the one
+this machine always has: host and device share ONE 121 GB pool, and a worker
+that cannot get the host pages it is writing dies with SIGBUS rather than
+waiting. Cost: 6.6 h of arm time to redo.
+
+The sampling job read no store at all. It was a GPU allocation. **The rule is
+therefore: nothing that takes a large bite of the unified pool runs beside a
+job with dataloader workers — store reads and GPU allocations alike.** What is
+still fine is what was fine before: writing code, editing docs, reading a
+`results.json`, running a CPU test suite that touches no patch file.
+
+Where a measurement genuinely has to share the machine, make the GPU part stand
+down by itself rather than relying on the scheduler. `measure_slicegan` does
+this: FID is its only GPU work, so it skips with a reason naming the blocking
+PID when `gpu_jobs_other_than` finds another CUDA process, and every CPU
+statistic in the assessment is still delivered. `measure_microstructure` does
+the same for the memorisation search. A measurer that needs the card should say
+so and wait, not take it.
