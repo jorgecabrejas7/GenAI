@@ -3,7 +3,7 @@
 #
 #   1. wait for SliceGAN training to finish       (run progress, not process absence)
 #   2. generate its eval_v4 cases
-#   3. eval_v4 measure + report, request-free
+#   3. eval_v4 measure + report + inspection PNGs, request-free
 #   4. downstream arms slicegan_synthetic + real_plus_slicegan_aug
 #   5. 3D pixel-space DDPM training       (campaign 23)
 #   6. DDPM generation + measure/report + its downstream arms
@@ -73,6 +73,10 @@ say "STAGE 3 measure rc=$?"
 python -m poregen.eval_v4.cli report --root "$C22" --assessment slicegan \
     > "$S/chain_sg_report.log" 2>&1
 say "STAGE 3 done rc=$?"
+say "STAGE 3 inspection start"
+python scripts/analysis/slicegan_inspection.py --root "$C22" \
+    > "$S/chain_sg_inspect.log" 2>&1
+say "STAGE 3 inspection rc=$? -> $C22/inspection"
 
 # ── 4. downstream arms (READS THE STORE — runs alone) ───────────────────────
 say "STAGE 4 downstream arms start (store-heavy; nothing else runs)"

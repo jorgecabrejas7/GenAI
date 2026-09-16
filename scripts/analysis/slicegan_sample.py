@@ -183,6 +183,10 @@ def main() -> int:
         if args.only and name not in args.only:
             continue
         t = time.time()
+        if device.type == "cuda":
+            # Per case, or every case after the 1024-wide pair reports the pair's
+            # high-water mark as its own cost.
+            torch.cuda.reset_peak_memory_stats(device)
         grey, label = generate(gen, shape, seed, device)
         wall = time.time() - t
         mf = Manifest(
@@ -221,10 +225,13 @@ def main() -> int:
         del grey, label
         if device.type == "cuda":
             torch.cuda.empty_cache()
+        # Written after EVERY case, not once at the end: the 1024-wide pair is
+        # the part that can die on memory, and a crash there must not throw away
+        # the record of the cases that succeeded.
+        (args.root / "generation.json").write_text(json.dumps(
+            {"checkpoint": str(args.checkpoint), "step": ck.get("step"),
+             "n_cases": len(written), "cases": written}, indent=2) + "\n")
 
-    (args.root / "generation.json").write_text(json.dumps(
-        {"checkpoint": str(args.checkpoint), "step": ck.get("step"),
-         "n_cases": len(written), "cases": written}, indent=2) + "\n")
     logger.info("wrote %d cases -> %s", len(written), args.root)
     return 0
 
