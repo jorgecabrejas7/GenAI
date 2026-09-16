@@ -31,7 +31,7 @@ pair (input, metric), not about the input alone, and the report says so per row.
 
 Usage:
     python scripts/analysis/conditioning_ablation.py --model <run> --ckpt latest \\
-        --out runs/campaigns/23-conditioning-ablation
+        --out runs/campaigns/24-conditioning-ablation
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def main() -> int:
     ap.add_argument("--model", type=Path, required=True)
     ap.add_argument("--ckpt", default="latest")
     ap.add_argument("--out", type=Path,
-                    default=REPO / "runs" / "campaigns" / "23-conditioning-ablation")
+                    default=REPO / "runs" / "campaigns" / "24-conditioning-ablation")
     ap.add_argument("--only", nargs="*", default=None, help="ablation names to run")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

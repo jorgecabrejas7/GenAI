@@ -225,6 +225,8 @@ ARMS: tuple[Arm, ...] = (
     # wrong generator.
     Arm("slicegan_synthetic", 0.0, pool="slicegan"),
     Arm("real_plus_slicegan_aug", 0.5, total_patches=32000, pool="slicegan"),
+    Arm("ddpm3d_synthetic", 0.0, pool="ddpm3d"),
+    Arm("real_plus_ddpm3d_aug", 0.5, total_patches=32000, pool="ddpm3d"),
 )
 
 REFERENCE_ARM = "real"
@@ -519,20 +521,27 @@ class SyntheticPool:
         return stratum_keys(self.porosity, self.air)
 
 
-def slicegan_case_dirs(root: Path) -> list[Path]:
-    """Every generated case of the SliceGAN campaign.
+#: How to generate each baseline's pool, named in the error when one is empty.
+BASELINE_GENERATORS = {
+    "slicegan": "python scripts/analysis/slicegan_sample.py --checkpoint <run>/latest.ckpt",
+    "ddpm3d": "python scripts/analysis/ddpm3d_sample.py --checkpoint <run>/latest.ckpt",
+}
+
+
+def baseline_case_dirs(root: Path, assessment: str) -> list[Path]:
+    """Every generated case of a BASELINE campaign.
 
     A plain glob, not `check_synthetic_volumes`: that one requires the four
-    eval-v4 assessments a CONDITIONAL generator produces, and SliceGAN has one
-    unconditional assessment. Demanding the eval-v4 layout of a baseline that
+    eval-v4 assessments a CONDITIONAL generator produces, and a baseline has one
+    unconditional assessment. Demanding the eval-v4 layout of a model that
     cannot produce it would refuse a valid pool.
     """
-    vols = Path(root) / "slicegan" / "volumes"
+    vols = Path(root) / assessment / "volumes"
     dirs = sorted(d for d in vols.glob("*") if (d / "label.tif").exists())
     if not dirs:
+        how = BASELINE_GENERATORS.get(assessment, "(generate it first)")
         raise MissingSyntheticVolumes(
-            f"no SliceGAN cases under {vols}. Generate them first:\n"
-            "  python scripts/analysis/slicegan_sample.py --checkpoint <run>/latest.ckpt")
+            f"no {assessment} cases under {vols}. Generate them first:\n  {how}")
     return dirs
 
 
@@ -1107,6 +1116,9 @@ def build_test_loader(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--ddpm3d-root", type=Path,
+                   default=REPO / "runs" / "campaigns" / "23-ddpm3d-baseline",
+                   help="campaign the ddpm3d_* arms draw their patches from")
     p.add_argument("--slicegan-root", type=Path,
                    default=REPO / "runs" / "campaigns" / "22-slicegan-baseline",
                    help="campaign the slicegan_* arms draw their patches from")
@@ -1147,9 +1159,11 @@ def main(argv: list[str] | None = None) -> int:
     wanted = {a.pool for a in arms if arm_patch_counts(a, budget)[1] > 0}
     for which in sorted(wanted):
         try:
-            if which == "slicegan":
-                case_dirs = slicegan_case_dirs(args.slicegan_root)
-                label = f"SliceGAN campaign {args.slicegan_root}"
+            if which in BASELINE_GENERATORS:
+                root = {"slicegan": args.slicegan_root,
+                        "ddpm3d": args.ddpm3d_root}[which]
+                case_dirs = baseline_case_dirs(root, which)
+                label = f"{which} campaign {root}"
             else:
                 case_dirs = check_synthetic_volumes(args.campaign_root, REPO)
                 label = f"eval v4 campaign {args.campaign_root}"

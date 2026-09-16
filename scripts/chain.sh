@@ -5,9 +5,11 @@
 #   2. generate its eval_v4 cases
 #   3. eval_v4 measure + report, request-free
 #   4. downstream arms slicegan_synthetic + real_plus_slicegan_aug
-#   5. resume rf-2 from its step-22000 checkpoint
-#   6. rf-64
-#   7. notebook rebuild into campaigns 18 and 12
+#   5. 3D pixel-space DDPM training       (campaign 23)
+#   6. DDPM generation + measure/report + its downstream arms
+#   7. resume rf-2 from its step-22000 checkpoint
+#   8. rf-64
+#   9. notebook rebuild into campaigns 18 and 12
 #
 # RULES THIS CHAIN KEEPS, each one learned the hard way:
 #   - exit tests are RUN PROGRESS, never process absence: a run paused for two
@@ -27,6 +29,7 @@ C12="$REPO/runs/campaigns/12-eval-v4"
 C14="$REPO/runs/campaigns/14-downstream-utility"
 C18="$REPO/runs/campaigns/18-eval-v4-final"
 C22="$REPO/runs/campaigns/22-slicegan-baseline"
+C23="$REPO/runs/campaigns/23-ddpm3d-baseline"
 SG_TRAIN="$C22/train"
 RF2_RUN=$(ls -dt "$REPO"/runs/vae/r08-run-0010-*/ 2>/dev/null | head -1)
 cd "$REPO" || exit 1
@@ -79,26 +82,51 @@ python scripts/analysis/downstream_utility.py \
     > "$S/chain_downstream.log" 2>&1
 say "STAGE 4 done rc=$? -> $C14"
 
-# ── 5. rf-2, resumed from step 22000 ────────────────────────────────────────
-if [ -n "$RF2_RUN" ]; then
-    say "STAGE 5 rf-2 resume from $(basename "$RF2_RUN")"
-    python scripts/train_vae.py resume "$(basename "$RF2_RUN")" latest.ckpt \
-        > "$S/chain_rf2.log" 2>&1
-    say "STAGE 5 done rc=$?"
-else
-    say "STAGE 5 SKIPPED: no r08-run-0010 directory found"
-fi
+# ── 5. the 3-D pixel-space DDPM (STREAMS THE STORE — runs alone) ───────────
+say "STAGE 5 DDPM training start (campaign 23, cap 24 h)"
+python scripts/train_ddpm3d.py --out "$C23/train" --max-hours 24 \
+    > "$S/chain_ddpm_train.log" 2>&1
+say "STAGE 5 done rc=$?"
 
-# ── 6. rf-64 ────────────────────────────────────────────────────────────────
-say "STAGE 6 rf-64 start"
-python scripts/train_vae.py run r08/reduction-factor-64 > "$S/chain_rf64.log" 2>&1
+# ── 6. DDPM generation, measure, downstream ────────────────────────────────
+say "STAGE 6 DDPM generation start"
+python scripts/analysis/ddpm3d_sample.py \
+    --checkpoint "$C23/train/latest.ckpt" --root "$C23" \
+    > "$S/chain_ddpm_sample.log" 2>&1
+say "STAGE 6 generation rc=$?"
+python -m poregen.eval_v4.cli measure ddpm3d --root "$C23" \
+    > "$S/chain_ddpm_measure.log" 2>&1
+say "STAGE 6 measure rc=$?"
+python -m poregen.eval_v4.cli report --root "$C23" --assessment ddpm3d \
+    > "$S/chain_ddpm_report.log" 2>&1
+say "STAGE 6 report rc=$?"
+say "STAGE 6 downstream arms start (store-heavy; nothing else runs)"
+python scripts/analysis/downstream_utility.py \
+    --campaign-root "$C18" --ddpm3d-root "$C23" --out "$C14" \
+    --arms ddpm3d_synthetic real_plus_ddpm3d_aug \
+    > "$S/chain_ddpm_downstream.log" 2>&1
 say "STAGE 6 done rc=$?"
 
-# ── 7. notebooks ────────────────────────────────────────────────────────────
+# ── 7. rf-2, resumed from step 22000 ────────────────────────────────────────
+if [ -n "$RF2_RUN" ]; then
+    say "STAGE 7 rf-2 resume from $(basename "$RF2_RUN")"
+    python scripts/train_vae.py resume "$(basename "$RF2_RUN")" latest.ckpt \
+        > "$S/chain_rf2.log" 2>&1
+    say "STAGE 7 done rc=$?"
+else
+    say "STAGE 7 SKIPPED: no r08-run-0010 directory found"
+fi
+
+# ── 8. rf-64 ────────────────────────────────────────────────────────────────
+say "STAGE 8 rf-64 start"
+python scripts/train_vae.py run r08/reduction-factor-64 > "$S/chain_rf64.log" 2>&1
+say "STAGE 8 done rc=$?"
+
+# ── 9. notebooks ────────────────────────────────────────────────────────────
 for root in "$C18" "$C12"; do
-    say "STAGE 7 notebook into $(basename "$root")"
+    say "STAGE 9 notebook into $(basename "$root")"
     python scripts/analysis/build_eval_v4_notebook.py --root "$root" \
         > "$S/chain_nb_$(basename "$root").log" 2>&1
-    say "STAGE 7 $(basename "$root") rc=$?"
+    say "STAGE 9 $(basename "$root") rc=$?"
 done
 say "CHAIN COMPLETE"
