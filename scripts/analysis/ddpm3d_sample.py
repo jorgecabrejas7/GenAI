@@ -25,8 +25,22 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 logger = logging.getLogger("ddpm3d_sample")
 
+#: EVERY case at DDIM-200 — the step count the microstructure and seam tables
+#: of this project use. A DDIM-50 shortcut would have made the baseline's rows
+#: incomparable with the rows they sit beside, which is the one thing a
+#: baseline may not be.
+DDIM_STEPS = 200
+
 #: 64-cubed is the model's native shape; 192-cubed is the smallest that has a
 #: fused seam to measure.
+#:
+#: THE NATIVE SHAPE CANNOT BE SCORED ON MICROSTRUCTURE AT ALL. Every
+#: microstructure statistic in this project is defined on a 128-cubed analysis
+#: window, and `analysis_windows` refuses a 64-cubed volume outright. So the
+#: microstructure set is 192-cubed and every microstructure number for this
+#: baseline comes from a FUSED volume and carries fusion seams. That is not a
+#: choice of this script; it is a consequence of the 64-cubed ceiling, and the
+#: README says so where the numbers are read.
 CASES = (
     ("64_seed101", (64, 64, 64), 101),
     ("64_seed202", (64, 64, 64), 202),
@@ -34,17 +48,23 @@ CASES = (
     ("192_seed101", (192, 192, 192), 101),
     ("192_seed202", (192, 192, 192), 202),
     ("192_seed303", (192, 192, 192), 303),
+    ("micro_192_seed404", (192, 192, 192), 404),
+    ("micro_192_seed505", (192, 192, 192), 505),
+    ("micro_192_seed606", (192, 192, 192), 606),
+    ("micro_192_seed707", (192, 192, 192), 707),
 )
 
-#: ONE wide case, at DDIM-50, chosen by MEASUREMENT rather than by guess. The
-#: full 1024 is generated if it fits the budget; otherwise 512, and the
-#: extrapolated cost of the 1024 is recorded.
+#: ONE wide case, at the same DDIM-200, chosen by MEASUREMENT. 512 if it fits
+#: the budget, else 384.
 #:
-#: The affordability argument for a latent space is stronger with a measured
-#: number than with an omission — "the pixel-space model would need N hours for
-#: the volume ldm06 makes in M" is a result; "we did not run it" is not.
-WIDE_CANDIDATES = ((192, 1024, 1024), (192, 512, 512))
-WIDE_STEPS = 50
+#: 192x1024x1024 is NOT a candidate — at 200 steps it is out of reach — but its
+#: cost is EXTRAPOLATED from the measured per-window time and recorded. The
+#: affordability argument for a latent space is stronger with a measured number
+#: than with an omission: "the pixel-space model needs N hours for the volume
+#: ldm06 makes in M" is a result, and "we did not run it" is not.
+WIDE_CANDIDATES = ((192, 512, 512), (192, 384, 384))
+#: Costed but never generated, so the headline comparison has a number.
+WIDE_EXTRAPOLATE = ((192, 1024, 1024),)
 
 
 def window_count(shape, patch: int, stride: int) -> int:
@@ -94,7 +114,6 @@ def main() -> int:
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--root", type=Path,
                     default=REPO / "runs" / "campaigns" / "23-ddpm3d-baseline")
-    ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--stride", type=int, default=32)
     ap.add_argument("--batch", type=int, default=4,
                     help="windows denoised per forward pass")
@@ -122,23 +141,34 @@ def main() -> int:
     wide = None
     wide_report = {}
     if not args.no_wide:
-        per_window = time_one_window(model, sched, device, WIDE_STEPS, args.batch)
+        per_window = time_one_window(model, sched, device, DDIM_STEPS, args.batch)
         wide_report["seconds_per_window_measured"] = per_window
-        wide_report["ddim_steps"] = WIDE_STEPS
-        for shape in WIDE_CANDIDATES:
+        wide_report["ddim_steps"] = DDIM_STEPS
+        wide_report["measured_on"] = str(device)
+        est = {}
+        for shape in (*WIDE_CANDIDATES, *WIDE_EXTRAPOLATE):
             n = window_count(shape, 64, args.stride)
             hours = n * per_window / 3600.0
-            wide_report[str(list(shape))] = {"windows": n, "estimated_hours": hours}
-            logger.info("wide candidate %s: %d windows, %.1f h estimated",
-                        shape, n, hours)
-            if wide is None and hours <= args.wide_budget_hours:
+            est[str(list(shape))] = {"windows": n, "estimated_hours": hours,
+                                     "generated": False}
+            logger.info("%s: %d windows, %.1f h estimated at DDIM-%d",
+                        shape, n, hours, DDIM_STEPS)
+        for shape in WIDE_CANDIDATES:
+            if wide is None and est[str(list(shape))]["estimated_hours"] <= args.wide_budget_hours:
                 wide = shape
         if wide is None:
             wide = WIDE_CANDIDATES[-1]
             logger.info("no candidate fits %.1f h; taking the smallest, %s",
                         args.wide_budget_hours, wide)
+        est[str(list(wide))]["generated"] = True
+        wide_report["estimates"] = est
         wide_report["chosen"] = list(wide)
-        logger.info("WIDE CASE: %s at DDIM-%d", wide, WIDE_STEPS)
+        wide_report["note"] = (
+            "192x1024x1024 is costed from the measured per-window time and NOT "
+            "generated: at DDIM-200 it is out of reach for this model. That "
+            "number is the comparison — it is what a pixel-space diffusion "
+            "model would need for the volume ldm06 produces routinely.")
+        logger.info("WIDE CASE: %s at DDIM-%d", wide, DDIM_STEPS)
 
     commit, written = git_commit(), []
     todo = list(CASES)
@@ -149,7 +179,7 @@ def main() -> int:
             continue
         g = torch.Generator(device=device).manual_seed(seed)
         t = time.time()
-        steps = WIDE_STEPS if name.startswith("wide") else args.steps
+        steps = DDIM_STEPS
         vol = sample_volume(model, sched, shape, device, steps=steps,
                             stride=args.stride, batch=args.batch, generator=g)
         grey, label = decode_sample(vol)
@@ -181,7 +211,7 @@ def main() -> int:
                         "wall_s": wall, "path": str(d)})
     (args.root / "generation.json").write_text(json.dumps(
         {"checkpoint": str(args.checkpoint), "step": ck.get("step"),
-         "ddim_steps": args.steps, "stride": args.stride,
+         "ddim_steps": DDIM_STEPS, "stride": args.stride,
          "parameters_M": sum(p.numel() for p in model.parameters()) / 1e6,
          "wide_case": wide_report,
          "n_cases": len(written), "cases": written}, indent=2) + "\n")
