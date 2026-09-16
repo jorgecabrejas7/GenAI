@@ -272,3 +272,24 @@ each) and 0.0300 in campaign 19, so no other campaign has a case that could be
 affected. If you add an assessment that requests a porosity below 1e-4, its
 failure rate will behave differently from the older campaigns — by design, but
 worth knowing.
+
+## Do not read the patch store while a training run is streaming it
+
+The page-cache rule above is about MEMORY. This one is about the DATALOADER,
+and it cost a run.
+
+While `r08/reduction-factor-2` was training, this session built two
+200 000-slice banks from `patches_xct.bin`, ran the test suite, and did a CPU
+resume dry run that spins up four dataloader workers against the same file.
+The training run deadlocked at step 22999: main process spinning at 99.6 % CPU,
+its workers parked in `poll_schedule_timeout`, zero bytes of I/O over 20 s, GPU
+at 0 %. It had a 180 s loader timeout and never recovered. 999 steps were lost —
+the last checkpoint was 1000 steps back.
+
+**So: no store reads beside a training run.** Bank builds, patch scans, test
+suites that touch `data/split_v3/patches_*.bin`, and CPU dry runs with their own
+workers all wait for the GPU slot to be free. Small-file work — writing code,
+editing docs, reading `results.json` — is fine.
+
+The corollary for scheduling: work that MUST read the store belongs inside the
+chain, after whatever is training, not alongside it.

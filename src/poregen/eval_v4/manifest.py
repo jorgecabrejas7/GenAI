@@ -33,7 +33,16 @@ import numpy as np
 MANIFEST_VERSION = "v4"
 MANIFEST_NAME = "manifest.json"
 
-SAMPLERS = ("hybrid_chunked", "real")
+#: What produced a volume. "real" is a crop of a scan; "hybrid_chunked" is
+#: this project's sampler; the rest are published baselines reimplemented in
+#: `poregen.baselines` and scored on the same tables.
+#:
+#: A BASELINE MANIFEST CARRIES NO REQUESTS, and that is not an omission. Only a
+#: hybrid_chunked volume is required to declare a porosity, a layup and an
+#: envelope, because only it was asked for them. SliceGAN is unconditional: it
+#: cannot be asked for anything, so a request field on its manifest would be a
+#: claim about a control it does not have.
+SAMPLERS = ("hybrid_chunked", "real", "slicegan", "ddpm3d")
 WEIGHTS = ("raw", "ema")
 DECODES = ("tiled", "overlapped")
 

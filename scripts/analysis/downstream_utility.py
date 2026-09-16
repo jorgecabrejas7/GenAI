@@ -191,12 +191,19 @@ class Arm:
         pore segmentation over the same images, written by
         `scripts/analysis/relabel_synthetic_onlypores.py`. Changing it isolates
         the labelling function from image quality.
+
+    ``pool``
+        which generator the synthetic patches come from — ``"ldm06"`` (campaign
+        18) or ``"slicegan"`` (campaign 22). Named per arm rather than taken
+        from a global, so a baseline arm cannot silently draw ldm06 patches and
+        be reported as the baseline.
     """
 
     name: str
     real_fraction: float
     total_patches: int | None = None
     label_file: str = "label.tif"
+    pool: str = "ldm06"
 
 
 ARMS: tuple[Arm, ...] = (
@@ -213,6 +220,11 @@ ARMS: tuple[Arm, ...] = (
     Arm("real_plus_synthetic_aug", 0.5, total_patches=32000),
     # Same images, the dataset's own pore labelling.
     Arm("synthetic_relabelled", 0.0, label_file="label_onlypores.tif"),
+    # The SliceGAN baseline on the same protocol. `pool` names which campaign
+    # the synthetic patches come from, so an arm cannot silently draw from the
+    # wrong generator.
+    Arm("slicegan_synthetic", 0.0, pool="slicegan"),
+    Arm("real_plus_slicegan_aug", 0.5, total_patches=32000, pool="slicegan"),
 )
 
 REFERENCE_ARM = "real"
@@ -507,6 +519,23 @@ class SyntheticPool:
         return stratum_keys(self.porosity, self.air)
 
 
+def slicegan_case_dirs(root: Path) -> list[Path]:
+    """Every generated case of the SliceGAN campaign.
+
+    A plain glob, not `check_synthetic_volumes`: that one requires the four
+    eval-v4 assessments a CONDITIONAL generator produces, and SliceGAN has one
+    unconditional assessment. Demanding the eval-v4 layout of a baseline that
+    cannot produce it would refuse a valid pool.
+    """
+    vols = Path(root) / "slicegan" / "volumes"
+    dirs = sorted(d for d in vols.glob("*") if (d / "label.tif").exists())
+    if not dirs:
+        raise MissingSyntheticVolumes(
+            f"no SliceGAN cases under {vols}. Generate them first:\n"
+            "  python scripts/analysis/slicegan_sample.py --checkpoint <run>/latest.ckpt")
+    return dirs
+
+
 def scan_synthetic_pool(case_dirs: list[Path], verbose: bool = True) -> SyntheticPool:
     import tifffile  # noqa: PLC0415  - only needed on the synthetic path
 
@@ -717,6 +746,7 @@ def arm_run_spec(arm: Arm, budget: Budget, seed: int, plan: ArmPlan) -> dict:
     """Everything that describes a run.  Everything but the data is shared."""
     return {
         "arm": arm.name,
+        "pool": arm.pool,
         "seed": seed,
         "real_fraction": arm.real_fraction,
         "n_real_patches": int(plan.real_rows.size),
@@ -1077,6 +1107,9 @@ def build_test_loader(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--slicegan-root", type=Path,
+                   default=REPO / "runs" / "campaigns" / "22-slicegan-baseline",
+                   help="campaign the slicegan_* arms draw their patches from")
     p.add_argument("--campaign-root", type=Path, default=CAMPAIGN_ROOT,
                    help="eval v4 campaign holding the synthetic volumes")
     p.add_argument("--out", type=Path, default=OUT_ROOT)
@@ -1106,19 +1139,28 @@ def main(argv: list[str] | None = None) -> int:
     arms = [arm_by_name(n) for n in args.arms]
     needs_synthetic = any(a.real_fraction < 1.0 for a in arms)
 
-    pool: SyntheticPool | None = None
-    case_dirs: list[Path] = []
-    if needs_synthetic:
-        print(f"Checking eval v4 campaign {args.campaign_root} ...", flush=True)
+    # One pool per GENERATOR, scanned only if a selected arm draws from it.
+    # Sharing a single pool across arms was fine while every arm drew from
+    # ldm06; a baseline arm must draw from the baseline, and keying the pool by
+    # `arm.pool` is what stops it silently drawing from the wrong one.
+    pools: dict[str, SyntheticPool] = {}
+    wanted = {a.pool for a in arms if arm_patch_counts(a, budget)[1] > 0}
+    for which in sorted(wanted):
         try:
-            case_dirs = check_synthetic_volumes(args.campaign_root, REPO)
+            if which == "slicegan":
+                case_dirs = slicegan_case_dirs(args.slicegan_root)
+                label = f"SliceGAN campaign {args.slicegan_root}"
+            else:
+                case_dirs = check_synthetic_volumes(args.campaign_root, REPO)
+                label = f"eval v4 campaign {args.campaign_root}"
         except MissingSyntheticVolumes as exc:
             # A stack trace here would bury the one thing the operator needs.
             print(f"\nREFUSING TO RUN\n\n{exc}", file=sys.stderr)
             return 2
-        print(f"  {len(case_dirs)} cases present.  Scanning patches ...", flush=True)
-        pool = scan_synthetic_pool(case_dirs)
-        print(f"  synthetic pool: {len(pool)} patches", flush=True)
+        print(f"Checking {label} ...  {len(case_dirs)} cases.  Scanning patches ...",
+              flush=True)
+        pools[which] = scan_synthetic_pool(case_dirs)
+        print(f"  {which} pool: {len(pools[which])} patches", flush=True)
 
     print("Loading the real patch index ...", flush=True)
     real_train = MemmapPatchDataset(PATCH_INDEX, DATA_ROOT, split="train")
@@ -1130,6 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
         perm = seed_permutation(len(real_train), budget, seed,
                                 n_draw=max_arm_total(budget))
         for arm in arms:
+            pool = pools.get(arm.pool)
             plans[(arm.name, seed)] = plan_arm(
                 arm, budget, seed, perm, real_keys,
                 pool.keys if pool is not None else None,
@@ -1158,15 +1201,17 @@ def main(argv: list[str] | None = None) -> int:
         for seed in budget.seeds:
             print(f"\n=== {arm.name}  seed {seed} ===", flush=True)
             runs.append(train_and_score(
-                arm, budget, seed, plans[(arm.name, seed)], real_train, pool,
-                test_loader, device, args.num_workers,
+                arm, budget, seed, plans[(arm.name, seed)], real_train,
+                pools.get(arm.pool), test_loader, device, args.num_workers,
             ))
 
     results = {
         "question": "Is the ldm06 synthetic data useful, not merely realistic?",
         "campaign_root": str(args.campaign_root),
-        "n_synthetic_cases": len(case_dirs),
-        "synthetic_pool_size": len(pool) if pool is not None else 0,
+        "slicegan_root": str(args.slicegan_root),
+        "pools": {k: len(v) for k, v in pools.items()},
+        "n_synthetic_cases": sum(len(v.case_dirs) for v in pools.values()),
+        "synthetic_pool_size": sum(len(v) for v in pools.values()),
         "budget": asdict(budget),
         "reference_arm": REFERENCE_ARM,
         "runs": runs,
