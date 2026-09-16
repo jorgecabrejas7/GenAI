@@ -1736,7 +1736,9 @@ def report_slicegan(res, root, floor) -> tuple[str, list[str]]:
         seams = r.get("seams") or {}
         rows.append([
             r["case"], f"{sh[1]}x{sh[2]}x{sh[0]}",
-            fmt((r.get("porosity") or {}).get("delivered_phi"), 4),
+            # phi_pore, NOT a "porosity" sub-block: that block is the request
+            # comparison and does not exist for a generator with no request.
+            fmt(r.get("phi_pore"), 4),
             fmt(r.get("air_fraction_interior"), 4),
             fmt(seams.get("seam_xct_ratio"), 3),
             fmt(seams.get("seam_xct_z_ratio"), 3),

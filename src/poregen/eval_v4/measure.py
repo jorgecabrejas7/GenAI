@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -1843,7 +1844,7 @@ def _anisotropy_block(cases, group: str) -> dict:
     }
 
 
-def measure_slicegan(root, repo) -> dict:
+def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
     """The SliceGAN baseline on the REQUEST-FREE metrics, and nothing else.
 
     SliceGAN is unconditional. It cannot be asked for a porosity, a layup, an
@@ -1866,9 +1867,29 @@ def measure_slicegan(root, repo) -> dict:
     """
     from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415
 
+    from poregen.eval_v4.memorisation import gpu_jobs_other_than  # noqa: PLC0415
+
     cases = load_cases(root, "slicegan")
     if not cases:
         raise FileNotFoundError(f"no slicegan volumes under {root}")
+
+    # FID is the only GPU work here. This machine shares 121 GB between host
+    # and device, and running a GPU job beside a training run killed a
+    # dataloader worker with SIGBUS once already. Everything else in this
+    # measurer is CPU, so FID alone stands down and says why — the assessment
+    # still delivers its seams, its phases and its anisotropy today.
+    busy = [] if allow_busy_gpu else gpu_jobs_other_than(os.getpid())
+    if busy:
+        logger.warning("slicegan FID SKIPPED: the card is busy with %s",
+                       ", ".join(f"{p} ({n})" for p, n in busy))
+
+    def fid(a, b, *, seed):
+        if busy:
+            return {"available": False,
+                    "blocked_by": [{"pid": p, "process": n} for p, n in busy],
+                    "reason": ("the card was busy; re-run `eval_v4 measure "
+                               "slicegan` when it is idle to fill this in")}
+        return MS.fid_between(a, b, seed=seed)
     reference = _micro_reference(root)
     if not reference:
         raise FileNotFoundError(
@@ -1895,8 +1916,8 @@ def measure_slicegan(root, repo) -> dict:
         b_p = [MS.profile_volume(c, group="real_b") for c in real_b]
         against = MS.compare_sets(gen_p, a_p + b_p)
         floor = MS.compare_sets(a_p, b_p)
-        fid_gen = MS.fid_between(micro, real_a + real_b, seed=int(level * 1e6))
-        fid_floor = MS.fid_between(real_a, real_b, seed=int(level * 1e6) + 1)
+        fid_gen = fid(micro, real_a + real_b, seed=int(level * 1e6))
+        fid_floor = fid(real_a, real_b, seed=int(level * 1e6) + 1)
         real_phi = float(np.mean([p.phi for p in a_p + b_p]))
         levels[f"{level:g}"] = {
             "level": level,
@@ -1980,12 +2001,18 @@ def measure(root: str | Path, assessment: str, repo: str | Path | None = None,
     if assessment not in MEASURERS:
         raise KeyError(f"unknown assessment {assessment!r}; choose from {sorted(MEASURERS)}")
     repo = Path(repo) if repo else repo_root()
-    # Only microstructure carries the full-store memorisation search, so only
-    # microstructure has a reason to care whether the card is busy.  Naming the
-    # one measurer is honest; giving every measurer a flag it ignores is not.
+    # Only microstructure and the baselines have GPU work, so only they have a
+    # reason to care whether the card is busy.  Naming the measurers is honest;
+    # giving every measurer a flag it ignores is not.
     extra = ({"allow_busy_gpu": allow_busy_gpu,
               "reuse_memorisation": reuse_memorisation}
              if assessment == "microstructure" else {})
+    # The baseline's FID is its only GPU work, and the same unified-memory rule
+    # applies to it: it must not run beside a training job. Everything else in
+    # that measurer is CPU, so FID skips itself with a reason rather than the
+    # whole assessment waiting for an idle card.
+    if assessment == "slicegan":
+        extra = {"allow_busy_gpu": allow_busy_gpu}
     results = MEASURERS[assessment](Path(root), repo, **extra)
     # A measurer whose `per_case` is not one row per case of its own assessment
     # sets these itself: `assembly` reads the SAMPLER volumes, and `geometry`
