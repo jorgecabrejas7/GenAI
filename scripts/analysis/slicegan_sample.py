@@ -63,20 +63,92 @@ def git_commit() -> str:
         return "0" * 40
 
 
+#: Latent cells of halo around each tile. The generator is fully convolutional,
+#: so a tile with enough halo reproduces the single-pass result EXACTLY in its
+#: interior — this is not a blend and there is no seam.
+#:
+#: MEASURED, not assumed: a latent tile starting at cell `a` produces output
+#: starting at voxel 32a, a tile of n cells produces 32n - 64 voxels, and only
+#: the 2 outermost voxels differ from the full pass. The arithmetic then forces
+#: h >= 2 (the core must fit inside 32n - 64), and at exactly 2 the cores tile
+#: with nothing wasted. `tests/test_slicegan.py` asserts the reproduction.
+HALO_CELLS = 2
+#: Core cells per tile. 8 cores + 2x2 halo = 12 cells -> a 320-voxel cube per
+#: forward pass, which is the size that keeps a 1024-wide volume inside memory.
+CORE_CELLS = 8
+
+
 @torch.no_grad()
-def generate(gen, shape, seed: int, device, tile_batch: int = 1):
+def generate(gen, shape, seed: int, device, core: int = CORE_CELLS):
     """One volume: grey as uint8 and the 3-class label.
 
-    The generator is run in ONE forward pass over the whole latent, not tiled.
-    Tiling would put a seam at every tile face and the seam metric would then be
-    measuring this script rather than the method.
+    A SINGLE FORWARD PASS WOULD BE IDEAL AND IS NOT AFFORDABLE. At
+    192x1024x1024 the last layer alone holds ngf x 2.0e8 activations; the first
+    attempt at this took the machine to 119 GB of its 121 GB unified pool
+    before it was stopped.
+
+    So the latent is tiled with a halo instead. Because the generator is fully
+    convolutional, each tile's interior is BIT-EXACT against the single pass —
+    this introduces no seam and is not a blend. The halo is what buys that, and
+    its size was measured rather than guessed.
     """
+    from poregen.baselines.slicegan.networks import latent_for_shape
+
     g = torch.Generator(device="cpu").manual_seed(seed)
-    z = gen.sample_latent(shape, n=1, generator=g).to(device)
-    out = gen(z)[0]
-    grey = ((out[0].clamp(-1, 1) + 1.0) * 127.5).round().clamp(0, 255)
-    label = out[1:].argmax(dim=0).to(torch.uint8)
-    return grey.to(torch.uint8).cpu().numpy(), label.cpu().numpy()
+    z_full = gen.sample_latent(shape, n=1, generator=g)
+    n_cells = latent_for_shape(shape)
+
+    grey = torch.empty(shape, dtype=torch.uint8)
+    label = torch.empty(shape, dtype=torch.uint8)
+
+    def cores(n: int) -> list[tuple[int, int]]:
+        """(start, length) in CELLS whose outputs tile the volume.
+
+        ONLY n - 2 CELLS PRODUCE OUTPUT. A latent of n cells gives 32n - 64
+        voxels, which is 32(n - 2): cell a maps to voxel 32a, and the last two
+        cells fall off the end. Tiling all n cells asks for output that does not
+        exist, and the guard below caught exactly that on the first attempt.
+        """
+        producing = n - 2
+        out, a = [], 0
+        while a < producing:
+            c = min(core, producing - a)
+            out.append((a, c))
+            a += c
+        return out
+
+    for z0, cz in cores(n_cells[0]):
+        for y0, cy in cores(n_cells[1]):
+            for x0, cx in cores(n_cells[2]):
+                sl, off, size = [], [], []
+                for a0, c, n in ((z0, cz, n_cells[0]), (y0, cy, n_cells[1]),
+                                 (x0, cx, n_cells[2])):
+                    lo = max(0, a0 - HALO_CELLS)
+                    hi = min(n, a0 + c + HALO_CELLS)
+                    sl.append(slice(lo, hi))
+                    off.append(32 * a0 - 32 * lo)
+                    size.append(32 * c)
+                tile = z_full[:, :, sl[0], sl[1], sl[2]].to(device)
+                out = gen(tile)[0]
+                cut = out[:, off[0]:off[0] + size[0],
+                          off[1]:off[1] + size[1],
+                          off[2]:off[2] + size[2]]
+                if tuple(cut.shape[1:]) != tuple(size):
+                    raise RuntimeError(
+                        f"tile at cells ({z0},{y0},{x0}) gave {tuple(cut.shape[1:])} "
+                        f"voxels where {tuple(size)} were needed — the halo is too "
+                        f"small for this geometry, which would silently truncate "
+                        f"the volume.")
+                g_t = ((cut[0].clamp(-1, 1) + 1.0) * 127.5).round().clamp(0, 255)
+                dst = (slice(32 * z0, 32 * z0 + size[0]),
+                       slice(32 * y0, 32 * y0 + size[1]),
+                       slice(32 * x0, 32 * x0 + size[2]))
+                grey[dst] = g_t.to(torch.uint8).cpu()
+                label[dst] = cut[1:].argmax(dim=0).to(torch.uint8).cpu()
+                del tile, out, cut
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+    return grey.numpy(), label.numpy()
 
 
 def main() -> int:
