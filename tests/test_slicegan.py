@@ -9,6 +9,11 @@ the first time this was written.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+from unittest import mock
+
 import numpy as np
 import pytest
 import torch
@@ -20,6 +25,20 @@ from poregen.baselines.slicegan.networks import (
     shape_for_latent,
     volume_to_slices,
 )
+
+
+def _load_sampler():
+    """The sampler lives in scripts/, which is not a package."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "analysis" / "slicegan_sample.py"
+    spec = importlib.util.spec_from_file_location("slicegan_sample", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["slicegan_sample"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+sg_module = _load_sampler()
+sg_generate = sg_module.generate
 
 
 class TestGeneratorGeometry:
@@ -52,6 +71,68 @@ class TestGeneratorGeometry:
         g = Generator3D(ngf=8)
         v = g(torch.randn(1, g.nz, 8, 4, 4))
         assert tuple(v.shape)[2:] == (192, 64, 64)
+
+
+class TestHaloTiling:
+    """The tiled sampler must equal the single forward pass, EXACTLY.
+
+    Tiling exists because a 192x1024x1024 volume in one pass took this machine
+    to 119 GB of its 121 GB unified pool. It is only legitimate if it changes
+    nothing: the generator is fully convolutional, so a tile carrying enough
+    halo reproduces the full pass in its interior bit for bit. "Close enough"
+    is not the claim being made, so the test is equality and not a tolerance.
+    """
+
+    @staticmethod
+    def _single_pass(gen, shape, seed):
+        g = torch.Generator(device="cpu").manual_seed(seed)
+        with torch.no_grad():
+            out = gen(gen.sample_latent(shape, n=1, generator=g))[0]
+        grey = ((out[0].clamp(-1, 1) + 1) * 127.5).round().clamp(0, 255)
+        return grey.to(torch.uint8).numpy(), out[1:].argmax(dim=0).to(torch.uint8).numpy()
+
+    @pytest.mark.parametrize("shape,core", [((128, 128, 128), 2), ((192, 192, 192), 3)])
+    def test_the_tiled_volume_equals_the_single_pass(self, shape, core):
+        gen = Generator3D(ngf=8).eval()
+        torch.manual_seed(0)
+        tiled_g, tiled_l = sg_generate(gen, shape, seed=7,
+                                       device=torch.device("cpu"), core=core)
+        full_g, full_l = self._single_pass(gen, shape, 7)
+        assert np.array_equal(tiled_g, full_g)
+        assert np.array_equal(tiled_l, full_l)
+
+    def test_the_cores_cover_the_volume_and_nothing_more(self):
+        """The bug this caught: a latent of n cells makes 32(n-2) voxels.
+
+        Tiling all n cells asks the generator for output past the end of the
+        volume. The first version did exactly that and the guard stopped it at
+        cells (0,0,4) rather than writing a truncated volume.
+        """
+        gen = Generator3D(ngf=8).eval()
+        shape = (128, 192, 256)
+        n_cells = latent_for_shape(shape)
+        grey, _ = sg_generate(gen, shape, seed=1, device=torch.device("cpu"), core=2)
+        assert grey.shape == shape
+        for axis in range(3):
+            assert 32 * (n_cells[axis] - 2) == shape[axis]
+
+    def test_a_smaller_halo_would_not_reproduce_the_full_pass(self):
+        """The guard on the guard: 2 cells is the MINIMUM, not a safe margin.
+
+        If a halo of 1 also reproduced the full pass, the measured receptive
+        field would be wrong and the constant would be carrying no weight.
+        """
+        gen = Generator3D(ngf=8).eval()
+        torch.manual_seed(0)
+        shape = (128, 128, 128)
+        full_g, _ = self._single_pass(gen, shape, 7)
+        with mock.patch.object(sg_module, "HALO_CELLS", 1):
+            try:
+                thin_g, _ = sg_generate(gen, shape, seed=7,
+                                        device=torch.device("cpu"), core=2)
+            except RuntimeError:
+                return          # refused outright, which is also a failure to tile
+        assert not np.array_equal(thin_g, full_g)
 
 
 class TestOutputContract:

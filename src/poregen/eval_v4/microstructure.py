@@ -192,6 +192,108 @@ def s2_radial(
     return r_vals, s2
 
 
+def s2_directional(
+    binary: np.ndarray,
+    r_max: int = S2_R_MAX,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """S2 along each axis SEPARATELY, from the same estimator as :func:`s2_radial`.
+
+    WHY A SECOND BINNING. ``s2_radial`` averages every lag at a given distance
+    over direction, so a material whose pores are flat in-plane and a material
+    whose pores are round give the SAME curve if their radial average matches.
+    That is exactly the question a laminate poses, and exactly the question the
+    SliceGAN per-axis critic divergence poses, so neither can be answered by
+    the isotropic curve.
+
+    The estimator is identical — the same Hann window, the same debias by the
+    window's own autocorrelation — and only the binning differs: this reads the
+    lags that lie ON each axis instead of the shells that cross all three. So a
+    difference between this and ``s2_radial`` is a property of the material and
+    never of the method.
+
+    Returns integer lags ``1..r_max`` and one curve per axis. Lag 0 is omitted:
+    it is the phase fraction, is the same in all three directions by
+    construction, and would dominate any distance between curves.
+    """
+    if binary.ndim != 3 or len({*binary.shape}) != 1:
+        raise ValueError(
+            f"s2_directional needs a cubic window, got shape {binary.shape}."
+        )
+    side = binary.shape[0]
+    if r_max >= side // 2:
+        raise ValueError(
+            f"r_max {r_max} must stay under half the {side}-voxel window: the FFT "
+            "autocorrelation wraps around, so a longer lag reads the window's "
+            "opposite face as though it were a neighbour."
+        )
+    w, win_auto = _hann_kernel(side)
+    f = np.fft.fftn(binary.astype(np.float64) * w)
+    raw = np.real(np.fft.ifftn(f * np.conj(f)))
+    auto = np.where(win_auto > 1e-10, raw / win_auto, 0.0).reshape(side, side, side)
+
+    lags = np.arange(1, r_max + 1)
+    out = {}
+    for axis, name in enumerate(("z", "y", "x")):
+        idx = [0, 0, 0]
+        curve = np.empty(r_max, np.float64)
+        for i, r in enumerate(lags):
+            idx[axis] = int(r)
+            curve[i] = auto[tuple(idx)]
+            idx[axis] = 0
+        out[name] = curve
+    return lags.astype(np.float64), out
+
+
+@requires()
+def s2_directional_profile(
+    label: np.ndarray,
+    material: np.ndarray,
+    *,
+    manifest: Manifest,
+) -> dict:
+    """Mean directional S2 over every fully-material window of one volume.
+
+    Same windows, same acceptance rule and same skip accounting as
+    :func:`s2_profile`, so the isotropic and directional readings of one volume
+    are computed on exactly the same material.
+    """
+    curves: dict[str, list] = {"z": [], "y": [], "x": []}
+    skipped = 0
+    lags = None
+    for z, y, x in analysis_windows(label.shape, S2_WINDOW, S2_STRIDE):
+        sl = np.s_[z:z + S2_WINDOW, y:y + S2_WINDOW, x:x + S2_WINDOW]
+        mat = material[sl]
+        if mat.mean() < S2_MIN_MATERIAL:
+            skipped += 1
+            continue
+        lags, per_axis = s2_directional((label[sl] == LABEL_PORE) & mat)
+        for k, v in per_axis.items():
+            curves[k].append(v)
+    if lags is None:
+        raise ValueError(
+            f"{manifest.assessment}/{manifest.case}: no {S2_WINDOW}-cubed window is "
+            f"at least {S2_MIN_MATERIAL:.0%} requested material, so directional S2 "
+            "has nothing to measure that is not part exterior air."
+        )
+    mean = {k: np.mean(v, axis=0) for k, v in curves.items()}
+    # The anisotropy of ONE volume in one number: the spread of the three
+    # curves against their own mean. Zero is isotropic. It is a ratio, so it is
+    # comparable between a generated volume and a real crop at a different
+    # porosity — the raw curves are not.
+    stack = np.vstack([mean["z"], mean["y"], mean["x"]])
+    ref = stack.mean(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        spread = np.where(ref > 1e-12, (stack.max(axis=0) - stack.min(axis=0)) / ref, np.nan)
+    return {
+        "r": lags.tolist(),
+        "s2": {k: v.tolist() for k, v in mean.items()},
+        "anisotropy": float(np.nanmean(spread)),
+        "n_windows": len(curves["z"]),
+        "n_windows_skipped": skipped,
+        "window": S2_WINDOW,
+    }
+
+
 def analysis_windows(shape: tuple[int, int, int], side: int, stride: int) -> list[tuple[int, int, int]]:
     """Origins of every ``side``-cubed window on a ``stride`` grid, last one flush.
 

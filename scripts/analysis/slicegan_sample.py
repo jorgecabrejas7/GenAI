@@ -198,12 +198,28 @@ def main() -> int:
             # metrics to treat the whole canvas as specimen. SliceGAN was asked
             # for nothing, which is why every requested_* field is absent.
             requested_material="full",
+            # THE MEASUREMENT GRID, NOT A PROPERTY OF THIS GENERATOR. SliceGAN
+            # has no chunks and no windows — it is fully convolutional and its
+            # tiling here is bit-exact. These are ldm06's PRODUCTION values, and
+            # they are carried so the seam statistic is evaluated at exactly the
+            # planes ldm06 is scored at. That is what makes this volume a
+            # CONTROL: a seam ratio near 1 on a generator that has no seams says
+            # the metric reads ordinary texture as ordinary texture, and a high
+            # ratio here would mean the metric, not the model, is the finding.
+            chunk_tiles=(3, 3, 3),
+            window_stride=32,
             wall_time_s=wall,
             peak_gpu_memory_bytes=(int(torch.cuda.max_memory_allocated(device))
                                    if device.type == "cuda" else None),
             notes={
                 "baseline": "SliceGAN (Kench & Cooper 2021, arXiv:2102.07708)",
                 "unconditional": True,
+                "chunk_tiles_are_the_measurement_grid":
+                    "chunk_tiles and window_stride are ldm06's production values, "
+                    "carried so the seam statistic is evaluated at the same plane "
+                    "positions ldm06 is scored at. SliceGAN has no chunk planes "
+                    "and no window planes; these volumes are the CONTROL for "
+                    "that statistic, not a model with the same structure",
                 "no_request_because":
                     "SliceGAN has no conditioning path: it cannot be asked for a "
                     "porosity, a layup, an envelope or a shape, so every "

@@ -1799,6 +1799,158 @@ def measure_ood_conditioning(root, repo) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# baselines - measured, never generated, by eval_v4
+# ---------------------------------------------------------------------------
+
+def _anisotropy_block(cases, group: str) -> dict:
+    """Directional S2 and adjacent-slice contrast, per axis, over a set.
+
+    TWO INDEPENDENT READINGS OF THE SAME PROPERTY, on purpose. The directional
+    S2 is a correlation length per axis; the adjacent-slice mean |difference|
+    is the raw contrast between neighbouring planes and shares no code with it.
+    A real anisotropy moves both. A bug in one moves one.
+    """
+    from poregen.diffusion.sampler import seam_discontinuity  # noqa: PLC0415
+    from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415
+
+    curves: dict[str, list] = {"z": [], "y": [], "x": []}
+    aniso, slice_mad = [], {"z": [], "y": [], "x": []}
+    for c in cases:
+        prof = MS.s2_directional_profile(c.label, c.material_voxels(),
+                                         manifest=c.manifest)
+        for k in curves:
+            curves[k].append(prof["s2"][k])
+        aniso.append(prof["anisotropy"])
+        # The interior MAD of the window-plane statistic IS the mean adjacent-
+        # slice contrast along that axis, already computed per axis and already
+        # excluding the planes. Re-using it keeps one definition of "contrast".
+        d = seam_discontinuity(c.xct.astype(np.float32) / 255.0, TILE, prefix="s")
+        for k in slice_mad:
+            slice_mad[k].append(d[f"s_{k}_interior_mad"])
+    mean = {k: np.mean(v, axis=0).tolist() for k, v in curves.items()}
+    mad = {k: float(np.mean(v)) for k, v in slice_mad.items()}
+    ref = float(np.mean(list(mad.values())))
+    return {
+        "group": group,
+        "n_volumes": len(cases),
+        "r": list(range(1, MS.S2_R_MAX + 1)),
+        "s2": mean,
+        "s2_anisotropy": M.mean_sd(aniso),
+        "slice_contrast_mad": mad,
+        "slice_contrast_spread": (
+            (max(mad.values()) - min(mad.values())) / ref if ref > 1e-12 else None),
+    }
+
+
+def measure_slicegan(root, repo) -> dict:
+    """The SliceGAN baseline on the REQUEST-FREE metrics, and nothing else.
+
+    SliceGAN is unconditional. It cannot be asked for a porosity, a layup, an
+    envelope or a shape, so every conditional table is inapplicable to it and
+    is absent here rather than filled with a number that would look like a
+    score. What is left is what both models can be asked the same question
+    about: what the material looks like.
+
+    THE POROSITY IS NOT MATCHED AND CANNOT BE. Whatever porosity the generator
+    settles on is what it delivers, so it is compared against all three matched
+    real levels rather than against the one closest to it: a single level would
+    let the choice of level carry the result. The level whose real porosity is
+    nearest the delivered value is named, and the gap is reported with it.
+
+    The anisotropy block is here because the three critics diverged during
+    training — axis z ended 12.95 apart from y and x — and that is only a
+    finding if the VOLUMES are anisotropic in a way real material is not. Real
+    laminate IS anisotropic, so the generated anisotropy is read against the
+    real floor's, never on its own.
+    """
+    from poregen.eval_v4 import microstructure as MS  # noqa: PLC0415
+
+    cases = load_cases(root, "slicegan")
+    if not cases:
+        raise FileNotFoundError(f"no slicegan volumes under {root}")
+    reference = _micro_reference(root)
+    if not reference:
+        raise FileNotFoundError(
+            f"{root}/real_floor holds no matched-porosity reference crops. The "
+            "floor depends only on the test panels and the detector, not on any "
+            f"model, so link the one campaign 12 already cut: ln -s "
+            f"$(pwd)/runs/campaigns/12-eval-v4/real_floor {root}/real_floor")
+
+    rows = [measure_core(c) for c in cases]
+
+    # Microstructure is estimated on the 192-cubed set: they are independent
+    # draws, which is what a distribution distance needs. The 1024-wide pair is
+    # two draws and is measured for seams and phases, not for distributions.
+    micro = [c for c in cases if tuple(c.manifest.volume_shape) == (192, 192, 192)]
+    gen_p = [MS.profile_volume(c, group="slicegan") for c in micro]
+    gen_phi = float(np.mean([p.phi for p in gen_p]))
+
+    levels: dict[str, dict] = {}
+    for level in sorted(reference):
+        real_a, real_b = reference[level].get("a", []), reference[level].get("b", [])
+        if not real_a or not real_b:
+            continue
+        a_p = [MS.profile_volume(c, group="real_a") for c in real_a]
+        b_p = [MS.profile_volume(c, group="real_b") for c in real_b]
+        against = MS.compare_sets(gen_p, a_p + b_p)
+        floor = MS.compare_sets(a_p, b_p)
+        fid_gen = MS.fid_between(micro, real_a + real_b, seed=int(level * 1e6))
+        fid_floor = MS.fid_between(real_a, real_b, seed=int(level * 1e6) + 1)
+        real_phi = float(np.mean([p.phi for p in a_p + b_p]))
+        levels[f"{level:g}"] = {
+            "level": level,
+            "real_phi": M.mean_sd([p.phi for p in a_p + b_p]),
+            "generated_phi": M.mean_sd([p.phi for p in gen_p]),
+            "phi_gap": gen_phi - real_phi,
+            "n_generated": len(gen_p), "n_real_a": len(a_p), "n_real_b": len(b_p),
+            "generated_vs_real": against,
+            "real_vs_real": floor,
+            "ratio": {
+                "s2_w1": MS.ratio(against["s2_w1"], floor["s2_w1"]),
+                "psd_w1": MS.ratio(against["psd_w1"], floor["psd_w1"]),
+                "ripley_log_ratio": MS.ratio(
+                    against["ripley_log_ratio"], floor["ripley_log_ratio"]),
+                "fid": MS.ratio(fid_gen.get("mean"), fid_floor.get("mean")),
+            },
+            "fid_generated_vs_real": fid_gen,
+            "fid_real_vs_real": fid_floor,
+        }
+    nearest = min(levels, key=lambda k: abs(levels[k]["phi_gap"])) if levels else None
+
+    real_all = [c for pair in reference.values() for c in pair.get("a", []) + pair.get("b", [])]
+    return {
+        "assessment": "slicegan",
+        "question": "What does an unconditional 3-D GAN deliver on the metrics "
+                    "that do not need a request?",
+        "note": (
+            "Request-free metrics ONLY. SliceGAN has no conditioning path, so "
+            "porosity error, layup agreement, surface agreement and every "
+            "envelope score are inapplicable and absent rather than zero. "
+            "Porosity is whatever the generator delivers: the set is scored "
+            "against all three matched real levels, and the nearest one is "
+            "named with its gap. The seam ratios are measured at the SAME plane "
+            "positions as ldm06's even though this generator has no chunk "
+            "planes — that is what makes them a control: a ratio near 1 here "
+            "says the metric reads ordinary texture as ordinary texture."
+        ),
+        "baseline": "SliceGAN (Kench & Cooper 2021, arXiv:2102.07708)",
+        "per_case": rows,
+        "levels": levels,
+        "nearest_level": nearest,
+        "anisotropy": {
+            "generated": _anisotropy_block(micro, "slicegan"),
+            "real": _anisotropy_block(real_all, "real_floor"),
+            "note": (
+                "Real laminate is anisotropic, so a generated anisotropy is only "
+                "a fault if it differs from the real one. Read the two "
+                "s2_anisotropy values and the two slice_contrast_mad triples "
+                "against each other, never the generated triple on its own."
+            ),
+        },
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -1814,6 +1966,10 @@ MEASURERS = {
     "assembly_modes": measure_assembly_modes,
     "stress_geometry": measure_stress_geometry,
     "ood_conditioning": measure_ood_conditioning,
+    # Baselines. eval_v4 measures them but never generates them: their volumes
+    # come from the baseline's own sampling script, which is why they are in
+    # MEASURE_ONLY and have no entry in ASSESSMENTS.
+    "slicegan": measure_slicegan,
 }
 
 

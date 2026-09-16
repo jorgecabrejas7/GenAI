@@ -1727,6 +1727,112 @@ def _fig_ood_conditioning(res, root) -> list[str]:
     return savefig(fig, figures_dir(root, "ood_conditioning"), "porosity_extremes")
 
 
+def report_slicegan(res, root, floor) -> tuple[str, list[str]]:
+    """The baseline's own page: what it delivers, and what it cannot be asked."""
+    per = res["per_case"]
+    rows = []
+    for r in sorted(per, key=lambda r: (tuple(r["volume_shape"]), r["case"])):
+        sh = tuple(r["volume_shape"])
+        seams = r.get("seams") or {}
+        rows.append([
+            r["case"], f"{sh[1]}x{sh[2]}x{sh[0]}",
+            fmt((r.get("porosity") or {}).get("delivered_phi"), 4),
+            fmt(r.get("air_fraction_interior"), 4),
+            fmt(seams.get("seam_xct_ratio"), 3),
+            fmt(seams.get("seam_xct_z_ratio"), 3),
+            fmt(seams.get("seam_xct_y_ratio"), 3),
+            fmt(seams.get("seam_xct_x_ratio"), 3),
+            fmt(r.get("wall_time_s"), 1),
+        ])
+    floor_rows = []
+    for tag, f in (floor or {}).get("by_shape", {}).items():
+        floor_rows.append([f"real {tag}", "--", ms(f["phi_pore"], 4),
+                           ms(f["air_fraction_interior"], 4),
+                           ms(f["seam_xct_ratio"], 3), "--", "--", "--", "--"])
+
+    body = ["## What the baseline delivers\n",
+            table(["case", "shape", "phi", "air (interior)", "seam xct",
+                   "seam z", "seam y", "seam x", "wall s"],
+                  floor_rows + rows),
+            "",
+            "SliceGAN has no chunk planes. The window-plane ratios are measured "
+            "at the SAME positions as ldm06's and are therefore a CONTROL, not a "
+            "score: a ratio near the real row says the metric reads ordinary "
+            "texture as ordinary texture.",
+            ""]
+
+    lev = res.get("levels") or {}
+    if lev:
+        near = res.get("nearest_level")
+        rows = []
+        for k, c in sorted(lev.items(), key=lambda kv: kv[1]["level"]):
+            rt = c["ratio"]
+            rows.append([
+                k + (" (nearest)" if k == near else ""),
+                ms(c["real_phi"], 4), f"{c['phi_gap']:+.4f}",
+                fmt(rt["s2_w1"], 2), fmt(rt["psd_w1"], 2),
+                fmt(rt["ripley_log_ratio"], 2), fmt(rt["fid"], 2),
+            ])
+        body += ["## Microstructure, against every matched real level\n",
+                 table(["real level", "real phi", "phi gap (gen - real)",
+                        "S2 W1 /floor", "PSD W1 /floor", "Ripley /floor",
+                        "FID /floor"], rows),
+                 "",
+                 "Every column is a RATIO to the real-vs-real floor at that "
+                 "level: 1.0 means as close to real material as two disjoint "
+                 "crops of one real panel are to each other. The porosity is "
+                 "not matched and cannot be — the generator is unconditional — "
+                 "so all three levels are shown and the gap is in the table. "
+                 "Read the nearest row first and the others as the size of the "
+                 "porosity confound.",
+                 ""]
+
+    an = res.get("anisotropy") or {}
+    g, rl = an.get("generated"), an.get("real")
+    if g and rl:
+        body += ["## Anisotropy: is z really different from y and x?\n",
+                 table(["set", "n", "S2 anisotropy", "slice contrast z",
+                        "slice contrast y", "slice contrast x", "spread"],
+                       [[b["group"], str(b["n_volumes"]), ms(b["s2_anisotropy"], 3),
+                         fmt(b["slice_contrast_mad"]["z"], 4),
+                         fmt(b["slice_contrast_mad"]["y"], 4),
+                         fmt(b["slice_contrast_mad"]["x"], 4),
+                         fmt(b["slice_contrast_spread"], 3)]
+                        for b in (g, rl)]),
+                 "",
+                 an.get("note", ""),
+                 ""]
+
+    figs = _fig_slicegan(res, root)
+    return "\n".join(body) + "\n", figs
+
+
+def _fig_slicegan(res, root) -> list[str]:
+    """Directional S2 for generated and real, side by side.
+
+    Two panels and not one: the curves sit at different porosities, so drawing
+    all six together would show the porosity gap and hide the shape difference
+    that the figure is for.
+    """
+    an = res.get("anisotropy") or {}
+    g, rl = an.get("generated"), an.get("real")
+    if not (g and rl):
+        return []
+    set_style()
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.4), sharex=True)
+    for ax, b, title in ((axes[0], g, "SliceGAN"), (axes[1], rl, "real floor")):
+        for j, axis in enumerate(("z", "y", "x")):
+            ax.plot(b["r"], b["s2"][axis], color=SERIES_COLORS[j], lw=1.4,
+                    label=f"along {axis}")
+        ax.set_title(f"{title} (n={b['n_volumes']})")
+        ax.set_xlabel("lag (voxels)")
+        ax.set_yscale("log")
+    axes[0].set_ylabel("S2(r), pore phase")
+    axes[0].legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    return savefig(fig, figures_dir(root, "slicegan"), "directional_s2")
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -1743,6 +1849,7 @@ REPORTERS = {
     "real_floor": report_real_floor,
     "stress_geometry": report_stress_geometry,
     "ood_conditioning": report_ood_conditioning,
+    "slicegan": report_slicegan,
 }
 
 

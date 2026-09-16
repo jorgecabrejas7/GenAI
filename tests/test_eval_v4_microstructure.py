@@ -139,6 +139,88 @@ class TestTwoPointCorrelation:
             MS.s2_radial(np.zeros((8, 8, 16), bool))
 
 
+def ellipsoid_pores(side, half, n=4000, seed=1):
+    """``n`` ellipsoidal pores of half-axes ``half`` = (z, y, x), placed at random."""
+    sz, sy, sx = half
+    r = np.random.default_rng(seed)
+    v = np.zeros((side,) * 3, bool)
+    zz, yy, xx = np.ogrid[-sz:sz + 1, -sy:sy + 1, -sx:sx + 1]
+    ker = (zz / sz) ** 2 + (yy / sy) ** 2 + (xx / sx) ** 2 <= 1.0
+    for z, y, x in r.integers([sz, sy, sx], [side - sz - 1, side - sy - 1, side - sx - 1],
+                              size=(n, 3)):
+        v[z - sz:z + sz + 1, y - sy:y + sy + 1, x - sx:x + sx + 1] |= ker
+    return v
+
+
+def half_decay(lags, curve):
+    """The lag at which a curve has fallen halfway to its own plateau."""
+    plateau = curve[-10:].mean()
+    below = curve < plateau + (curve[0] - plateau) / 2
+    return float(lags[np.argmax(below)]) if below.any() else float("nan")
+
+
+class TestDirectionalS2:
+    """Pores of a KNOWN shape, because the whole point is to read shape.
+
+    Each case has an answer that does not come from this code: a pore whose
+    half-axis along z is 1 voxel and 5 along y and x must decorrelate sooner
+    along z, whatever the estimator.
+    """
+
+    def test_round_pores_give_the_same_curve_in_every_direction(self):
+        lags, d = MS.s2_directional(ellipsoid_pores(128, (3, 3, 3)))
+        assert half_decay(lags, d["z"]) == half_decay(lags, d["y"]) == half_decay(lags, d["x"])
+
+    def test_flat_pores_decorrelate_soonest_along_their_short_axis(self):
+        lags, d = MS.s2_directional(ellipsoid_pores(128, (1, 5, 5)))
+        assert half_decay(lags, d["z"]) < half_decay(lags, d["y"])
+        assert half_decay(lags, d["z"]) < half_decay(lags, d["x"])
+
+    def test_long_pores_decorrelate_latest_along_their_long_axis(self):
+        lags, d = MS.s2_directional(ellipsoid_pores(128, (6, 2, 2)))
+        assert half_decay(lags, d["z"]) > half_decay(lags, d["y"])
+        assert half_decay(lags, d["z"]) > half_decay(lags, d["x"])
+
+    def test_the_isotropic_curve_cannot_tell_the_two_apart(self):
+        """The reason this function exists, stated as a test.
+
+        Flat-in-z and long-in-z are OPPOSITE anisotropies. The radial curve
+        averages over direction, so it orders them by their mean pore size and
+        not by their shape — a reader of that curve alone would draw the wrong
+        conclusion, and did.
+        """
+        flat = ellipsoid_pores(128, (1, 5, 5))
+        long = ellipsoid_pores(128, (6, 2, 2))
+        r, s_flat = MS.s2_radial(flat)
+        _, s_long = MS.s2_radial(long)
+        # The radial curves are not opposites of each other in any direction:
+        # both are single decaying curves and neither carries the axis.
+        assert half_decay(r, s_flat) < half_decay(r, s_long)
+        # The directional reading puts them the right way round on z.
+        lags, d_flat = MS.s2_directional(flat)
+        _, d_long = MS.s2_directional(long)
+        assert half_decay(lags, d_flat["z"]) < half_decay(lags, d_long["z"])
+
+    def test_the_anisotropy_scalar_is_lowest_for_round_pores(self):
+        def aniso(half):
+            _, d = MS.s2_directional(ellipsoid_pores(128, half))
+            st = np.vstack([d["z"], d["y"], d["x"]])
+            ref = st.mean(axis=0)
+            return float(np.nanmean(np.where(ref > 1e-12,
+                                             (st.max(0) - st.min(0)) / ref, np.nan)))
+        assert aniso((3, 3, 3)) < aniso((1, 5, 5))
+        assert aniso((3, 3, 3)) < aniso((6, 2, 2))
+
+    def test_a_lag_past_half_the_window_is_refused(self):
+        """The FFT autocorrelation wraps, so a long lag reads the opposite face."""
+        with pytest.raises(ValueError, match="wraps around"):
+            MS.s2_directional(np.zeros((64, 64, 64), bool), r_max=32)
+
+    def test_a_non_cubic_window_is_refused(self):
+        with pytest.raises(ValueError, match="cubic"):
+            MS.s2_directional(np.zeros((32, 32, 64), bool))
+
+
 class TestCurveW1:
     def test_two_shifted_spikes_are_their_separation_apart(self):
         """W1 between two point masses is the distance between them, in voxels."""
