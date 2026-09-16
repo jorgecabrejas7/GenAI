@@ -140,6 +140,7 @@ rsync -avP --partial $H/runs/campaigns/19-stress-geometry     ./campaigns/
 rsync -avP --partial $H/runs/campaigns/18-eval-v4-final       ./campaigns/
 rsync -avP --partial $H/runs/campaigns/20-ood-conditioning    ./campaigns/
 rsync -avP --partial $H/runs/campaigns/21-real-porosity-by-region ./campaigns/
+rsync -avP --partial $H/runs/campaigns/22-slicegan-baseline    ./campaigns/
 rsync -avP --partial --exclude 'r08_*' --exclude 'calibration_probe*' --exclude 'gate_*' $H/runs/campaigns/09-r08-latent-sweep ./campaigns/
 rsync -avP --partial $H/runs/campaigns/11-decoder-ft         ./campaigns/
 rsync -avP --partial $H/runs/campaigns/14-downstream-utility ./campaigns/
@@ -238,6 +239,7 @@ STRESS_ROOT = CAMPAIGNS / "19-stress-geometry"
 FINAL_ROOT = CAMPAIGNS / "18-eval-v4-final"
 OOD_ROOT = CAMPAIGNS / "20-ood-conditioning"
 REALPOR_ROOT = CAMPAIGNS / "21-real-porosity-by-region"
+BASELINE_ROOT = CAMPAIGNS / "22-slicegan-baseline"
 RUNGS_ROOT = CAMPAIGNS / "09-r08-latent-sweep"
 CONV_JSONL = next((p for p in [CAMPAIGNS / "ldm06_convergence_check.jsonl",
                                ROOT.parents[2] / "ldm" / "ldm06-run-0001-20260907-145657-z8-c128-bs256-lr1e-04" / "convergence_check.jsonl"]
@@ -1173,6 +1175,7 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-14 16:57 | **Campaign 19 closed (18 cases).** DDIM-200 changes nothing against DDIM-50: largest air-Dice difference 0.0005, band moves ≤ 0.013, seams identical. The step count is not a lever on off-manifold geometry. Downstream arms 4–6 started 16:57 (ETA 03:00 on 09-15), then rf-2 / rf-64 (Sep 16 evening). | section *stress geometries*; vault E11 |
 | 09-15 03:00 | **Downstream utility, six arms final** (18 runs). Pore Dice on real test scans: real 16k 0.841, **real 8k 0.842** (data-saturated), half/half 0.821, **real+synthetic augmentation 0.815**, synthetic 0.514, **synthetic relabelled with the dataset's own segmentation 0.632**. Adding synthetic data hurts by 0.02–0.03 Dice; relabelling recovers a third of the synthetic-only gap, so two thirds is the images themselves. "Realistic is not useful" stands, now with the decomposition. | section *downstream utility*; vault E14 |
 | 09-15 03:39 | **Corrected decoder redecode:** generated volumes are 0.84 / 0.86 of real sharpness with the paper's decoder (duller, not sharper); fine-tuned 0.90 / 0.92, still below the 0.95 gate and still over-calling pores. Rejection unchanged; refiner = future work. rf-2 training started 03:39, rf-64 follows (Sep 16 evening). | section *decoder fine-tune*; vault E13 |
+| 09-16 | **Author's decision (D46): the paper targets an ML venue.** A comparator on the same data is therefore mandatory: **SliceGAN** (paired grey + label, unconditional) trained on split_v3 train slices, scored on the request-free eval-v4 tables and the downstream protocol (campaign 22). rf-2 paused at a checkpoint for it and resumed after. Planned next: a 3D pixel-space DDPM baseline, conditioning ablations, a second downstream segmenter. | section *baselines*; vault D46 |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
@@ -2833,6 +2836,54 @@ the synthetic pool (no high-porosity stratum with air; air only from planar surf
 """)
 
 
+def build_baselines() -> None:
+    section("Baselines (campaign 22): SliceGAN on the same data, same tables",
+            "a comparator generator trained on our data and scored with our metrics: porosity distribution, seams, microstructure vs floor, memorisation, downstream utility")
+    md("""
+**Why a baseline.** Every table above compares the model with *real material* (the floor), not with another generator. A
+reviewer at an ML venue will ask how an established 3D microstructure generator scores on the same tables. The first
+baseline is **SliceGAN** (Kench & Cooper, *Nature Machine Intelligence* 2021): a 3D generator trained only from 2D slices,
+with one 2D discriminator per axis, Wasserstein loss with gradient penalty. It is the standard reference for 3D
+microstructure synthesis and can be trained on our data as it is.
+
+**How it is run here.** Same training panels (split_v3 train), slices of 64×64 from all three axes; the generator emits
+**grey + a 3-class label** so the baseline is paired like ours; unconditional (SliceGAN has no conditioning inputs, which
+is the honest limitation and is stated, not patched). Volumes are generated at 192³ and 1024×1024×192 by the periodic
+latent extension the paper describes, written as eval-v4 cases, and measured with every metric that needs no request:
+phase fractions against the real porosity table, window and chunk seams (plain and material-restricted), microstructure
+statistics against the real-vs-real floor, memorisation against the full train store, failure flags, and the downstream
+segmenter arms (synthetic-only and augmentation). Metrics that need a request (dose response, layup, geometry) do not
+apply and are marked so.
+""")
+    code(r'''
+BR = BASELINE_ROOT
+if not BR.exists():
+    unavailable("campaign 22-slicegan-baseline", "SliceGAN training (queued ahead of the remaining VAE rungs) → generation → eval_v4 measure → downstream arms")
+else:
+    readme = BR / "README.md"
+    if readme.exists(): display(Markdown(readme.read_text()))
+    for f in sorted(BR.rglob("results.json")):
+        J = load_json(f); print("--", f.relative_to(BR))
+        if "per_case" in J:
+            rows = [{"case": c.get("case"), "φ": c.get("phi_pore"), "air interior": c.get("air_fraction_interior"), "seam window grey": (c.get("seams") or {}).get("seam_xct_ratio"),
+                     "seam chunk grey": (c.get("seams") or {}).get("seam_chunk_xct_ratio"), "failed": (c.get("failure") or {}).get("failed")} for c in J["per_case"] if isinstance(c, dict)]
+            if rows: display(pd.DataFrame(rows).round(4))
+        for k in ("levels", "memorisation", "summary", "aggregate"):
+            if k in J:
+                try: display(pd.json_normalize(J[k], sep=".").T.head(60))
+                except Exception: print(json.dumps(J[k], indent=1)[:2000])
+    for p in sorted(BR.rglob("*.png"))[:8]: display(Image(filename=str(p)))
+''')
+    md("""
+**How to read it.** Put the baseline rows beside the corresponding ldm06/facedrop rows of sections *sampler*, *assembly*,
+*microstructure* and *downstream utility*. The questions are: does it reach the real floors on seams and statistics; does it
+copy training slices (memorisation); what porosity does it produce when nobody asks; and does a segmenter trained on it
+score better or worse than one trained on ours. A baseline that scores as well on statistics and as badly on use would
+strengthen the "realistic is not useful" reading; one that scores worse on use would show ours carries more of what a
+segmenter needs, control aside.
+""")
+
+
 def build_summary() -> None:
     section("Summary dashboard: claim → metric → value → floor → status", "one table that fills in as results land, and the list of what is still pending")
     md("""
@@ -2933,7 +2984,7 @@ def build_all() -> None:
     build_config(); build_progress(); build_primer(); build_research_log(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
     build_rungs(); build_real_porosity(); build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
     build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_stress_geometry(); build_ood_conditioning(); build_microstructure()
-    build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream()
+    build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream(); build_baselines()
     build_summary(); build_preview()
 
 
