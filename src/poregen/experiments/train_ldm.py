@@ -16,7 +16,8 @@ from poregen.configuration import ResolvedExperiment, resolve_experiment
 from poregen.diffusion.latents import build_latent_dataloaders
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.experiments.base import find_repo_root
-from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
+from poregen.models.diffusion import UNet3DDenoiser
+from poregen.models.diffusion.factory import build_denoiser
 from poregen.runtime import (
     collect_runtime_metadata,
     create_run_context,
@@ -46,8 +47,7 @@ def _resolve_latents_root(cfg: dict[str, Any], repo_root: Path) -> Path:
 
 
 def _build_model(cfg: dict[str, Any], device: torch.device) -> UNet3DDenoiser:
-    model_cfg = UNet3DConfig.from_cfg(cfg)
-    return UNet3DDenoiser(model_cfg).to(device)
+    return build_denoiser(cfg).to(device)
 
 
 def _build_optimizer(cfg: dict[str, Any], model: torch.nn.Module) -> torch.optim.Optimizer:

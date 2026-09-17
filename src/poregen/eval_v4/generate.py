@@ -240,7 +240,7 @@ class VolumeRunner:
 
         from poregen.diffusion.noise_schedule import DDPMSchedule  # noqa: PLC0415
         from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: PLC0415
-        from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser  # noqa: PLC0415
+        from poregen.models.diffusion.factory import build_denoiser  # noqa: PLC0415
         from poregen.training.checkpoint import load_checkpoint  # noqa: PLC0415
 
         if weights not in ("raw", "ema"):
@@ -267,7 +267,7 @@ class VolumeRunner:
         root, meta = resolve_latent_store(cfg, self.repo)
         self.latents_root = root
 
-        model = UNet3DDenoiser(UNet3DConfig.from_cfg(cfg)).to(self.device)
+        model = build_denoiser(cfg).to(self.device)
         state = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         if weights == "ema":
             if "ema" not in state:

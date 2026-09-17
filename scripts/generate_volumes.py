@@ -173,15 +173,14 @@ def _build_local_por_map(
 
 
 def _load_ldm(checkpoint: str | Path, device: torch.device) -> torch.nn.Module:
-    from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
+    from poregen.models.diffusion.factory import build_denoiser
     from poregen.training.checkpoint import load_checkpoint
 
     checkpoint = Path(checkpoint)
     run_dir = checkpoint.parent.parent
     cfg = yaml.safe_load((run_dir / "resolved_config.yaml").read_text())
 
-    model_cfg = UNet3DConfig.from_cfg(cfg)
-    model = UNet3DDenoiser(model_cfg).to(device)
+    model = build_denoiser(cfg).to(device)
 
     raw = torch.load(checkpoint, map_location=device, weights_only=False)
     if "ema" in raw:

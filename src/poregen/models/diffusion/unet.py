@@ -405,8 +405,19 @@ class UNet3DDenoiser(nn.Module):
             ],
             dim=1,
         )
-        x = self.input_proj(x)
+        return self._trunk(self.input_proj(x), cond)
 
+    def _trunk(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Encoder, bottleneck, decoder and output head, given a projected stem.
+
+        Split out of :meth:`forward` so that a variant with a different set of
+        CONDITIONING INPUTS can reuse this network rather than copy it.
+        `poregen.baselines.ldm_phi_only` is that variant, and it exists to
+        measure what the other conditioning signals buy — a question only
+        answerable if the two models share a trunk in fact and not by
+        resemblance. A copied trunk would be equivalent on the day it was
+        written and would drift the first time either file was touched.
+        """
         # ── Encoder ──────────────────────────────────────────────────────────
         skips: list[torch.Tensor] = []
         for blk in self.enc_blocks[0]:

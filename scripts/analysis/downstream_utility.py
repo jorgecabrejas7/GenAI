@@ -166,6 +166,12 @@ class Budget:
     #: Real TEST patches every arm is scored on.
     test_patches: int = 20000
     seeds: tuple[int, ...] = (101, 202, 303)
+    #: Which segmenter. "unet" is the plain 3-level U-Net every campaign-14
+    #: number was measured with and is the default; "resunet" is the same shape
+    #: with residual blocks, run to check whether campaign 14's conclusion is
+    #: about the DATA or about that one inductive bias. It is part of the
+    #: budget so it cannot vary between arms of one comparison.
+    architecture: str = "unet"
 
 
 @dataclass(frozen=True)
@@ -656,14 +662,94 @@ class SegUNet3D(nn.Module):
         return self.head(h)
 
 
-def build_model(budget: Budget) -> SegUNet3D:
+class SegResUNet3D(nn.Module):
+    """The SAME U-Net shape with RESIDUAL blocks in place of plain ones.
+
+    WHY A SECOND ARCHITECTURE EXISTS AT ALL. Campaign 14 concluded that our
+    synthetic data HURTS a downstream segmenter. A conclusion measured through
+    one network is a statement about that network until a second one agrees,
+    and the cheapest way for the first result to have been an artefact is an
+    inductive bias that happened to suit real data.
+
+    So the depth, the channel widths, the skips, the head and every Budget
+    field are deliberately unchanged — this is not a better segmenter and is
+    not meant to be. The difference is that each level's convolutions carry an
+    identity shortcut. If the campaign-14 conclusion is about the DATA it must
+    survive that; if it flips, it was about the model.
+
+    IT IS NOT PARAMETER-MATCHED, and the caveat travels with the result: two
+    3x3x3 convolutions per level against the plain block's one puts this at
+    2.574 M parameters where SegUNet3D is 1.849 M, 39 % more at the same base
+    width. Narrowing it to match would have traded a capacity difference for a
+    width difference, which is not obviously the better confound; stating the
+    number is. What the arm can support is "the conclusion survives a different
+    inductive bias", not "it survives at equal capacity".
+    """
+
+    def __init__(self, base_channels: int = 32, in_channels: int = 1, n_classes: int = 3):
+        super().__init__()
+        c1, c2, c3 = base_channels, base_channels * 2, base_channels * 4
+        self.stem = nn.Conv3d(in_channels, c1, 3, padding=1)
+        self.enc1 = self._res(c1, c1)
+        self.enc2 = self._res(c1, c2, stride=2)        # 64 -> 32
+        self.enc3 = self._res(c2, c3, stride=2)        # 32 -> 16
+        self.enc4 = self._res(c3, c3, stride=2)        # 16 ->  8
+        self.up1 = UpBlockV2(c3, c3, c2)               #  8 -> 16
+        self.up2 = UpBlockV2(c2, c2, c1)               # 16 -> 32
+        self.up3 = UpBlockV2(c1, c1, c1)               # 32 -> 64
+        self.head = nn.Conv3d(c1, n_classes, 1)
+
+    @staticmethod
+    def _res(cin: int, cout: int, stride: int = 1) -> nn.Module:
+        return _ResBlock(cin, cout, stride)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        e1 = self.enc1(self.stem(x))                   # 64, c1
+        e2 = self.enc2(e1)                             # 32, c2
+        e3 = self.enc3(e2)                             # 16, c3
+        e4 = self.enc4(e3)                             #  8, c3
+        h = self.up1(e4, e3)                           # 16, c2
+        h = self.up2(h, e2)                            # 32, c1
+        h = self.up3(h, e1)                            # 64, c1
+        return self.head(h)
+
+
+class _ResBlock(nn.Module):
+    """Two 3x3x3 convolutions with an identity shortcut, GroupNorm + SiLU.
+
+    The same normalisation and activation as `DownBlockV2`, so the only thing
+    that differs from the plain arm is the shortcut.
+    """
+
+    def __init__(self, cin: int, cout: int, stride: int = 1):
+        super().__init__()
+        g = lambda c: nn.GroupNorm(min(8, c), c)       # noqa: E731
+        self.body = nn.Sequential(
+            g(cin), nn.SiLU(), nn.Conv3d(cin, cout, 3, stride=stride, padding=1),
+            g(cout), nn.SiLU(), nn.Conv3d(cout, cout, 3, padding=1),
+        )
+        self.skip = (nn.Identity() if (stride == 1 and cin == cout)
+                     else nn.Conv3d(cin, cout, 1, stride=stride))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.body(x) + self.skip(x)
+
+
+#: ``--architecture`` -> class. The plain U-Net is what every campaign-14
+#: number was measured with and stays the default.
+ARCHITECTURES = {"unet": SegUNet3D, "resunet": SegResUNet3D}
+
+
+def build_model(budget: Budget) -> nn.Module:
     """The model depends on the BUDGET and on nothing else.
 
     There is deliberately no ``arm`` argument.  An architecture that could
     differ between arms is the single easiest way to invalidate the whole
-    campaign, so the call site has no way to express one.
+    campaign, so the call site has no way to express one.  The architecture is
+    part of the budget, so it is fixed for a whole invocation and lands in the
+    results beside every number it produced.
     """
-    return SegUNet3D(base_channels=budget.base_channels)
+    return ARCHITECTURES[budget.architecture](base_channels=budget.base_channels)
 
 
 def load_class_weights() -> list[float]:
@@ -1130,6 +1216,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--steps", type=int, default=Budget.steps)
     p.add_argument("--batch-size", type=int, default=Budget.batch_size)
     p.add_argument("--patch-count", type=int, default=Budget.patch_count)
+    p.add_argument("--architecture", choices=("unet", "resunet"),
+                   default=Budget.architecture,
+                   help="segmenter: 'unet' is campaign 14's own; 'resunet' is the "
+                        "same shape with residual blocks, for checking whether the "
+                        "conclusion survives a different inductive bias")
     p.add_argument("--base-channels", type=int, default=Budget.base_channels,
                    help="U-Net width - a BUDGET knob, shared by every arm")
     p.add_argument("--test-patches", type=int, default=Budget.test_patches)
@@ -1144,6 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
         steps=args.steps,
         batch_size=args.batch_size,
         base_channels=args.base_channels,
+        architecture=args.architecture,
         patch_count=args.patch_count,
         test_patches=args.test_patches,
         seeds=tuple(args.seeds),

@@ -1,0 +1,165 @@
+experiment:
+  name: ldm25
+  variant: phi_only
+  description: >-
+    The porous-rock recipe on our data: scalar-porosity-conditioned latent
+    diffusion (Naiff et al. 2026), reimplemented so that the ONLY difference
+    from ldm06 is the conditioning.
+
+    Same r08 compressor, same latent store, same trunk, same schedule and
+    objective. The model is 81.67 M parameters against ldm06's 83.00 M —
+    98.4 % — so a gap between the two is what the other conditioning signals
+    buy, and not what a smaller network costs.
+
+    WHAT IT IS NOT TOLD. No orientation, no material map, no neighbours, no
+    availability, no neighbour timestep, no depth, no face distances, no
+    porosity FIELD. Porosity and the timestep, and nothing else.
+
+    HOW A SCALAR REQUEST MAPS ONTO OUR CONDITIONING. Our cond_por is the
+    porosity of the 64-voxel PATCH, not of the volume; the published recipe
+    conditions on one scalar for the sample. Asking every window for the same
+    value is the faithful mapping and is exactly what the porosity_global
+    assessment already does. It is a deviation and the campaign README states
+    it as one.
+
+    SAMPLING. Joint MultiDiffusion over the whole canvas, which is the
+    existing assembly_modes "joint" arm: chunk_tiles set to the whole volume in
+    tiles, neighbour_mode "unknown". There are no neighbours to carry between
+    chunks because the model has no neighbour input, so there is nothing to
+    chunk for. Measured on campaign 18, that arm peaks at 11.83 GB on a
+    192x1024x1024 canvas — the ceiling is TIME, not memory.
+
+    s_nb IS NOT APPLICABLE. The guided sampler's third pass differs from its
+    second only in the neighbour inputs, which this model ignores, so the s_nb
+    term is identically zero. Run the s_por arm alone; an s_nb sweep would draw
+    a flat line that looks like a measurement.
+
+loss: {}
+
+model:
+  # The one line that selects the baseline. Everything below is ldm06's.
+  type: unet3d_phi_only
+  z_channels: 8
+  base_channels: 128
+  channel_mult: [1, 2, 4]
+  n_res_blocks: 2
+  attn_at_bottleneck: false
+  bottleneck_downsample: true
+  cond_embed_dim: 512
+  # Kept at ldm06's values although this model has no neighbour path: they are
+  # read by UNet3DConfig.in_channels, which PhiOnlyDenoiser overrides. Leaving
+  # them identical keeps the two configs diffable line for line.
+  nb_avail_embed_dim: 8
+  nb_t_embed_dim: 8
+  n_attn_heads: 8
+  dropout: 0.0
+
+noise_schedule:
+  # Identical to ldm06/base. See that file for why v and zero_terminal_snr are
+  # a numerical requirement here and not a preference.
+  type: cosine
+  T: 1000
+  s: 0.008
+  objective: v
+  zero_terminal_snr: true
+
+vae:
+  checkpoint: runs/vae/r08-run-0004-20260904-035134-archv2-conv_noattn_dualbranch_cls-z8-c32-bs128-lr2e-04-b0.050-fb0.1-klw0-schednone/best.ckpt
+
+training:
+  seed: 42
+  batch_size: 256
+  ema_decay: 0.9999
+  lr: 1.0e-4
+  weight_decay: 0.01
+  # 40 000, and the cosine schedule is set to COMPLETE in 40 000. ldm04 was
+  # stopped at 120k with its schedule 60 % through and never reached lr_min;
+  # a short run against a 130k schedule would repeat that at four times the
+  # severity. Measured 1589 ms/step at this batch on ldm06 => 17.7 h.
+  total_steps: 40000
+  max_grad_norm: 1.0
+  scheduler: cosine
+  lr_min: 1.0e-5
+  warmup_steps: 250
+  log_every: 10
+  # PERIODIC DIAGNOSTICS OFF, as specified. gen_eval and the sample grid both
+  # exercise conditioning this model does not have, so they would report on
+  # inputs it ignores. Validation loss is kept: it is cheap and it is the only
+  # signal that the run is training at all.
+  eval_every: 500
+  val_batches: 50
+  full_val_every: 0
+  gen_eval_every: 0
+  sample_every: 0
+  # NO early stopping, for ldm06's reason: run-0001 inherited patience on
+  # val.loss and stopped itself at step 74000 of 130000 on a metric that was
+  # not one of its gates.
+  save_every: 2000
+  compile: true
+  # CFG dropout on porosity, per-sample, as specified. drop_nb has nothing to
+  # drop — there is no neighbour arm — and is 0 rather than absent so the two
+  # configs stay diffable.
+  drop_por: 0.1
+  drop_nb: 0.0
+  nb_t_mix: 0.0
+
+guidance:
+  s_por: 1.0
+  # Inert by construction. Held at 1.0 so the sampler takes its unguided
+  # single-pass path rather than spending a third of sampling on an identity.
+  s_nb: 1.0
+  cfg_rescale: 0.0
+
+generation:
+  # Joint over the whole canvas: eval_v4 sets chunk_tiles per case, and the
+  # campaign-25 cases set it to the full tile grid with neighbour_mode
+  # "unknown". These are the production window and decode geometry, unchanged.
+  chunk_tiles: [3, 3, 3]
+  window_stride: 32
+  decode_stride: 32
+  window_batch: 32
+
+data:
+  # The SAME store ldm06 read. Not a copy, not a re-encode: if the latents
+  # differed the comparison would be about the compressor.
+  latents_root: data/split_v3/latents_r08z8
+  latent_mode: sampled
+  sample_stride: 32
+  generation_stride: 64
+  neighbour_offset: 64
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+runtime:
+  runs_root: runs/ldm
+  device:
+    gpu_id: null
+  checkpoints:
+    save_latest: true
+    save_best: true
+    best_metric: val.loss
+    best_mode: min
+  resume:
+    prune_jsonl: true
+  metadata:
+    capture_git: true
+    capture_machine: true
+    capture_environment: true
+  run_name:
+    timestamp_format: "%Y%m%d-%H%M%S"
+    run_index_width: 4
+    fields:
+      - label: z
+        path: model.z_channels
+      - label: c
+        path: model.base_channels
+      - label: bs
+        path: training.batch_size
+      - label: lr
+        path: training.lr
+        transform: sci
+  machine:
+    name: dgx_spark
+    accelerator: NVIDIA GB10 Blackwell
