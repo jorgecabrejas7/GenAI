@@ -233,6 +233,11 @@ ARMS: tuple[Arm, ...] = (
     Arm("real_plus_slicegan_aug", 0.5, total_patches=32000, pool="slicegan"),
     Arm("ddpm3d_synthetic", 0.0, pool="ddpm3d"),
     Arm("real_plus_ddpm3d_aug", 0.5, total_patches=32000, pool="ddpm3d"),
+    # The porosity-only LDM (campaign 25). It IS conditional, so its pool comes
+    # from the eval_v4 layout like ldm06's — but only from the assessments it
+    # can be asked for, which is why it has its own root and its own list.
+    Arm("phi_only_synthetic", 0.0, pool="phi_only"),
+    Arm("real_plus_phi_only_aug", 0.5, total_patches=32000, pool="phi_only"),
 )
 
 REFERENCE_ARM = "real"
@@ -452,10 +457,12 @@ class MissingSyntheticVolumes(RuntimeError):
     """Raised before any training when the eval v4 campaign is incomplete."""
 
 
-def required_synthetic_cases(repo: Path | None = None) -> list[tuple[str, str]]:
+def required_synthetic_cases(repo: Path | None = None,
+                             assessments: tuple[str, ...] | None = None
+                             ) -> list[tuple[str, str]]:
     """``(assessment, case name)`` for every case the synthetic arm needs."""
     out: list[tuple[str, str]] = []
-    for assessment in SYNTHETIC_ASSESSMENTS:
+    for assessment in (assessments or SYNTHETIC_ASSESSMENTS):
         for case in build_cases(assessment, repo):
             if case.target_phi is not None and float(case.target_phi) == OFF_MANIFOLD_PHI:
                 continue
@@ -463,8 +470,16 @@ def required_synthetic_cases(repo: Path | None = None) -> list[tuple[str, str]]:
     return out
 
 
+#: What the porosity-only baseline can be asked for. `surface` is absent
+#: because that model has no material conditioning: a surface request is not a
+#: request it can take, so demanding those cases would refuse a pool that is
+#: complete for what the model IS.
+PHI_ONLY_ASSESSMENTS: tuple[str, ...] = ("sampler", "porosity_global", "microstructure")
+
+
 def check_synthetic_volumes(
-    campaign_root: Path, repo: Path | None = None
+    campaign_root: Path, repo: Path | None = None,
+    assessments: tuple[str, ...] | None = None,
 ) -> list[Path]:
     """Every required case directory, or raise naming what is missing.
 
@@ -475,7 +490,8 @@ def check_synthetic_volumes(
     campaign_root = Path(campaign_root)
     found: list[Path] = []
     missing: list[str] = []
-    for assessment, name in required_synthetic_cases(repo):
+    assessments = assessments or SYNTHETIC_ASSESSMENTS
+    for assessment, name in required_synthetic_cases(repo, assessments):
         d = campaign_root / assessment / "volumes" / name
         if all((d / f).exists() for f in ("manifest.json", "volume.tif", "label.tif")):
             found.append(d)
@@ -496,9 +512,9 @@ def check_synthetic_volumes(
             "would no longer be comparable and nothing in the result would say so.\n"
             "Generate them first, one command per assessment:\n"
             + "".join(
-                f"    eval_v4 generate {a} --model <ldm06 run> --ckpt <step> "
+                f"    eval_v4 generate {a} --model <run> --ckpt <step> "
                 f"--out {campaign_root}\n"
-                for a in SYNTHETIC_ASSESSMENTS
+                for a in assessments
             )
         )
     return found
@@ -1205,6 +1221,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ddpm3d-root", type=Path,
                    default=REPO / "runs" / "campaigns" / "23-ddpm3d-baseline",
                    help="campaign the ddpm3d_* arms draw their patches from")
+    p.add_argument("--phi-only-root", type=Path,
+                   default=REPO / "runs" / "campaigns" / "25-ldm-phi-only",
+                   help="campaign directory of the porosity-only LDM baseline")
     p.add_argument("--slicegan-root", type=Path,
                    default=REPO / "runs" / "campaigns" / "22-slicegan-baseline",
                    help="campaign the slicegan_* arms draw their patches from")
@@ -1256,6 +1275,10 @@ def main(argv: list[str] | None = None) -> int:
                         "ddpm3d": args.ddpm3d_root}[which]
                 case_dirs = baseline_case_dirs(root, which)
                 label = f"{which} campaign {root}"
+            elif which == "phi_only":
+                case_dirs = check_synthetic_volumes(
+                    args.phi_only_root, REPO, PHI_ONLY_ASSESSMENTS)
+                label = f"phi-only campaign {args.phi_only_root}"
             else:
                 case_dirs = check_synthetic_volumes(args.campaign_root, REPO)
                 label = f"eval v4 campaign {args.campaign_root}"
