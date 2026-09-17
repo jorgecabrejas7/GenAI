@@ -125,6 +125,37 @@ class TestTheGenerator:
         f = np.clip(f, PHI_MIN, PHI_MAX)
         assert axis_length(f, 0) == pytest.approx(2 * corr[0], rel=0.15)
 
+    def test_a_length_longer_than_the_canvas_is_capped_to_it(self, sampler_and_corr):
+        """Asking for more than the canvas can express gives a constant field.
+
+        Real in-plane porosity correlation is longer than any coupon-scale
+        canvas — campaign 21 found the in-plane porosity of all 80 volumes flat
+        to within 6 % — so the fitted in-plane length is not something a 1024
+        canvas can deliver. The cap makes that explicit instead of smoothing
+        with 20 grid steps on a 16-step grid and calling the result a
+        measurement.
+        """
+        sampler, _ = sampler_and_corr
+        grid = (3, 16, 16)                       # 192 x 1024 x 1024 voxels
+        huge = (50.0, 100_000.0, 100_000.0)
+        at_cap = (50.0, 16 * STRIDE, 16 * STRIDE)
+        a = build_porosity_field(grid, 0.03, sampler, huge, stride_voxels=STRIDE, seed=1)
+        b = build_porosity_field(grid, 0.03, sampler, at_cap, stride_voxels=STRIDE, seed=1)
+        # A request of 100 000 voxels and one of exactly the canvas extent must
+        # produce the SAME field: everything above the cap is the same request.
+        assert np.allclose(a, b)
+
+    def test_the_cap_does_not_touch_a_length_the_canvas_can_hold(
+            self, sampler_and_corr):
+        sampler, _ = sampler_and_corr
+        grid = (24, 96, 160)
+        short = (50.0, 200.0, 300.0)             # all far inside the extents
+        a = build_porosity_field(grid, 0.03, sampler, short, stride_voxels=STRIDE, seed=1)
+        b = build_porosity_field(grid, 0.03, sampler,
+                                 tuple(min(c, g * STRIDE) for c, g in zip(short, grid)),
+                                 stride_voxels=STRIDE, seed=1)
+        assert np.array_equal(a, b)
+
     def test_the_mean_is_still_delivered_exactly(self, sampler_and_corr):
         sampler, corr = sampler_and_corr
         for target in (0.01, 0.03, 0.06):

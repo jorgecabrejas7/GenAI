@@ -169,6 +169,30 @@ def build_porosity_field(
     Deterministic per ``seed``.  Values lie in [PHI_MIN, PHI_MAX]; the mean
     equals ``target`` exactly unless the final clamp bites (target near a
     range edge), in which case a small residual error remains.
+
+    TWO PROPERTIES OF THE DELIVERED FIELD, BOTH MEASURED, NEITHER OBVIOUS.
+
+    1. The requested correlation lengths are CAPPED AT THE CANVAS EXTENT.
+       Real in-plane porosity correlation is longer than any coupon-scale
+       canvas — campaign 21 found the in-plane porosity of all 80 volumes flat
+       to within 6 % across y and x — so the fitted in-plane length is not a
+       length this canvas can express. On the split_v3 train refit the y curve
+       does not decay to 1/e at all, and its nominal 2521 voxels is 20 grid
+       steps of a 16-step production grid: smoothing with it would make the
+       field constant along y while claiming to have applied a measurement.
+       Capping says the honest thing instead — at these sizes A SAMPLED FIELD
+       IS EFFECTIVELY A THROUGH-THICKNESS PROFILE, and the project's
+       controllable local-field claims rest on the PAINTED fields
+       (`field_two_halves`, `field_checkerboard`), not on this one.
+
+    2. The FITTED MARGINAL IS NOT PRESERVED. Gaussian smoothing reduces
+       variance and the rescale-and-clip below restores the MEAN but not the
+       SPREAD: the delivered field carries about 5 % of the fitted T-E spread
+       on a large grid and 7-12 % on a production one (campaign 26). A field
+       cannot have both a long correlation length and the unsmoothed marginal;
+       this one buys the length. Do not describe the output as drawn from the
+       T-E marginal — it is drawn from it and then smoothed, which is a
+       different distribution.
     """
     rng = np.random.default_rng(seed)
     u = rng.uniform(0.0, 1.0, size=grid_shape)
@@ -190,7 +214,22 @@ def build_porosity_field(
     # therefore delivered a 1/e correlation length of 2*cl — every coherent
     # field this project generated was twice as smooth as the T-D length it
     # was asked for. sigma = cl/(2*stride) delivers cl.
-    sigma = tuple(cl / (2.0 * stride_voxels) for cl in corr_lengths_voxels)
+    # A length longer than the canvas cannot be delivered by it, and asking for
+    # one produces a constant field rather than a correlated one. Capped per
+    # axis at the canvas extent; in practice only the in-plane axes are ever
+    # affected, because the through-thickness length is tens of voxels and the
+    # in-plane ones are hundreds to thousands.
+    extents = tuple(float(g) * stride_voxels for g in grid_shape)
+    capped = tuple(min(float(cl), e) for cl, e in zip(corr_lengths_voxels, extents))
+    for axis, (cl, cap) in enumerate(zip(corr_lengths_voxels, capped)):
+        if cap < cl:
+            logger.info(
+                "porosity field: %s correlation length capped from %.0f to the "
+                "%.0f-voxel canvas extent — a longer length cannot be expressed "
+                "on this canvas, and at this size the field is effectively a "
+                "through-thickness profile",
+                "zyx"[axis], cl, cap)
+    sigma = tuple(cl / (2.0 * stride_voxels) for cl in capped)
     field = gaussian_filter(field, sigma=sigma, mode="nearest")
 
     # Rescale mean → clamp → rescale mean once more → final clamp (D32 §4).

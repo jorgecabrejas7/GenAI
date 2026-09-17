@@ -610,12 +610,40 @@ deliver.
 
 **One window on both sides.** 64-voxel windows every 32 voxels, on real crops
 and generated volumes alike; a window under half material is dropped. That is
-the grid campaign 01's T-D measured the real correlation lengths on (z 79.45,
-y 413.58, x 900.95 voxels), which are in turn the lengths
-`build_porosity_field` smooths the coherent request with — so the request, the
-delivery, the real material and the target the request was built from are all
-the same kind of number. The T-D lengths are printed as the first row of the
-correlation table.
+the grid campaign 01's T-D measured the real correlation lengths on, which are
+in turn the lengths `build_porosity_field` smooths the coherent request with —
+so the request, the delivery, the real material and the target the request was
+built from are all the same kind of number. The T-D lengths are printed as the
+first row of the correlation table.
+
+The lengths themselves are now `T-D_v3` — refitted on the split_v3 TRAIN
+panels, because the original fit used all 80 volumes and is read at generation
+time (see `docs/FITTED_INPUTS.md`). They are z 59.0, y 2521.5, x 1112.6 voxels,
+not the z 79.45 / y 413.58 / x 900.95 of the leaked fit that earlier tables
+quote.
+
+**TWO LIMITATIONS OF THE COHERENT REQUEST, both measured in campaign 26, and
+neither of them a defect in the model.**
+
+*Gaussian smoothing destroys the marginal.* The coherent field is drawn from
+the T-E marginal and then smoothed, and smoothing reduces variance. The
+rescale-and-clip that follows restores the **mean** and not the **spread**: the
+delivered field carries about **5 % of the fitted spread on a large grid and
+7–12 % on a production one**. Nothing may describe it as drawn from the T-E
+marginal — it is drawn from it and then smoothed, which is a different
+distribution. This is the direct explanation of the coherent-field R² collapse
+in campaigns 18 (0.306) and 20: what collapses is the variance of the REQUEST,
+not the model's obedience to it.
+
+*In-plane correlation is longer than the canvas.* Campaign 21 found the
+in-plane porosity of all 80 real volumes flat to within 6 % across y and x, and
+the fitted in-plane lengths are hundreds to thousands of voxels — 2521 in y,
+which is 20 grid steps of a 16-step production grid. Requested lengths are
+therefore **capped at the canvas extent**, and the honest statement is that at
+coupon scale **a sampled coherent field is effectively a through-thickness
+profile**. The project's controllable local-field claims rest on the PAINTED
+fields — two halves and checkerboard, which ask for a boundary the canvas can
+hold — and not on the coherent one.
 
 **Per axis.** The material is a laminate: it decorrelates in about 80 voxels
 through the thickness and in several hundred in plane. A single isotropic
