@@ -774,6 +774,55 @@ def refine(acc: Top2, queries: np.ndarray, store: PatchStore, space: str,
             dist[lo:hi] = np.linalg.norm(q - rows, axis=1)
 
 
+#: Voxel shifts the planted-copy validation uses. 0 is an EXACT bank row and is
+#: the sanity floor — a search that cannot flag that is broken. 8 and 16 are
+#: sub-grid shifts no bank row can match exactly; 32 is the store's own stride,
+#: so the shifted patch exists in the STORE but not in the stride-64 BANK.
+PLANTED_SHIFTS = (0, 8, 16, 32)
+
+
+def detection_rate(acc: "Top2") -> dict:
+    """What fraction of a planted set the 1/3 criterion actually flags.
+
+    THE NUMBER THE NULL RESULT DEPENDS ON. "No generated patch was memorised"
+    means nothing until it is known that the search WOULD have said so had one
+    been. This reports that directly, and reports the absolute distances beside
+    the ratio so a detection can be read as "identical" rather than only as
+    "relatively closer than its second neighbour".
+    """
+    ratio = acc.ratio()
+    ok = np.isfinite(ratio)
+    return {
+        "n": int(len(ratio)),
+        "n_scored": int(ok.sum()),
+        "detection_rate": float((ratio[ok] < RATIO_THRESHOLD).mean()) if ok.any() else None,
+        "ratio_median": float(np.median(ratio[ok])) if ok.any() else None,
+        "ratio_p95": float(np.percentile(ratio[ok], 95)) if ok.any() else None,
+        # Absolute, beside the ratio: a ratio is dimensionless and cannot say
+        # whether the nearest row is a copy or merely the closest of many
+        # far-away rows.
+        "nn_distance_median": float(np.median(acc.d1[ok])) if ok.any() else None,
+        "nn_distance_max": float(np.max(acc.d1[ok])) if ok.any() else None,
+        "second_nn_distance_median": float(np.median(acc.d2[ok])) if ok.any() else None,
+    }
+
+
+#: What the bank CANNOT see, stated as a limit rather than left to be inferred.
+BANK_COVERAGE_NOTE = (
+    "The bank holds only the store rows whose origin lies on the stride-64 "
+    "grid, while the store itself is built on stride 32 — so the bank is one "
+    "eighth of the stored patches. That is deliberate: overlapping rows would "
+    "make a patch its own second-nearest neighbour and the Favero ratio would "
+    "approach 1 for every query, which is the statistic's failure mode, not a "
+    "result. THE PRICE IS A DETECTION LIMIT. A generated patch that reproduces "
+    "real material at an offset of 32 voxels has no exact counterpart in the "
+    "bank, so it is scored against the nearest 64-grid row instead and its "
+    "ratio is not the ratio of a copy. A null memorisation result therefore "
+    "means 'no copy ALIGNED TO THE 64-GRID', and the planted-copy validation "
+    "is what turns that into a number."
+)
+
+
 def search(
     queries: np.ndarray,
     store: PatchStore,
