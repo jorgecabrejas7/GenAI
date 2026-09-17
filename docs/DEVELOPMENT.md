@@ -49,7 +49,7 @@ tensorboard --logdir runs/vae/
 
 ## Known pre-existing test failures
 
-Exactly these tests fail. **Everything else must pass.**
+Exactly these five tests fail. **Everything else must pass.**
 
 ```
 tests/test_losses_smoke.py::TestLossesSmoke::test_all_components_present
@@ -59,28 +59,20 @@ tests/test_recon_metrics.py::test_run_eval_aggregates_active_units_across_eval_w
 tests/test_recon_metrics.py::test_train_loop_runs_final_full_eval_for_val_and_test
 ```
 
-**Six more, in `tests/test_downstream_utility.py`, added 2026-09-17.** They are
-NOT new breakage — they have been failing since the augmentation arms were
-added (`63cfe0b`) to a test file last written before them (`f9e1afa`), and the
-list above was simply never updated. Recording them so the gate is true again:
+**Fixed 2026-09-17.** Six tests in `tests/test_downstream_utility.py` had been
+failing since the augmentation arms were added (`63cfe0b`) to a test file last
+written before them (`f9e1afa`), and this list was never updated — so "everything
+else must pass" was not true for a long stretch of commits. The cause was
+`Arm.total_patches` being the ABSOLUTE constant 32 000, which silently assumed
+`budget.patch_count == 16000`: no smaller budget could express an augmentation
+arm, so the 4000-patch fixture pool could never serve one. It is now
+`Arm.total_multiple`, a multiple of `patch_count`. **Every arm's count at the
+production budget is unchanged**, so campaign 14's numbers stand.
 
-```
-tests/test_downstream_utility.py::test_every_arm_trains_on_exactly_the_same_number_of_patches
-tests/test_downstream_utility.py::test_arm_patch_counts_always_sum_to_the_budget
-tests/test_downstream_utility.py::test_every_arm_targets_the_same_real_request_distribution
-tests/test_downstream_utility.py::test_mixed_arm_reuses_the_real_arms_own_patches
-tests/test_downstream_utility.py::test_run_specs_differ_only_in_the_data_mix
-tests/test_downstream_utility.py::test_an_arm_cannot_carry_a_training_setting
-```
-
-Two causes, both worth fixing when the campaign is next touched. Five of them
-trip because `Arm.total_patches` is the ABSOLUTE constant 32 000, which
-silently assumes `budget.patch_count == 16000`; a toy budget cannot express an
-augmentation arm, so the 4 000-patch fixture pool can never serve one.
-Expressing the override as a MULTIPLE of `patch_count` would fix all five and
-remove the hidden coupling. The sixth asserts `Arm` has exactly the fields
-`['name', 'real_fraction']`, which stopped being true when `total_patches`,
-`label_file` and `pool` were added.
+One test in that file was a guard that had stopped guarding: it asserted `Arm`
+has exactly `["name", "real_fraction"]`, which went stale the moment the
+campaign grew the arms it needed. It now asserts the INTENT — that no field of
+`Arm` is a training setting — which is what it was for.
 
 **One flaky test**, order-dependent rather than failing on its own:
 `tests/test_eval_v4_microstructure.py::TestFid::test_the_frechet_distance_of_a_feature_set_with_itself_is_zero`

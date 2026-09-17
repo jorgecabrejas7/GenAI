@@ -183,13 +183,22 @@ class Arm:
     original design could not answer its own question, and each relaxes ONE
     further thing, named here so it cannot be relaxed by accident:
 
-    ``total_patches``
-        ``None`` means the budget's count, which is what the first three use.
-        `real_8k` halves it and `real_plus_synthetic_aug` doubles it. THE STEP
-        BUDGET IS UNCHANGED at 8000 x 32 = 256 000 samples drawn, so changing
-        the pool size changes how often each patch is seen: 16 times at 16 000
-        patches, 32 at 8 000, 8 at 32 000. Those arms are therefore NOT clean
-        one-variable comparisons against the first three, and their rows say so.
+    ``total_multiple``
+        the arm's patch count as a MULTIPLE of ``budget.patch_count``. 1.0 is
+        the budget itself, which is what the first three use; `real_8k` is 0.5
+        and the augmentation arms are 2.0. THE STEP BUDGET IS UNCHANGED at
+        8000 x 32 = 256 000 samples drawn, so changing the pool size changes how
+        often each patch is seen: 16 times at 16 000 patches, 32 at 8 000, 8 at
+        32 000. Those arms are therefore NOT clean one-variable comparisons
+        against the first three, and their rows say so.
+
+        A MULTIPLE AND NOT AN ABSOLUTE COUNT. It was 32 000, which silently
+        assumed ``patch_count == 16000``: any other budget left the arm asking
+        for 32 000 patches out of a pool sized for something else, so a smaller
+        budget could not express an augmentation arm at all and six tests in
+        `tests/test_downstream_utility.py` had been failing on a 4000-patch
+        fixture ever since these arms were added. At the production budget the
+        counts are identical to before.
 
     ``label_file``
         which label the SYNTHETIC patches carry. ``label.tif`` is the decoder's
@@ -207,7 +216,7 @@ class Arm:
 
     name: str
     real_fraction: float
-    total_patches: int | None = None
+    total_multiple: float = 1.0
     label_file: str = "label.tif"
     pool: str = "ldm06"
 
@@ -221,23 +230,23 @@ ARMS: tuple[Arm, ...] = (
     # synthetic costs 0.020 pore Dice" cannot be read: the synthetic half may
     # have helped or may merely not have hurt, and 8000 real alone is what
     # separates those.
-    Arm("real_8k", 1.0, total_patches=8000),
+    Arm("real_8k", 1.0, total_multiple=0.5),
     # Augmentation rather than replacement — the arm the framing note promised.
-    Arm("real_plus_synthetic_aug", 0.5, total_patches=32000),
+    Arm("real_plus_synthetic_aug", 0.5, total_multiple=2.0),
     # Same images, the dataset's own pore labelling.
     Arm("synthetic_relabelled", 0.0, label_file="label_onlypores.tif"),
     # The SliceGAN baseline on the same protocol. `pool` names which campaign
     # the synthetic patches come from, so an arm cannot silently draw from the
     # wrong generator.
     Arm("slicegan_synthetic", 0.0, pool="slicegan"),
-    Arm("real_plus_slicegan_aug", 0.5, total_patches=32000, pool="slicegan"),
+    Arm("real_plus_slicegan_aug", 0.5, total_multiple=2.0, pool="slicegan"),
     Arm("ddpm3d_synthetic", 0.0, pool="ddpm3d"),
-    Arm("real_plus_ddpm3d_aug", 0.5, total_patches=32000, pool="ddpm3d"),
+    Arm("real_plus_ddpm3d_aug", 0.5, total_multiple=2.0, pool="ddpm3d"),
     # The porosity-only LDM (campaign 25). It IS conditional, so its pool comes
     # from the eval_v4 layout like ldm06's — but only from the assessments it
     # can be asked for, which is why it has its own root and its own list.
     Arm("phi_only_synthetic", 0.0, pool="phi_only"),
-    Arm("real_plus_phi_only_aug", 0.5, total_patches=32000, pool="phi_only"),
+    Arm("real_plus_phi_only_aug", 0.5, total_multiple=2.0, pool="phi_only"),
 )
 
 REFERENCE_ARM = "real"
@@ -260,7 +269,7 @@ def arm_patch_counts(arm: Arm, budget: Budget) -> tuple[int, int]:
     The synthetic count is the remainder rather than a second rounding, so no
     arm can end up one patch short of another through a rounding difference.
     """
-    total = arm.total_patches if arm.total_patches is not None else budget.patch_count
+    total = int(round(budget.patch_count * arm.total_multiple))
     n_real = int(round(total * arm.real_fraction))
     n_real = max(0, min(total, n_real))
     return n_real, total - n_real
@@ -797,8 +806,7 @@ class ArmPlan:
 
 def max_arm_total(budget: Budget, arms: tuple[Arm, ...] = ARMS) -> int:
     """The longest real draw any arm needs, so one draw can serve them all."""
-    return max((a.total_patches if a.total_patches is not None else budget.patch_count)
-               for a in arms)
+    return max(int(round(budget.patch_count * a.total_multiple)) for a in arms)
 
 
 def seed_permutation(n_real_pool: int, budget: Budget, seed: int,
@@ -871,8 +879,17 @@ def arm_run_spec(arm: Arm, budget: Budget, seed: int, plan: ArmPlan) -> dict:
 
 #: The keys of :func:`arm_run_spec` that are allowed to differ between arms.
 #: Anything else differing means the comparison is broken.
+#: Spec keys an arm is ALLOWED to differ in. Everything else must be identical
+#: across arms, which is what makes the comparison one.
+#:
+#: ``total_patches`` is here because two arms deliberately override it — the
+#: 8k control and the augmentation arms — and those overrides are what those
+#: arms exist to test. It is NOT a training setting: the step budget is
+#: unchanged, so what the override changes is how often each patch is seen, and
+#: the rows that carry it say so.
 ARM_VARYING_KEYS = frozenset(
-    {"arm", "real_fraction", "n_real_patches", "n_synthetic_patches"}
+    {"arm", "real_fraction", "n_real_patches", "n_synthetic_patches",
+     "total_patches", "pool", "label_file"}
 )
 
 

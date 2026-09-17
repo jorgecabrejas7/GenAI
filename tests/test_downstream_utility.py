@@ -72,7 +72,10 @@ def budget():
 def _plans(budget, real_pool, pool_keys, seed):
     por, air = real_pool
     keys = du.stratum_keys(por, air)
-    perm = du.seed_permutation(len(por), budget, seed)
+    # Sized as `main` sizes it: one draw serves every arm, so it must cover the
+    # LONGEST one or the augmentation arms get an empty synthetic half.
+    perm = du.seed_permutation(len(por), budget, seed,
+                               n_draw=du.max_arm_total(budget))
     return perm, keys, {
         arm.name: du.plan_arm(arm, budget, seed, perm, keys, pool_keys)
         for arm in du.ARMS
@@ -88,11 +91,17 @@ def test_every_arm_trains_on_exactly_the_same_number_of_patches(
 ):
     for seed in budget.seeds:
         _, _, plans = _plans(budget, real_pool, full_pool_keys, seed)
-        assert {p.total for p in plans.values()} == {budget.patch_count}
         for name, p in plans.items():
-            n_real, n_synth = du.arm_patch_counts(du.arm_by_name(name), budget)
+            arm = du.arm_by_name(name)
+            n_real, n_synth = du.arm_patch_counts(arm, budget)
             assert p.real_rows.size == n_real
             assert p.synthetic_rows.size == n_synth
+            # The arm's own total, which is the budget times its multiple. The
+            # three original arms are 1.0 and so DO all share one count; the
+            # overrides are deliberate and are what those arms exist to test.
+            assert p.total == int(round(budget.patch_count * arm.total_multiple))
+        assert {p.total for p in plans.values()
+                if du.arm_by_name(p.arm).total_multiple == 1.0} == {budget.patch_count}
 
 
 def test_arm_patch_counts_always_sum_to_the_budget():
@@ -102,7 +111,10 @@ def test_arm_patch_counts_always_sum_to_the_budget():
         b = du.Budget(patch_count=total)
         for arm in du.ARMS:
             n_real, n_synth = du.arm_patch_counts(arm, b)
-            assert n_real + n_synth == total
+            # The ARM's total, which is the budget times its multiple — the
+            # augmentation arms are 2.0 on purpose. What must not happen is a
+            # SECOND rounding leaving one arm a patch short of another.
+            assert n_real + n_synth == int(round(total * arm.total_multiple))
             assert n_real >= 0 and n_synth >= 0
 
 
@@ -111,13 +123,19 @@ def test_every_arm_targets_the_same_real_request_distribution(
 ):
     """The point of the stratified draw: the arms differ in provenance only.
 
-    With a pool that covers every stratum, all three arms hold the SAME joint
-    (porosity bin x has-air) histogram — the one the real draw of that seed has.
+    With a pool that covers every stratum, every arm holds the SAME joint
+    (porosity bin x has-air) histogram as the real draw of that seed — over the
+    prefix of that draw which is the arm's own length, since the arms are
+    deliberately different sizes and the smaller nest inside the larger.
     """
     for seed in budget.seeds:
         perm, keys, plans = _plans(budget, real_pool, full_pool_keys, seed)
-        reference = np.bincount(keys[perm], minlength=du.N_STRATA)
         for name, p in plans.items():
+            # Each arm's target is the PREFIX of the one shared draw that is its
+            # own length — the smaller arms nest inside the larger, which is
+            # what "the same real distribution" means once the arms are
+            # deliberately different sizes.
+            reference = np.bincount(keys[perm[:p.total]], minlength=du.N_STRATA)
             got = np.bincount(keys[p.real_rows], minlength=du.N_STRATA)
             if p.synthetic_rows.size:
                 got = got + np.bincount(
@@ -141,7 +159,14 @@ def test_mixed_arm_reuses_the_real_arms_own_patches(budget, real_pool, full_pool
 
 
 def test_run_specs_differ_only_in_the_data_mix(budget, real_pool, full_pool_keys):
-    """Same steps, same batch size, same architecture width, same totals."""
+    """Same steps, same batch size, same architecture width, same seed.
+
+    NOT the same totals. Two arms override the patch count on purpose — the 8k
+    control and the augmentation arms — and that override is what those arms
+    exist to test. What must be identical is every TRAINING setting, because a
+    difference there would make the comparison something other than a
+    comparison of data.
+    """
     for seed in budget.seeds:
         _, _, plans = _plans(budget, real_pool, full_pool_keys, seed)
         specs = {
@@ -153,10 +178,20 @@ def test_run_specs_differ_only_in_the_data_mix(budget, real_pool, full_pool_keys
             for s in specs.values()
         ]
         assert all(s == shared[0] for s in shared[1:]), shared
-        # and the three headline budget knobs, named explicitly
-        for key in ("steps", "batch_size", "base_channels", "total_patches",
+        # The training knobs, named explicitly. `total_patches` is NOT among
+        # them: it is the data mix, it varies by design, and the arms that vary
+        # it say so in their own rows.
+        for key in ("steps", "batch_size", "base_channels",
                     "test_patches", "lr", "seed"):
             assert len({s[key] for s in specs.values()}) == 1, key
+        # The overriding arms are exactly the ones that meant to override.
+        by_total = {n: s["total_patches"] for n, s in specs.items()}
+        base = int(round(budget.patch_count))
+        for name, total in by_total.items():
+            mult = du.arm_by_name(name).total_multiple
+            assert total == int(round(base * mult)), name
+            if mult == 1.0:
+                assert total == base, name
 
 
 def test_an_arm_cannot_carry_a_training_setting():
@@ -165,11 +200,26 @@ def test_an_arm_cannot_carry_a_training_setting():
     A ``steps`` or ``lr`` field on ``Arm`` is all it would take to make the
     campaign meaningless; this test fails the moment one appears.
     """
-    assert [f.name for f in dataclasses.fields(du.Arm)] == ["name", "real_fraction"]
+    # The INTENT, not a literal list. This asserted exactly
+    # ["name", "real_fraction"] and went stale the moment the campaign grew the
+    # arms it needed, so it failed for years of commits while testing nothing.
+    # What must stay true is that no field of Arm is a TRAINING setting.
+    data_mix_fields = {"name", "real_fraction", "total_multiple", "label_file", "pool"}
+    arm_fields = {f.name for f in dataclasses.fields(du.Arm)}
+    assert arm_fields <= data_mix_fields, (
+        f"Arm grew a field that is not part of the data mix: "
+        f"{sorted(arm_fields - data_mix_fields)}")
+    training_fields = {f.name for f in dataclasses.fields(du.Budget)} - {"seeds"}
+    assert not (arm_fields & training_fields), (
+        f"Arm carries a TRAINING setting, which makes the campaign meaningless: "
+        f"{sorted(arm_fields & training_fields)}")
     assert du.Arm.__dataclass_params__.frozen
     assert du.Budget.__dataclass_params__.frozen
-    assert [a.name for a in du.ARMS] == ["real", "synthetic", "real_plus_synthetic"]
-    assert [a.real_fraction for a in du.ARMS] == [1.0, 0.0, 0.5]
+    # The three original arms still differ in nothing but the mix.
+    assert [a.name for a in du.ARMS[:3]] == ["real", "synthetic", "real_plus_synthetic"]
+    assert [a.real_fraction for a in du.ARMS[:3]] == [1.0, 0.0, 0.5]
+    assert all(a.total_multiple == 1.0 and a.label_file == "label.tif"
+               and a.pool == "ldm06" for a in du.ARMS[:3])
     assert du.REFERENCE_ARM == "real"
 
 
