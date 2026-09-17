@@ -813,9 +813,11 @@ def seed_permutation(n_real_pool: int, budget: Budget, seed: int,
     the first 16 000. So every arm at a given seed targets the same real
     distribution, patch for patch, and the smaller arms nest inside the larger.
 
-    ``n_draw`` must cover the longest arm — `real_plus_synthetic_aug` needs
-    32 000 — or that arm silently gets an EMPTY synthetic target and trains on
-    its real half alone. The `--dry-run` plan table is what caught that.
+    ``n_draw`` must cover the LONGEST arm — the augmentation arms need 32 000 —
+    or that arm gets an EMPTY synthetic target and trains on its real half
+    alone. `main` passes ``max_arm_total(budget)``; a caller that wants only
+    the short arms may pass less, and `plan_arm` REFUSES rather than silently
+    planning an empty synthetic half, which is how the short draw was caught.
     """
     rng = np.random.default_rng([seed, 0xD0])
     n = n_draw if n_draw is not None else budget.patch_count

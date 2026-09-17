@@ -74,10 +74,24 @@ class TestTheGenerator:
         )
         return load_sampler(DEFAULT_TE_RESULTS), load_corr_lengths_voxels(DEFAULT_TD_RESULTS)
 
-    def test_it_delivers_the_requested_length_on_a_grid_that_can_hold_it(
-            self, sampler_and_corr):
-        """A grid big enough that the box is not the limit."""
+    def test_it_delivers_every_WELL_DEFINED_requested_length(self, sampler_and_corr):
+        """A grid big enough that the box is not the limit.
+
+        Only the axes whose T-D curve actually decays to 1/e are checked. On
+        the train refit the in-plane y curve does not: it plateaus near 0.45
+        and dips to 0.359 once against a 1/e of 0.3679, so its "length" of 2521
+        voxels is where noise crossed a line. Asserting the generator delivers
+        that would be asserting it reproduces an artefact.
+        """
+        import json
+
+        from poregen.diffusion.porosity_field import (
+            DEFAULT_TD_RESULTS,
+            corr_length_is_well_defined,
+        )
+
         sampler, corr = sampler_and_corr
+        patch_level = json.loads(DEFAULT_TD_RESULTS.read_text())["patch_level"]
         grid = (24, 96, 160)
         got = []
         for seed in (101, 202, 303):
@@ -85,9 +99,14 @@ class TestTheGenerator:
                                      stride_voxels=STRIDE, seed=seed)
             got.append([axis_length(f, a) for a in range(3)])
         mean = np.nanmean(got, axis=0)
+        checked = 0
         for a, name in enumerate(("z", "y", "x")):
+            if not corr_length_is_well_defined(patch_level[f"{name}_volume_mean_removed"]):
+                continue
+            checked += 1
             assert mean[a] == pytest.approx(corr[a], rel=0.12), (
                 f"{name}: asked {corr[a]:.0f}, delivered {mean[a]:.0f}")
+        assert checked >= 2, "at least two axes should have a usable length"
 
     def test_the_old_sigma_delivered_twice_the_requested_length(
             self, sampler_and_corr):

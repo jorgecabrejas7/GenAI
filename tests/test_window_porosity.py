@@ -127,5 +127,6 @@ class TestTheSamplerUsesIt:
 
         src = inspect.getsource(VolumeGenerator._window_conditioning)
         assert "window_tile_cells" in src
-        assert "(cells * block).mean()" in src
+        # The reduction is in float64 — see the comment at that line.
+        assert "cells.astype(np.float64) * block" in src
         assert "phi *= float(block.mean())" not in src

@@ -37,10 +37,43 @@ def corr_lengths():
 
 
 def test_corr_lengths_are_td_volume_mean_removed(corr_lengths):
+    """The values, AND where they came from.
+
+    Pinning three numbers alone would pass just as happily on the superseded
+    all-80-volume fit, which is the leak this test now exists to prevent: T-D
+    is read at GENERATION time, so a fit that saw the val and test panels makes
+    every generated field derived from held-out material.
+    """
+    import json
+
+    meta = json.loads((REPO_ROOT / DEFAULT_TD_RESULTS).read_text())
+    assert meta["split"] == "train", (
+        "the generator's correlation lengths must come from a TRAIN-only fit")
+    assert meta["patch_index"].endswith("split_v3/patch_index.parquet"), (
+        "and from the split every current model was trained on — split_v2 puts "
+        "64 volumes in train where split_v3 puts 58")
+    assert meta["n_volumes"] == 58 and meta["n_patches"] == 1_598_000
+
     cz, cy, cx = corr_lengths
-    assert cz == pytest.approx(79.447, abs=0.01)
-    assert cy == pytest.approx(413.582, abs=0.01)
-    assert cx == pytest.approx(900.948, abs=0.01)
+    assert cz == pytest.approx(59.012, abs=0.01)
+    assert cy == pytest.approx(2521.489, abs=0.01)
+    assert cx == pytest.approx(1112.628, abs=0.01)
+
+
+def test_the_y_length_is_flagged_as_not_a_length(corr_lengths):
+    """y does not decay to 1/e on this fit, and the loader must say so.
+
+    It plateaus near 0.45 and dips to 0.359 once against a 1/e of 0.3679, so
+    2521 voxels is where noise crossed a line. z and x do decay and are real.
+    """
+    import json
+
+    from poregen.diffusion.porosity_field import corr_length_is_well_defined
+
+    patch_level = json.loads((REPO_ROOT / DEFAULT_TD_RESULTS).read_text())["patch_level"]
+    ok = {ax: corr_length_is_well_defined(patch_level[f"{ax}_volume_mean_removed"])
+          for ax in ("z", "y", "x")}
+    assert ok == {"z": True, "y": False, "x": True}
 
 
 @pytest.mark.parametrize("target", [0.01, 0.03, 0.05])

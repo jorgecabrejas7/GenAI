@@ -1425,7 +1425,13 @@ class VolumeGenerator:
                 phi = por_default * float(block.mean())
             else:
                 cells = window_tile_cells(ov, P, L, local_por_map, por_default)
-                phi = float((cells * block).mean())
+                # float64 for the reduction: a window is only L**3 = 4096
+                # cells, so the cost is nil, and a float32 mean of a product
+                # differs from the exact value by ~1e-5 relative — enough to
+                # move cond_por in the sixth decimal and to make an
+                # analytically-exact test fail for a reason that is not the
+                # model.
+                phi = float((cells.astype(np.float64) * block).mean())
             phi = self._clamp_por(phi)
             por.append(float(porosity_to_cond(phi, self.por_log_stats)))
             d, d6 = self._window_position(ov, box_lo, box_hi)
