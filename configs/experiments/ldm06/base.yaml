@@ -44,8 +44,12 @@ model:
   attn_at_bottleneck: false
   bottleneck_downsample: true
   cond_embed_dim: 512
-  # Input channels = 4 (z) + 2 (orient) + 1 (material) + 24 (6×4 neighbours)
-  #                + 48 (6×8 availability) + 48 (6×8 nb_t) = 127.
+  # Input channels = 8 (z) + 2 (orient) + 1 (material) + 48 (6×8 neighbours)
+  #                + 48 (6×8 availability) + 48 (6×8 nb_t) = 155.
+  # (This said 127 and counted z as 4: it was written for the z=4 rung and was
+  #  never updated when this run moved to z_channels 8. UNet3DConfig derives
+  #  in_channels itself, so the model was always right and only the comment
+  #  was wrong.)
   nb_avail_embed_dim: 8
   nb_t_embed_dim: 8
   n_attn_heads: 8
