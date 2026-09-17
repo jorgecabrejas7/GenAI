@@ -110,6 +110,24 @@ class CaseSpec:
     #: ``(lo, hi)`` in voxels; drives cond_depth and cond_dist6.  ``None`` means
     #: "this whole volume is the specimen", which is the normal case.
     specimen_box: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
+    #: CAMPAIGN 24 ONLY - the conditioning FED to the model, when it is meant to
+    #: differ from the request the case is SCORED against.
+    #:
+    #: An ablation that zeroes an input measures what the model does with an
+    #: impossible value: (cos2t, sin2t) = (0, 0) is off the unit circle, and six
+    #: face distances of zero say a window touches all six faces at once. A
+    #: SWAP keeps the input valid and only makes it wrong - layup C's profile
+    #: fed while layup A is scored - so what it measures is how much the model
+    #: actually uses the signal. Both rows are run; the swap is the primary one.
+    #:
+    #: ``None`` means "feed what is scored", which is every case outside
+    #: campaign 24.
+    cond_layup: tuple[int, ...] | None = None
+    cond_specimen_box: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
+    #: Conditioning to ZERO on its way to the denoiser - see
+    #: :data:`poregen.diffusion.sampler.ABLATABLE` for why the result needs
+    #: reading carefully.
+    ablate: tuple[str, ...] = ()
     #: the sub-block of the canvas the case is about
     region_offset: tuple[int, int, int] | None = None
     region_shape: tuple[int, int, int] | None = None
@@ -1207,6 +1225,185 @@ def ood_conditioning_cases(repo=None) -> list[CaseSpec]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 14 - what each conditioning input actually buys (campaign 24)
+# ---------------------------------------------------------------------------
+
+#: DDIM-50 throughout. The result is a DIFFERENCE against the unablated
+#: campaign-18 row, and both sides of a difference must be sampled the same way.
+ABLATION_DDIM = 50
+#: How far the swapped specimen box is moved: half the canvas thickness in z,
+#: and 256 voxels in plane. Far enough that every window's depth and face
+#: distances are genuinely different, and small enough that the box still
+#: overlaps the canvas, so the fed values stay in the range training produced.
+ABLATION_BOX_SHIFT_INPLANE = 256
+
+
+def _shifted_box(shape: tuple[int, int, int]):
+    """A VALID specimen box that puts the canvas somewhere ELSE in a specimen.
+
+    Not a zeroed input: the primary rows feed the model something training
+    could really have produced, belonging to a different position. Zeroing
+    depth and the six distances says a window touches all six faces at once,
+    which no specimen does — that is the secondary row, and it measures the
+    response to an impossible input rather than the contribution of a real one.
+
+    THE OBVIOUS CONSTRUCTION DOES NOT WORK, and it is worth saying why. Moving
+    a same-sized box by +dz puts the CANVAS OUTSIDE IT: every window then sits
+    beyond a face, `dist6_from_box` saturates to the same [0,1,0,1,0,1] the
+    unshifted box already gives, and cond_depth clips to 0.0 — which is exactly
+    the zeroed row. The swap would have been measuring nothing, and would have
+    looked like a result.
+
+    So the box is EXTENDED on the low side instead. The canvas stays entirely
+    inside it and lands near the specimen's far end rather than filling it:
+    depth moves from the 0.17-0.83 of a canvas that IS the specimen to the
+    0.58-0.92 of one near a thick specimen's back, and the low-side distances
+    saturate at "far from that face" where before they varied. Every value is
+    one training produced somewhere.
+    """
+    dz = shape[0] // 2
+    dy = dx = ABLATION_BOX_SHIFT_INPLANE
+    return ((-2 * dz, -2 * dy, -2 * dx), tuple(shape))
+
+
+def _surface_notes(tag: str) -> dict:
+    """The keys `measure_surface` reads, on the arms it is going to measure."""
+    if tag != "surface":
+        return {}
+    return {"request": "flat", "scale": "192",
+            "z_lo": SURFACE_Z_LO, "z_hi": SURFACE_Z_HI}
+
+
+def ablation_cases(repo=None) -> list[CaseSpec]:
+    """14 - drop one conditioning input at a time and measure what moves.
+
+    Every arm is read on the assessment that READS the input it disturbs, at
+    the shapes and seeds that assessment already uses, so each number has an
+    unablated campaign-18 row to be a difference FROM.
+
+    TWO KINDS OF ARM, and they answer different questions.
+
+    A SWAP feeds a valid input belonging to somewhere else — layup C's profile
+    while layup A is scored, or the depth and face distances of a box shifted
+    across the canvas. Everything the model is given is something training
+    could have produced; only its relevance is wrong. That is what measures how
+    much the model USES a signal, and it is the primary row.
+
+    A ZERO feeds a value that does not exist. (cos2t, sin2t) = (0, 0) is off
+    the unit circle, not a strange orientation on it; six face distances of
+    zero are geometrically impossible. Those rows say what the model does when
+    handed nonsense, which is worth knowing and is not the same question. They
+    are secondary and are labelled so in the notes.
+
+    NEIGHBOURS ARE NOT HERE. The all-UNKNOWN arm already exists as
+    assembly_modes' ``joint``, measured at both scales in campaign 18. Running
+    it again would spend hours to reproduce a number this project already has.
+    """
+    layups = load_layups(repo)
+    a_plies, a_pitch = layups["A"]["plies"], layups["A"]["ply_vox"]
+    c_plies = layups["C"]["plies"]
+    tgt = real_surface_target(repo)
+    out: list[CaseSpec] = []
+
+    def note(arm, kind, reads, why):
+        return {"arm": arm, "kind": kind, "reads": reads, "why": why,
+                "layup": "A", "ddim_steps": ABLATION_DDIM,
+                "compare_against": f"18-eval-v4-final/{reads}",
+                "exploratory": True}
+
+    # (b) the ply profile, on the assessment that reads a ply angle back.
+    for seed in SEEDS:
+        out.append(CaseSpec(
+            name=f"ply_swap_seed{seed}", assessment="ablation",
+            volume_shape=SHAPE_LARGE, seed=seed,
+            layup=a_plies, ply_thickness_vox=a_pitch, cond_layup=c_plies,
+            target_phi=TARGET_DEFAULT, ddim_steps=ABLATION_DDIM,
+            notes=note("ply_swap", "swap", "layup",
+                       "layup C is FED while layup A is SCORED. If the profile "
+                       "drives the output, recovery of A falls towards chance "
+                       "and recovery of C rises; both readings are reported"),
+        ))
+        out.append(CaseSpec(
+            name=f"ply_zero_seed{seed}", assessment="ablation",
+            volume_shape=SHAPE_LARGE, seed=seed,
+            layup=a_plies, ply_thickness_vox=a_pitch, ablate=("orient",),
+            target_phi=TARGET_DEFAULT, ddim_steps=ABLATION_DDIM,
+            notes=note("ply_zero", "zero", "layup",
+                       "(cos2t, sin2t) = (0, 0) is OFF the unit circle and was "
+                       "never seen in training; this is the response to an "
+                       "impossible input, not the contribution of a real one"),
+        ))
+
+    # (a) the material map, and (e) position, on the two assessments that read
+    # a requested envelope back.
+    for seed in SEEDS:
+        out.append(CaseSpec(
+            name=f"material_full_seed{seed}", assessment="ablation",
+            volume_shape=SHAPE_GEOMETRY, seed=seed,
+            layup=a_plies, ply_thickness_vox=a_pitch,
+            target_phi=TARGET_DEFAULT, ddim_steps=ABLATION_DDIM,
+            # material_fn omitted: the envelope becomes "full", which is a
+            # request the model sees constantly. This arm is IN-distribution,
+            # which is why it has no zeroed twin.
+            notes=note("material_full", "swap", "geometry",
+                       "the notch-and-hole envelope is replaced by all-material. "
+                       "The scored request is still the notch and hole, so the "
+                       "geometry Dice says how much of the shape survives without "
+                       "being asked for"),
+        ))
+        for tag, shape in (("geometry", SHAPE_GEOMETRY), ("surface", SHAPE_SMALL)):
+            out.append(CaseSpec(
+                name=f"position_swap_{tag}_seed{seed}", assessment="ablation",
+                volume_shape=shape, seed=seed,
+                layup=a_plies, ply_thickness_vox=a_pitch,
+                cond_specimen_box=_shifted_box(shape),
+                target_phi=TARGET_DEFAULT, ddim_steps=ABLATION_DDIM,
+                # The case must still CARRY the request the assessment reads:
+                # a surface arm with no envelope has no interface to score, and
+                # surface_agreement would have had nothing to measure.
+                material_fn=(material_notch_and_hole if tag == "geometry"
+                             else material_inset_z),
+                notes={**note(f"position_swap_{tag}", "swap", tag,
+                              "cond_depth and cond_dist6 of a box shifted half "
+                              "the thickness in z and 256 voxels in plane — "
+                              "valid values belonging to a different position"),
+                       **_surface_notes(tag)},
+            ))
+            out.append(CaseSpec(
+                name=f"position_zero_{tag}_seed{seed}", assessment="ablation",
+                volume_shape=shape, seed=seed,
+                layup=a_plies, ply_thickness_vox=a_pitch,
+                ablate=("depth_dist6",),
+                target_phi=TARGET_DEFAULT, ddim_steps=ABLATION_DDIM,
+                material_fn=(material_notch_and_hole if tag == "geometry"
+                             else material_inset_z),
+                notes={**note(f"position_zero_{tag}", "zero", tag,
+                              "six face distances of zero say the window touches "
+                              "all six faces of the specimen at once, which no "
+                              "geometry can; the response to an impossible input"),
+                       **_surface_notes(tag)},
+            ))
+
+    # (d) the local field, on the assessment that reads a painted field back.
+    for fname, fn in FIELDS.items():
+        for seed in SEEDS:
+            out.append(CaseSpec(
+                name=f"field_global_{fname}_seed{seed}", assessment="ablation",
+                volume_shape=SHAPE_SMALL, seed=seed,
+                layup=a_plies, ply_thickness_vox=a_pitch,
+                target_phi=TARGET_DEFAULT, ddim_steps=ABLATION_DDIM,
+                # field_fn omitted: one global scalar instead of the painted
+                # field. In-distribution, so no zeroed twin.
+                notes={**note(f"field_global_{fname}", "swap", "porosity_local",
+                              "the painted field is replaced by ONE global scalar "
+                              "at the same mean; the local fit is then scored "
+                              "against the field that was NOT requested"),
+                       "field": fname},
+            ))
+    return out
+
+
 ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "sampler": sampler_cases,
     "porosity_global": porosity_global_cases,
@@ -1221,6 +1418,7 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "assembly_modes": assembly_modes_cases,
     "stress_geometry": stress_geometry_cases,
     "ood_conditioning": ood_conditioning_cases,
+    "ablation": ablation_cases,
 }
 
 #: Assessments whose measure step also reads another assessment's volumes.

@@ -1972,6 +1972,132 @@ def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 14 - conditioning ablations (campaign 24)
+# ---------------------------------------------------------------------------
+
+def measure_ablation(root, repo) -> dict:
+    """Each arm scored with the metric of the assessment it disturbs.
+
+    The number this campaign produces is a DIFFERENCE — an arm against the
+    unablated campaign-18 row of the same assessment — so every arm is measured
+    with that assessment's own metric and nothing else. This measurer does not
+    compute the difference: the two campaigns are separate directories and the
+    report reads both, so a missing baseline is visible as a missing column
+    rather than silently absent from a subtraction.
+
+    THE PLY SWAP IS SCORED TWICE, against A and against C. One number cannot
+    say what happened: recovery of A falling could mean the model followed C,
+    or that it produced no readable layup at all. Reading both separates them.
+    """
+    cases = load_cases(root, "ablation")
+    if not cases:
+        raise FileNotFoundError(f"no ablation volumes under {root}")
+
+    rows = []
+    for case in cases:
+        notes = case.manifest.notes or {}
+        material = case.material_voxels()
+        row = measure_core(case)
+        row.update({k: notes.get(k) for k in
+                    ("arm", "kind", "reads", "why", "compare_against")})
+        reads = notes.get("reads")
+
+        if reads == "layup":
+            row["recovery"] = M.layup_recovery(
+                case.xct, case.label, manifest=case.manifest, repo=repo)
+            # The layup actually FED, when it differs from the one scored.
+            fed = notes.get("cond_layup")
+            if fed:
+                import dataclasses  # noqa: PLC0415
+                as_fed = dataclasses.replace(
+                    case.manifest, requested_layup=tuple(int(x) for x in fed))
+                row["recovery_of_the_fed_layup"] = M.layup_recovery(
+                    case.xct, case.label, manifest=as_fed, repo=repo)
+        elif reads == "geometry":
+            row["geometry"] = M.geometry_agreement(
+                case.label, material, manifest=case.manifest)
+        elif reads == "surface":
+            row["surface"] = M.surface_agreement(
+                case.label, material,
+                z_lo=M.height_map(material, face="lower"),
+                z_hi=M.height_map(material, face="upper"),
+                xct=case.xct)
+        elif reads == "porosity_local":
+            row["local"] = M.local_obedience(
+                case.label, material, manifest=case.manifest)
+            row["field"] = notes.get("field")
+        else:
+            row["unmeasured_because"] = (
+                f"notes.reads is {reads!r}, which names no assessment metric")
+        rows.append(row)
+
+    arms = {}
+    for name, grp in _group(rows, lambda r: r["arm"]).items():
+        first = grp[0]
+        entry = {
+            "n_cases": len(grp), "kind": first["kind"], "reads": first["reads"],
+            "why": first["why"], "compare_against": first["compare_against"],
+            **_seam_summary(grp), **_failure_rate(grp),
+            "phi_pore": _agg(grp, ("phi_pore",)),
+        }
+        if first["reads"] == "layup":
+            # Per reader, as measure_layup reports it: there are two independent
+            # readers and one number for "recovery" would hide a disagreement
+            # between them, which is the first thing to check on a swap row.
+            for key, block in (("scored", "recovery"),
+                               ("fed", "recovery_of_the_fed_layup")):
+                if block not in first:
+                    continue
+                per_reader = {}
+                for reader in sorted(first[block]["readers"]):
+                    ok = [r for r in grp
+                          if r[block]["readers"].get(reader, {}).get("available")]
+                    per_reader[reader] = (
+                        {"available": False} if not ok else {
+                            "available": True, "n_cases": len(ok),
+                            "strict_class_accuracy": _agg(
+                                ok, (block, "readers", reader, "strict_class_accuracy")),
+                            "frac_within_10": _agg(
+                                ok, (block, "readers", reader, "frac_within_10")),
+                            "median_abs_error_deg": _agg(
+                                ok, (block, "readers", reader, "median_abs_error_deg")),
+                        })
+                entry[f"recovery_of_the_{key}_layup"] = per_reader
+        elif first["reads"] == "geometry":
+            entry["dice_air"] = _agg(grp, ("geometry", "dice_air"))
+        elif first["reads"] == "surface":
+            entry["air_fraction_outside_box"] = _agg(
+                grp, ("surface", "air_fraction_outside_box"))
+        elif first["reads"] == "porosity_local":
+            entry["local_r2"] = _agg(grp, ("local", "r2"))
+            entry["local_slope"] = _agg(grp, ("local", "slope"))
+        arms[name] = entry
+
+    return {
+        "assessment": "ablation",
+        "question": "What does each conditioning input actually buy?",
+        "note": (
+            "EXPLORATORY. Every arm disturbs ONE input and is scored with the "
+            "metric of the assessment that reads it, so each number is a "
+            "difference against the unablated campaign-18 row named in "
+            "compare_against. Two kinds of arm, and they answer different "
+            "questions. A SWAP feeds a valid input belonging to somewhere else "
+            "— layup C's profile while A is scored, or the depth and distances "
+            "of a differently placed specimen — and measures how much the model "
+            "USES the signal. A ZERO feeds a value that cannot exist: "
+            "(cos2t, sin2t) = (0,0) is off the unit circle, and six face "
+            "distances of zero say a window touches all six faces at once. "
+            "Zero rows say what the model does with nonsense, which is not the "
+            "same thing, and are labelled kind='zero'. THE NEIGHBOUR ARM IS "
+            "NOT HERE: all-UNKNOWN already exists as assembly_modes' 'joint', "
+            "measured at both scales in campaign 18."
+        ),
+        "per_case": rows,
+        "arms": arms,
+    }
+
+
 MEASURERS = {
     "sampler": measure_sampler,
     "porosity_global": measure_porosity_global,
@@ -1990,6 +2116,7 @@ MEASURERS = {
     # Baselines. eval_v4 measures them but never generates them: their volumes
     # come from the baseline's own sampling script, which is why they are in
     # MEASURE_ONLY and have no entry in ASSESSMENTS.
+    "ablation": measure_ablation,
     "slicegan": measure_slicegan,
 }
 

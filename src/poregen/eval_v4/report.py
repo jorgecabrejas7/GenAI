@@ -1835,6 +1835,72 @@ def _fig_slicegan(res, root) -> list[str]:
     return savefig(fig, figures_dir(root, "slicegan"), "directional_s2")
 
 
+def report_ablation(res, root, floor) -> tuple[str, list[str]]:
+    """One table per assessment the arms disturb, swaps before zeros."""
+    arms = res.get("arms") or {}
+    body = ["## What each conditioning input buys\n", res["note"], ""]
+
+    def rows_for(reads, cols):
+        sel = [(n, a) for n, a in arms.items() if a["reads"] == reads]
+        # Swaps first: they are the primary rows, and a reader who stops after
+        # the first line of a table should have stopped on the right one.
+        sel.sort(key=lambda na: (na[1]["kind"] != "swap", na[0]))
+        return [[n, a["kind"], str(a["n_cases"]), *[c(a) for c in cols]]
+                for n, a in sel]
+
+    def rec(block, reader, stat):
+        return lambda a: fmt((((a.get(block) or {}).get(reader) or {})
+                              .get(stat) or {}).get("mean"), 3)
+
+    # Both readers, because one number would hide a disagreement between them —
+    # and a disagreement is the first thing to look at on a swap row.
+    lay = rows_for("layup", [rec(b, r, "frac_within_10")
+                             for b in ("recovery_of_the_scored_layup",
+                                       "recovery_of_the_fed_layup")
+                             for r in ("fft_slice", "pore_axes")])
+    if lay:
+        body += ["### Ply orientation — read on `layup`\n",
+                 table(["arm", "kind", "n",
+                        "SCORED (A) fft_slice", "SCORED (A) pore_axes",
+                        "FED fft_slice", "FED pore_axes"], lay),
+                 "",
+                 "Two columns because one cannot say what happened. If the "
+                 "profile drives the output, recovery of A falls AND recovery "
+                 "of the fed layup rises. If both fall, the model produced no "
+                 "readable layup at all, which is a different finding. The "
+                 "unablated campaign-18 row is what each is a difference from.",
+                 ""]
+
+    geo = rows_for("geometry", [lambda a: ms(a.get("dice_air"), 3)])
+    if geo:
+        body += ["### Specimen envelope and position — read on `geometry`\n",
+                 table(["arm", "kind", "n", "air Dice"], geo), ""]
+
+    sur = rows_for("surface", [lambda a: ms(a.get("air_fraction_outside_box"), 4)])
+    if sur:
+        body += ["### Position — read on `surface`\n",
+                 table(["arm", "kind", "n", "air outside the box"], sur), ""]
+
+    loc = rows_for("porosity_local", [lambda a: ms(a.get("local_r2"), 3),
+                                      lambda a: ms(a.get("local_slope"), 3)])
+    if loc:
+        body += ["### The porosity field — read on `porosity_local`\n",
+                 table(["arm", "kind", "n", "local R2", "slope"], loc),
+                 "",
+                 "The field is replaced by ONE global scalar at the same mean "
+                 "and the local fit is then scored against the field that was "
+                 "not requested, so a model ignoring the field would score what "
+                 "a flat delivery scores.",
+                 ""]
+
+    body += ["### Seams and phases, every arm\n",
+             table(["arm", "kind", "reads", "phi", "seam xct", "fail"],
+                   [[n, a["kind"], a["reads"], ms(a.get("phi_pore"), 4),
+                     ms(a.get("seam_xct_ratio"), 3), fmt(a.get("failure_rate"), 2)]
+                    for n, a in sorted(arms.items())]), ""]
+    return "\n".join(body) + "\n", []
+
+
 REPORTERS = {
     "sampler": report_sampler,
     "porosity_global": report_porosity_global,
@@ -1851,6 +1917,7 @@ REPORTERS = {
     "real_floor": report_real_floor,
     "stress_geometry": report_stress_geometry,
     "ood_conditioning": report_ood_conditioning,
+    "ablation": report_ablation,
     "slicegan": report_slicegan,
 }
 

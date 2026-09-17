@@ -324,8 +324,12 @@ class VolumeRunner:
         shape = tuple(int(s) for s in spec.volume_shape)
         size_mm = tuple(s * VOXEL_SIZE_MM for s in shape)
 
+        # The layup FED, which is spec.layup unless the case is a campaign-24
+        # swap row. The layup SCORED is spec.layup either way, and the manifest
+        # below records both so a reader cannot mistake one for the other.
         theta = theta_for_canvas(
-            shape[0], spec.layup, spec.ply_thickness_vox, spec.request_offset[0]
+            shape[0], spec.cond_layup or spec.layup,
+            spec.ply_thickness_vox, spec.request_offset[0]
         )
         sampler = DDIMSampler(
             self.model, self.schedule, self.device,
@@ -354,6 +358,7 @@ class VolumeRunner:
             neighbour_mode=spec.neighbour_mode,
             reference_latents=reference,
             clamp_porosity=spec.clamp_porosity,
+            ablate=spec.ablate,
         )
         snapped = generator._volume_shape(size_mm)
         if tuple(snapped) != shape:
@@ -376,7 +381,7 @@ class VolumeRunner:
                 autocast_dtype=self.autocast_dtype,
                 local_por_map=por_map,
                 material_map=material_map,
-                specimen_box=spec.specimen_box,
+                specimen_box=spec.cond_specimen_box or spec.specimen_box,
                 request_offset=spec.request_offset,
                 progress=progress,
                 window_batch=WINDOW_BATCH,
@@ -458,6 +463,18 @@ class VolumeRunner:
                     [list(spec.specimen_box[0]), list(spec.specimen_box[1])]
                     if spec.specimen_box is not None else None
                 ),
+                # WHAT WAS FED, when it differs from what is SCORED. The
+                # requested_* fields above are the request the metrics judge
+                # this volume against; these are what the model was actually
+                # given. They are equal for every case outside campaign 24, and
+                # a reader who confuses the two would read a swap row backwards.
+                "cond_layup": (list(spec.cond_layup)
+                               if spec.cond_layup is not None else None),
+                "cond_specimen_box": (
+                    [list(spec.cond_specimen_box[0]), list(spec.cond_specimen_box[1])]
+                    if spec.cond_specimen_box is not None else None
+                ),
+                "ablate": list(spec.ablate),
                 "generation_stats": {
                     k: v for k, v in stats.items() if not isinstance(v, (list, dict))
                 },

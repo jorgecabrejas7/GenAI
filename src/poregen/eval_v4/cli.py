@@ -65,6 +65,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--chunk-overlap-write", default=None,
                    choices=("blend", "pin", "successor"),
                    help="how the free part of the overlap is written")
+    # A model with no neighbour input has nothing to carry between chunks, so
+    # chunking it would partition the canvas into independent solves and put a
+    # seam at every chunk plane for no reason. This is the assembly_modes
+    # "joint" arm applied to a whole campaign.
+    g.add_argument("--joint", action="store_true",
+                   help="denoise each case's WHOLE canvas as one chunk with every "
+                        "neighbour UNKNOWN. For the porosity-only baseline, which "
+                        "has no neighbour conditioning to chunk for.")
     g.add_argument("--save-latents", action="store_true",
                    help="also write latents.npy per case — the finished latent canvas the "
                         "decoder consumed. Required by the decoder fine-tune gate, which "
@@ -119,6 +127,18 @@ def _apply_sampler_overrides(specs, args):
     comparison into four copies of one thing.
     """
     import dataclasses  # noqa: PLC0415
+
+    if getattr(args, "joint", False):
+        out = []
+        for spec in specs:
+            if spec.neighbour_mode != "canvas":
+                out.append(spec)
+                continue
+            out.append(dataclasses.replace(
+                spec, chunk_tiles=spec.tile_grid, neighbour_mode="unknown"))
+        log.info("--joint: %d case(s) set to one chunk over the whole canvas "
+                 "with every neighbour UNKNOWN", len(out))
+        specs = out
 
     changes = {k: v for k, v in (
         ("chunk_overlap", args.chunk_overlap),

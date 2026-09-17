@@ -62,6 +62,7 @@ import numpy as np
 import torch
 
 from poregen.diffusion.conditioning import (
+    N_DIST6,
     N_NEIGHBOURS,
     NB_EXISTS,
     NB_OOB,
@@ -85,6 +86,20 @@ AXIS_NAMES = ("z", "y", "x")
 #: ``"canvas"`` is the production path and the other two are measurement arms.
 NEIGHBOUR_MODES = ("canvas", "unknown", "reference")
 
+#: Conditioning inputs an ablation can ZERO on their way to the denoiser.
+#:
+#: READ THE RESULT CAREFULLY. Neither of these is a value the model has ever
+#: seen. cos2theta and sin2theta lie on the UNIT CIRCLE, so (0, 0) is not an
+#: unusual orientation — it is off the manifold entirely. Six face distances of
+#: zero say the window touches all six faces of the specimen at once, which no
+#: geometry can. So an ablation here measures what the model does when handed
+#: an IMPOSSIBLE input, which is a real question but is not the same question
+#: as how much the input contributes. For the contribution, feed a valid input
+#: that belongs to a different position — `CaseSpec.cond_layup` and
+#: `CaseSpec.cond_specimen_box` do exactly that, and are the primary rows of
+#: campaign 24 for this reason.
+ABLATABLE = ("orient", "depth_dist6")
+
 #: How the FREE part of a chunk overlap is written to the canvas.  "blend" is
 #: the cosine mix of both chunks' outputs; "pin" keeps the predecessor, which
 #: does NOT remove the band and exists to show that; "successor" takes the new
@@ -101,6 +116,7 @@ _DECODE_WINDOW_FLOOR = 1e-3
 __all__ = [
     "AXIS_NAMES",
     "DDIMSampler",
+    "ABLATABLE",
     "NEIGHBOUR_MODES",
     "OVERLAP_WRITES",
     "chunk_blend_weight",
@@ -780,7 +796,16 @@ class VolumeGenerator:
         neighbour_mode: str = "canvas",
         reference_latents: torch.Tensor | None = None,
         clamp_porosity: bool = True,
+        ablate: tuple[str, ...] = (),
     ) -> None:
+        # Checked before anything else is touched: an argument this object was
+        # given wrong should be reported as that, not as an AttributeError from
+        # some later line that happens to dereference a different argument.
+        self.ablate = frozenset(ablate)
+        if not self.ablate <= set(ABLATABLE):
+            raise ValueError(
+                f"ablate must be a subset of {ABLATABLE}, got "
+                f"{sorted(self.ablate - set(ABLATABLE))}.")
         if patch_size % latent_size:
             raise ValueError(
                 f"patch_size={patch_size} is not a multiple of latent_size={latent_size}."
@@ -955,9 +980,10 @@ class VolumeGenerator:
                 f"theta_deg covers {len(self.theta_deg)} voxels — too few for a "
                 f"window at z0={z0} (needs {z0}..{z0 + P - 1})."
             )
-        return torch.from_numpy(
+        out = torch.from_numpy(
             orientation_tensor(self.theta_deg[z0 : z0 + P], self.latent_size)
         )
+        return torch.zeros_like(out) if "orient" in self.ablate else out
 
     def _window_position(
         self,
@@ -973,6 +999,8 @@ class VolumeGenerator:
         ``scripts/build_conditioning.py`` applies at training time (there the
         box comes from the volume's foreground extent).
         """
+        if "depth_dist6" in self.ablate:
+            return 0.0, np.zeros(N_DIST6, dtype=np.float32)
         centre_z = origin[0] + self.patch_size / 2.0
         span = max(box_hi[0] - box_lo[0], 1)
         depth = float(np.clip((centre_z - box_lo[0]) / span, 0.0, 1.0))
