@@ -128,6 +128,7 @@ __all__ = [
     "rescale_guidance",
     "theta_from_layup",
     "window_origins",
+    "window_tile_cells",
     "window_tile_mean",
     "window_weight",
     "seam_discontinuity",
@@ -259,6 +260,43 @@ def window_tile_mean(
             for ix, wx in spans[2]:
                 total += float(tile_field.get((iz, iy, ix), default)) * wz * wy * wx
     return total / float(P ** 3)
+
+
+def window_tile_cells(
+    origin: tuple[int, int, int],
+    patch_size: int,
+    latent_size: int,
+    tile_field: dict,
+    default: float,
+) -> np.ndarray:
+    """The TILE-grid field sampled onto one window's LATENT CELLS.
+
+    :func:`window_tile_mean` collapses the field to one number, which is the
+    right thing only when it is then used on its own. It is NOT the right thing
+    when the result is multiplied by the material fraction: the full-patch
+    porosity of a window is
+
+        phi_full = mean over cells of  phi(x) * m(x)
+
+    and ``mean(phi) * mean(m)`` differs from that by the covariance of the
+    requested field with the specimen shape. Where a window is half exterior
+    air at a high requested porosity and half material at a low one, the two
+    answers are far apart, and the model is then conditioned on a porosity
+    nothing asked for.
+
+    A latent cell is ``patch_size // latent_size`` voxels and a tile is
+    ``patch_size``, so a cell never straddles a tile boundary and this sampling
+    is exact rather than an interpolation.
+    """
+    P, L = int(patch_size), int(latent_size)
+    ds = P // L
+    idx = [((int(origin[a]) + np.arange(L) * ds) // P).astype(int) for a in range(3)]
+    out = np.empty((L, L, L), dtype=np.float32)
+    for i, iz in enumerate(idx[0]):
+        for j, iy in enumerate(idx[1]):
+            for k, ix in enumerate(idx[2]):
+                out[i, j, k] = float(tile_field.get((iz, iy, ix), default))
+    return out
 
 
 def region_noise_field(
@@ -1368,19 +1406,26 @@ class VolumeGenerator:
         for g in g_origins:
             ov = tuple(int(c) * ds for c in g)          # voxel origin
             block = material_map[g[0]:g[0] + L, g[1]:g[1] + L, g[2]:g[2] + L]
-            phi = por_default
-            if local_por_map is not None:
-                # The requested porosity field is defined on the TILE grid but a
-                # window steps by window_stride, so it straddles up to eight
-                # tiles: its request is the field over its own footprint.
-                phi = window_tile_mean(ov, P, local_por_map, por_default)
-            # Material porosity -> full-patch phi.  Every latent cell covers the
-            # same ds**3 voxels, so the mean envelope fraction over the window's
-            # cells IS the material fraction of its voxel footprint.  This has
-            # to happen before the clip (0.2 material porosity at half material
-            # is a legal 0.1, not a clipped 0.107) and before porosity_to_cond,
-            # which is a log — scaling after it would be an offset, not a scale.
-            phi *= float(block.mean())
+            # Material porosity -> full-patch phi, CELL BY CELL.
+            #
+            # The full-patch porosity of a window is the mean over its cells of
+            # phi(x) * m(x): every cell covers the same ds**3 voxels, so the
+            # pore volume it contributes is its requested material porosity
+            # times its own envelope fraction. Collapsing each factor to its
+            # own mean first and multiplying the two means instead drops the
+            # covariance between the requested field and the specimen shape,
+            # which is exactly what a window straddling a specimen edge under a
+            # graded request has most of.
+            #
+            # This has to happen before the clip (0.2 material porosity at half
+            # material is a legal 0.1, not a clipped 0.107) and before
+            # porosity_to_cond, which is a log — scaling after it would be an
+            # offset, not a scale.
+            if local_por_map is None:
+                phi = por_default * float(block.mean())
+            else:
+                cells = window_tile_cells(ov, P, L, local_por_map, por_default)
+                phi = float((cells * block).mean())
             phi = self._clamp_por(phi)
             por.append(float(porosity_to_cond(phi, self.por_log_stats)))
             d, d6 = self._window_position(ov, box_lo, box_hi)
