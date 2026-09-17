@@ -125,7 +125,18 @@ def build_porosity_field(
     # periodic ("wrap" would correlate opposite faces), and "nearest"
     # extends the boundary value, keeping the local porosity level at the
     # faces instead of mirroring interior fluctuations back in.
-    sigma = tuple(cl / stride_voxels for cl in corr_lengths_voxels)
+    #
+    # THE FACTOR OF TWO IS NOT COSMETIC. Smoothing white noise with a Gaussian
+    # kernel of standard deviation s gives an autocorrelation that is itself
+    # Gaussian with standard deviation s*sqrt(2):
+    #
+    #     rho(r) = exp(-r^2 / (4 s^2))
+    #
+    # so rho falls to 1/e at r = 2s, NOT at r = s. Setting sigma = cl/stride
+    # therefore delivered a 1/e correlation length of 2*cl — every coherent
+    # field this project generated was twice as smooth as the T-D length it
+    # was asked for. sigma = cl/(2*stride) delivers cl.
+    sigma = tuple(cl / (2.0 * stride_voxels) for cl in corr_lengths_voxels)
     field = gaussian_filter(field, sigma=sigma, mode="nearest")
 
     # Rescale mean → clamp → rescale mean once more → final clamp (D32 §4).
