@@ -188,6 +188,12 @@ def cmd_generate(args) -> int:
                 # setting most worth catching there: it is what makes a case
                 # off-manifold, and it was invisible here.
                 + (" CLAMP-LIFTED" if not s.clamp_porosity else "")
+                # Same reason as the clamp: what a campaign-24 case IS lives in
+                # these three fields, and without them `ply_swap` and `ply_zero`
+                # print as the same line.
+                + (f" FED-LAYUP={s.cond_layup}" if s.cond_layup else "")
+                + (" FED-BOX-SHIFTED" if s.cond_specimen_box else "")
+                + (f" ABLATE={','.join(s.ablate)}" if s.ablate else "")
             )
         print(f"\n{len(specs)} cases")
         return 0
