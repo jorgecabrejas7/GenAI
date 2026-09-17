@@ -32,18 +32,34 @@ Recipe (exactly as prescribed):
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
 # Training phi range (D39).
+logger = logging.getLogger(__name__)
+
 PHI_MIN = 0.002
 PHI_MAX = 0.107
 
 # Default artefact locations, relative to the repo root.
-DEFAULT_TE_RESULTS = Path("runs/campaigns/01-conditioning-design/T-E/results.json")
-DEFAULT_TD_RESULTS = Path("runs/campaigns/01-conditioning-design/T-D/results.json")
+# THE _v3 FITS, AND WHY THE ORIGINALS ARE NOT USED.
+#
+# T-D and T-E are read at GENERATION time, so whatever they were fitted on is
+# data the generator has seen. The originals were fitted on all 80 volumes of
+# the split_v2 index — before the current split existed, with hole-touching
+# patches still in — so the priors every published field was drawn from had
+# seen the val and test panels. That is leakage into the generator, not into
+# the model, and it is exactly as disqualifying.
+#
+# The _v3 fits are the same two scripts run with `--split train --patch-index
+# data/split_v3/patch_index.parquet`: 58 volumes, 1 598 000 patches, the split
+# every current model was actually trained on. The originals are kept, with a
+# banner, because the published numbers were built from them.
+DEFAULT_TE_RESULTS = Path("runs/campaigns/01-conditioning-design/T-E_v3/results.json")
+DEFAULT_TD_RESULTS = Path("runs/campaigns/01-conditioning-design/T-D_v3/results.json")
 
 
 def load_sampler(path: str | Path) -> dict[str, np.ndarray]:
@@ -62,18 +78,56 @@ def load_sampler(path: str | Path) -> dict[str, np.ndarray]:
     }
 
 
+def corr_length_is_well_defined(block: dict) -> bool:
+    """Is this axis's 1/e length a LENGTH, or where a plateau happened to dip?
+
+    A 1/e correlation length means something only if the curve DECAYS to 1/e.
+    Where it instead flattens out above 1/e and wanders, the "crossing" is
+    wherever noise takes it briefly under the line, and that position moves
+    with the sample rather than with the material.
+
+    This is not hypothetical. Refitting T-D on the split_v3 TRAIN panels made
+    the in-plane y curve plateau near 0.45 with a single excursion to 0.359
+    against a 1/e of 0.3679 — so its reported length moved from 416 voxels to
+    2528, a factor of six, on a curve that never really decays. Smoothing with
+    that number would make the generated field constant along y.
+
+    The test is monotonicity up to the crossing: a curve that only ever falls
+    has a length; one that rises again before crossing does not.
+    """
+    r = np.asarray(block["correlation"], dtype=np.float64)
+    below = np.flatnonzero(r < np.exp(-1.0))
+    if not below.size:
+        return False
+    return bool(np.all(np.diff(r[: below[0] + 1]) <= 1e-9))
+
+
 def load_corr_lengths_voxels(path: str | Path) -> tuple[float, float, float]:
     """Load the (z, y, x) 1/e correlation lengths in voxels from T-D.
 
     Uses the patch-level, volume-mean-removed variant — the raw variant is
     inflated by the volume-to-volume mean differences, which are irrelevant
     inside one generated volume.
+
+    WARNS, per axis, when the curve does not actually decay to 1/e. The number
+    is still returned, because refusing it would take down generation over a
+    property of the dataset, but a length that is not a length must not pass
+    silently into a smoothing kernel.
     """
     patch_level = json.loads(Path(path).read_text())["patch_level"]
-    return tuple(
-        float(patch_level[f"{axis}_volume_mean_removed"]["corr_length_1_over_e_voxels"])
-        for axis in ("z", "y", "x")
-    )
+    out = []
+    for axis in ("z", "y", "x"):
+        block = patch_level[f"{axis}_volume_mean_removed"]
+        length = float(block["corr_length_1_over_e_voxels"])
+        if not corr_length_is_well_defined(block):
+            logger.warning(
+                "%s: the %s correlation curve does not decay monotonically to "
+                "1/e, so its reported length of %.0f voxels is where a plateau "
+                "happens to dip and not a correlation length. Smoothing with it "
+                "will make the field nearly constant along %s.",
+                Path(path).parent.name, axis, length, axis)
+        out.append(length)
+    return tuple(out)
 
 
 def _draw_marginal(

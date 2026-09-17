@@ -76,11 +76,28 @@ def pooled_lag_correlation(grids: list[np.ndarray], axis: int, max_lag: int) -> 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-lag-patches", type=int, default=100)
+    # LEAKAGE. The first fit used all 80 volumes, before the split existed, and
+    # `porosity_field.py` reads its output at GENERATION time — so the priors
+    # the generator drew from had seen the val and test panels. `--split train`
+    # is the refit; `--out-dir` keeps it beside the original instead of
+    # destroying the record of what the published numbers were built from.
+    ap.add_argument("--split", default="all", choices=["all", "train"])
+    # `_common.PATCH_INDEX` still points at SPLIT_V2, whose split is not the
+    # one any current model was trained on: v2 puts 64 volumes in train, v3
+    # puts 58, and v3 carries the manual re-split (Na_09 -> test, Na_01 ->
+    # val). A refit "on train" against v2 would be a refit on the wrong train.
+    ap.add_argument("--patch-index", type=Path, default=PATCH_INDEX,
+                    help="patch index to fit from; pass data/split_v3/"
+                         "patch_index.parquet to refit on the current split")
+    ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out_dir or OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_parquet(PATCH_INDEX)
+    df = pd.read_parquet(args.patch_index)
     df = df[df["porosity"] <= 1.0]
+    if args.split == "train":
+        df = df[df["split"] == "train"]
     vids = sorted(df["volume_id"].unique().tolist())
     print(f"[T-D] {len(vids)} volumes, {len(df)} patches", flush=True)
 
@@ -94,8 +111,10 @@ def main() -> None:
 
     results = {
         "test_id": TEST_ID,
+        "patch_index": str(args.patch_index),
         "patch_size_voxels": PATCH_SIZE,
         "stride_voxels": STRIDE,
+        "split": args.split,
         "n_volumes": len(vids),
         "n_patches": int(len(df)),
         "patch_level": {},
@@ -169,7 +188,7 @@ def main() -> None:
     else:
         print("[T-D] T-A profile cache missing — skipping the voxel-level pass", flush=True)
 
-    p = write_json(results, OUT_DIR)
+    p = write_json(results, out_dir)
     print(f"[T-D] wrote {p}", flush=True)
 
     # ---- figures ----
@@ -194,7 +213,7 @@ def main() -> None:
         ax.legend(frameon=False)
     fig.suptitle("T-D  Spatial autocorrelation of patch porosity, per axis "
                  f"({results['n_patches']:,} patches, {results['n_volumes']} volumes)", fontsize=11)
-    f1 = savefig(fig, OUT_DIR, "TD_fig1_patch_autocorrelation")
+    f1 = savefig(fig, out_dir, "TD_fig1_patch_autocorrelation")
 
     figs = list(f1)
     if voxel_curves:
@@ -218,7 +237,7 @@ def main() -> None:
             ax.set_title(f"{axis}-axis")
         fig.suptitle("T-D  Voxel-resolution autocorrelation of the detrended $\\varphi$ profile "
                      "(mean and IQR over volumes)", fontsize=11)
-        figs += savefig(fig, OUT_DIR, "TD_fig2_voxel_autocorrelation")
+        figs += savefig(fig, out_dir, "TD_fig2_voxel_autocorrelation")
     print("[T-D] figures:", *figs, sep="\n  ", flush=True)
 
 

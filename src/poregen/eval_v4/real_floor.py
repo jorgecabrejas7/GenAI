@@ -91,9 +91,21 @@ def _real_windows(repo: Path):
     return _real_windows
 
 
-def test_volume_ids(data_root: Path) -> list[str]:
+def volume_ids_for_split(data_root: Path, split: str = "test") -> list[str]:
+    """Volume ids of one split.
+
+    The floor is TEST by definition — it is what the model is scored against.
+    ``split`` exists for one other caller: the ROUGH SURFACE REQUEST is built
+    from measured Sa and correlation length, and building a request out of test
+    material makes the request itself leakage, separately from the floor it is
+    then scored against. That request must come from TRAIN.
+    """
     splits = json.loads((data_root / "splits.json").read_text())
-    return sorted(v for v, s in splits["volumes"].items() if s == "test")
+    return sorted(v for v, s in splits["volumes"].items() if s == split)
+
+
+def test_volume_ids(data_root: Path) -> list[str]:
+    return volume_ids_for_split(data_root, "test")
 
 
 def _crop(zgroup, z0, y0, x0, shape):

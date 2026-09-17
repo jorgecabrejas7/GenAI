@@ -57,10 +57,21 @@ def global_porosity_table(df: pd.DataFrame) -> tuple[pd.Series, str]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="all", choices=["all", "train"])
+    # `_common.PATCH_INDEX` still points at SPLIT_V2, whose split is not the
+    # one any current model was trained on: v2 puts 64 volumes in train, v3
+    # puts 58, and v3 carries the manual re-split (Na_09 -> test, Na_01 ->
+    # val). A refit "on train" against v2 would be a refit on the wrong train.
+    ap.add_argument("--patch-index", type=Path, default=PATCH_INDEX,
+                    help="patch index to fit from; pass data/split_v3/"
+                         "patch_index.parquet to refit on the current split")
+    # Written beside the original, not over it: the published numbers were
+    # built from the all-volume fit and that record has to survive the refit.
+    ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out_dir or OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_parquet(PATCH_INDEX)
+    df = pd.read_parquet(args.patch_index)
     df = df[df["porosity"] <= 1.0]
     if args.split == "train":
         df = df[df["split"] == "train"]
@@ -74,6 +85,8 @@ def main() -> None:
 
     results = {
         "test_id": TEST_ID,
+        "patch_index": str(args.patch_index),
+        "split": args.split,
         "n_patches": int(len(df)),
         "n_volumes": int(df["volume_id"].nunique()),
         "global_phi_source": gsource,
@@ -162,7 +175,7 @@ def main() -> None:
         "quantile_levels": QUANTILES.tolist(),
         **sampler_table,
     }
-    p = write_json(results, OUT_DIR)
+    p = write_json(results, out_dir)
     print(f"[T-E] wrote {p}", flush=True)
 
     # ---------------- figures ----------------
@@ -216,7 +229,7 @@ def main() -> None:
     ax.legend(frameon=False)
     fig.suptitle("T-E  Conditional distribution of local porosity given global porosity",
                  fontsize=12)
-    figs = savefig(fig, OUT_DIR, "TE_fig1_conditional")
+    figs = savefig(fig, out_dir, "TE_fig1_conditional")
 
     fig, ax = plt.subplots(figsize=(6.2, 4.0), constrained_layout=True)
     R = np.array(sampler_table["ratio_quantiles"])
@@ -228,7 +241,7 @@ def main() -> None:
     ax.set_yscale("log")
     ax.set_title("T-E  Sampler artifact: quantiles of $\\varphi_L/\\varphi_G$")
     ax.legend(frameon=False, fontsize=7, ncol=2)
-    figs += savefig(fig, OUT_DIR, "TE_fig2_sampler_quantiles")
+    figs += savefig(fig, out_dir, "TE_fig2_sampler_quantiles")
     print("[T-E] figures:", *figs, sep="\n  ", flush=True)
 
 
