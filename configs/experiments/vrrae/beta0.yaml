@@ -1,0 +1,29 @@
+experiment:
+  name: vrrae
+  variant: beta0
+  description: >-
+    V0 — vrrae04 with the KL switched OFF. The "posterior collapse versus
+    bottleneck" test: is the reconstruction gap caused by KL pressure killing
+    latent dimensions, or by the flat bottleneck itself?
+
+    THE PRIOR IS STRONG AND IT COMES FROM vrrae04's OWN LOGS. At its best
+    validation step that run reports mu_n_active = 1 of rank 300 and
+    mu_active_fraction = 0.0033 — ONE live dimension out of three hundred. If
+    that is KL pressure, this run recovers most of the gap; if the
+    reconstruction stays where vrrae04 left it, the bottleneck is the cause and
+    the KL is not worth arguing about.
+
+    Everything else is vrrae04 exactly, including the LINEAR bottleneck: this
+    is a one-variable change to that run, not to the SVD ones.
+
+extends: vrrae04/base
+
+overrides:
+  loss:
+    # 0, not "small". A ramped-to-small beta still rewards killing a channel;
+    # only removing the term entirely separates the two explanations.
+    kl_max_beta: 0.0
+    # The warmup ramps beta 0 -> kl_max_beta, so with kl_max_beta 0 it is a
+    # ramp from zero to zero. Zeroed as well so the resolved config cannot be
+    # misread as "KL arrives after 2000 steps".
+    kl_warmup_steps: 0

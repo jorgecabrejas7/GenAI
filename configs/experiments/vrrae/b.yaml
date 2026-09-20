@@ -1,0 +1,49 @@
+experiment:
+  name: vrrae
+  variant: b
+  description: >-
+    B — vrrae04's encoder, NO fully-connected projection, and the widest rank
+    the batch can carry. Where A shrinks the tensor to test the FC, B keeps the
+    tensor and removes only the FC, so the pair separates "the FC hurt" from
+    "the smaller tensor hurt".
+
+    THE LAYOUT. 5 blocks at base 32 gives 32, 64, 128, 256, 512 and takes a
+    64-voxel patch to 2 voxels, so the flattened tensor is
+
+        512 channels x 2^3 = 4096
+
+    which is vrrae04's exactly. Setting vrrae_dim to that same 4096 makes
+    fc_in and its mirror `nn.Identity()`, so the RR layer sees the encoder
+    output directly — the ONE difference from vrrae04 besides the rank.
+
+    THE RANK <= BATCH CONSTRAINT IS THE BINDING ONE HERE: rank 1280 needs a
+    batch of at least 1280, and RRLayer CLIPS rather than raising, so an
+    undersized batch would quietly train a narrower bottleneck than this file
+    claims. Hence batch 1536.
+
+    IF IT WILL NOT FIT, the fallback is batch 1024 with rank 768 — stated here
+    rather than decided at the console, and WHICHEVER RAN MUST BE RECORDED in
+    the campaign README, because the two are different experiments and the run
+    directory name is the only thing that will still say which.
+
+    Memory is the open risk. vrrae04 at batch 768 with the FC ran in 10.7 h at
+    ~2.27 s/step; this doubles the batch and removes a 4096x2048 FC while
+    widening the RR layer more than four-fold, and the SVD is over a
+    4096-column matrix rather than 2048. Smoke-test one step before committing
+    the queue slot.
+
+extends: vrrae/base
+
+overrides:
+  model:
+    n_blocks: 5
+    base_channels: 32
+    # = channel_schedule()[4] * latent_spatial**3 = 512 * 2**3. Equal to the
+    # flattened width ON PURPOSE: that is what removes the FC.
+    vrrae_dim: 4096
+    vrrae_rank: 1280
+  data:
+    batch_size: 1536
+  training:
+    # 71690 * 128 / 1536, holding total epochs constant at ~5.04.
+    total_steps: 5974

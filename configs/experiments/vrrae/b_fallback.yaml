@@ -1,0 +1,18 @@
+experiment:
+  name: vrrae
+  variant: b_fallback
+  description: >-
+    B at the smaller batch, for use ONLY if B itself will not fit. Separate
+    file rather than an edit to B: the two are different experiments, and which
+    one ran has to stay answerable from the config and the run name after the
+    fact.
+
+extends: vrrae/b
+
+overrides:
+  model:
+    vrrae_rank: 768
+  data:
+    batch_size: 1024
+  training:
+    total_steps: 8961

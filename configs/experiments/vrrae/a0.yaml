@@ -1,0 +1,18 @@
+experiment:
+  name: vrrae
+  variant: a0
+  description: >-
+    A0 — configuration A with the KL switched off. Together with A it separates
+    the two explanations again, but on the architecture A tests rather than on
+    vrrae04's.
+
+    Run it BESIDE A and not instead of it. A on its own cannot say whether a
+    change came from the architecture or from the KL still being present; the
+    A/A0 pair and the vrrae04/V0 pair are what make the two readings separable.
+
+extends: vrrae/a
+
+overrides:
+  loss:
+    kl_max_beta: 0.0
+    kl_warmup_steps: 0

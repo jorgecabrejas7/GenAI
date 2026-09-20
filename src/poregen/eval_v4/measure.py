@@ -331,14 +331,26 @@ def measure_cfg(root, repo) -> dict:
         period = M.chunk_period(a.manifest)
         slab = M.chunk_plane_slab(tuple(a.manifest.volume_shape), period)
         if not slab.any():
-            raise ValueError(
-                f"cfg seed {seed}: the s_nb volumes have no chunk plane "
-                f"(shape {a.manifest.volume_shape}, chunk period {period}); the "
-                "neighbour arm cannot be measured on them."
-            )
+            # NOT an error: a volume denoised as ONE chunk has no interior
+            # chunk plane by construction, which is what `--joint` produces and
+            # is the only way to sample a model with no neighbour input. The
+            # arm is inapplicable rather than failed, and saying so keeps the
+            # rest of the assessment — the s_por sweep — measurable.
+            pairs.append({
+                "seed": seed,
+                "chunk_period": list(period),
+                "available": False,
+                "reason": (
+                    f"the volumes have no chunk plane (shape "
+                    f"{tuple(a.manifest.volume_shape)}, chunk period {period}): "
+                    "they were denoised as a single chunk, so there is no "
+                    "frontier for neighbour conditioning to act on"),
+            })
+            continue
         pairs.append({
             "seed": seed,
             "chunk_period": list(period),
+            "available": True,
             "slab_voxels": int(slab.sum()),
             "pore_dice_chunk_plane": M.pore_dice(a.label, b.label, slab),
             "pore_dice_whole_volume": M.pore_dice(a.label, b.label),
@@ -361,20 +373,41 @@ def measure_cfg(root, repo) -> dict:
         "s_por_cells": por_cells,
         "s_nb_cells": nb_cells,
         "s_nb_pairs": pairs,
-        "s_nb_summary": {
-            "pore_dice_chunk_plane": M.mean_sd([p["pore_dice_chunk_plane"] for p in pairs]),
-            "pore_dice_whole_volume": M.mean_sd([p["pore_dice_whole_volume"] for p in pairs]),
-            "reading": (
-                "A Dice near 1 across the chunk plane means turning the neighbour "
-                "arm off changed nothing there, so the arm is inert."
-            ),
-        },
+        "s_nb_summary": _s_nb_summary(pairs),
     }
 
 
 # ---------------------------------------------------------------------------
 # 5 - layup
 # ---------------------------------------------------------------------------
+
+def _s_nb_summary(pairs: list[dict]) -> dict:
+    """The neighbour arm, or the reason there is nothing to measure.
+
+    A volume denoised as ONE chunk has no interior chunk plane, so there is no
+    frontier for neighbour conditioning to act on. That is the `--joint`
+    sampler, which is the only way to sample a model with no neighbour input at
+    all, and it makes the arm INAPPLICABLE rather than failed.
+    """
+    ok = [p for p in pairs if p.get("available")]
+    if not ok:
+        reasons = sorted({p.get("reason", "unknown") for p in pairs})
+        return {
+            "available": False,
+            "n_pairs": len(pairs),
+            "reason": reasons[0] if len(reasons) == 1 else reasons,
+        }
+    return {
+        "available": True,
+        "n_pairs": len(ok),
+        "pore_dice_chunk_plane": M.mean_sd([p["pore_dice_chunk_plane"] for p in ok]),
+        "pore_dice_whole_volume": M.mean_sd([p["pore_dice_whole_volume"] for p in ok]),
+        "reading": (
+            "A Dice near 1 across the chunk plane means turning the neighbour "
+            "arm off changed nothing there, so the arm is inert."
+        ),
+    }
+
 
 def measure_layup(root, repo) -> dict:
     cases = load_cases(root, "layup")
@@ -909,6 +942,7 @@ def _memorisation_block(root, repo, *, allow_busy_gpu: bool, reuse: bool) -> dic
     previous block, the search runs whatever ``reuse`` says — reusing nothing
     would write an empty result and call it a reading.
     """
+    from poregen.eval_v4 import memorisation as MEMO  # noqa: PLC0415
     from poregen.eval_v4.io import assessment_dir  # noqa: PLC0415
 
     if reuse:
@@ -2015,8 +2049,30 @@ def measure_ablation(root, repo) -> dict:
                 row["recovery_of_the_fed_layup"] = M.layup_recovery(
                     case.xct, case.label, manifest=as_fed, repo=repo)
         elif reads == "geometry":
-            row["geometry"] = M.geometry_agreement(
-                case.label, material, manifest=case.manifest)
+            if case.manifest.requested_material == "full":
+                # The material_full arm: the envelope was REMOVED, so there is
+                # no requested air and geometry_agreement rightly refuses. The
+                # question the arm asks is what the model does WITHOUT being
+                # asked, so it is scored against the notch-and-hole map it was
+                # NOT given — labelled as counterfactual so no reader mistakes
+                # it for obedience to a request.
+                import dataclasses  # noqa: PLC0415
+
+                from poregen.eval_v4.cases import material_notch_and_hole  # noqa: PLC0415
+
+                want = material_notch_and_hole(tuple(case.manifest.volume_shape))
+                row["geometry_against_the_unrequested_map"] = M.geometry_agreement(
+                    case.label, want,
+                    manifest=dataclasses.replace(
+                        case.manifest, requested_material="counterfactual.npy"))
+                row["geometry_not_requested_because"] = (
+                    "this arm removed the envelope; the map scored against is "
+                    "the notch and hole the UNABLATED case requested, and a "
+                    "high Dice here would mean the model carves the shape "
+                    "without being told to")
+            else:
+                row["geometry"] = M.geometry_agreement(
+                    case.label, material, manifest=case.manifest)
         elif reads == "surface":
             row["surface"] = M.surface_agreement(
                 case.label, material,
@@ -2065,7 +2121,12 @@ def measure_ablation(root, repo) -> dict:
                         })
                 entry[f"recovery_of_the_{key}_layup"] = per_reader
         elif first["reads"] == "geometry":
-            entry["dice_air"] = _agg(grp, ("geometry", "dice_air"))
+            key = ("geometry" if "geometry" in first
+                   else "geometry_against_the_unrequested_map")
+            entry["dice_air"] = _agg(grp, (key, "dice_air"))
+            entry["dice_air_is_counterfactual"] = key != "geometry"
+            if key != "geometry":
+                entry["counterfactual_because"] = first["geometry_not_requested_because"]
         elif first["reads"] == "surface":
             entry["air_fraction_outside_box"] = _agg(
                 grp, ("surface", "air_fraction_outside_box"))

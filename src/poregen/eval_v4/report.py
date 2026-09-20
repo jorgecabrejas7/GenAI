@@ -383,13 +383,14 @@ def report_cfg(res, root, floor) -> tuple[str, list[str]]:
         table(["cell", "s_nb", "delivered", "air (interior)", "chunk seam xct",
                "chunk seam pore"], nb_rows),
         "",
-        table(["comparison", "value"], [
+        (table(["comparison", "value"], [
             ["pore Dice across the chunk plane, s_nb 0 vs 1",
              ms(summ["pore_dice_chunk_plane"], 3)],
             ["pore Dice over the whole volume", ms(summ["pore_dice_whole_volume"], 3)],
-        ]),
+         ]) if summ.get("available") else
+         "**Not applicable.** " + str(summ.get("reason", "no pairs were measurable."))),
         "",
-        summ["reading"],
+        summ.get("reading", ""),
     ]
     figs = _fig_cfg(res, root)
     return "\n".join(body) + "\n", figs

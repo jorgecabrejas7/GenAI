@@ -1,0 +1,48 @@
+experiment:
+  name: vrrae
+  variant: a
+  description: >-
+    A — one more stride-2 convolution, NO fully-connected projection, and a
+    much wider RR rank. The question is whether the flat bottleneck's cost is
+    the FC layer that precedes it rather than the rank reduction itself.
+
+    THE CHANNEL LAYOUT, COMPUTED NOT ASSUMED. base_channels 32 over 6 blocks
+    gives 32, 64, 128, 256, 512, 1024, and six stride-2 steps take a 64-voxel
+    patch to 1 voxel. So the encoder's flattened tensor is
+
+        1024 channels x 1^3 = 1024
+
+    against vrrae04's 512 x 2^3 = 4096. The tensor is FOUR TIMES SMALLER and
+    entirely in the channel dimension — there is no spatial extent left at all,
+    which is the other thing this arm changes and which its result must be read
+    against.
+
+    NO FC IS NOT A NEW CODE PATH. Setting vrrae_dim equal to the flattened
+    width makes both fc_in and its decoder mirror `nn.Identity()` — see
+    `src/poregen/models/vae/v2/vrrae.py`, which already chooses Identity over
+    Linear when the widths match. So the RR layer operates directly on the
+    encoder's own output.
+
+    THE RANK <= BATCH CONSTRAINT IS SATISFIED WITH HEADROOM: rank 768 against
+    batch 1024. RRLayer silently CLIPS the effective rank to the batch size, so
+    a batch below the rank would train a narrower bottleneck than the config
+    claims and nothing would say so.
+
+extends: vrrae/base
+
+overrides:
+  model:
+    n_blocks: 6
+    base_channels: 32
+    # = channel_schedule()[5] * latent_spatial**3 = 1024 * 1**3. Equal to the
+    # flattened width ON PURPOSE: that is what removes the FC.
+    vrrae_dim: 1024
+    vrrae_rank: 768
+  data:
+    # >= vrrae_rank, and by a margin: the constraint is on the EFFECTIVE batch,
+    # so a short trailing batch must not silently narrow the bottleneck.
+    batch_size: 1024
+  training:
+    # 71690 * 128 / 1024, holding total epochs constant at ~5.04 as every other
+    # rung in this family does.
+    total_steps: 8961
