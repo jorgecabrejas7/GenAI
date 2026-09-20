@@ -15,4 +15,4 @@ overrides:
   data:
     batch_size: 1024
   training:
-    total_steps: 8961
+    total_steps: 7857  # 5.035 epochs over split_v3 at batch 1024

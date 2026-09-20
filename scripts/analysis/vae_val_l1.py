@@ -39,7 +39,24 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 
-def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int) -> dict:
+def held_out_volumes(eval_split: str, exclude_train_of: str | None) -> set[str] | None:
+    """Volumes of ``eval_split`` that ``exclude_train_of`` did NOT train on.
+
+    A model trained on one split and evaluated on another is not necessarily
+    being evaluated on held-out data: SIX of split_v3's eleven validation
+    volumes are in split_v2's TRAIN set. Scoring a split_v2-trained model on
+    all eleven therefore flatters it. This names the subset it never saw.
+    """
+    if not exclude_train_of:
+        return None
+    ev = json.loads((REPO / "data" / eval_split / "splits.json").read_text())["volumes"]
+    tr = json.loads((REPO / "data" / exclude_train_of / "splits.json").read_text())["volumes"]
+    trained = {k for k, v in tr.items() if v == "train"}
+    return {k for k, v in ev.items() if v == "val"} - trained
+
+
+def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
+             exclude_train_of: str | None = None) -> dict:
     from poregen.experiments.train_vae import build_model
     from poregen.models.vae.base import decode_xct
     from poregen.training import build_patch_dataloaders
@@ -52,15 +69,54 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int) -> dic
                        dataset_root=split_root)
     dev = torch.device("cpu")
     model = build_model(cfg, dev)
-    model.load_state_dict(torch.load(run / "best.ckpt", map_location="cpu",
-                                     weights_only=False)["model"])
+    state = torch.load(run / "best.ckpt", map_location="cpu",
+                       weights_only=False)["model"]
+    # THE SVD BOTTLENECK'S inference_basis IS NOT A REGISTERED BUFFER — it is
+    # assigned at finalisation, so a freshly built model has no slot for it and
+    # a strict load refuses the checkpoint. It cannot simply be dropped: in
+    # eval mode RRLayer PROJECTS ONTO IT, so a model loaded without it is a
+    # different model and would be measured as one.
+    basis_key = "bottleneck.rr.inference_basis"
+    basis = state.pop(basis_key, None)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected:
+        raise RuntimeError(f"{run.name}: unexpected keys {list(unexpected)}")
+    if basis is not None:
+        model.bottleneck.rr.inference_basis = basis
+    elif getattr(getattr(model, "bottleneck", None), "rr", None) is not None:
+        raise RuntimeError(
+            f"{run.name} has an RR bottleneck but its checkpoint carries no "
+            f"{basis_key}; eval-mode projection would be undefined.")
     model.eval()
     _, val, _ = build_patch_dataloaders(cfg, REPO / "data" / split_root)
 
+    # THE VAL LOADER SHUFFLES. Two runs of this script on one checkpoint gave
+    # 0.0586 and 0.0626 for that reason alone, which is larger than some of the
+    # differences the study wants to report. The dataset is iterated on a fixed
+    # even stride instead, so the sample is the same patches every time.
+    ds = val.dataset
+    keep = held_out_volumes(split_root, exclude_train_of)
+    rows_all = list(range(len(ds)))
+    if keep is not None:
+        vol = ds.df["volume_id"].to_numpy() if hasattr(ds, "df") else None
+        if vol is None:
+            raise RuntimeError("the dataset exposes no volume_id column to filter on")
+        rows_all = [i for i in rows_all if vol[i] in keep]
+        if not rows_all:
+            raise RuntimeError(
+                f"no {split_root} val patch is outside {exclude_train_of}'s train "
+                "split, so there is no held-out subset to measure on")
+    stride = max(1, len(rows_all) // (n_batches * batch_size))
+    idx = rows_all[::stride][: n_batches * batch_size]
+
+    def batches():
+        for i in range(0, len(idx), batch_size):
+            rows = [ds[j] for j in idx[i:i + batch_size]]
+            yield {k: torch.stack([r[k] for r in rows])
+                   for k in rows[0] if torch.is_tensor(rows[0][k])}
+
     l1, baseline, lo, hi, n = [], [], [], [], 0
-    it = iter(val)
-    for _ in range(n_batches):
-        batch = next(it)
+    for batch in batches():
         # Through the model's OWN input contract: a 3-class model takes the
         # label too, and calling it with the grey alone raises rather than
         # silently measuring something else.
@@ -76,12 +132,17 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int) -> dic
         lo.append(float(out.xct_out.min())); hi.append(float(out.xct_out.max()))
         n += x.shape[0]
 
+    if not l1:
+        raise RuntimeError(f"{run.name}: no validation batches were built")
     mean_l1, mean_base = st.mean(l1), st.mean(baseline)
     return {
         "run": run.name,
         "trained_on": trained_on,
         "evaluated_on": split_root,
+        "restricted_to_volumes_unseen_by": exclude_train_of,
+        "n_volumes_used": (len(keep) if keep is not None else None),
         "n_patches": n,
+        "deterministic_sample": True,
         "l1": mean_l1,
         "constant_prediction_baseline": mean_base,
         "fraction_of_baseline_error_removed": (
@@ -98,17 +159,24 @@ def main() -> int:
                     help="split root to evaluate on; default is the run's own")
     ap.add_argument("--n-batches", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--exclude-train-of", default=None,
+                   help="restrict the val set to volumes this split did NOT train "
+                        "on; use when the run was trained on a different split")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
     run = args.run if args.run.is_absolute() else REPO / args.run
     split = args.split or yaml.safe_load(
         (run / "resolved_config.yaml").read_text())["data"]["dataset_root"]
-    res = evaluate(run, split, args.n_batches, args.batch_size)
+    res = evaluate(run, split, args.n_batches, args.batch_size,
+                   args.exclude_train_of)
 
     print(f"{res['run'][:60]}")
     print(f"  trained on {res['trained_on']}, evaluated on {res['evaluated_on']}, "
           f"{res['n_patches']} patches")
+    if res["restricted_to_volumes_unseen_by"]:
+        print(f"  restricted to the {res['n_volumes_used']} volumes "
+              f"{res['restricted_to_volumes_unseen_by']} did not train on")
     print(f"  L1                                 {res['l1']:.5f}")
     print(f"  predicting the mean would score    {res['constant_prediction_baseline']:.5f}")
     print(f"  fraction of that error removed     "

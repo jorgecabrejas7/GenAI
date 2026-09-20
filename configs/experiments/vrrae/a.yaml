@@ -39,10 +39,20 @@ overrides:
     vrrae_dim: 1024
     vrrae_rank: 768
   data:
+    # SPLIT_V3, NOT the split_v2 that vrrae/base inherits. The point of this
+    # arm is to sit beside the r08 rungs and the paper's baselines, and those
+    # are measured on split_v3. The two val sets are not equally hard —
+    # predicting the dataset mean scores 0.153 on split_v2 and 0.066 on
+    # split_v3 — so a number from one cannot be read against a number from the
+    # other. `vrrae/beta0` deliberately stays on split_v2, because it is
+    # defined as a ONE-VARIABLE change to vrrae04 and must not move two things.
+    dataset_root: split_v3
     # >= vrrae_rank, and by a margin: the constraint is on the EFFECTIVE batch,
     # so a short trailing batch must not silently narrow the bottleneck.
     batch_size: 1024
   training:
-    # 71690 * 128 / 1024, holding total epochs constant at ~5.04 as every other
-    # rung in this family does.
-    total_steps: 8961
+    # 5.035 epochs over split_v3's 1 598 000 train patches at
+    # batch 1024. NOT 71690*128/batch: that rule was calibrated on
+    # split_v2's 1 822 599 patches, and reusing it here would train
+    # 14 % more epochs than every other rung in the family.
+    total_steps: 7857
