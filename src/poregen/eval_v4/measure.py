@@ -2080,9 +2080,27 @@ def measure_ablation(root, repo) -> dict:
                 z_hi=M.height_map(material, face="upper"),
                 xct=case.xct)
         elif reads == "porosity_local":
-            row["local"] = M.local_obedience(
+            # The arm REPLACED the painted field with one global scalar, so the
+            # case carries no requested field and local_obedience would return
+            # delivered statistics and no fit. The question is what the model
+            # does without the field, so it is scored against the field it was
+            # NOT given — the same counterfactual treatment as material_full.
+            from poregen.eval_v4.cases import FIELDS, TILE  # noqa: PLC0415
+
+            fname = notes.get("field")
+            row["field"] = fname
+            grid = tuple(v // TILE for v in case.manifest.volume_shape)
+            want = FIELDS[fname](grid, case.manifest.seed)
+            row["local_against_the_unrequested_field"] = M.local_obedience(
+                case.label, material, manifest=case.manifest,
+                requested_tiles=want)
+            row["local_delivered_only"] = M.local_obedience(
                 case.label, material, manifest=case.manifest)
-            row["field"] = notes.get("field")
+            row["local_not_requested_because"] = (
+                "this arm replaced the painted field with one global scalar at "
+                "the same mean; the field scored against is the one the "
+                "UNABLATED case requested, so an R2 near zero means the model "
+                "delivers nothing the field would have asked for")
         else:
             row["unmeasured_because"] = (
                 f"notes.reads is {reads!r}, which names no assessment metric")
@@ -2131,8 +2149,19 @@ def measure_ablation(root, repo) -> dict:
             entry["air_fraction_outside_box"] = _agg(
                 grp, ("surface", "air_fraction_outside_box"))
         elif first["reads"] == "porosity_local":
-            entry["local_r2"] = _agg(grp, ("local", "r2"))
-            entry["local_slope"] = _agg(grp, ("local", "slope"))
+            # within_volume_*, which is what measure_porosity_local aggregates:
+            # each volume's own mean is removed before the fit, so the number is
+            # obedience and not the global dose response.
+            entry["local_r2"] = _agg(
+                grp, ("local_against_the_unrequested_field", "within_volume_r2"))
+            entry["local_slope"] = _agg(
+                grp, ("local_against_the_unrequested_field", "within_volume_slope"))
+            entry["requested_cell_sd"] = _agg(
+                grp, ("local_against_the_unrequested_field", "requested_cell_sd"))
+            entry["delivered_cell_sd"] = _agg(
+                grp, ("local_delivered_only", "delivered_cell_sd"))
+            entry["r2_is_counterfactual"] = True
+            entry["counterfactual_because"] = first["local_not_requested_because"]
         arms[name] = entry
 
     return {

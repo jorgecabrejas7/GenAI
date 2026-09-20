@@ -1883,10 +1883,13 @@ def report_ablation(res, root, floor) -> tuple[str, list[str]]:
                  table(["arm", "kind", "n", "air outside the box"], sur), ""]
 
     loc = rows_for("porosity_local", [lambda a: ms(a.get("local_r2"), 3),
-                                      lambda a: ms(a.get("local_slope"), 3)])
+                                      lambda a: ms(a.get("local_slope"), 3),
+                                      lambda a: ms(a.get("delivered_cell_sd"), 4),
+                                      lambda a: ms(a.get("requested_cell_sd"), 4)])
     if loc:
         body += ["### The porosity field — read on `porosity_local`\n",
-                 table(["arm", "kind", "n", "local R2", "slope"], loc),
+                 table(["arm", "kind", "n", "local R2", "slope",
+                        "delivered cell sd", "the field's own sd"], loc),
                  "",
                  "The field is replaced by ONE global scalar at the same mean "
                  "and the local fit is then scored against the field that was "
