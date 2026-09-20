@@ -1180,6 +1180,7 @@ order; finished chunks fed back as neighbours). Training ended **2026-09-11 03:4
 | 09-17 | **Author's decision (D47):** the control tables need a comparator too. Ordered before the VAE rungs: a **porosity-only conditional latent diffusion** (the porous-rock recipe on our data: same compressor and UNet, cond_por only, joint sampling; campaign 25, 40k steps ≈ 18 h + eval), **inference-time ablations** of ldm06/facedrop dropping the material map, ply profile, neighbours, field, depth/faces one at a time (campaign 24, ≈ 6 h), and a **second downstream segmenter** (≈ 4 h). Baseline tables complete ≈ Sep 22. | sections *baselines*, *ablations* (to come); vault D47 |
 | 09-17 → 09-20 | External review (vault A5): all twelve points verified. Fixed with tests: window porosity for shaped fields (mean of φ·envelope, not mean×mean), field smoothing σ = L/2 (fields were twice too smooth; smoothing keeps the mean, not the fitted spread — campaign 26), field prior refit on training panels only (it had been fitted on the old 80-volume store: test leakage), in-plane correlation capped at the canvas (real in-plane correlation exceeds any coupon-scale canvas), rough-surface request statistics refit from training volumes, memorisation planted-copy sensitivity, request-aware collapse flag. Claims reworded: "reduces boundary bias", reference distributions not floors, algorithmic labels not expert masks, bounded denoiser working memory not bounded memory. Queued: matched control fine-tune without per-face dropout, the "chunked without neighbours" assembly cell, regeneration of field cases, downstream arms preserving real exposure and low-real budgets. Open: are the six JI coupons one physical panel (split leak if so; JI → train is the cheap repair). | vault A5, docs/FITTED_INPUTS.md, docs/JI_RESPLIT_COST.md |
 | 09-20 | **φ-only conditional baseline (campaign 25) measured:** same trunk and latent space, porosity scalar only, 40k steps. Dose response passes the gate only up to 0.03 and over-delivers by 20–30 % above it (0.064 / 0.090 / 0.115 for 0.05 / 0.07 / 0.10) against 7 of 7 in gate for ours. Budget-matched row (ldm06 at step 40k) ordered to separate conditioning from training length. Campaigns 23 (DDPM) and 24 (ablation) measured, reports pending. | section *baselines*; vault E16 |
+| 09-20 | **Ablations (campaign 24) measured:** ply profile fully effective (feed C while scoring A: recovery of A 0.000, of C 0.83–0.90); material map load-bearing (all-material request: air Dice 0.000 against the notch-and-hole); depth and face distances barely matter (0.992 vs 0.991); the local field adds little to the global scalar (R² 0.01, slope ≈ 0), and the coherent field's own spread (0.0048) equals what the model produces unprompted (0.0047) — the painted fields carry the local-control claim. | section *ablations* (to add); vault E17 |
 | 09-12 09:00 | GPU idle after the trial. Launched the training-side fix `ldm06/facedrop` (per-face neighbour dropout, warm start from 130k, 15k steps ≈ 7 h). After it: production sampler and a2s re-tested on the new weights + the mixed-set rim test as mechanism check. Campaign 12 is NOT regenerated yet; that choice (a2s on 130k vs production sampler on facedrop) is the author's. | `configs/experiments/ldm06/facedrop.yaml`; campaign 17 README |
 """)
     md("""
@@ -2888,6 +2889,52 @@ segmenter needs, control aside.
 """)
 
 
+def build_ablation() -> None:
+    section("Conditioning ablations (campaign 24): which inputs carry the control?",
+            "inference-time changes to campaign-18 requests, one input at a time: ply profile swapped, material map removed, position swapped or zeroed, field replaced by the scalar")
+    md("""
+**What this is.** The model receives five kinds of conditioning: the local porosity field, the ply-orientation profile,
+the specimen-envelope (material) map, depth with the six face distances, and the neighbour latents. This campaign asks
+how much each one carries by changing it *at sampling time* on the same campaign-18 requests, the model unchanged. Two
+kinds of change are used and labelled: a **swap** feeds a different but valid input (layup C's profile while the case is
+scored against A; the depth and distances of a different valid position), which measures whether the model follows that
+input; a **zeroed** input (cos 2θ = sin 2θ = 0; all distances 0) is an impossible value the model never saw and is reported
+as a secondary "off-manifold" row. Removing the material map is scored against the shape the request *did not* carry, so
+the number answers "does the model carve the notch and hole unless asked" (it should not).
+""")
+    code(r'''
+AB = CAMPAIGNS / "24-ablation" / "ablation" / "results.json"
+if not AB.exists():
+    unavailable("campaign 24 results.json", "ablation generation + measure")
+else:
+    D = load_json(AB); rows = []
+    for c in D.get("per_case", []):
+        if not c.get("ddim_steps"): continue
+        L = c.get("layup_recovery") or {}; R = L.get("readers") if isinstance(L.get("readers"), dict) else {}
+        ga = c.get("geometry_agreement") or {}; lo = c.get("local_obedience") or {}; sa = c.get("surface_agreement") or {}
+        rows.append({"case": c.get("case"), "arm": (c.get("notes") or {}).get("arm") or c.get("arm") or str(c.get("case", "")).rsplit("_seed", 1)[0], "seed": c.get("seed"),
+                     "φ": c.get("phi_pore"),
+                     "fft 4-class (scored layup)": (R.get("fft_slice") or {}).get("strict_class_accuracy"), "pore_axes 4-class (scored)": (R.get("pore_axes") or {}).get("strict_class_accuracy"),
+                     "fft 4-class (fed layup)": ((L.get("fed") or {}).get("fft_slice") or {}).get("strict_class_accuracy"), "pore_axes 4-class (fed)": ((L.get("fed") or {}).get("pore_axes") or {}).get("strict_class_accuracy"),
+                     "air Dice": next((v for k, v in ga.items() if "dice" in k.lower() and isinstance(v, (int, float))), None),
+                     "surface pos err": ((sa.get("lower") or {}).get("error_abs_mean")), "local slope": lo.get("within_volume_slope"), "local R2": lo.get("within_volume_r2"), "cell sd": lo.get("delivered_cell_sd")})
+    AT = pd.DataFrame(rows)
+    display(AT.groupby("arm").mean(numeric_only=True).round(4))
+    display(AT.round(4))
+    readme = CAMPAIGNS / "24-ablation" / "README.md"
+    if readme.exists(): display(Markdown(readme.read_text()))
+''')
+    md("""
+**How to read it.** Compare each arm with the corresponding campaign-18 row (sections *layup*, *geometry*, *surface*,
+*porosity local*). A ply swap that drops recovery of the scored layup to zero and raises recovery of the fed one shows the
+profile is followed; an all-material request that yields air Dice 0 against the notch shows the envelope is load-bearing;
+position rows that do not move show the envelope already carries the position; a field replaced by its scalar that
+leaves the within-volume slope near zero shows the field adds little beyond the mean at this scale. The delivered cell sd
+with no field, compared with the coherent field's own sd, tells whether the coherent request asks for more spatial
+variation than the model produces unprompted.
+""")
+
+
 def build_summary() -> None:
     section("Summary dashboard: claim → metric → value → floor → status", "one table that fills in as results land, and the list of what is still pending")
     md("""
@@ -2988,7 +3035,7 @@ def build_all() -> None:
     build_config(); build_progress(); build_primer(); build_research_log(); build_case_reading(); build_slice_viewer(); build_compare_viewer()
     build_rungs(); build_real_porosity(); build_real_floor(); build_sampler(); build_porosity_global(); build_porosity_local(); build_cfg(); build_layup()
     build_assembly(); build_geometry(); build_surface(); build_multichunk(); build_assembly_modes(); build_chunk_band(); build_rim_tests(); build_stress_geometry(); build_ood_conditioning(); build_microstructure()
-    build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream(); build_baselines()
+    build_field_stats(); build_label_uncertainty(); build_convergence(); build_decoder_ft(); build_downstream(); build_baselines(); build_ablation()
     build_summary(); build_preview()
 
 
