@@ -1,0 +1,27 @@
+experiment:
+  name: ldm06
+  variant: facedrop_control
+  description: >-
+    THE MATCHED CONTROL FOR THE FACEDROP CAUSAL CLAIM. Identical to
+    ldm06/facedrop in every respect — same checkpoint to resume from, same lr,
+    same EMA, same 15 000 steps, same all-six dropout — except that
+    `drop_nb_face` is 0.
+
+    WHY IT IS NEEDED. campaign 17 reports that the facedrop fine-tune clears
+    the chunk-plane porosity band: -8 slab 1.035 and worst plane 0.928 against
+    the hybrid's 0.192 and 0.147. That comparison is between a fine-tuned model
+    and a NOT-fine-tuned one, so it cannot separate "per-face dropout fixed it"
+    from "another 15 000 steps at a low learning rate fixed it". Anything that
+    a short low-lr fine-tune would have done anyway shows up in THIS run too.
+
+    Read the band profile on the same 1024 cases and the same seeds. If this
+    control also clears the band, the mechanism claim is wrong and the paper
+    must say the fine-tune helped without saying why.
+
+extends: ldm06/facedrop
+
+overrides:
+  training:
+    # THE ONE CHANGE. Everything else is inherited, deliberately: a control
+    # that differed in two things would control for neither.
+    drop_nb_face: 0.0

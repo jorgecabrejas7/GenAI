@@ -115,6 +115,13 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
             yield {k: torch.stack([r[k] for r in rows])
                    for k in rows[0] if torch.is_tensor(rows[0][k])}
 
+    # A VAE SAMPLES ITS POSTERIOR, and `model.eval()` does not stop it: z is
+    # mu + sigma*eps on every forward pass. Fixing which patches are measured
+    # is therefore only half of making this repeatable — two runs on the same
+    # checkpoint and the same patches still moved vrrae04 from 13.5 % to 14.5 %
+    # of baseline error removed. Seeding closes the other half.
+    torch.manual_seed(0)
+
     l1, baseline, lo, hi, n = [], [], [], [], 0
     for batch in batches():
         # Through the model's OWN input contract: a 3-class model takes the
@@ -143,6 +150,7 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
         "n_volumes_used": (len(keep) if keep is not None else None),
         "n_patches": n,
         "deterministic_sample": True,
+        "torch_seed": 0,
         "l1": mean_l1,
         "constant_prediction_baseline": mean_base,
         "fraction_of_baseline_error_removed": (

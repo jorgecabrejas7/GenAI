@@ -247,6 +247,14 @@ ARMS: tuple[Arm, ...] = (
     # can be asked for, which is why it has its own root and its own list.
     Arm("phi_only_synthetic", 0.0, pool="phi_only"),
     Arm("real_plus_phi_only_aug", 0.5, total_multiple=2.0, pool="phi_only"),
+    # THE LOW-REAL-BUDGET PAIR. Every arm above has 8000 real patches at least,
+    # which is past the point where the real data saturates (campaign 14: 8k
+    # scores 0.8419 against 16k's 0.8411). Synthetic data cannot help where
+    # real data has already stopped helping, so the arms above cannot answer
+    # "does it help when real data is SCARCE?" — these two can. 2000 real is
+    # an eighth of the budget and well below the saturation point.
+    Arm("real_2k", 1.0, total_multiple=0.125),
+    Arm("real_2k_plus_synthetic_14k", 0.125),
 )
 
 REFERENCE_ARM = "real"
