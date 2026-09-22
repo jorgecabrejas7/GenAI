@@ -109,6 +109,12 @@ def train(dataset, cfg: DDPMConfig, out_dir: Path, device: torch.device,
                         persistent_workers=cfg.num_workers > 0)
     (out_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n")
     hist = out_dir / "losses.jsonl"
+    # TensorBoard under tb/, as every VAE and LDM run writes. Missing before:
+    # this run logged a JSONL history and no event file, so a 24-hour
+    # unattended training was invisible while it ran.
+    from poregen.baselines.slicegan.train import _summary_writer  # noqa: PLC0415
+
+    writer = _summary_writer(out_dir / "tb")
     t0 = time.time()
     last_ck = t0
     step = start
@@ -140,6 +146,9 @@ def train(dataset, cfg: DDPMConfig, out_dir: Path, device: torch.device,
                        "elapsed_s": now - t0}
                 with hist.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
+                if writer is not None:
+                    writer.add_scalar("train/loss", row["loss"], step)
+                    writer.flush()
                 logger.info("step %7d  loss %.5f  %.2f h", step, row["loss"],
                             (now - t0) / 3600)
             if now - last_ck >= cfg.checkpoint_minutes * 60:

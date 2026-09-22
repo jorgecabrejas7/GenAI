@@ -97,6 +97,21 @@ def _fake_slices(vol: torch.Tensor, axis: int, k: int,
     return s[torch.from_numpy(pick).to(s.device)]
 
 
+def _summary_writer(tb_dir: Path):
+    """A TensorBoard writer, or None if torch.utils.tensorboard is unavailable.
+
+    None rather than raising: a missing optional dependency must not take down
+    an 11-hour training run that is otherwise fine.
+    """
+    try:
+        from torch.utils.tensorboard import SummaryWriter  # noqa: PLC0415
+    except Exception as exc:                               # noqa: BLE001
+        logger.warning("no TensorBoard writer (%s); training continues", exc)
+        return None
+    tb_dir.mkdir(parents=True, exist_ok=True)
+    return SummaryWriter(str(tb_dir))
+
+
 def train(bank: SliceBank, cfg: TrainConfig, out_dir: Path,
           device: torch.device, resume: Path | None = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -123,6 +138,14 @@ def train(bank: SliceBank, cfg: TrainConfig, out_dir: Path,
         logger.info("resumed from %s at step %d", resume, start)
 
     (out_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n")
+
+    # TensorBoard, under tb/ like every VAE and LDM run, so a campaign
+    # directory can be watched with the same command as a training run. This
+    # was missing: the SliceGAN and DDPM runs wrote a JSONL history and no
+    # event file, so neither was visible while it trained — which for an
+    # 11-hour unattended run is the difference between noticing a divergence
+    # and reading about it afterwards.
+    writer = _summary_writer(out_dir / "tb")
     hist_path = out_dir / "losses.jsonl"
     t0 = time.time()
     last_ck = last_sample = t0
@@ -171,6 +194,17 @@ def train(bank: SliceBank, cfg: TrainConfig, out_dir: Path,
                         step, row["g_loss"], row["d_wasserstein"], row["gp"],
                         [round(v, 2) for v in row["d_per_axis"]],
                         (now - t0) / 3600)
+            if writer is not None:
+                writer.add_scalar("train/g_loss", row["g_loss"], step)
+                writer.add_scalar("train/d_wasserstein", row["d_wasserstein"], step)
+                writer.add_scalar("train/gp", row["gp"], step)
+                # Per axis, because the three critics diverging is the one
+                # thing this architecture can do that the pooled loss hides.
+                for i, v in enumerate(row["d_per_axis"]):
+                    writer.add_scalar(f"train/d_axis{i}", v, step)
+                writer.add_scalar("train/d_axis_spread",
+                                  max(row["d_per_axis"]) - min(row["d_per_axis"]), step)
+                writer.flush()
 
         if now - last_ck >= cfg.checkpoint_minutes * 60 or step == cfg.steps - 1:
             _save(out_dir / "latest.ckpt", gen, critics, opt_g, opt_d, step, cfg)

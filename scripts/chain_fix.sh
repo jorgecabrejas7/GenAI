@@ -19,6 +19,10 @@
 #  * ddpm3d had no measurer at all — the same gap slicegan had — so campaign 23
 #    had eleven volumes and no numbers. Fixed in code and already measured.
 #
+# ORDER: fix stage -> VRRAE (V0, A, B, A0) -> rf-2 -> rf-64 -> notebooks.
+# The VRRAE study is ahead of rf-2 because the collaborator is blocked on it
+# and rf-2 is not blocking anything; its resume point on disk is step 29000.
+#
 # THE RULE THIS ADDS: a stage that should generate and finishes in under a
 # minute is a FAILURE, and the chain now says so itself.
 set -uo pipefail
@@ -125,9 +129,9 @@ else
 fi
 
 # ── then everything the original chain still owes ──────────────────────────
-run "rf-2 resumed to completion" rf2_resume 0 \
-    python scripts/train_vae.py resume "$(basename "$RF2_RUN")" latest.ckpt
-
+# THE VRRAE RUNS COME BEFORE rf-2 (author's priority, 2026-09-22). rf-2 has
+# 35.7 h left from step 29000 and its resume is verified, so it can wait; the
+# VRRAE study is what the collaborator is blocked on.
 vrrae_row() { python scripts/analysis/vrrae_family_table.py --out "$C28" \
     > "$S/vrrae_table_$1.log" 2>&1; say "family table re-rendered after $1 rc=$?"; }
 smoke() { say "SMOKE $1"; python scripts/analysis/vae_smoke_step.py --experiment "$1" \
@@ -142,6 +146,10 @@ else say "VRRAE B at 1536 did not fit — fallback"
      run "VRRAE B fallback" vrrae_b_fb 0 python scripts/train_vae.py run vrrae/b_fallback; fi
 vrrae_row b
 run "VRRAE A0" vrrae_a0 0 python scripts/train_vae.py run vrrae/a0; vrrae_row a0
+
+# rf-2 resumes after the VRRAE block, from latest.ckpt at step 29000.
+run "rf-2 resumed to completion" rf2_resume 0 \
+    python scripts/train_vae.py resume "$(basename "$RF2_RUN")" latest.ckpt
 
 run "rf-64" rf64 0 python scripts/train_vae.py run r08/reduction-factor-64
 for root in "$C18" "$C12"; do
