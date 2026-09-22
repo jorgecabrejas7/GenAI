@@ -415,7 +415,16 @@ def _fig_cfg(res, root) -> list[str]:
     ax.legend(frameon=False)
 
     ax = axes[1]
-    pairs = res.get("s_nb_pairs") or []
+    # Only the pairs that HAVE a reading. A volume denoised as one chunk has no
+    # interior chunk plane, so its pair carries a reason instead of a Dice —
+    # the measurer and the table were taught that and this figure was not,
+    # which is how `eval_v4 report` crashed on the phi-only campaign with a
+    # bare KeyError after the measure had succeeded.
+    pairs = [p for p in (res.get("s_nb_pairs") or []) if p.get("available")]
+    if not pairs:
+        ax.text(0.5, 0.5, "not applicable:\nno chunk plane in these volumes",
+                ha="center", va="center", transform=ax.transAxes, fontsize=9)
+        ax.set_xticks([])
     if pairs:
         xs = np.arange(len(pairs))
         ax.bar(xs - 0.18, [p["pore_dice_chunk_plane"] for p in pairs], 0.36,
@@ -428,7 +437,8 @@ def _fig_cfg(res, root) -> list[str]:
         ax.set_ylim(0, 1.05)
     ax.set_ylabel("pore Dice, s_nb 0 vs 1")
     ax.set_title("1.0 = the neighbour arm did nothing")
-    ax.legend(frameon=False)
+    if pairs:
+        ax.legend(frameon=False)
     fig.tight_layout()
     return savefig(fig, figures_dir(root, "cfg"), "guidance")
 
@@ -1729,7 +1739,13 @@ def _fig_ood_conditioning(res, root) -> list[str]:
 
 
 def report_slicegan(res, root, floor) -> tuple[str, list[str]]:
-    """The baseline's own page: what it delivers, and what it cannot be asked."""
+    """A baseline's own page: what it delivers, and what it cannot be asked.
+
+    Shared by every baseline. The prose names the one it is reporting on,
+    because a ddpm3d page that said "SliceGAN has no chunk planes" would be
+    telling the reader about a different model.
+    """
+    name = res.get("baseline", res["assessment"])
     per = res["per_case"]
     rows = []
     for r in sorted(per, key=lambda r: (tuple(r["volume_shape"]), r["case"])):
@@ -1753,16 +1769,24 @@ def report_slicegan(res, root, floor) -> tuple[str, list[str]]:
                            ms(f["air_fraction_interior"], 4),
                            ms(f["seam_xct_ratio"], 3), "--", "--", "--", "--"])
 
-    body = ["## What the baseline delivers\n",
+    body = [f"## What the baseline delivers — {name}\n",
             table(["case", "shape", "phi", "air (interior)", "seam xct",
                    "seam z", "seam y", "seam x", "wall s"],
                   floor_rows + rows),
             "",
-            "SliceGAN has no chunk planes. The window-plane ratios are measured "
+            f"{name} has no chunk planes. The window-plane ratios are measured "
             "at the SAME positions as ldm06's and are therefore a CONTROL, not a "
             "score: a ratio near the real row says the metric reads ordinary "
-            "texture as ordinary texture.",
+            "texture as ordinary texture."
+            + (" The grid was supplied by the measurer, not by the run."
+               if res.get("measurement_grid_supplied_by_the_measurer") else ""),
             ""]
+
+    skipped = res.get("skipped_no_interior") or []
+    if skipped:
+        body += [f"**{len(skipped)} volume(s) not measured**: "
+                 + ", ".join(f"`{s['case']}` {tuple(s['volume_shape'])}" for s in skipped)
+                 + f" — {skipped[0]['reason']}.", ""]
 
     lev = res.get("levels") or {}
     if lev:
@@ -1923,6 +1947,7 @@ REPORTERS = {
     "ood_conditioning": report_ood_conditioning,
     "ablation": report_ablation,
     "slicegan": report_slicegan,
+    "ddpm3d": report_slicegan,
 }
 
 

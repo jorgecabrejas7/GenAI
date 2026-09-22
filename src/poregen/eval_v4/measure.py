@@ -1878,8 +1878,41 @@ def _anisotropy_block(cases, group: str) -> dict:
     }
 
 
-def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
-    """The SliceGAN baseline on the REQUEST-FREE metrics, and nothing else.
+#: ldm06's production sampler geometry. A baseline has no chunks and no
+#: windows, so these are a MEASUREMENT GRID and not a claim about the model:
+#: carrying them makes the seam statistic evaluate at exactly the planes ldm06
+#: is scored at, which is what makes a baseline volume a CONTROL for that
+#: statistic rather than an incomparable number.
+MEASUREMENT_GRID = {"chunk_tiles": (3, 3, 3), "window_stride": 32}
+
+#: What each baseline IS, for the results file.
+BASELINE_CITATION = {
+    "slicegan": "SliceGAN (Kench & Cooper 2021, arXiv:2102.07708)",
+    "ddpm3d": "3-D pixel-space DDPM (this project's own control for the latent)",
+}
+
+
+def _with_measurement_grid(case):
+    """The case, with ldm06's grid supplied if its manifest carries none.
+
+    `slicegan_sample.py` writes the grid into its manifests; `ddpm3d_sample.py`
+    does not, and regenerating 11 volumes over 4.35 h of GPU to add two fields
+    that do not change a voxel would be a poor trade. Supplied here instead and
+    RECORDED in the results, so a reader sees that the grid came from the
+    measurer rather than from the run.
+    """
+    import dataclasses  # noqa: PLC0415
+
+    m = case.manifest
+    if m.chunk_tiles is not None and m.window_stride is not None:
+        return case, False
+    case.manifest = dataclasses.replace(m, **MEASUREMENT_GRID)
+    return case, True
+
+
+def measure_baseline(root, repo, assessment: str, *,
+                     allow_busy_gpu: bool = False) -> dict:
+    """A baseline on the REQUEST-FREE metrics, and nothing else.
 
     SliceGAN is unconditional. It cannot be asked for a porosity, a layup, an
     envelope or a shape, so every conditional table is inapplicable to it and
@@ -1903,9 +1936,28 @@ def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
 
     from poregen.eval_v4.memorisation import gpu_jobs_other_than  # noqa: PLC0415
 
-    cases = load_cases(root, "slicegan")
+    cases = load_cases(root, assessment)
     if not cases:
-        raise FileNotFoundError(f"no slicegan volumes under {root}")
+        raise FileNotFoundError(f"no {assessment} volumes under {root}")
+    grid_supplied = False
+    for i, c in enumerate(cases):
+        cases[i], did = _with_measurement_grid(c)
+        grid_supplied = grid_supplied or did
+
+    # A volume no larger than twice the interior margin HAS no interior, and
+    # every request-free metric here is defined on it. The DDPM baseline emits
+    # 64-cubed sanity volumes at its native size, which are exactly 2 x 32 —
+    # they are skipped WITH A REASON rather than taking the assessment down,
+    # because the cases that matter are the 192-cubed ones beside them.
+    from poregen.eval_v4.metrics import EDGE_VOX  # noqa: PLC0415
+
+    too_small = [c for c in cases
+                 if any(v <= 2 * EDGE_VOX for v in c.manifest.volume_shape)]
+    cases = [c for c in cases if c not in too_small]
+    if not cases:
+        raise FileNotFoundError(
+            f"every {assessment} volume under {root} is at most {2 * EDGE_VOX} "
+            f"voxels on some axis, so none has an interior to measure")
 
     # FID is the only GPU work here. This machine shares 121 GB between host
     # and device, and running a GPU job beside a training run killed a
@@ -1914,7 +1966,7 @@ def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
     # still delivers its seams, its phases and its anisotropy today.
     busy = [] if allow_busy_gpu else gpu_jobs_other_than(os.getpid())
     if busy:
-        logger.warning("slicegan FID SKIPPED: the card is busy with %s",
+        logger.warning("%s FID SKIPPED: the card is busy with %s", assessment,
                        ", ".join(f"{p} ({n})" for p, n in busy))
 
     def fid(a, b, *, seed):
@@ -1975,11 +2027,20 @@ def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
 
     real_all = [c for pair in reference.values() for c in pair.get("a", []) + pair.get("b", [])]
     return {
-        "assessment": "slicegan",
-        "question": "What does an unconditional 3-D GAN deliver on the metrics "
-                    "that do not need a request?",
+        "assessment": assessment,
+        "measurement_grid_supplied_by_the_measurer": grid_supplied,
+        "skipped_no_interior": [
+            {"case": c.manifest.case, "volume_shape": list(c.manifest.volume_shape),
+             "reason": f"at most {2 * EDGE_VOX} voxels on some axis, so it has "
+                       f"no interior at margin {EDGE_VOX}"}
+            for c in too_small],
+        "measurement_grid": {k: list(v) if isinstance(v, tuple) else v
+                             for k, v in MEASUREMENT_GRID.items()},
+        "question": "What does this unconditional baseline deliver on the "
+                    "metrics that do not need a request?",
         "note": (
-            "Request-free metrics ONLY. SliceGAN has no conditioning path, so "
+            f"Request-free metrics ONLY. {BASELINE_CITATION.get(assessment, assessment)} "
+            "has no conditioning path, so "
             "porosity error, layup agreement, surface agreement and every "
             "envelope score are inapplicable and absent rather than zero. "
             "Porosity is whatever the generator delivers: the set is scored "
@@ -1989,7 +2050,7 @@ def measure_slicegan(root, repo, *, allow_busy_gpu: bool = False) -> dict:
             "planes — that is what makes them a control: a ratio near 1 here "
             "says the metric reads ordinary texture as ordinary texture."
         ),
-        "baseline": "SliceGAN (Kench & Cooper 2021, arXiv:2102.07708)",
+        "baseline": BASELINE_CITATION.get(assessment, assessment),
         "per_case": rows,
         "levels": levels,
         "nearest_level": nearest,
@@ -2207,7 +2268,10 @@ MEASURERS = {
     # come from the baseline's own sampling script, which is why they are in
     # MEASURE_ONLY and have no entry in ASSESSMENTS.
     "ablation": measure_ablation,
-    "slicegan": measure_slicegan,
+    # The baselines share one measurer: they get the same request-free
+    # treatment by construction, and a second copy would drift from it.
+    "slicegan": lambda root, repo, **kw: measure_baseline(root, repo, "slicegan", **kw),
+    "ddpm3d": lambda root, repo, **kw: measure_baseline(root, repo, "ddpm3d", **kw),
 }
 
 

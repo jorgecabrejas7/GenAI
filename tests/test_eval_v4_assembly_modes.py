@@ -266,16 +266,41 @@ def test_s2_across_a_destroyed_join_is_further_from_the_inside_curve():
 # The four arms, as cases
 # ---------------------------------------------------------------------------
 
-def test_the_four_arms_are_built_with_the_same_request_and_the_same_seeds():
+def test_the_factorial_has_all_four_cells():
+    """Chunking and neighbour content are two variables, not one.
+
+    `hybrid` has both, `joint` has neither, `autoregressive` chunks at one tile.
+    Without `chunked_no_neighbours` the design confounds them: any difference
+    between hybrid and joint could be the chunking or the content, and nothing
+    in the campaign separates the two.
+    """
+    specs = build_cases("assembly_modes")
+    cells = {(s.notes["arm"], s.chunk_tiles == (3, 3, 3), s.neighbour_mode)
+             for s in specs if s.notes["scale"] == "1024"}
+    chunked_with = any(a == "hybrid" and c and nb == "canvas" for a, c, nb in cells)
+    chunked_without = any(a == "chunked_no_neighbours" and c and nb == "unknown"
+                          for a, c, nb in cells)
+    assert chunked_with, "the chunked arm WITH neighbour content is missing"
+    assert chunked_without, "the chunked arm WITHOUT neighbour content is missing"
+
+
+def test_every_arm_is_built_with_the_same_request_and_the_same_seeds():
     specs = build_cases("assembly_modes")
     by_scale: dict[str, dict[str, list]] = {}
     for s in specs:
         by_scale.setdefault(s.notes["scale"], {}).setdefault(s.notes["arm"], []).append(s)
 
     assert set(by_scale) == {"384", "1024"}
-    assert set(by_scale["384"]) == {"joint", "autoregressive", "hybrid"}
+    # `chunked_no_neighbours` is the missing cell of the factorial: production
+    # chunking with the neighbour CONTENT removed. `joint` varies chunking and
+    # content together and `hybrid` has both, so neither separates them —
+    # hybrid minus this is what the neighbour content buys, and this minus
+    # joint is what chunking costs on its own.
+    assert set(by_scale["384"]) == {
+        "joint", "autoregressive", "hybrid", "chunked_no_neighbours"}
     assert set(by_scale["1024"]) == {
-        "joint", "autoregressive", "hybrid", "teacher_forced"}
+        "joint", "autoregressive", "hybrid", "teacher_forced",
+        "chunked_no_neighbours"}
 
     for scale, arms in by_scale.items():
         seeds = {arm: sorted(s.seed for s in v) for arm, v in arms.items()}
@@ -292,10 +317,15 @@ def test_the_four_arms_are_built_with_the_same_request_and_the_same_seeds():
 
     modes = {s.notes["arm"]: s.neighbour_mode for s in specs}
     assert modes == {"joint": "unknown", "autoregressive": "canvas",
-                     "hybrid": "canvas", "teacher_forced": "reference"}
+                     "hybrid": "canvas", "teacher_forced": "reference",
+                     # The fourth cell: chunked like hybrid, neighbour content
+                     # removed like joint.
+                     "chunked_no_neighbours": "unknown"}
     chunks = {s.notes["arm"]: s.chunk_tiles for s in specs if s.notes["scale"] == "384"}
     assert chunks["joint"] == (6, 6, 6)          # one chunk over the whole volume
     assert chunks["autoregressive"] == (1, 1, 1)
+    # Chunked exactly like hybrid — that is what makes it hybrid's control.
+    assert chunks["chunked_no_neighbours"] == chunks["hybrid"]
     assert chunks["hybrid"] == ASSEMBLY_MODES_REFERENCE_TILES
 
 
