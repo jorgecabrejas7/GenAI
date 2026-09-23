@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 600" width="1600" height="600" font-family="Helvetica, Arial, sans-serif">
+  <!-- PoreGen pipeline. Flat vector, one accent colour (#0072B2) + greys. Edit text freely. -->
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555555"/>
+    </marker>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0072B2"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="600" fill="#ffffff"/>
+
+  <!-- ===== stage 1: real XCT volume (isometric cube) ===== -->
+  <g transform="translate(60,200)">
+    <polygon points="0,40 100,40 100,140 0,140" fill="#bfbfbf" stroke="#555555" stroke-width="2"/>
+    <polygon points="0,40 40,0 140,0 100,40" fill="#e6e6e6" stroke="#555555" stroke-width="2"/>
+    <polygon points="100,40 140,0 140,100 100,140" fill="#8c8c8c" stroke="#555555" stroke-width="2"/>
+    <!-- a few pores on the front face -->
+    <circle cx="28" cy="70" r="5" fill="#333333"/><circle cx="66" cy="95" r="4" fill="#333333"/>
+    <circle cx="45" cy="120" r="3" fill="#333333"/><circle cx="82" cy="62" r="3" fill="#333333"/>
+    <text x="70" y="180" text-anchor="middle" font-size="24" fill="#222222">Real XCT volume</text>
+    <text x="70" y="208" text-anchor="middle" font-size="18" fill="#666666">CFRP, 25 µm/voxel</text>
+  </g>
+  <line x1="190" y1="270" x2="245" y2="270" stroke="#555555" stroke-width="3" marker-end="url(#arr)"/>
+
+  <!-- ===== stage 2: 3D VAE encoder (trapezoid) ===== -->
+  <g transform="translate(250,200)">
+    <polygon points="0,10 140,45 140,95 0,130" fill="#f2f2f2" stroke="#555555" stroke-width="2"/>
+    <text x="70" y="78" text-anchor="middle" font-size="22" fill="#222222">3D VAE</text>
+    <text x="70" y="180" text-anchor="middle" font-size="24" fill="#222222">Encoder</text>
+    <text x="70" y="208" text-anchor="middle" font-size="18" fill="#666666">4× compression</text>
+  </g>
+  <line x1="400" y1="270" x2="455" y2="270" stroke="#555555" stroke-width="3" marker-end="url(#arr)"/>
+
+  <!-- ===== stage 3: latent space (small cube, latent grid) ===== -->
+  <g transform="translate(465,220)">
+    <polygon points="0,30 60,30 60,90 0,90" fill="#dbe9f4" stroke="#0072B2" stroke-width="2"/>
+    <polygon points="0,30 25,5 85,5 60,30" fill="#eef5fa" stroke="#0072B2" stroke-width="2"/>
+    <polygon points="60,30 85,5 85,65 60,90" fill="#b9d3e8" stroke="#0072B2" stroke-width="2"/>
+    <line x1="20" y1="30" x2="20" y2="90" stroke="#0072B2" stroke-width="1"/>
+    <line x1="40" y1="30" x2="40" y2="90" stroke="#0072B2" stroke-width="1"/>
+    <line x1="0" y1="50" x2="60" y2="50" stroke="#0072B2" stroke-width="1"/>
+    <line x1="0" y1="70" x2="60" y2="70" stroke="#0072B2" stroke-width="1"/>
+    <text x="42" y="160" text-anchor="middle" font-size="24" fill="#222222">Latent space</text>
+    <text x="42" y="188" text-anchor="middle" font-size="18" fill="#666666">compact 3D grid</text>
+  </g>
+  <line x1="560" y1="270" x2="615" y2="270" stroke="#555555" stroke-width="3" marker-end="url(#arr)"/>
+
+  <!-- ===== stage 4: conditional diffusion (accent block) ===== -->
+  <g transform="translate(625,185)">
+    <rect x="0" y="0" width="300" height="170" rx="10" fill="#ffffff" stroke="#0072B2" stroke-width="4"/>
+    <text x="150" y="58" text-anchor="middle" font-size="26" font-weight="bold" fill="#0072B2">Conditional</text>
+    <text x="150" y="92" text-anchor="middle" font-size="26" font-weight="bold" fill="#0072B2">diffusion</text>
+    <text x="150" y="128" text-anchor="middle" font-size="18" fill="#666666">3D U-Net, denoises latent patches</text>
+    <!-- noise → clean glyph -->
+    <g transform="translate(20,142)" fill="#0072B2">
+      <circle cx="0" cy="0" r="2"/><circle cx="8" cy="4" r="2"/><circle cx="16" cy="-3" r="2"/><circle cx="24" cy="2" r="2"/>
+      <circle cx="32" cy="-4" r="2"/><circle cx="40" cy="3" r="2"/><circle cx="48" cy="-1" r="2"/>
+    </g>
+    <text x="80" y="148" font-size="14" fill="#666666">noise</text>
+    <line x1="120" y1="143" x2="170" y2="143" stroke="#0072B2" stroke-width="2" marker-end="url(#arrA)"/>
+    <text x="180" y="148" font-size="14" fill="#666666">clean latent</text>
+  </g>
+
+  <!-- conditioning inputs: three labelled arrows into the diffusion block from above -->
+  <g font-size="20" fill="#222222">
+    <!-- porosity -->
+    <rect x="515" y="60" width="150" height="46" rx="6" fill="#eef5fa" stroke="#0072B2" stroke-width="2"/>
+    <text x="590" y="90" text-anchor="middle">Target porosity</text>
+    <line x1="590" y1="106" x2="695" y2="182" stroke="#0072B2" stroke-width="3" marker-end="url(#arrA)"/>
+    <!-- stacking sequence -->
+    <rect x="685" y="60" width="180" height="46" rx="6" fill="#eef5fa" stroke="#0072B2" stroke-width="2"/>
+    <text x="775" y="90" text-anchor="middle">Stacking sequence</text>
+    <line x1="775" y1="106" x2="775" y2="182" stroke="#0072B2" stroke-width="3" marker-end="url(#arrA)"/>
+    <!-- shape -->
+    <rect x="885" y="60" width="150" height="46" rx="6" fill="#eef5fa" stroke="#0072B2" stroke-width="2"/>
+    <text x="960" y="90" text-anchor="middle">Sample shape</text>
+    <line x1="960" y1="106" x2="855" y2="182" stroke="#0072B2" stroke-width="3" marker-end="url(#arrA)"/>
+    <text x="775" y="45" text-anchor="middle" font-size="18" fill="#666666">conditioning inputs</text>
+  </g>
+
+  <line x1="930" y1="270" x2="985" y2="270" stroke="#555555" stroke-width="3" marker-end="url(#arr)"/>
+
+  <!-- ===== stage 5: VAE decoder (mirrored trapezoid) ===== -->
+  <g transform="translate(995,200)">
+    <polygon points="0,45 140,10 140,130 0,95" fill="#f2f2f2" stroke="#555555" stroke-width="2"/>
+    <text x="70" y="78" text-anchor="middle" font-size="22" fill="#222222">3D VAE</text>
+    <text x="70" y="180" text-anchor="middle" font-size="24" fill="#222222">Decoder</text>
+    <text x="70" y="208" text-anchor="middle" font-size="18" fill="#666666">grey volume + labels</text>
+  </g>
+  <line x1="1145" y1="270" x2="1200" y2="270" stroke="#555555" stroke-width="3" marker-end="url(#arr)"/>
+
+  <!-- ===== stage 6: synthetic XCT volume, assembled from patches (grid inset) ===== -->
+  <g transform="translate(1215,180)">
+    <!-- big cube built from a 3x3 grid of patches on each visible face -->
+    <polygon points="0,60 150,60 150,210 0,210" fill="#bfbfbf" stroke="#555555" stroke-width="2"/>
+    <polygon points="0,60 60,0 210,0 150,60" fill="#e6e6e6" stroke="#555555" stroke-width="2"/>
+    <polygon points="150,60 210,0 210,150 150,210" fill="#8c8c8c" stroke="#555555" stroke-width="2"/>
+    <!-- patch grid (accent) -->
+    <g stroke="#0072B2" stroke-width="1.5" fill="none">
+      <line x1="50" y1="60" x2="50" y2="210"/><line x1="100" y1="60" x2="100" y2="210"/>
+      <line x1="0" y1="110" x2="150" y2="110"/><line x1="0" y1="160" x2="150" y2="160"/>
+      <line x1="20" y1="40" x2="170" y2="40"/><line x1="40" y1="20" x2="190" y2="20"/>
+      <line x1="50" y1="60" x2="110" y2="0"/><line x1="100" y1="60" x2="160" y2="0"/>
+      <line x1="170" y1="40" x2="170" y2="190"/><line x1="190" y1="20" x2="190" y2="170"/>
+      <line x1="150" y1="110" x2="210" y2="50"/><line x1="150" y1="160" x2="210" y2="100"/>
+    </g>
+    <!-- one highlighted patch = the current window -->
+    <rect x="50" y="110" width="50" height="50" fill="#0072B2" fill-opacity="0.25" stroke="#0072B2" stroke-width="3"/>
+    <!-- pores -->
+    <circle cx="30" cy="90" r="4" fill="#333333"/><circle cx="120" cy="185" r="4" fill="#333333"/>
+    <circle cx="70" cy="135" r="3" fill="#333333"/><circle cx="130" cy="80" r="3" fill="#333333"/>
+    <text x="105" y="250" text-anchor="middle" font-size="24" fill="#222222">Synthetic XCT volume</text>
+    <text x="105" y="278" text-anchor="middle" font-size="18" fill="#666666">grey + material/pore/air labels</text>
+  </g>
+
+  <!-- patch-assembly caption box (right, below the cube) -->
+  <g transform="translate(1215,330)">
+    <rect x="0" y="0" width="360" height="0" fill="none"/>
+  </g>
+  <g transform="translate(1100,480)" font-size="18" fill="#222222">
+    <rect x="0" y="0" width="470" height="110" rx="8" fill="#ffffff" stroke="#0072B2" stroke-width="2" stroke-dasharray="6,5"/>
+    <text x="16" y="30" font-weight="bold" fill="#0072B2">Patch-based assembly</text>
+    <text x="16" y="58">Windows are generated one at a time, each conditioned</text>
+    <text x="16" y="82">on its finished neighbours, so any size and geometry</text>
+    <text x="16" y="104">can be assembled and porosity placed per region.</text>
+  </g>
+
+  <!-- training-vs-generation footnote -->
+  <g transform="translate(40,490)" font-size="18" fill="#666666">
+    <rect x="0" y="0" width="1000" height="90" rx="8" fill="#f7f7f7" stroke="#cccccc" stroke-width="1"/>
+    <text x="16" y="32"><tspan font-weight="bold" fill="#222222">Training:</tspan> the encoder maps real scans to latents; the diffusion model learns to denoise latent patches given the three conditions.</text>
+    <text x="16" y="66"><tspan font-weight="bold" fill="#222222">Generation:</tspan> the encoder is not used. New latents are sampled from noise under the requested conditions, then decoded.</text>
+  </g>
+</svg>
