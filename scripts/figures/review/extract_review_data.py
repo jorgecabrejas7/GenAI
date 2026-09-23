@@ -59,24 +59,24 @@ def fig2(out):
 def fig3(out):
     d = out / "fig3"; (d / "panels").mkdir(parents=True, exist_ok=True)
     # top row: through-thickness (y) slice, 192 deep x 384 wide, of trained and never-seen sequences
-    seqs = [(C18 / "layup/volumes/A_seed101", "A (trained)"),
-            (C18 / "layup/volumes/C_seed101", "C (trained)"),
-            (C20 / "seq_quasi_iso_seed101", "quasi-isotropic (unseen)"),
-            (C20 / "seq_crossply_seed101", "cross-ply (unseen)"),
-            (C20 / "seq_blocked_seed101", "blocked (unseen)")]
+    seqs = [(C18 / "layup/volumes/A_seed101", ""),
+            (C18 / "layup/volumes/C_seed101", ""),
+            (C20 / "seq_quasi_iso_seed101", ""),
+            (C20 / "seq_crossply_seed101", ""),
+            (C20 / "seq_blocked_seed101", "")]
     rows = []
     for i, (cd, name) in enumerate(seqs):
         m = json.load(open(cd / "manifest.json"))
         g = tifffile.imread(cd / "volume.tif"); lab = tifffile.imread(cd / "label.tif")
         y = richest(lab, 1); sl = take(g, 1, y)[:, 320:704]          # 192 x 384
         fn = f"seq_{i}.npy"; np.save(d / "panels" / fn, sl)
-        rows.append((fn, "sequence", f"{name}\n{seq_label(m['requested_layup'])}"))
+        rows.append((fn, "sequence", seq_label(m["requested_layup"])))
     # bottom row: ply pitch (thickness) and off-manifold shapes
-    shapes = [(C20 / "pitch8_seed101", 1, None, "thin plies, 8 vox (0.2 mm)", (slice(None), slice(320, 704))),
-              (C20 / "pitch32_seed101", 1, None, "thick plies, 32 vox (0.8 mm)", (slice(None), slice(320, 704))),
+    shapes = [(C20 / "pitch8_seed101", 1, None, "thin plies", (slice(None), slice(320, 704))),
+              (C20 / "pitch32_seed101", 1, None, "thick plies", (slice(None), slice(320, 704))),
               (C19 / "lbracket_ddim50", 2, None, "L-bracket", (slice(None), slice(None))),
               (C19 / "taper_ddim50", 1, None, "tapered coupon", (slice(None), slice(256, 768))),
-              (C19 / "letters_ddim50", 0, None, "letters (air)", "air_bbox")]
+              (C19 / "letters_ddim50", 0, None, "letters", "air_bbox")]
     for i, (cd, axis, _, name, crop) in enumerate(shapes):
         g = tifffile.imread(cd / "volume.tif"); lab = tifffile.imread(cd / "label.tif")
         idx = richest(lab, axis) if axis == 1 and "pitch" in cd.name else g.shape[axis] // 2

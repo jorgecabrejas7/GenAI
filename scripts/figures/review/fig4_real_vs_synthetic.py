@@ -54,7 +54,7 @@ C_ACCENT = "#0072B2"
 C_GREY = "#666666"
 C_LIGHT = "#bbbbbb"
 IMG_CMAP = "gray"                 # all tomography images
-SCALEBAR_UM = 1000                # scale bar length in µm
+SCALEBAR_UM = None                # scale bar length in µm; None = auto (about 1/5 of the image width)
 PIXEL_UM = 25.0                   # default voxel size
 
 plt.rcParams.update({
@@ -68,16 +68,20 @@ plt.rcParams.update({
 })
 
 
-def add_scalebar(ax, shape, pixel_um=PIXEL_UM, length_um=SCALEBAR_UM):
-    """White bar with black outline in the lower-left corner of an image axis."""
+def add_scalebar(ax, shape, pixel_um=PIXEL_UM, length_um=None):
+    """Small bar tucked in the lower-left corner. Its length is picked from a round set so that
+    it spans roughly a fifth of the image width, whatever the image size."""
     h, w = shape
+    if length_um is None:
+        target = 0.2 * w * pixel_um
+        length_um = min([100, 200, 500, 1000, 2000, 5000, 10000], key=lambda L: abs(L - target))
     px = length_um / pixel_um
-    x0, y0 = 0.05 * w, 0.93 * h
-    ax.plot([x0, x0 + px], [y0, y0], color="black", lw=4, solid_capstyle="butt")
-    ax.plot([x0, x0 + px], [y0, y0], color="white", lw=2.5, solid_capstyle="butt")
-    ax.text(x0 + px / 2, y0 - 0.03 * h, f"{length_um:g} µm", color="white",
-            ha="center", va="bottom", fontsize=FONT_SIZE - 1,
-            path_effects=[matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
+    x0, y0 = 0.04 * w, 0.95 * h
+    ax.plot([x0, x0 + px], [y0, y0], color="black", lw=3, solid_capstyle="butt")
+    ax.plot([x0, x0 + px], [y0, y0], color="white", lw=1.8, solid_capstyle="butt")
+    unit = f"{length_um / 1000:g} mm" if length_um >= 1000 else f"{length_um:g} µm"
+    ax.text(x0, y0 - 0.025 * h, unit, color="white", ha="left", va="bottom", fontsize=FONT_SIZE - 3,
+            path_effects=[matplotlib.patheffects.withStroke(linewidth=1.5, foreground="black")])
 
 
 def show_image(ax, img, title=None, pixel_um=PIXEL_UM):

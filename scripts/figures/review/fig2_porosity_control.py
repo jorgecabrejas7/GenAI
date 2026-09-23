@@ -45,7 +45,7 @@ C_ACCENT = "#0072B2"
 C_GREY = "#666666"
 C_LIGHT = "#bbbbbb"
 IMG_CMAP = "gray"                 # all tomography images
-SCALEBAR_UM = 1000                # scale bar length in µm
+SCALEBAR_UM = None                # scale bar length in µm; None = auto (about 1/5 of the image width)
 PIXEL_UM = 25.0                   # default voxel size
 
 plt.rcParams.update({
@@ -59,16 +59,20 @@ plt.rcParams.update({
 })
 
 
-def add_scalebar(ax, shape, pixel_um=PIXEL_UM, length_um=SCALEBAR_UM):
-    """White bar with black outline in the lower-left corner of an image axis."""
+def add_scalebar(ax, shape, pixel_um=PIXEL_UM, length_um=None):
+    """Small bar tucked in the lower-left corner. Its length is picked from a round set so that
+    it spans roughly a fifth of the image width, whatever the image size."""
     h, w = shape
+    if length_um is None:
+        target = 0.2 * w * pixel_um
+        length_um = min([100, 200, 500, 1000, 2000, 5000, 10000], key=lambda L: abs(L - target))
     px = length_um / pixel_um
-    x0, y0 = 0.05 * w, 0.93 * h
-    ax.plot([x0, x0 + px], [y0, y0], color="black", lw=4, solid_capstyle="butt")
-    ax.plot([x0, x0 + px], [y0, y0], color="white", lw=2.5, solid_capstyle="butt")
-    ax.text(x0 + px / 2, y0 - 0.03 * h, f"{length_um:g} µm", color="white",
-            ha="center", va="bottom", fontsize=FONT_SIZE - 1,
-            path_effects=[matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
+    x0, y0 = 0.04 * w, 0.95 * h
+    ax.plot([x0, x0 + px], [y0, y0], color="black", lw=3, solid_capstyle="butt")
+    ax.plot([x0, x0 + px], [y0, y0], color="white", lw=1.8, solid_capstyle="butt")
+    unit = f"{length_um / 1000:g} mm" if length_um >= 1000 else f"{length_um:g} µm"
+    ax.text(x0, y0 - 0.025 * h, unit, color="white", ha="left", va="bottom", fontsize=FONT_SIZE - 3,
+            path_effects=[matplotlib.patheffects.withStroke(linewidth=1.5, foreground="black")])
 
 
 def show_image(ax, img, title=None, pixel_um=PIXEL_UM):
@@ -133,15 +137,15 @@ def make_figure(req, meas, slices, slice_por, pixel_um, out):
     gs_left = gs[0].subgridspec(1, n, wspace=0.06)
     for i, (img, p) in enumerate(zip(slices, slice_por)):
         ax = fig.add_subplot(gs_left[i])
-        show_image(ax, img, f"target {100 * p:.1f} %", pixel_um)
-    fig.text(0.03 + 0.62 / 2, 0.95, "Generated cross-sections at increasing target porosity",
+        show_image(ax, img, f"{100 * p:g} %", pixel_um)
+    fig.text(0.03 + 0.62 / 2, 0.95, "Generated cross-sections, target porosity from 0.5 % to 10 %",
              ha="center", fontsize=TITLE_SIZE)
 
     ax = fig.add_subplot(gs[1])
     lim = (0, 1.05 * max(req.max(), meas.max()) * 100)
-    ax.plot(lim, lim, ls="--", color=C_LIGHT, lw=1, label="1:1")
+    ax.plot(lim, lim, ls="--", color=C_LIGHT, lw=1)
     ax.scatter(req * 100, meas * 100, s=28, color=C_ACCENT, edgecolor="white",
-               linewidth=0.5, zorder=3, label="generated volume")
+               linewidth=0.5, zorder=3)
     ss_res = np.sum((meas - req) ** 2)
     ss_tot = np.sum((meas - meas.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -151,7 +155,6 @@ def make_figure(req, meas, slices, slice_por, pixel_um, out):
     ax.set_xlabel("Requested porosity (%)")
     ax.set_ylabel("Measured porosity (%)")
     ax.set_xlim(lim); ax.set_ylim(lim); ax.set_aspect("equal")
-    ax.legend(loc="lower right")
     ax.set_title("Requested vs measured porosity")
 
     fig.savefig(f"{out}.png"); fig.savefig(f"{out}.pdf")

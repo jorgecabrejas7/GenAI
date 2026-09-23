@@ -45,7 +45,7 @@ C_ACCENT = "#0072B2"
 C_GREY = "#666666"
 C_LIGHT = "#bbbbbb"
 IMG_CMAP = "gray"                 # all tomography images
-SCALEBAR_UM = 1000                # scale bar length in µm
+SCALEBAR_UM = None                # scale bar length in µm; None = auto (about 1/5 of the image width)
 PIXEL_UM = 25.0                   # default voxel size
 
 plt.rcParams.update({
@@ -59,16 +59,20 @@ plt.rcParams.update({
 })
 
 
-def add_scalebar(ax, shape, pixel_um=PIXEL_UM, length_um=SCALEBAR_UM):
-    """White bar with black outline in the lower-left corner of an image axis."""
+def add_scalebar(ax, shape, pixel_um=PIXEL_UM, length_um=None):
+    """Small bar tucked in the lower-left corner. Its length is picked from a round set so that
+    it spans roughly a fifth of the image width, whatever the image size."""
     h, w = shape
+    if length_um is None:
+        target = 0.2 * w * pixel_um
+        length_um = min([100, 200, 500, 1000, 2000, 5000, 10000], key=lambda L: abs(L - target))
     px = length_um / pixel_um
-    x0, y0 = 0.05 * w, 0.93 * h
-    ax.plot([x0, x0 + px], [y0, y0], color="black", lw=4, solid_capstyle="butt")
-    ax.plot([x0, x0 + px], [y0, y0], color="white", lw=2.5, solid_capstyle="butt")
-    ax.text(x0 + px / 2, y0 - 0.03 * h, f"{length_um:g} µm", color="white",
-            ha="center", va="bottom", fontsize=FONT_SIZE - 1,
-            path_effects=[matplotlib.patheffects.withStroke(linewidth=2, foreground="black")])
+    x0, y0 = 0.04 * w, 0.95 * h
+    ax.plot([x0, x0 + px], [y0, y0], color="black", lw=3, solid_capstyle="butt")
+    ax.plot([x0, x0 + px], [y0, y0], color="white", lw=1.8, solid_capstyle="butt")
+    unit = f"{length_um / 1000:g} mm" if length_um >= 1000 else f"{length_um:g} µm"
+    ax.text(x0, y0 - 0.025 * h, unit, color="white", ha="left", va="bottom", fontsize=FONT_SIZE - 3,
+            path_effects=[matplotlib.patheffects.withStroke(linewidth=1.5, foreground="black")])
 
 
 def show_image(ax, img, title=None, pixel_um=PIXEL_UM):
@@ -150,14 +154,14 @@ def make_figure(panels, pixel_um, out):
     rows_h = FIG_WIDTH_IN * 0.97 * sum(1 / sum(a) for a in aspects)
     fig = plt.figure(figsize=(FIG_WIDTH_IN, max(rows_h * 1.8, 3.5)))
     outer = fig.add_gridspec(2, 1, height_ratios=[1 / sum(a) for a in aspects],
-                             left=0.02, right=0.99, top=0.83, bottom=0.03, hspace=0.45)
+                             left=0.02, right=0.99, top=0.87, bottom=0.03, hspace=0.45)
     for r, (row, asp) in enumerate(zip(rows, aspects)):
         gs = outer[r].subgridspec(1, len(row), width_ratios=asp, wspace=0.05)
         for c, (_, label, img) in enumerate(row):
             show_image(fig.add_subplot(gs[c]), img, label, pixel_um)
-    fig.text(0.5, 0.965, "Stacking-sequence control (through-thickness slices)", ha="center", fontsize=TITLE_SIZE)
+    fig.text(0.5, 0.965, "Different stacking sequences", ha="center", fontsize=TITLE_SIZE)
     y_mid = outer[1].get_position(fig).y1 + 0.075
-    fig.text(0.5, y_mid, "Shape and thickness control", ha="center", fontsize=TITLE_SIZE)
+    fig.text(0.5, y_mid, "Different shapes and thicknesses", ha="center", fontsize=TITLE_SIZE)
     fig.savefig(f"{out}.png"); fig.savefig(f"{out}.pdf")
     print(f"wrote {out}.png / .pdf   ({len(rows[0])} sequence + {len(rows[1])} shape panels)")
 
