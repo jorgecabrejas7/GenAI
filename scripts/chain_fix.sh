@@ -42,6 +42,14 @@ say() { printf '%s  FIX %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
 #: Run a stage and CHECK IT DID SOMETHING. `min_seconds` is how long the stage
 #: must take to be credible: a generate that returns instantly skipped its
 #: cases, which is exactly the failure this script exists to correct.
+#: Consecutive failures before the chain gives up. A chain must survive ONE
+#: failing stage — that is why it does not use `set -e`. It must not plough
+#: through four: VRRAE V0, A, B and A0 all failed in sequence and the chain
+#: went on to resume rf-2, so the card spent the night on the job that was
+#: LEAST urgent while nothing anyone was waiting for had succeeded.
+MAX_CONSECUTIVE_FAILURES=2
+consecutive_failures=0
+
 run() {
     local label="$1" tag="$2" min="$3"; shift 3
     say "$label start"
@@ -50,13 +58,23 @@ run() {
     local rc=$? dt=$((SECONDS - t0))
     if [ "$rc" -ne 0 ]; then
         say "$tag rc=$rc FAILED after ${dt}s — see $S/$tag.log"
-    elif [ "$min" -gt 0 ] && [ "$dt" -lt "$min" ]; then
+        consecutive_failures=$((consecutive_failures + 1))
+        if [ "$consecutive_failures" -ge "$MAX_CONSECUTIVE_FAILURES" ]; then
+            say "STOPPING: $consecutive_failures stages failed in a row."
+            say "  The card is left FREE rather than spent on whatever came next."
+            say "  Logs: $S/"
+            exit 1
+        fi
+        return $rc
+    fi
+    consecutive_failures=0
+    if [ "$min" -gt 0 ] && [ "$dt" -lt "$min" ]; then
         say "$tag rc=0 but finished in ${dt}s, under the ${min}s this stage needs"
         say "  SUSPECT NO-OP — check $S/$tag.log before believing it"
     else
         say "$tag rc=0 in ${dt}s"
     fi
-    return $rc
+    return 0
 }
 
 read -r LDM06_RUN LDM06_CKPT LDM06_W <<EOF2

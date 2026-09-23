@@ -140,10 +140,16 @@ def _log_scalars_to_tb(
                     tb_writer.add_scalar(f"{prefix}/kl_ch{i:02d}", ch_val, step)
         else:
             tb_writer.add_scalar(f"{prefix}/{k}", v, step)
-    if "kl_per_channel" in metrics and isinstance(metrics["kl_per_channel"], list):
+    # A histogram of an EMPTY list raises inside TensorBoard ("The histogram is
+    # empty, please file a bug report"), which takes the training run down from
+    # a LOGGING call. That is not hypothetical: `vrrae/beta0` sets
+    # kl_max_beta 0, so no KL is computed and kl_per_channel is empty — the run
+    # trained for 7.8 h and died at step 6636 on this line.
+    kl_pc = metrics.get("kl_per_channel")
+    if isinstance(kl_pc, list) and len(kl_pc) > 0:
         tb_writer.add_histogram(
             f"{prefix}/kl_per_channel",
-            torch.tensor(metrics["kl_per_channel"]),
+            torch.tensor(kl_pc),
             step,
         )
 

@@ -1193,7 +1193,8 @@ def report_multichunk(res, root, floor) -> tuple[str, list[str]]:
 #: Row order of the arm tables.  Fixed, not alphabetical: the three samplers in
 #: increasing chunk size and then the ceiling, so the table reads as the
 #: argument it is.
-ARM_ORDER = ("joint", "autoregressive", "hybrid", "teacher_forced")
+ARM_ORDER = ("joint", "chunked_no_neighbours", "autoregressive", "hybrid",
+             "teacher_forced")
 #: Per-chunk quantities the findings show, and how many digits each deserves.
 CHUNK_ROWS = (
     ("chunk_plane_seam_xct", "chunk-plane seam (grey)", 3),
@@ -1327,7 +1328,12 @@ def _fig_assembly_modes(res, root) -> list[str]:
                 # point that was never measured.
                 y = [np.nan if b.get("mean") is None else b["mean"] for b in series]
                 e = [b.get("sd") or 0.0 for b in series]
-                colour = SERIES_COLORS[ARM_ORDER.index(c["arm"]) % len(SERIES_COLORS)]
+                # An arm added to the case list but not to ARM_ORDER must not
+                # take the whole report down — `fix8_report` died on exactly
+                # that, two seconds after a 30-minute generate succeeded.
+                idx = (ARM_ORDER.index(c["arm"]) if c["arm"] in ARM_ORDER
+                       else len(ARM_ORDER))
+                colour = SERIES_COLORS[idx % len(SERIES_COLORS)]
                 ax.errorbar(range(len(y)), y, yerr=e, marker="o", ms=3, capsize=2,
                             color=colour, label=c["arm"])
             fl = (res.get("real_floor") or {}).get("large" if scale == "1024" else "small")

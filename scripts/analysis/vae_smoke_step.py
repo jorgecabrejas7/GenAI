@@ -63,7 +63,12 @@ def main() -> int:
     try:
         model.train()
         out = model(batch["xct"])
-        losses = compute_total_loss(out, batch, 0, cfg["loss"])
+        # The WHOLE cfg: compute_total_loss does `cfg["loss"]` itself. Passing
+        # cfg["loss"] made it look up cfg["loss"]["loss"] and raise KeyError,
+        # so this smoke test reported "did not fit" for BOTH A and B without
+        # ever allocating anything — which skipped A for no reason and sent B
+        # to its fallback, and that fallback took the host out of memory.
+        losses = compute_total_loss(out, batch, 0, cfg)
         losses["total"].backward()
         opt.step()
         opt.zero_grad(set_to_none=True)

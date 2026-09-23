@@ -52,6 +52,18 @@ overrides:
     # defined as a ONE-VARIABLE change to vrrae04 and must not move two things.
     dataset_root: split_v3
     batch_size: 1536
+    # A BATCH OF 1024 64-CUBED PATCHES IS 1.0 GiB, and every worker holds one
+    # in flight. At the inherited 4 workers that is 4 GiB of prefetched input
+    # on top of the model, the optimiser and the SVD's backward intermediates —
+    # on a machine where host and device share 121 GB. The first attempt at
+    # this configuration took the WHOLE HOST out of memory at 02:29 on
+    # 2026-09-23: the kernel's OOM killer took wireplumber, pipewire and the
+    # tmux server, and the run died at step 6 with its dataloader workers
+    # killed. Halved, with prefetch already at 1 and persistence off so nothing
+    # is held between epochs.
+    num_workers: 2
+    persistent_workers: false
+    prefetch_factor: 1
   training:
     # 5.035 epochs over split_v3's 1 598 000 train patches at
     # batch 1536. NOT 71690*128/batch: that rule was calibrated on
