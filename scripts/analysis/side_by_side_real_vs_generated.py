@@ -6,7 +6,7 @@ same phi levels from the test panels (Na_05 is a layup-A panel).  The generated 
 cropped to its central 128^3 so both sides are shown at the same physical size (25 um/voxel).
 A second figure compares a real 128x1024x1024 test crop with a generated 1024x1024x192 volume
 (porosity NOT matched: the real crop is what the panel contains, the generated one was asked
-for 0.03).  Three orthogonal mid-slices per volume, grey and label (grey=material, red=pore,
+for 0.03).  Slices shown are the ones holding the most pore voxels along each axis (same rule for both sides); grey only (grey=material, red=pore,
 blue=air).  Output: <campaign>/figures_side_by_side/*.png.  CPU only.
 """
 from __future__ import annotations
@@ -28,6 +28,11 @@ def crop_center(a, n):
     z, y, x = [(s - n) // 2 for s in a.shape[:3]]
     return a[z:z + n, y:y + n, x:x + n]
 
+def richest_index(label, axis):
+    """Index along `axis` of the slice holding the most pore voxels (a fair 'show the pores' choice for both sides)."""
+    other = tuple(i for i in range(3) if i != axis)
+    return int(np.argmax((label == 1).sum(axis=other)))
+
 def mid_slices(a):
     z, y, x = a.shape
     return {"z": a[z // 2], "y": a[:, y // 2, :], "x": a[:, :, x // 2]}
@@ -45,42 +50,43 @@ def panel(ax, img, label=None, title=""):
 def matched_figure(camp: Path, level: str, panel_id: str, seed: int, out: Path):
     real_d = camp / "real_floor" / "volumes" / f"micro_phi{level}__{panel_id}__a"
     gen_d = camp / "microstructure" / "volumes" / f"phi{level}_seed{seed}"
-    rg, rl, rm = load(real_d); gg, gl, gm = load(gen_d)
+    rg, rl, _ = load(real_d); gg, gl, _ = load(gen_d)
     gg, gl = crop_center(gg, 128), crop_center(gl, 128)
-    fig, axes = plt.subplots(4, 3, figsize=(10.5, 14))
-    rows = [("REAL grey\n(test panel %s, layup A)" % panel_id, rg, None), ("REAL label", rg, rl),
-            ("GENERATED grey\n(request phi %s, layup A, DDIM-200)" % level, gg, None), ("GENERATED label", gg, gl)]
-    for r, (name, g, l) in enumerate(rows):
-        for c, ax in enumerate(("z", "y", "x")):
-            panel(axes[r, c], mid_slices(g)[ax], None if l is None else mid_slices(l)[ax], f"{name}\n{ax}-slice" if c == 0 else f"{ax}-slice")
-    fig.suptitle(f"Real vs generated at matched porosity — real crop phi {phi_of(rl):.4f}, generated phi {phi_of(gl):.4f}\n(central 128³ of the 192³ generated volume; 25 µm/voxel; red = pore, blue = air)", fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(out, dpi=200); plt.close(fig)
+    fig, axes = plt.subplots(2, 3, figsize=(10.5, 7.2))
+    for c, ax in enumerate(("z", "y", "x")):
+        panel(axes[0, c], mid_slices(rg)[ax], None, f"real, {ax}" if c else f"real (phi {phi_of(rl):.3f}), {ax}")
+        panel(axes[1, c], mid_slices(gg)[ax], None, f"generated, {ax}" if c else f"generated (phi {phi_of(gl):.3f}), {ax}")
+    fig.tight_layout(); fig.savefig(out, dpi=200); plt.close(fig)
 
-def wide_figure(camp: Path, out: Path):
-    real_d = next(p for p in sorted((camp / "real_floor" / "volumes").iterdir()) if p.name.endswith("__large") and "Na_05" in p.name)
+def wide_figure(camp: Path, out: Path, real_name: str = "Na_09_5"):
+    real_d = next(p for p in sorted((camp / "real_floor" / "volumes").iterdir()) if p.name.endswith("__large") and real_name in p.name)
     gen_d = camp / "sampler" / "volumes" / "1024_ddim200_seed101"
     rg, rl, _ = load(real_d); gg, gl, _ = load(gen_d)
-    fig, axes = plt.subplots(4, 1, figsize=(16, 13))
-    rz, gz = rg[rg.shape[0] // 2], gg[gg.shape[0] // 2]
-    panel(axes[0], rz, None, f"REAL  test panel Na_05, 128×1024×1024 crop, mid-z slice (phi {phi_of(rl):.4f})")
-    panel(axes[1], rz, rl[rl.shape[0] // 2], "REAL  label")
-    panel(axes[2], gz, None, f"GENERATED  1024×1024×192, request phi 0.03, layup A, DDIM-200, mid-z slice (phi {phi_of(gl):.4f})")
-    panel(axes[3], gz, gl[gl.shape[0] // 2], "GENERATED  label")
-    fig.suptitle("Full panel width, same voxel size (25 µm). Porosity is NOT matched here: the real crop holds what the panel contains.", fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(out, dpi=150); plt.close(fig)
-    # through-thickness (y-slice) strip: plies visible
-    fig, axes = plt.subplots(4, 1, figsize=(16, 7))
-    ry, gy = rg[:, rg.shape[1] // 2, :], gg[:, gg.shape[1] // 2, :]
-    panel(axes[0], ry, None, "REAL  through-thickness (y-slice): plies run left–right"); panel(axes[1], ry, rl[:, rl.shape[1] // 2, :], "REAL  label")
-    panel(axes[2], gy, None, "GENERATED  through-thickness (y-slice)"); panel(axes[3], gy, gl[:, gl.shape[1] // 2, :], "GENERATED  label")
+    # mid-z (in-plane) view
+    rz, gz = richest_index(rl, 0), richest_index(gl, 0)
+    fig, axes = plt.subplots(2, 1, figsize=(16, 8.6))
+    panel(axes[0], rg[rz], None, f"real, test panel {real_name}, in-plane slice z={rz} (phi {phi_of(rl):.3f})")
+    panel(axes[1], gg[gz], None, f"generated, request phi 0.03, in-plane slice z={gz} (phi {phi_of(gl):.3f})")
+    fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
+    # through-thickness (side) view: y-slice, plies run left-right; both volumes 192 deep
+    fig, axes = plt.subplots(2, 1, figsize=(16, 5.2))
+    ry, gy = richest_index(rl, 1), richest_index(gl, 1)
+    panel(axes[0], rg[:, ry, :], None, f"real, {real_name}, through-thickness slice y={ry} (phi {phi_of(rl):.3f})")
+    panel(axes[1], gg[:, gy, :], None, f"generated, through-thickness slice y={gy} (phi {phi_of(gl):.3f})")
     fig.tight_layout(); fig.savefig(out.with_name(out.stem + "_through_thickness.png"), dpi=150); plt.close(fig)
+    # second side view along the other in-plane axis
+    fig, axes = plt.subplots(2, 1, figsize=(16, 5.2))
+    rx, gx = richest_index(rl, 2), richest_index(gl, 2)
+    panel(axes[0], rg[:, :, rx], None, f"real, {real_name}, through-thickness slice x={rx} (phi {phi_of(rl):.3f})")
+    panel(axes[1], gg[:, :, gx], None, f"generated, through-thickness slice x={gx} (phi {phi_of(gl):.3f})")
+    fig.tight_layout(); fig.savefig(out.with_name(out.stem + "_through_thickness_x.png"), dpi=150); plt.close(fig)
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--campaign", default="runs/campaigns/18-eval-v4-final"); ap.add_argument("--seed", type=int, default=101)
     a = ap.parse_args(); camp = Path(a.campaign); out = camp / "figures_side_by_side"; out.mkdir(exist_ok=True)
     for level in ("0.01", "0.03", "0.06"):
         matched_figure(camp, level, "Na_05", a.seed, out / f"matched_phi{level}_Na05_vs_generated.png")
-    wide_figure(camp, out / "wide_real_Na05_vs_generated_1024.png")
+    wide_figure(camp, out / "wide_real_Na09_5_vs_generated_1024.png")
     print("wrote", sorted(p.name for p in out.glob("*.png")))
 
 if __name__ == "__main__":
