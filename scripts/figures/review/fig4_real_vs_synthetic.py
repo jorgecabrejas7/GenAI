@@ -14,6 +14,9 @@ Data format
                    Greyscale histograms are computed from these images
                    (material+pore voxels; pixels below --air-threshold are
                    dropped so background air does not dominate).
+--grey-real / --grey-synth
+                   optional .npy arrays of voxel intensities (0-255) for the grey
+                   histogram; default is the shown slices.
 --pores-real / --pores-synth
                    CSV with one column  pore_size_um  (one row per pore, e.g.
                    equivalent spherical diameter in µm). Any extra columns are
@@ -124,7 +127,7 @@ def placeholder_pores(n, rng, scale):
 
 
 # --------------------------------- figure -----------------------------------
-def make_figure(real, synth, pores_real, pores_synth, pixel_um, out, blind, seed, air_thr):
+def make_figure(real, synth, pores_real, pores_synth, pixel_um, out, blind, seed, air_thr, grey_real=None, grey_synth=None):
     n = min(len(real), len(synth))
     # grid: 2 rows × n columns. Row 0 real, row 1 synthetic — or shuffled if blind.
     panels = [("real", i, real[i]) for i in range(n)] + [("synthetic", i, synth[i]) for i in range(n)]
@@ -160,8 +163,8 @@ def make_figure(real, synth, pores_real, pores_synth, pixel_um, out, blind, seed
     ax1.set_xscale("log"); ax1.set_xlabel("Pore equivalent diameter (µm)"); ax1.set_ylabel("Density")
     ax1.set_title("Pore size distribution"); ax1.legend()
 
-    gr_real = np.concatenate([im[im > air_thr].ravel() for im in real])
-    gr_synth = np.concatenate([im[im > air_thr].ravel() for im in synth])
+    gr_real = grey_real if grey_real is not None else np.concatenate([im[im > air_thr].ravel() for im in real])
+    gr_synth = grey_synth if grey_synth is not None else np.concatenate([im[im > air_thr].ravel() for im in synth])
     gbins = np.linspace(0, 255, 64)
     ax2.hist(gr_real, bins=gbins, density=True, histtype="stepfilled", color=C_REAL, alpha=0.35, lw=0)
     ax2.hist(gr_real, bins=gbins, density=True, histtype="step", color=C_REAL, lw=1.8, label="real")
@@ -188,6 +191,7 @@ def main():
     ap.add_argument("--n-pairs", type=int, default=3, help="rows of the image grid")
     ap.add_argument("--blind", action="store_true", help="shuffle panels and hide labels")
     ap.add_argument("--seed", type=int, default=0, help="shuffle seed for --blind")
+    ap.add_argument("--grey-real"); ap.add_argument("--grey-synth", help=".npy of voxel intensities; if given, the grey histogram uses these instead of the shown slices")
     ap.add_argument("--air-threshold", type=float, default=60, help="pixels ≤ this are background air, excluded from the grey histogram")
     ap.add_argument("--pixel-um", type=float, default=PIXEL_UM)
     ap.add_argument("--out", default="fig4_real_vs_synthetic")
@@ -211,7 +215,8 @@ def main():
         print("no --pores-*: using placeholder pore sizes")
         rng = np.random.default_rng(1)
         pr, ps = placeholder_pores(3000, rng, 120), placeholder_pores(3000, rng, 130)
-    make_figure(real, synth, pr, ps, a.pixel_um, a.out, a.blind, a.seed, a.air_threshold)
+    gr = np.load(a.grey_real) if a.grey_real else None; gs_ = np.load(a.grey_synth) if a.grey_synth else None
+    make_figure(real, synth, pr, ps, a.pixel_um, a.out, a.blind, a.seed, a.air_threshold, gr, gs_)
 
 
 if __name__ == "__main__":

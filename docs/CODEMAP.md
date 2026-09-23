@@ -234,7 +234,7 @@ real-vs-real floor.
 
 | Path | What it does |
 |---|---|
-| `figures/review/` | Project-review deck material: `fig1_pipeline.svg` (standalone pipeline diagram) and `fig2_porosity_control.py`, `fig3_sequence_shape.py`, `fig4_real_vs_synthetic.py` (matplotlib, shared style block, 300-dpi PNG+PDF, run on placeholder data with no arguments; data formats in each docstring). See its `README.md`. |
+| `figures/review/` | Project-review deck material (plus `extract_review_data.py`, which builds the inputs from campaigns 18/19/20 and draws them into `runs/campaigns/18-eval-v4-final/figures_review/`): `fig1_pipeline.svg` (standalone pipeline diagram) and `fig2_porosity_control.py`, `fig3_sequence_shape.py`, `fig4_real_vs_synthetic.py` (matplotlib, shared style block, 300-dpi PNG+PDF, run on placeholder data with no arguments; data formats in each docstring). See its `README.md`. |
 | `figures/make_architecture_figures.py` | Paper-style architecture figures for the two trained networks — r08 (the VAE) and ldm06 (the denoiser) — as `.svg` + 300-dpi `.png` + `.pdf` in `docs/figures/`. Laid out in matplotlib in SVG-like units (y down, axes filling the figure so the type scale is honest). `--measure` re-derives the latent receptive field from a freshly built r08 rather than quoting it: one cell sees 22³ voxels and 6³ = 216 cells reach every output voxel, so 4 voxels / 100 µm is the grid PITCH and the latent is not a block-average of the volume. |
 
 **Analysis — conditioning design & microstructure (CPU only)**

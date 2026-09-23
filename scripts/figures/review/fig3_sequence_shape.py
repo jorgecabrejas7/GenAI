@@ -142,27 +142,24 @@ PLACEHOLDER = [
 
 # --------------------------------- figure -----------------------------------
 def make_figure(panels, pixel_um, out):
-    """panels: list of (row, label, image)."""
-    rows = {"sequence": [p for p in panels if p[0] == "sequence"],
-            "shape": [p for p in panels if p[0] == "shape"]}
-    ncol = max(len(rows["sequence"]), len(rows["shape"]))
-    fig, axes = plt.subplots(2, ncol, figsize=(FIG_WIDTH_IN, FIG_HEIGHT_IN * 1.15),
-                             gridspec_kw=dict(left=0.03, right=0.99, top=0.90, bottom=0.04,
-                                              wspace=0.06, hspace=0.30))
-    axes = np.atleast_2d(axes)
-    for r, key in enumerate(["sequence", "shape"]):
-        for c in range(ncol):
-            ax = axes[r, c]
-            if c < len(rows[key]):
-                _, label, img = rows[key][c]
-                show_image(ax, img, label, pixel_um)
-            else:
-                ax.set_axis_off()
-    fig.text(0.5, 0.95, "Stacking-sequence control (through-thickness slices)",
-             ha="center", fontsize=TITLE_SIZE)
-    fig.text(0.5, 0.47, "Shape and thickness control", ha="center", fontsize=TITLE_SIZE)
+    """panels: list of (row, label, image). Each row is laid out with width ratios equal to
+    the image aspects, and row heights so that every row fills the figure width."""
+    rows = [[p for p in panels if p[0] == "sequence"], [p for p in panels if p[0] == "shape"]]
+    aspects = [[im.shape[1] / im.shape[0] for _, _, im in r] for r in rows]
+    # figure height from the image rows themselves (each row fills the width), plus room for titles
+    rows_h = FIG_WIDTH_IN * 0.97 * sum(1 / sum(a) for a in aspects)
+    fig = plt.figure(figsize=(FIG_WIDTH_IN, max(rows_h * 1.8, 3.5)))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1 / sum(a) for a in aspects],
+                             left=0.02, right=0.99, top=0.83, bottom=0.03, hspace=0.45)
+    for r, (row, asp) in enumerate(zip(rows, aspects)):
+        gs = outer[r].subgridspec(1, len(row), width_ratios=asp, wspace=0.05)
+        for c, (_, label, img) in enumerate(row):
+            show_image(fig.add_subplot(gs[c]), img, label, pixel_um)
+    fig.text(0.5, 0.965, "Stacking-sequence control (through-thickness slices)", ha="center", fontsize=TITLE_SIZE)
+    y_mid = outer[1].get_position(fig).y1 + 0.075
+    fig.text(0.5, y_mid, "Shape and thickness control", ha="center", fontsize=TITLE_SIZE)
     fig.savefig(f"{out}.png"); fig.savefig(f"{out}.pdf")
-    print(f"wrote {out}.png / .pdf   ({len(rows['sequence'])} sequence + {len(rows['shape'])} shape panels)")
+    print(f"wrote {out}.png / .pdf   ({len(rows[0])} sequence + {len(rows[1])} shape panels)")
 
 
 def main():
