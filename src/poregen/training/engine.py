@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import contextlib
 import faulthandler
 import json
@@ -180,6 +182,9 @@ def to_device_inputs(
     return {**batch, **moved}, tuple(moved[k] for k in keys)
 
 
+MAX_SKIPPED_STEPS_IN_A_ROW = 20
+
+
 def train_step(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
@@ -332,6 +337,17 @@ def train_step(
             _global_norm_gpu,
         )
     grad_norm = _global_norm_gpu.item()
+
+    # A non-finite gradient must never reach the weights. With bf16 autocast
+    # the GradScaler is disabled, so nothing else checks: vrrae A (run-0004)
+    # put one NaN SVD backward into its encoder at step 476 and every forward
+    # after that was NaN. Skip the step, drop the gradients, count it; the
+    # caller aborts after MAX_SKIPPED_STEPS_IN_A_ROW.
+    if not math.isfinite(grad_norm):
+        optimizer.zero_grad(set_to_none=True)
+        scaler.update()
+        result = {"total": float("nan"), "skipped_nonfinite_grad": 1.0}
+        return result, grad_norm, latent_moments, module_grad_norms
 
     scaler.step(optimizer)
     scaler.update()
@@ -886,6 +902,7 @@ def train_loop(
         metrics_file = stack.enter_context(open(metrics_path, "a"))
         stack.callback(faulthandler.cancel_dump_traceback_later)
 
+        skipped_in_a_row = 0
         for step in pbar:
             # Re-arm: fires only if THIS iteration overruns the budget.
             faulthandler.dump_traceback_later(_WATCHDOG_SECONDS, exit=False)
@@ -904,6 +921,16 @@ def train_loop(
             )
             _step_elapsed = time.perf_counter() - _step_t0
             step_time_ms  = _step_elapsed * 1000.0
+
+            if losses.get("skipped_nonfinite_grad"):
+                skipped_in_a_row += 1
+                _logger.warning("step %d: non-finite gradient (norm %s) — optimizer step skipped (%d in a row)",
+                                step, grad_norm, skipped_in_a_row)
+                if skipped_in_a_row >= MAX_SKIPPED_STEPS_IN_A_ROW:
+                    raise RuntimeError(f"{skipped_in_a_row} consecutive non-finite gradients at step {step}; "
+                                       "the model is not trainable as configured")
+            else:
+                skipped_in_a_row = 0
             steps_per_sec = 1.0 / _step_elapsed if _step_elapsed > 0 else float("inf")
 
             # ── GPU memory: log once after the first training step ────
