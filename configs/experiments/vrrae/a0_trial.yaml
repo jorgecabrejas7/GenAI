@@ -1,0 +1,36 @@
+experiment:
+  name: vrrae
+  variant: a0_trial
+  description: >-
+    A 400-STEP TRIAL, NOT A CAMPAIGN RUN. Nothing from it goes on the
+    campaign-28 table.
+
+    THE QUESTION. `vrrae/a` died at step 476 having never learned — xct_loss
+    flat at 0.197 from step 100, where vrrae04 was at 0.073 by step 200 — and
+    its latent collapsed from 588 active dimensions to 14 inside 100 steps.
+    That collapse happened while beta was still only 0.0013 of its 0.025
+    target, so KL pressure cannot be the whole explanation, and V0's result
+    (beta 0 takes this family from 12.9 % to 54.7 %) does not automatically
+    transfer.
+
+    So this is A's architecture with the KL OFF, run just long enough to see
+    whether it learns at all:
+
+    * if xct_loss is still near 0.2 at step 400, the ARCHITECTURE is the
+      problem — six stride-2 convolutions leave a 1x1x1 latent with no spatial
+      extent, and the RR layer's matrix is SQUARE (1024x1024) with rank 768
+      taking most of its spectrum, where vrrae03's was 65536-wide at rank 500.
+      A and A0 are then dead as designed.
+    * if it is under 0.12 and falling, the no-FC six-block encoder works once
+      the KL is off, and A0 is the arm that matters.
+
+    35 minutes of card time to settle a question that would otherwise cost two
+    8.5-hour runs.
+
+extends: vrrae/a0
+
+overrides:
+  training:
+    # THE ONLY CHANGE. Everything else is vrrae/a0 exactly, so the trial is
+    # evidence about that configuration and not about a different one.
+    total_steps: 400
