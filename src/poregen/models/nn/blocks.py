@@ -28,6 +28,20 @@ def norm_groups(channels: int) -> int:
     return min(32, channels)
 
 
+# Bounds on the posterior log-variance, applied wherever exp(logvar) is taken.
+# With the KL switched off (kl_max_beta 0) nothing holds logvar down: vrrae V0
+# (run-0001) grew its KL to 4.5e5 over 6.7k steps and then overflowed exp()
+# in float32 at step 6777 — xct_loss NaN, kl inf — hours before anything
+# noticed. exp(20) = 4.9e8 is far above any variance a z-scored input can
+# want; exp(-30) is a std of 3e-7. Neither bound is reached by a run with a
+# working KL, so this changes nothing for the r08 rungs or ldm06's decoder.
+LOGVAR_MIN, LOGVAR_MAX = -30.0, 20.0
+
+
+def clamp_logvar(logvar: torch.Tensor) -> torch.Tensor:
+    return logvar.clamp(LOGVAR_MIN, LOGVAR_MAX)
+
+
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """VAE reparameterization trick computed in float32 for numerical stability.
 
@@ -46,7 +60,7 @@ def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         Sampled latent via z = mu + std * ε,  ε ~ N(0, I).
     """
     mu_f = mu.float()
-    std = (0.5 * logvar.float()).exp()
+    std = (0.5 * clamp_logvar(logvar.float())).exp()
     eps = torch.randn_like(std)
     return (mu_f + std * eps).to(mu.dtype)
 

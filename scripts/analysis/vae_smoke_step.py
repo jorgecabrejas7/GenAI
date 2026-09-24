@@ -8,8 +8,11 @@ layer more than four-fold.
 Runs forward, loss and backward — not just a forward pass, because the backward
 is where the SVD's gradient and the optimiser state land, and that is the peak.
 
-Exit 0 if it fits, 1 if it does not. The chain reads that to decide between a
-config and its fallback.
+EXIT CODES, and they matter: 0 it fits, **1 a real CUDA OOM**, 2 anything else.
+The chain uses a config's fallback ONLY on 1. The previous version returned 1
+for every failure, so a KeyError in this script itself was read as "does not
+fit" and sent a config to its fallback that had never been tested — and that
+fallback took the whole host out of memory.
 
 Usage:
     python scripts/analysis/vae_smoke_step.py --experiment vrrae/b
@@ -40,10 +43,11 @@ def main() -> int:
 
     cfg = resolve_experiment(args.experiment).cfg
     bs = args.batch_size or cfg["data"]["batch_size"]
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from poregen.training.device import select_device
+    dev = select_device()  # applies the POREGEN_CUDA_MEM_FRACTION cap, so an oversize batch raises instead of draining the host
     if dev.type != "cuda":
         print("no CUDA device; a memory smoke test on CPU would mean nothing")
-        return 1
+        return 2
 
     torch.cuda.reset_peak_memory_stats(dev)
     model = build_model(cfg, dev)
@@ -58,7 +62,7 @@ def main() -> int:
         print(f"REFUSING: vrrae_rank {rank} exceeds batch {bs}. RRLayer CLIPS the "
               f"effective rank to the batch size, so this would train a narrower "
               f"bottleneck than the config claims and nothing would say so.")
-        return 1
+        return 2
 
     try:
         model.train()
@@ -75,7 +79,15 @@ def main() -> int:
     except torch.cuda.OutOfMemoryError as exc:
         peak = torch.cuda.max_memory_allocated(dev) / 2**30
         print(f"OOM at batch {bs}: peak {peak:.1f} GiB before failing\n  {exc}")
-        return 1
+        return 1                      # a REAL out-of-memory: the fallback applies
+    except Exception as exc:          # noqa: BLE001
+        # Anything else is a fault in this script or the config, NOT evidence
+        # about memory, and must not be read as one.
+        import traceback
+
+        traceback.print_exc()
+        print(f"\nNOT A MEMORY RESULT: {type(exc).__name__}: {exc}")
+        return 2
 
     peak = torch.cuda.max_memory_allocated(dev) / 2**30
     total = torch.cuda.get_device_properties(dev).total_memory / 2**30

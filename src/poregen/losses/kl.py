@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from poregen.models.nn.blocks import clamp_logvar
+
 
 def kl_divergence(
     mu: torch.Tensor,
@@ -31,6 +33,7 @@ def kl_divergence(
         decisions (e.g. z_channels active-units criterion).
     """
     # Per-element KL: 0.5 * (mu^2 + exp(logvar) - logvar - 1)
+    logvar = clamp_logvar(logvar)  # same bounds as reparameterize; see blocks.py
     kl_elem = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1.0)
 
     # Aggregate per channel: mean over batch and spatial dims
@@ -85,6 +88,7 @@ def kl_divergence_flat(
     # protection does not reach here.
     mu = mu.float()
     logvar = logvar.float()
+    logvar = clamp_logvar(logvar)  # same bounds as reparameterize; see blocks.py
     kl_elem = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1.0)
 
     # kl_elem shape: (B, C) -> (C,), mean over batch only (no spatial dims).
