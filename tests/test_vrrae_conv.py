@@ -156,3 +156,57 @@ class TestTheKLReduction:
         out2 = m(torch.randn(4, 1, PATCH, PATCH, PATCH))
         kl2, _, _ = kl_divergence_flat(out2.mu, out2.logvar)
         assert 0.2 < float(kl2) / float(kl) < 5.0
+
+
+# ---------------------------------------------------------------------------
+# End-of-training basis finalization
+#
+# This is not a corner case. Training derives U_f in a separate pass AFTER the
+# last step, and a checkpoint without it is refused by vae_val_l1 and by the
+# reconstruction figure alike — so a variant whose finalization does not work
+# produces no row and no figure however well it trained.
+# ---------------------------------------------------------------------------
+
+def _tiny_loader(n=4, batch=2):
+    from torch.utils.data import DataLoader, Dataset
+
+    class _D(Dataset):
+        def __len__(self):
+            return n
+
+        def __getitem__(self, i):
+            g = torch.Generator().manual_seed(i)
+            return {"xct": torch.randn(1, 64, 64, 64, generator=g)}
+
+    return DataLoader(_D(), batch_size=batch, num_workers=0)
+
+
+def test_finalization_treats_cells_as_samples_and_stays_small():
+    """The per-cell model finalizes, and its covariance is 64x64, not 262144^2.
+
+    Flattening the (B, 64, 16, 16, 16) grid asks for 275 GB and OOM-kills the
+    host; that is what happened to a 3.4 h conv_k8 run on 2026-09-25.
+    """
+    model = conv_model()
+    info = model.finalize_inference_basis(
+        _tiny_loader(), device=torch.device("cpu"), autocast_dtype=torch.float32)
+
+    basis = model.bottleneck.rr.inference_basis
+    assert basis.shape == (64, 8), basis.shape
+    # 4 patches x 16^3 cells — the sample count is CELLS, not patches.
+    assert info["n_samples"] == 4 * 16 ** 3, info
+
+
+def test_finalization_of_a_1x1x1_grid_still_takes_the_flat_path():
+    """At n_blocks=6 the grid degenerates and the two readings coincide."""
+    from poregen.models.vae.v2.vrrae_finetune import _as_samples
+
+    h = torch.randn(3, 64, 1, 1, 1)
+    assert torch.equal(_as_samples(h, 64), h.flatten(1))
+
+
+def test_as_samples_refuses_an_output_it_cannot_read():
+    from poregen.models.vae.v2.vrrae_finetune import _as_samples
+
+    with pytest.raises(RuntimeError, match="neither one sample"):
+        _as_samples(torch.randn(2, 30, 4, 4, 4), 64)

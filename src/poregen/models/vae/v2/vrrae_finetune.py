@@ -100,6 +100,31 @@ def _full_dataset_loader(loader: DataLoader) -> DataLoader:
     return DataLoader(loader.dataset, **kwargs)
 
 
+def _as_samples(h: torch.Tensor, expect: int) -> torch.Tensor:
+    """The encoder's output as the rows the bottleneck was built to consume.
+
+    THE WHOLE GRID IS ONE SAMPLE (the flat variants) when flattening it gives
+    the width ``fc_in`` expects. ONE CELL IS ONE SAMPLE (``v2.vrrae_conv``)
+    when the CHANNEL count is that width instead; the permute is what makes a
+    row one cell's channel vector, exactly as the model's own forward does — a
+    bare ``reshape(-1, C)`` would interleave channels with positions.
+
+    Getting this wrong is not a silent error, it is a fatal one: flattening a
+    (B, 64, 16, 16, 16) grid hands the per-batch SVD a 262 144-row basis, and
+    the covariance accumulator then asks for 262 144^2 floats — 275 GB. That
+    allocation OOM-killed a 3.4 h conv_k8 run on 2026-09-25, and it would have
+    killed it again at the end of its 22 h had it not been caught.
+    """
+    flat = h.flatten(1)
+    if flat.shape[1] == expect:
+        return flat
+    if h.dim() == 5 and h.shape[1] == expect:
+        return h.permute(0, 2, 3, 4, 1).reshape(-1, expect)
+    raise RuntimeError(
+        f"encoder output {tuple(h.shape)} is neither one sample of width "
+        f"{expect} per patch nor one per cell; the bottleneck cannot consume it")
+
+
 @torch.no_grad()
 def finalize_basis_from_dataloader(
     model: nn.Module,
@@ -125,6 +150,12 @@ def finalize_basis_from_dataloader(
     model.eval()
     dim = bottleneck.vrrae_dim
     rank = bottleneck.rank
+    #: What the bottleneck expects one SAMPLE to look like. For the flat
+    #: variants that is the whole flattened latent grid; for v2.vrrae_conv it
+    #: is one CELL's channel vector, and the grid contributes latent_spatial^3
+    #: samples per patch. Reading it off fc_in is what keeps one function
+    #: correct for both without asking the caller to declare which it is.
+    expect = getattr(bottleneck.fc_in, "in_features", dim)
 
     # Exact covariance accumulation is O(dim^2) memory: 16 MB at the default
     # dim=2048, but 17 GB at vrrae03's dim=65536 — plus an equal-sized matmul
@@ -157,8 +188,8 @@ def finalize_basis_from_dataloader(
             dtype=autocast_dtype,
             enabled=autocast_dtype in (torch.float16, torch.bfloat16),
         ):
-            h = encoder(xct).flatten(1)
-            y = bottleneck.projected_features(h)
+            h = encoder(xct)
+            y = bottleneck.projected_features(_as_samples(h, expect))
 
         with torch.autocast(device_type=device.type, enabled=False):
             u, _, _ = torch.linalg.svd(
@@ -174,7 +205,7 @@ def finalize_basis_from_dataloader(
                 covariance.add_(batch_basis @ batch_basis.transpose(0, 1))
 
         n_batches += 1
-        n_samples += xct.shape[0]
+        n_samples += y.shape[0]
 
     if n_batches == 0:
         raise RuntimeError("Cannot finalize VRRAE basis from an empty dataset.")
