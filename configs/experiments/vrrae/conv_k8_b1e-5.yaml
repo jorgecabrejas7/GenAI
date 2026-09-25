@@ -1,0 +1,36 @@
+experiment:
+  name: vrrae
+  variant: conv_k8_b1e-5
+  description: >-
+    conv_k8 AT beta 1e-5 — the middle of the sweep range the method's author
+    uses. Nothing else changes: same per-cell model, same k* = 8, same batch
+    128, same 2000-step warmup, same 71 690 steps.
+
+    THE EVIDENCE THAT PROMPTED IT. conv_k8 at beta 0.025 settles at a KL of
+    about 0.15 nats over its 8 coefficients — 0.02 nats each. r08 sits at 2.4
+    to 3.0 nats over its 8 channels, 0.26 to 0.37 each, with all 8 active. Per
+    latent unit the per-cell posterior keeps roughly a SEVENTEENTH of what the
+    baseline keeps, and the step-10000 interim figure shows the cost: smooth
+    reconstructions, texture correlation on interior patches at about half
+    r08's.
+
+    WHAT THE COMPARISON DOES NOT ESTABLISH, recorded on the file that acts on
+    it. r08 runs at beta 0.05, TWICE this family's 0.025, and still keeps
+    seventeen times more — so beta is not shown to be the cause. The difference
+    that lines up is free bits, 0.1 for r08 against 0.0 here, though r08's
+    per-channel KL sits above that floor anyway. A free-bits arm may be better
+    targeted than a beta arm.
+
+    AND 1e-5 IS NOT A SMALL KL, IT IS ALMOST NONE: 2500 times weaker than
+    0.025. V0 and the A0 trial already show what this family does with the KL
+    off, so if this run reconstructs well it will not by itself show that the
+    per-cell bottleneck carries a POSTERIOR — only that it can autoencode. The
+    beta sweep that separates those two is the thing to plan next.
+
+extends: vrrae/conv_k8
+
+overrides:
+  loss:
+    #: The warmup is unchanged at 2000 steps, so the ramp keeps its shape and
+    #: only its ceiling moves.
+    kl_max_beta: 1.0e-5
