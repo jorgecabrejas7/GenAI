@@ -1,0 +1,42 @@
+experiment:
+  name: vrrae
+  variant: conv_k8_b0025
+  description: >-
+    conv_k8 WITH THE KL PRESSURE DIVIDED BY TEN: beta 0.0025 instead of 0.025.
+    Nothing else changes — same per-cell model, same k* = 8, same batch 128,
+    same 2000-step warmup, same 71 690 steps.
+
+    THE EVIDENCE. conv_k8 at beta 0.025 settles at a KL of about 0.15 nats
+    over its 8 coefficients — 0.02 nats each. r08 sits at 2.4 to 3.0 nats over
+    its 8 channels, 0.26 to 0.37 each, with all 8 active. Per latent unit the
+    per-cell posterior therefore retains roughly a SEVENTEENTH of what the
+    baseline retains, and the step-10000 interim figure shows what that costs:
+    the reconstruction is smooth, with the texture correlation on interior
+    patches at roughly half r08's.
+
+    WHAT THE COMPARISON DOES NOT ESTABLISH, and it must be said on the file
+    that acts on it: r08 runs at beta 0.05, TWICE this family's 0.025, and
+    still keeps seventeen times more. So beta is not shown to be the cause.
+    The difference that does line up is free bits — r08 has kl_free_bits 0.1
+    and this family has 0.0 — though r08's per-channel KL sits above that floor
+    anyway, so it is not binding there either. Lowering beta is a reasonable
+    and cheap intervention; it is not a diagnosis, and a free-bits arm may be
+    the better-targeted one.
+
+    WHAT THIS DOES NOT DO. It does not turn the KL off. V0 and the A0 trial
+    already cover beta 0, and this family's whole question is whether the
+    rank-reduction bottleneck can carry a POSTERIOR, not whether an
+    autoencoder can reconstruct. 0.0025 leaves real pressure and brings the
+    per-coefficient KL to roughly 0.2 nats, which is the same order as r08's
+    free-bits floor rather than a hundredth of it.
+
+    PREPARED, NOT LAUNCHED. Whether conv_k8 is stopped and relaunched here, or
+    this runs after it, is the author's call.
+
+extends: vrrae/conv_k8
+
+overrides:
+  loss:
+    #: 10x less than conv_k8's 0.025. The warmup is unchanged at 2000 steps,
+    #: so the ramp has the same shape and only its ceiling moves.
+    kl_max_beta: 0.0025
