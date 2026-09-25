@@ -55,12 +55,13 @@ def held_out_volumes(eval_split: str, exclude_train_of: str | None) -> set[str] 
     return {k for k, v in ev.items() if v == "val"} - trained
 
 
-def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
-             exclude_train_of: str | None = None) -> dict:
+def load_model_and_patches(run: Path, split_root: str, n_batches: int, batch_size: int,
+                           exclude_train_of: str | None = None, ckpt: str = "best.ckpt"):
+    """The model at ``ckpt`` on CPU, in eval mode, plus the fixed list of held-out
+    val patch indices and the dataset they index. Shared by the L1 harness and the
+    reconstruction figure so both look at the SAME patches through the SAME load."""
     from poregen.experiments.train_vae import build_model
-    from poregen.models.vae.base import decode_xct
     from poregen.training import build_patch_dataloaders
-    from poregen.training.engine import to_device_inputs
 
     cfg = yaml.safe_load((run / "resolved_config.yaml").read_text())
     trained_on = cfg["data"].get("dataset_root")
@@ -69,7 +70,7 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
                        dataset_root=split_root)
     dev = torch.device("cpu")
     model = build_model(cfg, dev)
-    state = torch.load(run / "best.ckpt", map_location="cpu",
+    state = torch.load(run / ckpt, map_location="cpu",
                        weights_only=False)["model"]
     # THE SVD BOTTLENECK'S inference_basis IS NOT A REGISTERED BUFFER — it is
     # assigned at finalisation, so a freshly built model has no slot for it and
@@ -108,6 +109,18 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
                 "split, so there is no held-out subset to measure on")
     stride = max(1, len(rows_all) // (n_batches * batch_size))
     idx = rows_all[::stride][: n_batches * batch_size]
+    return model, ds, idx, cfg, keep
+
+
+def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
+             exclude_train_of: str | None = None) -> dict:
+    from poregen.models.vae.base import decode_xct
+    from poregen.training.engine import to_device_inputs
+
+    model, ds, idx, cfg, keep = load_model_and_patches(
+        run, split_root, n_batches, batch_size, exclude_train_of)
+    trained_on = cfg["data"].get("dataset_root")
+    dev = torch.device("cpu")
 
     def batches():
         for i in range(0, len(idx), batch_size):
