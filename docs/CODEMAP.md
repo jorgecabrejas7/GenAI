@@ -227,6 +227,7 @@ real-vs-real floor.
 | `debug_reconstruction.py` | 🕰 Four-hypothesis probe of early reconstruction/orientation/z-score bugs. Defaults to the legacy `src/poregen/configs/vae_default.yaml`. |
 | `bench_batch_size.py` | Throughput vs batch size (loader-only, train, eval) + peak GPU memory, using the real model and loaders. |
 | `profile_vae_memory.py` | Single-config peak-memory profile of the real `train_step` on synthetic batches. |
+| `vrrae_interim_basis.py` | Gives a MID-TRAINING VRRAE checkpoint a usable `U_f` from a few dozen train patches, into a scratch run directory the L1 and figure harnesses can read. A run in progress cannot otherwise be looked at: the basis is derived only after the last step, and in eval mode the RR layer projects onto it. Never a table row. |
 | `investigate_vrrae_throughput_cliff.py` | 💀 Self-labelled THROWAWAY: reproduces the cuDNN 64-bit-indexing backward cliff on the GB10. |
 | `rebuild_tensorboard.py` | Rebuilds TensorBoard event files from a run's `metrics.jsonl`. |
 | `convert_patch_samples_to_tiff.py` | Migrates legacy patch-sample `.npz` archives under `runs/` to TIFF. |

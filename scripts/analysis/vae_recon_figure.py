@@ -34,6 +34,8 @@ def main() -> int:
     ap.add_argument("--split", default="split_v3"); ap.add_argument("--exclude-train-of", default="split_v2")
     ap.add_argument("--n-patches", type=int, default=6)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--title", default="",
+                    help="prepended to the caption, in capitals — use it to say when a\nfigure is NOT a result, e.g. a mid-training checkpoint on an interim basis")
     a = ap.parse_args()
     from poregen.models.vae.base import decode_xct
     from poregen.training.engine import to_device_inputs
@@ -86,7 +88,11 @@ def main() -> int:
         axes[r, 0].set_ylabel(label, fontsize=10)
     for ax in axes.ravel():
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("Held-out 64³ patches, central slice — input vs reconstruction (corr = texture correlation after removing the patch mean)", fontsize=11)
+    caption = ("Held-out 64³ patches, central slice — input vs reconstruction "
+               "(corr = texture correlation after removing the patch mean)")
+    if a.title:
+        caption = f"{a.title.upper()}\n{caption}"
+    fig.suptitle(caption, fontsize=11)
     fig.tight_layout()
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out.with_suffix(".png"), dpi=200); fig.savefig(out.with_suffix(".pdf"))

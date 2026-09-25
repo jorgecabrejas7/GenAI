@@ -124,9 +124,22 @@ mkdir -p "$FIG"
 say "=== conv_k8 table, then B, then A0 === $(mem_line)"
 say "r08=$(basename "${R08%/}")  V0=$(basename "${V0%/}")"
 
-# ── 1. conv_k8's row and figure ────────────────────────────────────────────
-gate "conv_k8 row"
+# ── 1. conv_k8, resumed from step 10000 ────────────────────────────────────
+# The first attempt was OOM-killed at step ~11 700 when a CPU diagnostic asked
+# for 275 GB beside it (40d99ff). choom -n 1000 makes the TRAINER the kernel's
+# preferred victim, so the trainer dies and the offender survives — the reason
+# nothing else may run in this pool while a card is up.
+gate "conv_k8 resume"
 CONV_RUN=$(ls -dt "$REPO"/runs/vae/vrrae-run-*vrrae_conv*/ 2>/dev/null | head -1)
+CONV_CKPT=$(ls "${CONV_RUN%/}" | grep -E 'step[0-9]+\.ckpt$' | sort | tail -1)
+if [ -n "$CONV_CKPT" ]; then
+    run_watched "conv_k8 resume from $CONV_CKPT" vrrae_conv_k8_resume \
+        python scripts/train_vae.py resume "$(basename "${CONV_RUN%/}")" "$CONV_CKPT"
+else
+    run_watched "conv_k8 from scratch" vrrae_conv_k8 \
+        python scripts/train_vae.py run vrrae/conv_k8
+    CONV_RUN=$(ls -dt "$REPO"/runs/vae/vrrae-run-*vrrae_conv*/ 2>/dev/null | head -1)
+fi
 rung conv_k8 "conv k8 per-cell" "${CONV_RUN%/}"
 
 # ── 2. B to completion, so the U_f finalization pass runs ──────────────────
