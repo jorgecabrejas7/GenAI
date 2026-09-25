@@ -31,6 +31,10 @@ C12="$REPO/runs/campaigns/12-eval-v4"; C18="$REPO/runs/campaigns/18-eval-v4-fina
 C28="$REPO/runs/campaigns/28-vrrae-family"
 FIG="$C28/figures"
 MIN_AVAIL_GB=15
+#: Per-process CUDA cap for the smoke probe. Without it "set -u" makes smoke()
+#  return non-zero before it allocates anything, which reads as "does not fit" —
+#  the same false negative that sent B to its fallback on 2026-09-24.
+SMOKE_FRACTION=0.75
 R08=$(ls -dt "$REPO"/runs/vae/r08-run-0004-*/ 2>/dev/null | head -1)
 V0=$(ls -dt "$REPO"/runs/vae/vrrae-run-0001-*/ 2>/dev/null | head -1)
 B_RUN=$(ls -dt "$REPO"/runs/vae/vrrae-run-0006-*/ 2>/dev/null | head -1)
