@@ -1,0 +1,54 @@
+experiment:
+  name: vrrae
+  variant: conv_k8
+  description: >-
+    THE CONVOLUTIONAL VRRAE: the rank-reduction layer applied per latent grid
+    cell, with one basis shared across every cell of every patch.
+
+    WHY. Every flat variant of this family throws the spatial extent away —
+    five or six stride-2 blocks leave a 1x1x1 latent and the decoder has to
+    invent a 64-cubed volume from one vector. This stops two blocks down, at a
+    (B, 64, 16, 16, 16) grid, and gives the SVD one column per CELL. The layer
+    is unchanged: with cells as columns, N = batch x cells and every
+    RRAE/VRRAE identity still holds. Only what counts as a sample changes.
+
+    THE BUDGET IS THE POINT. k* = 8 coefficients per cell over 16^3 cells is
+    32 768 numbers per patch, which is r08's latent budget EXACTLY. So a
+    difference against the spatial baseline is about the bottleneck and not
+    about capacity — which is the one thing the flat variants could never say.
+
+    THE RANK CONSTRAINT STOPS BITING. RRLayer clips the effective rank to
+    min(rank, dim, n_samples), and n_samples is now batch x 4096 rather than
+    batch. A rank of 8 needs a batch of 1, not 768, so this runs at batch 128
+    where A and B needed 1024 and 1536 — and it is why the memory that took
+    the host down twice is not in play here.
+
+    KL AT beta 0.025 WITH THE FAMILY'S WARMUP, deliberately: this is the
+    design as proposed, and the beta-0 twin is a separate later file. V0 and
+    the A0 trial both show what beta 0 does to this family, so the pair will
+    be readable.
+
+extends: vrrae/base
+
+components:
+  model: models/vae/v2_vrrae_conv.yaml
+
+overrides:
+  model:
+    z_channels: null
+    base_channels: 32
+    n_blocks: 2
+    patch_size: 64
+    vrrae_dim: 64
+    vrrae_rank: 8
+  data:
+    # No batch >= rank constraint any more: the SVD sees batch x 4096 samples.
+    # 128 is r08's batch, so the step budget below is directly comparable.
+    batch_size: 128
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+  training:
+    # ~5.03 epochs over split_v2's 1 822 599 train patches at batch 128, which
+    # is the same epoch count every rung of this family holds.
+    total_steps: 71690

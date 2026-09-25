@@ -68,6 +68,7 @@ companion docs listed under [docs/](#docs).
 | `models/vae/v2/conv_noattn_dualbranch_cls.py` | `v2.conv_noattn_dualbranch_cls` — same trunk, encoder input `cat([xct, pore, air])` (`in_channels` 3) and a 3-class decoder head (material/pore/air) in place of the binary mask head. **Current VAE** (r08, the one ldm06 builds on). |
 | `models/vae/v2/vrrae.py` | `v2.vrrae` — VRRAE-bottleneck VAE, XCT-only encoder and decoder (no mask head). |
 | `models/vae/v2/vrrae_bottleneck.py` | The bottleneck itself: flatten → FC → truncated-SVD RR layer (vendored) → identity posterior mean. |
+| `models/vae/v2/vrrae_conv.py` | `v2.vrrae_conv` — the SAME bottleneck applied PER LATENT GRID CELL: the encoder stops at two blocks, so each of the 16³ cells is one SVD column and one basis is shared over all of them. k*=8 over 16³ cells is 32 768 latents per patch, r08's budget exactly, which is what makes the comparison like-for-like. Refuses `vrrae_dim != enc_channels`. |
 | `models/vae/v2/vrrae_linear.py` | `v2.vrrae_linear` — SVD ablation twin: same flat bottleneck, plain `Linear` heads. |
 | `models/vae/v2/vrrae_finetune.py` | Fixed-basis extraction at inference + decoder-only fine-tune hook for VRRAE. |
 | `models/discriminator.py` | 2-D multi-plane PatchGAN + LSGAN losses for adversarial XCT supervision (R04+). Runs in float32 — see `AGENTS.md`. |
@@ -361,7 +362,7 @@ Hierarchical YAML. Resolution order (`extends` → `components` → body → `ov
 
 | Path | What it does |
 |---|---|
-| `configs/models/vae/*.yaml` | Architecture presets: `v2_conv_noattn`, `v2_vrrae`, `v2_vrrae_linear`. |
+| `configs/models/vae/*.yaml` | Architecture presets: `v2_conv_noattn`, `v2_vrrae`, `v2_vrrae_linear`, `v2_vrrae_conv`. |
 | `configs/losses/*.yaml` | `vae_charbonnier_mask_kl` (with mask head), `vae_charbonnier_kl` (XCT-only). |
 | `configs/datasets/split_v{1,2}.yaml` | Data root, split version, loader backend. |
 | `configs/training/vae_default.yaml` | Step budget, eval/save cadence, optimiser and schedule defaults. |
@@ -404,6 +405,7 @@ Run with `pytest tests/`. Known pre-existing failures are listed in `AGENTS.md`.
 | `test_segmentation_material_mask.py` | `material_mask` picks the LARGEST projected component, not the first-labelled one — a corner speck must not become the specimen — and raises when the second-largest exceeds `AMBIGUOUS_COMPONENT_RATIO` (10 %), because two comparable objects mean no single box is the specimen. |
 | `test_vae_output_shapes.py`, `test_losses_smoke.py` | VAE forward shapes; loss finiteness. |
 | `test_vrrae_vae.py`, `test_vrrae_linear.py`, `test_vrrae_bottleneck.py`, `test_vrrae_finetune.py` | VRRAE family: shapes, gradients, registry, fixed-basis round-trip. |
+| `test_vrrae_conv.py` | The per-cell variant: that cells become COLUMNS (a bare `reshape(-1, C)` is shown NOT to be the same tensor), that the latent budget is r08's, that batch 1 still carries full rank, and that at `n_blocks=6` — a 1×1×1 grid — it reproduces `v2.vrrae` bit-for-bit on shared weights. |
 | `test_recon_metrics.py`, `test_latent_metrics.py` | Recon metrics + eval loop wiring; latent moment merging and active units. |
 | `test_early_stopping.py`, `test_patch_sample_export.py` | `train_loop` early-stopping path; TIFF sample export, including the 3-class head exporting `argmax == pore` plus `label_recon` while a binary head exports neither. |
 | `_ldm06_store.py` | Not a test — the miniature ldm06 latent store several test modules build on (patch 16, latent 4³, every patch a crop of one known field). |

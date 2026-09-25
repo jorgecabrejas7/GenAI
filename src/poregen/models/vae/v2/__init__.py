@@ -11,6 +11,7 @@ under the ``v2.*`` namespace:
 * ``"v2.unet"``                  — :class:`~poregen.models.vae.v2.unet.UNetVAE3DV2`
 * ``"v2.vrrae"``                 — :class:`~poregen.models.vae.v2.vrrae.ConvVAE3DVRRAEV2`
 * ``"v2.vrrae_linear"``          — :class:`~poregen.models.vae.v2.vrrae_linear.ConvVAE3DVRRAELinearV2`
+* ``"v2.vrrae_conv"``            — :class:`~poregen.models.vae.v2.vrrae_conv.ConvVAE3DVRRAEConvV2`
 """
 
 import poregen.models.vae.v2.conv                    # noqa: F401  registers "v2.conv"
@@ -20,3 +21,4 @@ import poregen.models.vae.v2.conv_noattn_dualbranch_cls  # noqa: F401  registers
 import poregen.models.vae.v2.unet                    # noqa: F401  registers "v2.unet"
 import poregen.models.vae.v2.vrrae                   # noqa: F401  registers "v2.vrrae"
 import poregen.models.vae.v2.vrrae_linear            # noqa: F401  registers "v2.vrrae_linear"
+import poregen.models.vae.v2.vrrae_conv              # noqa: F401  registers "v2.vrrae_conv"

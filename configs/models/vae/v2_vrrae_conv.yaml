@@ -1,0 +1,17 @@
+model:
+  name: v2.vrrae_conv
+  in_channels: 1
+  base_channels: 32
+  # TWO stride-2 blocks, not five or six. 64 -> 16 on each axis, and
+  # channel_schedule()[1] = 64, so the encoder leaves a (B, 64, 16, 16, 16)
+  # grid — the SAME latent grid r08 uses, which is what makes the comparison
+  # like-for-like.
+  n_blocks: 2
+  patch_size: 64
+  # A column of the SVD is ONE CELL, so its length is the channel width. The
+  # model refuses any other value rather than silently building something
+  # else, and fc_in is Identity by construction because the two are equal.
+  vrrae_dim: 64
+  # k*, the coefficients kept per cell. 8 x 16^3 = 32 768 latents per patch,
+  # which is r08 z=8 exactly. The later sweep uses 4 / 16 / 32 here.
+  vrrae_rank: 8
