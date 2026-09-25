@@ -1,0 +1,45 @@
+experiment:
+  name: vrrae
+  variant: conv_k8_b1e-3
+  description: >-
+    conv_k8 AT beta 1e-3 — the arm that sits between the two already measured,
+    and the only one of the three that can answer the question the family was
+    built to ask. Same per-cell model, same k* = 8, same batch 128, same
+    2000-step warmup, same 71 690 steps.
+
+    WHAT THE TWO MEASURED ARMS BRACKET, at step 2369 of identical runs that
+    differ only in this one number:
+      beta 0.025   xct 0.0401   KL 0.20 nats over 8 coefficients   6 of 8 active
+      beta 1e-5    xct 0.0308   KL 23.2 nats over 8 coefficients   8 of 8 active
+    r08, the baseline both are read against: xct 0.0346, 0.26 to 0.37 nats per
+    channel, 8 of 8 active.
+
+    SO NEITHER ARM IS IN r08's REGIME. At 0.025 the per-cell posterior keeps
+    0.02 nats per coefficient — a seventeenth of the baseline — and the
+    reconstruction is visibly smooth. At 1e-5 it keeps 2.9 nats each, roughly
+    TEN TIMES MORE than the baseline, and beats r08 on reconstruction while
+    doing it. Beating a VAE by holding ten times more information is what an
+    autoencoder does; it is not evidence that the bottleneck carries a usable
+    POSTERIOR, which is the only property the LDM will need from it.
+
+    WHY 1e-3. The two arms differ by 2500x in beta and by about 120x in the
+    KL they settle at, so the response is far from proportional and 1e-3
+    cannot be placed by arithmetic. The log midpoint of the bracket is 5e-4;
+    1e-3 is a factor of two above it, chosen on the side of MORE pressure
+    because the failure at 0.025 was a slow smooth reconstruction, which is
+    readable, while the failure at 1e-5 is an autoencoder, which is not. It is
+    a guess at where the per-coefficient KL lands in r08's 0.26 to 0.37 band,
+    and it may miss; if it does, the miss says which way to go next. If it lands there, the comparison with r08 is finally
+    like-for-like in BOTH latent budget and regularisation, and the answer —
+    whichever way it falls — means something.
+
+    PREPARED, NOT LAUNCHED AND NOT QUEUED. Whether this runs is the author's
+    call once the 1e-5 figure lands.
+
+extends: vrrae/conv_k8
+
+overrides:
+  loss:
+    #: The warmup is unchanged at 2000 steps, so the ramp keeps its shape and
+    #: only its ceiling moves.
+    kl_max_beta: 1.0e-3
