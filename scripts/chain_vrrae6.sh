@@ -97,6 +97,19 @@ run_watched() {
     say "$tag rc=0 in ${dt}s — $(mem_line)"
     return 0
 }
+#: One real training step at the real batch, under the per-process CUDA cap,
+#  before hours are committed to it. rc=0 fits, rc=1 is a real OOM, rc=2 is
+#  anything else — and rc=2 must never be read as a memory verdict.
+smoke() {
+    local exp="$1" tag="$2"
+    say "SMOKE $exp (cap $SMOKE_FRACTION)"
+    POREGEN_CUDA_MEM_FRACTION=$SMOKE_FRACTION \
+        choom -n 1000 -- python scripts/analysis/vae_smoke_step.py --experiment "$exp" \
+        > "$S/smoke_$tag.log" 2>&1
+    local rc=$?
+    say "SMOKE $exp rc=$rc — $(grep -E 'peak allocated|OOM at batch|FITS|NOT A MEMORY' "$S/smoke_$tag.log" | head -2 | tr '\n' ' ')"
+    return $rc
+}
 table() {
     choom -n 1000 -- python scripts/analysis/vrrae_family_table.py --out "$C28" \
         > "$S/tbl_$1.log" 2>&1
