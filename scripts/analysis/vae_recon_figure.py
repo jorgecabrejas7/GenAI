@@ -80,7 +80,13 @@ def main() -> int:
             return float((r * t).sum() / (r.norm() * t.norm() + 1e-8))
         cc = [corr(recon[i], x[i]) for i in range(x.shape[0])]
         rows.append((label, recon, l1, cc))
-        print(f"{label:<24} mean L1 {sum(l1) / len(l1):.4f}   mean texture corr {sum(cc) / len(cc):.3f}   on {x.shape[0]} patches")
+        print(f"{label:<28} mean L1 {sum(l1) / len(l1):.4f}   mean texture corr "
+              f"{sum(cc) / len(cc):.3f}   on {x.shape[0]} patches")
+        # Per patch as well as the mean: patches carrying the air/material
+        # boundary score above 0.85 for EVERY model, so a mean over six of
+        # them flatters a model that returns flat grey in the interior.
+        print("    L1  " + "  ".join(f"{v:.4f}" for v in l1))
+        print("    cc  " + "  ".join(f"{v:+.3f}" for v in cc))
 
     n = x_ref.shape[0]; z = x_ref.shape[-3] // 2
     vmin, vmax = float(x_ref.min()), float(x_ref.max())
