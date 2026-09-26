@@ -113,12 +113,12 @@ def load_model_and_patches(run: Path, split_root: str, n_batches: int, batch_siz
 
 
 def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
-             exclude_train_of: str | None = None) -> dict:
+             exclude_train_of: str | None = None, ckpt: str = "best.ckpt") -> dict:
     from poregen.models.vae.base import decode_xct
     from poregen.training.engine import to_device_inputs
 
     model, ds, idx, cfg, keep = load_model_and_patches(
-        run, split_root, n_batches, batch_size, exclude_train_of)
+        run, split_root, n_batches, batch_size, exclude_train_of, ckpt)
     trained_on = cfg["data"].get("dataset_root")
     dev = torch.device("cpu")
 
@@ -176,6 +176,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", type=Path, required=True)
+    ap.add_argument("--ckpt", default="best.ckpt",
+                    help="checkpoint file inside the run; latest.ckpt is the one the finalisation "
+                         "pass stamps with the RR inference basis, best.ckpt is written earlier and lacks it")
     ap.add_argument("--split", default=None,
                     help="split root to evaluate on; default is the run's own")
     ap.add_argument("--n-batches", type=int, default=10)
@@ -190,7 +193,7 @@ def main() -> int:
     split = args.split or yaml.safe_load(
         (run / "resolved_config.yaml").read_text())["data"]["dataset_root"]
     res = evaluate(run, split, args.n_batches, args.batch_size,
-                   args.exclude_train_of)
+                   args.exclude_train_of, args.ckpt)
 
     print(f"{res['run'][:60]}")
     print(f"  trained on {res['trained_on']}, evaluated on {res['evaluated_on']}, "

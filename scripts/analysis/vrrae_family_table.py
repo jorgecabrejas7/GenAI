@@ -27,6 +27,17 @@ BASELINE_GLOB = "runs/vae/r08-run-0004-*"
 FAMILY_GLOBS = ("runs/vae/vrrae0*-run-*", "runs/vae/vrrae-run-*")
 
 
+def _needs_latest(run: Path) -> bool:
+    """True when best.ckpt lacks the RR inference basis that latest.ckpt carries."""
+    import torch
+    key = "bottleneck.rr.inference_basis"
+    best = torch.load(run / "best.ckpt", map_location="cpu", weights_only=False)["model"]
+    if key in best or not (run / "latest.ckpt").exists():
+        return False
+    latest = torch.load(run / "latest.ckpt", map_location="cpu", weights_only=False)["model"]
+    return key in latest
+
+
 def main() -> int:
     import sys
     sys.path.insert(0, str(REPO / "scripts" / "analysis"))
@@ -49,8 +60,14 @@ def main() -> int:
     rows = []
     for d in runs:
         try:
-            rows.append(evaluate(d, "split_v3", args.n_batches, 32,
-                                 exclude_train_of="split_v2"))
+            # The RR finalisation pass stamps its inference basis on latest.ckpt,
+            # after best.ckpt was written; an RR run's row therefore comes from
+            # latest.ckpt (the finalised model), everything else from best.ckpt.
+            ckpt = "latest.ckpt" if _needs_latest(d) else "best.ckpt"
+            row = evaluate(d, "split_v3", args.n_batches, 32,
+                           exclude_train_of="split_v2", ckpt=ckpt)
+            row["checkpoint"] = ckpt
+            rows.append(row)
         except Exception as exc:                          # noqa: BLE001
             # A run that cannot be measured is reported as such rather than
             # dropped: a missing row reads as "not run yet", which is a
