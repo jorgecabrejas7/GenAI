@@ -210,3 +210,101 @@ def test_as_samples_refuses_an_output_it_cannot_read():
 
     with pytest.raises(RuntimeError, match="neither one sample"):
         _as_samples(torch.randn(2, 30, 4, 4, 4), 64)
+
+
+# ---------------------------------------------------------------------------
+# best.ckpt and its basis
+#
+# A run can train perfectly and still produce no row and no figure, because
+# best.ckpt is written mid-run and the basis is derived only after the last
+# step. That is what happened to every rung of this family.
+# ---------------------------------------------------------------------------
+
+def _write_best(tmp_path, model, step):
+    """A best.ckpt in the shape the trainer writes, carrying no basis."""
+    import torch as _t
+
+    state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    payload = {"model": state, "step": step, "optimizer": {"sentinel": 1},
+               "metadata": {"best_metric": "total", "best_value": 0.123}}
+    path = tmp_path / "best.ckpt"
+    _t.save(payload, path)
+    return path
+
+
+def test_best_checkpoint_gets_a_basis_refitted_to_its_own_weights(tmp_path):
+    """The final basis is NOT copied when the weights differ — it is refitted.
+
+    Copying it would pair one encoder with a projection fitted to another's
+    features, and eval-mode projection through it reports a model that never
+    existed at any step.
+    """
+    from poregen.models.vae.v2.vrrae_finetune import finalize_best_checkpoint
+
+    best_model = conv_model()
+    path = _write_best(tmp_path, best_model, step=500)
+
+    # A DIFFERENT model stands in for the final weights.
+    torch.manual_seed(7)
+    final_model = conv_model()
+    final_model.finalize_inference_basis(
+        _tiny_loader(), device=torch.device("cpu"), autocast_dtype=torch.float32)
+    final_basis = final_model.bottleneck.rr.inference_basis.clone()
+
+    info = finalize_best_checkpoint(
+        path, final_model, _tiny_loader(), final_step=1000,
+        device=torch.device("cpu"), autocast_dtype=torch.float32)
+
+    assert info["refitted"] is True
+    assert info["best_step"] == 500
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    stamped = saved["model"]["bottleneck.rr.inference_basis"]
+    assert stamped.shape == (64, 8)
+    assert not torch.allclose(stamped, final_basis), \
+        "the final model's basis was copied instead of refitted"
+    # The rest of the checkpoint is untouched.
+    assert saved["step"] == 500
+    assert saved["optimizer"] == {"sentinel": 1}
+    assert saved["metadata"]["best_value"] == 0.123
+    # And the live model is left as it was found.
+    assert torch.allclose(final_model.bottleneck.rr.inference_basis, final_basis)
+
+
+def test_best_checkpoint_at_the_final_step_reuses_the_basis(tmp_path):
+    """Same weights, so a second pass over the training set adds nothing."""
+    from poregen.models.vae.v2.vrrae_finetune import finalize_best_checkpoint
+
+    model = conv_model()
+    path = _write_best(tmp_path, model, step=1000)
+    model.finalize_inference_basis(
+        _tiny_loader(), device=torch.device("cpu"), autocast_dtype=torch.float32)
+    basis = model.bottleneck.rr.inference_basis.clone()
+
+    info = finalize_best_checkpoint(
+        path, model, _tiny_loader(), final_step=1000,
+        device=torch.device("cpu"), autocast_dtype=torch.float32)
+
+    assert info["refitted"] is False
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    assert torch.equal(saved["model"]["bottleneck.rr.inference_basis"], basis)
+
+
+def test_it_does_nothing_without_a_best_checkpoint(tmp_path):
+    from poregen.models.vae.v2.vrrae_finetune import finalize_best_checkpoint
+
+    assert finalize_best_checkpoint(
+        tmp_path / "best.ckpt", conv_model(), _tiny_loader(), final_step=1,
+        device=torch.device("cpu"), autocast_dtype=torch.float32) is None
+
+
+def test_a_stamped_checkpoint_is_not_stamped_twice(tmp_path):
+    from poregen.models.vae.v2.vrrae_finetune import finalize_best_checkpoint
+
+    model = conv_model()
+    model.finalize_inference_basis(
+        _tiny_loader(), device=torch.device("cpu"), autocast_dtype=torch.float32)
+    path = _write_best(tmp_path, model, step=500)   # state_dict now HAS a basis
+
+    assert finalize_best_checkpoint(
+        path, model, _tiny_loader(), final_step=1000,
+        device=torch.device("cpu"), autocast_dtype=torch.float32) is None

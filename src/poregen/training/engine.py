@@ -1188,6 +1188,31 @@ def train_loop(
         if save_latest:
             copy_checkpoint(final_ckpt_path, run_dir / "latest.ckpt")
 
+        # best.ckpt was written mid-run and therefore has no U_f, which every
+        # eval harness refuses — the reason the whole VRRAE family had runs
+        # that trained fine and rows that read "could not load". Give it one
+        # fitted to ITS OWN weights; see finalize_best_checkpoint for why the
+        # final run's basis must not simply be copied into it.
+        if basis_finalization is not None:
+            from poregen.models.vae.v2.vrrae_finetune import (  # noqa: PLC0415
+                finalize_best_checkpoint,
+            )
+
+            best_finalization = finalize_best_checkpoint(
+                run_dir / "best.ckpt",
+                getattr(model, "_orig_mod", model),
+                train_loader,
+                final_step=final_step,
+                device=device,
+                autocast_dtype=autocast_dtype,
+            )
+            if best_finalization is not None:
+                _logger.info(
+                    "Stamped best.ckpt (step %s) with U_f, refitted=%s",
+                    best_finalization["best_step"],
+                    best_finalization["refitted"],
+                )
+
         # ── final full eval ───────────────────────────────────────────
         if final_full_eval:
             if val_loader is not None:

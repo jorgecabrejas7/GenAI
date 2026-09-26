@@ -67,7 +67,9 @@ This module adds three things RRLayer does NOT give you for free:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import torch
@@ -245,6 +247,72 @@ def finalize_basis_from_dataloader(
     model.eval()
     return {"n_batches": n_batches, "n_samples": n_samples}
 
+
+
+def basis_keys(state: dict[str, Any]) -> list[str]:
+    """Every ``*.inference_basis`` entry of a model state dict."""
+    return [k for k in state if k.endswith("inference_basis")]
+
+
+def finalize_best_checkpoint(
+    best_path: Path,
+    model: nn.Module,
+    train_loader: DataLoader,
+    *,
+    final_step: int,
+    device: torch.device,
+    autocast_dtype: torch.dtype,
+) -> dict[str, Any] | None:
+    """Give ``best.ckpt`` an ``inference_basis`` FITTED TO ITS OWN WEIGHTS.
+
+    Training derives U_f in a pass after the last step, so only the final
+    checkpoint carries one. best.ckpt does not, and every eval harness refuses
+    a checkpoint without it — which is how the whole VRRAE family came to have
+    no table rows and no figures while the runs themselves were fine.
+
+    THE OBVIOUS REPAIR IS WRONG. Copying the final basis into best.ckpt pairs
+    one encoder's weights with a projection fitted to a DIFFERENT encoder's
+    features. In eval mode the RR layer projects onto that basis, so the result
+    is a model that never existed at any step of training, reported as if it
+    were the best one. When the two steps differ the pass is therefore run
+    again, on the best weights.
+
+    Returns None when there is nothing to do: no best.ckpt, or a model with no
+    RR bottleneck. Everything else in the checkpoint — optimizer, scaler, RNG,
+    metadata — is left exactly as it was; only the basis entries are added.
+    """
+    if not best_path.exists() or not hasattr(model, "finalize_inference_basis"):
+        return None
+
+    payload = torch.load(best_path, map_location="cpu", weights_only=False)
+    best_state = payload.get("model")
+    if best_state is None or basis_keys(best_state):
+        return None                       # nothing to do, or already stamped
+
+    live = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    best_step = payload.get("step")
+    try:
+        if best_step != final_step:
+            load_vrrae_state_dict(model, best_state, strict=False)
+            info = model.finalize_inference_basis(
+                train_loader, device=device, autocast_dtype=autocast_dtype)
+            info["refitted"] = True
+        else:
+            # Same weights, so the basis already in hand is the right one and
+            # a second pass over the training set would only reproduce it.
+            info = {"refitted": False}
+        fitted = model.state_dict()
+        for key in basis_keys(fitted):
+            best_state[key] = fitted[key].detach().cpu().clone()
+    finally:
+        load_vrrae_state_dict(model, live, strict=False)
+
+    tmp = best_path.with_suffix(".stamping")
+    torch.save(payload, tmp)
+    os.replace(tmp, best_path)
+    info["best_step"] = best_step
+    info["keys"] = basis_keys(best_state)
+    return info
 
 # ---------------------------------------------------------------------------
 # 1. Deliberate re-finalization at end of training
