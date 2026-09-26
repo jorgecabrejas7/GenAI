@@ -36,6 +36,8 @@ import torch
 import torch.nn.functional as F
 import yaml
 
+from poregen.dataset.loader import LABEL_AIR
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -157,7 +159,20 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
     # of baseline error removed. Seeding closes the other half.
     torch.manual_seed(0)
 
+    #: Correlation between reconstruction and input AFTER each patch's own mean
+    #  is removed. L1 is dominated by the patch mean and by the air/material
+    #  boundary, so a model that returns a flat grey block of the right
+    #  brightness scores well on it — V0 removes 54.7 % of the baseline error
+    #  and reproduces no texture at all. This is the quantity that separates
+    #  them, and it is the same definition the recon figure uses.
+    def texture_corr(r: torch.Tensor, t: torch.Tensor) -> float:
+        r = r - r.mean()
+        t = t - t.mean()
+        return float((r * t).sum() / (r.norm() * t.norm() + 1e-8))
+
     l1, baseline, lo, hi, n = [], [], [], [], 0
+    cc_all: list[float] = []
+    cc_interior: list[float] = []
     for batch in batches():
         # Through the model's OWN input contract: a 3-class model takes the
         # label too, and calling it with the grey alone raises rather than
@@ -172,6 +187,16 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
         # reconstruction has to beat to have learned anything at all.
         baseline.append(float((x - x.mean()).abs().mean()))
         lo.append(float(out.xct_out.min())); hi.append(float(out.xct_out.max()))
+        # Per patch, and split by whether the patch touches the specimen edge.
+        # A patch with any AIR voxel carries the one structure every model in
+        # this family reproduces, and including those patches lifts a grey
+        # model's mean far above what it earns in the material.
+        label = batch_dev.get("label")
+        for i in range(x.shape[0]):
+            c = texture_corr(recon[i], x[i])
+            cc_all.append(c)
+            if label is not None and not bool((label[i] == LABEL_AIR).any()):
+                cc_interior.append(c)
         n += x.shape[0]
 
     if not l1:
@@ -191,6 +216,9 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
         "fraction_of_baseline_error_removed": (
             (mean_base - mean_l1) / mean_base if mean_base else None),
         "raw_output_range": [min(lo), max(hi)],
+        "texture_corr": st.mean(cc_all),
+        "texture_corr_interior": (st.mean(cc_interior) if cc_interior else None),
+        "n_patches_interior": len(cc_interior),
     }
 
 

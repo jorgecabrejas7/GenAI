@@ -76,24 +76,43 @@ def main() -> int:
 
     (args.out / "family_table.json").write_text(json.dumps(rows, indent=2) + "\n")
 
-    hdr = (f"| run | evaluated on | L1 | predicting the mean | error removed |\n"
-           f"|---|---|---|---|---|\n")
+    hdr = ("| run | L1 | error removed | texture, interior | texture, all |\n"
+           "|---|---|---|---|---|\n")
     body = ""
-    for r in sorted(rows, key=lambda r: r.get("fraction_of_baseline_error_removed", -1)):
+    # SORTED BY TEXTURE, not by error removed. On this family the two orders
+    # disagree: V0 and A0 beat the spatial baseline on error removed while
+    # reproducing no texture at all, so sorting by that column would present
+    # the flat bottleneck as the better one.
+    for r in sorted(rows, key=lambda r: (r.get("texture_corr_interior") is None,
+                                         r.get("texture_corr_interior") or -2)):
         if "error" in r:
-            body += f"| `{r['run'][:44]}` | — | — | — | **could not load**: {r['error'][:60]} |\n"
+            body += (f"| `{r['run'][:44]}` | — | — | — | "
+                     f"**could not load**: {r['error'][:60]} |\n")
             continue
-        body += (f"| `{r['run'][:44]}` | {r['evaluated_on']} | {r['l1']:.4f} | "
-                 f"{r['constant_prediction_baseline']:.4f} | "
-                 f"**{r['fraction_of_baseline_error_removed']:.1%}** |\n")
+        ti = r.get("texture_corr_interior")
+        body += (f"| `{r['run'][:44]}` | {r['l1']:.4f} | "
+                 f"{r['fraction_of_baseline_error_removed']:.1%} | "
+                 f"**{'—' if ti is None else f'{ti:+.3f}'}** | "
+                 f"{r.get('texture_corr', float('nan')):+.3f} |\n")
     (args.out / "family_table.md").write_text(
         "# The VRRAE family on one validation set\n\n"
         f"{len(rows)} runs, {args.n_batches * 32} patches of split_v3, restricted "
         "to the 5 validation volumes split_v2 never trained on.\n\n"
-        "`error removed` is the fraction of the constant-prediction baseline's "
-        "error the model removes. It is the column to read: an L1 of 0.066 "
-        "against 0.034 sounds like a factor of two until you see that "
-        "predicting the dataset mean already scores 0.076.\n\n" + hdr + body)
+        "`error removed` RANKS THE MEAN GREY LEVEL. `texture` RANKS THE "
+        "RECONSTRUCTION. The two disagree, and that is the point of this "
+        "table: V0 and A0 remove MORE of the constant-prediction error than "
+        "the spatial baseline while returning a flat grey block wherever "
+        "there is no specimen edge. L1 is dominated by a patch's mean "
+        "brightness and by the air/material boundary, so it cannot referee "
+        "this family.\n\n"
+        "`texture` is the correlation between reconstruction and input after "
+        "each patch's own mean is removed — the same quantity the recon "
+        "figure prints, computed here on every patch. `interior` is the mean "
+        "over patches with NO air voxel (by the dataset's own label, class "
+        "2), which is the honest one: a patch touching the specimen edge "
+        "carries the single structure every model in this family reproduces, "
+        "and including those patches lifts a grey model far above what it "
+        "earns in the material. Rows are sorted by it.\n\n" + hdr + body)
     print(hdr + body)
     print(f"-> {args.out}/family_table.md")
     return 0
