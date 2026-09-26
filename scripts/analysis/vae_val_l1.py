@@ -55,6 +55,28 @@ def held_out_volumes(eval_split: str, exclude_train_of: str | None) -> set[str] 
     return {k for k, v in ev.items() if v == "val"} - trained
 
 
+def finalised_ckpt(run: Path) -> str:
+    """The checkpoint of ``run`` that carries the RR inference basis.
+
+    The finalisation pass stamps its basis on the FINAL checkpoint, after
+    best.ckpt has already been written, so an RR run's best.ckpt has none and
+    every eval harness refuses it. Non-RR runs are unaffected and keep
+    best.ckpt. Runs trained after the trainer learned to stamp best.ckpt itself
+    also keep it, because the key is then already there.
+    """
+    key = "bottleneck.rr.inference_basis"
+    best = run / "best.ckpt"
+    if not best.exists():
+        return "latest.ckpt"
+    if key in torch.load(best, map_location="cpu", weights_only=False)["model"]:
+        return "best.ckpt"
+    latest = run / "latest.ckpt"
+    if latest.exists() and key in torch.load(
+            latest, map_location="cpu", weights_only=False)["model"]:
+        return "latest.ckpt"
+    return "best.ckpt"
+
+
 def load_model_and_patches(run: Path, split_root: str, n_batches: int, batch_size: int,
                            exclude_train_of: str | None = None, ckpt: str = "best.ckpt"):
     """The model at ``ckpt`` on CPU, in eval mode, plus the fixed list of held-out

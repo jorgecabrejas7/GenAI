@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
-from vae_val_l1 import load_model_and_patches  # same dir
+from vae_val_l1 import finalised_ckpt, load_model_and_patches  # same dir
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -43,8 +43,15 @@ def main() -> int:
     specs = []
     for r in a.run:
         label, rest = r.split("=", 1)
-        path, ckpt = (rest.split(":", 1) + ["best.ckpt"])[:2]
-        specs.append((label, REPO / path, ckpt))
+        parts = rest.split(":", 1)
+        run = REPO / parts[0]
+        # An explicit ":ckpt" wins. Otherwise take the FINALISED checkpoint: the
+        # RR pass stamps its basis on latest.ckpt after best.ckpt was written, so
+        # an RR run's best.ckpt has none and this figure would refuse it — the
+        # rc=1 that silently cost the family several figures. Same rule the
+        # family table applies to its rows.
+        ckpt = parts[1] if len(parts) > 1 else finalised_ckpt(run)
+        specs.append((label, run, ckpt))
 
     # the harness's sample: 20 batches x 32 = 640 patches; take every k-th for the figure
     rows, x_ref = [], None
