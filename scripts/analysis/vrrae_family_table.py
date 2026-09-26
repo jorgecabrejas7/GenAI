@@ -76,8 +76,9 @@ def main() -> int:
 
     (args.out / "family_table.json").write_text(json.dumps(rows, indent=2) + "\n")
 
-    hdr = ("| run | L1 | error removed | texture, interior | texture, all |\n"
-           "|---|---|---|---|---|\n")
+    hdr = ("| run | L1 | error removed | texture, interior | texture, all "
+           "| sharpness, interior | sharpness, all |\n"
+           "|---|---|---|---|---|---|---|\n")
     body = ""
     # SORTED BY TEXTURE, not by error removed. On this family the two orders
     # disagree: V0 and A0 beat the spatial baseline on error removed while
@@ -86,14 +87,17 @@ def main() -> int:
     for r in sorted(rows, key=lambda r: (r.get("texture_corr_interior") is None,
                                          r.get("texture_corr_interior") or -2)):
         if "error" in r:
-            body += (f"| `{r['run'][:44]}` | — | — | — | "
+            body += (f"| `{r['run'][:44]}` | — | — | — | — | — | "
                      f"**could not load**: {r['error'][:60]} |\n")
             continue
         ti = r.get("texture_corr_interior")
+        si = r.get("sharpness_interior")
         body += (f"| `{r['run'][:44]}` | {r['l1']:.4f} | "
                  f"{r['fraction_of_baseline_error_removed']:.1%} | "
                  f"**{'—' if ti is None else f'{ti:+.3f}'}** | "
-                 f"{r.get('texture_corr', float('nan')):+.3f} |\n")
+                 f"{r.get('texture_corr', float('nan')):+.3f} | "
+                 f"{'—' if si is None else f'{si:.3f}'} | "
+                 f"{r.get('sharpness', float('nan')):.3f} |\n")
     (args.out / "family_table.md").write_text(
         "# The VRRAE family on one validation set\n\n"
         f"{len(rows)} runs, {args.n_batches * 32} patches of split_v3, restricted "
@@ -112,7 +116,19 @@ def main() -> int:
         "2), which is the honest one: a patch touching the specimen edge "
         "carries the single structure every model in this family reproduces, "
         "and including those patches lifts a grey model far above what it "
-        "earns in the material. Rows are sorted by it.\n\n" + hdr + body)
+        "earns in the material. Rows are sorted by it.\n\n"
+        "`sharpness` is a THIRD question, and it is not implied by the other "
+        "two: the standard deviation of the reconstruction's 3-D Laplacian "
+        "over the input's. 1.0 is as sharp as the input; 0.6 means a third of "
+        "the fine contrast has gone. A reconstruction can put the pattern in "
+        "the right place, and so correlate well, and still be a smoothed "
+        "version of it.\n\n"
+        "READ SHARPNESS ONLY NEXT TO TEXTURE. On its own it is not a quality "
+        "measure at all: the 400-step a0 trial scores the HIGHEST sharpness "
+        "in this table, 0.909, with a texture correlation of -0.001. It emits "
+        "fine contrast at almost exactly the input's level and in none of the "
+        "right places. Sharpness says how much detail is there; texture says "
+        "whether it is the input's detail.\n\n" + hdr + body)
     print(hdr + body)
     print(f"-> {args.out}/family_table.md")
     return 0

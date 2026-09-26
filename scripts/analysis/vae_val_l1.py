@@ -170,9 +170,31 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
         t = t - t.mean()
         return float((r * t).sum() / (r.norm() * t.norm() + 1e-8))
 
+    #: How much FINE DETAIL survives, as distinct from whether the pattern is
+    #  in the right place. A reconstruction can correlate at +0.85 and still be
+    #  a smoothed version of the input; this is the ratio of the two Laplacian
+    #  standard deviations, so 1.0 means the reconstruction is as sharp as the
+    #  input and 0.6 means a third of the fine contrast is gone.
+    #
+    #  BY SLICING, NOT F.conv3d: conv3d on CPU inside a memory-capped cgroup
+    #  raises "label is too far", so the six-neighbour stencil is written out.
+    #  Axes -3, -2, -1 are the SPATIAL ones; x is (B, 1, D, H, W) here, so the
+    #  channel axis must not be differenced.
+    def laplacian(x: torch.Tensor) -> torch.Tensor:
+        c = x[..., 1:-1, 1:-1, 1:-1]
+        return (x[..., :-2, 1:-1, 1:-1] + x[..., 2:, 1:-1, 1:-1]
+                + x[..., 1:-1, :-2, 1:-1] + x[..., 1:-1, 2:, 1:-1]
+                + x[..., 1:-1, 1:-1, :-2] + x[..., 1:-1, 1:-1, 2:]
+                - 6.0 * c)
+
+    def sharpness(r: torch.Tensor, t: torch.Tensor) -> float:
+        return float(laplacian(r).std() / (laplacian(t).std() + 1e-8))
+
     l1, baseline, lo, hi, n = [], [], [], [], 0
     cc_all: list[float] = []
     cc_interior: list[float] = []
+    sh_all: list[float] = []
+    sh_interior: list[float] = []
     for batch in batches():
         # Through the model's OWN input contract: a 3-class model takes the
         # label too, and calling it with the grey alone raises rather than
@@ -194,9 +216,12 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
         label = batch_dev.get("label")
         for i in range(x.shape[0]):
             c = texture_corr(recon[i], x[i])
+            sh = sharpness(recon[i], x[i])
             cc_all.append(c)
+            sh_all.append(sh)
             if label is not None and not bool((label[i] == LABEL_AIR).any()):
                 cc_interior.append(c)
+                sh_interior.append(sh)
         n += x.shape[0]
 
     if not l1:
@@ -218,6 +243,8 @@ def evaluate(run: Path, split_root: str, n_batches: int, batch_size: int,
         "raw_output_range": [min(lo), max(hi)],
         "texture_corr": st.mean(cc_all),
         "texture_corr_interior": (st.mean(cc_interior) if cc_interior else None),
+        "sharpness": st.mean(sh_all),
+        "sharpness_interior": (st.mean(sh_interior) if sh_interior else None),
         "n_patches_interior": len(cc_interior),
     }
 
