@@ -1990,7 +1990,11 @@ def measure_baseline(root, repo, assessment: str, *,
     # draws, which is what a distribution distance needs. The 1024-wide pair is
     # two draws and is measured for seams and phases, not for distributions.
     micro = [c for c in cases if tuple(c.manifest.volume_shape) == (192, 192, 192)]
-    gen_p = [MS.profile_volume(c, group="slicegan") for c in micro]
+    # The GROUP LABEL IS THE ASSESSMENT, not a constant. It was hardcoded to
+    # "slicegan" here and in the anisotropy block, so ddpm3d's findings.md
+    # printed its own numbers under the heading "slicegan" — a reader
+    # comparing campaigns 22 and 23 saw two contradictory slicegan rows.
+    gen_p = [MS.profile_volume(c, group=assessment) for c in micro]
     gen_phi = float(np.mean([p.phi for p in gen_p]))
 
     levels: dict[str, dict] = {}
@@ -2055,7 +2059,7 @@ def measure_baseline(root, repo, assessment: str, *,
         "levels": levels,
         "nearest_level": nearest,
         "anisotropy": {
-            "generated": _anisotropy_block(micro, "slicegan"),
+            "generated": _anisotropy_block(micro, assessment),
             "real": _anisotropy_block(real_all, "real_floor"),
             "note": (
                 "Real laminate is anisotropic, so a generated anisotropy is only "
