@@ -1473,8 +1473,16 @@ class VolumeGenerator:
         volume_shape: tuple[int, int, int],
         autocast_dtype: torch.dtype,
         decode_batch_size: int,
+        on_tile=None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Blend-decode the latent canvas.  Returns (xct [0,1], class logits).
+
+        ``on_tile`` is an optional callback fired once per decoded tile with the
+        tile index, the tile count, its voxel slice and the weight-normalised
+        accumulator so far. It exists so a film can SHOW the overlapped decode
+        blending rather than re-implement it — a re-implementation that drifted
+        would be a picture of something the pipeline does not do. Leaving it
+        None changes nothing.
 
         Decode windows are one tile wide and step ``decode_stride`` voxels, and
         the decoded grey level and the raw 3-class logits are accumulated with
@@ -1525,6 +1533,20 @@ class VolumeGenerator:
                 xct_acc[sl] += w3d * xct_np[i]
                 logit_acc[(slice(None), *sl)] += w3d[None] * cls_np[i]
                 w_acc[sl] += w3d
+                if on_tile is not None:
+                    # The accumulator DIVIDED BY THE WEIGHT SO FAR — what the
+                    # finished volume would look like if decoding stopped here.
+                    # Handing over the raw accumulator instead would show a
+                    # picture that darkens with every overlap, which is the
+                    # Tukey sum and not the image.
+                    on_tile({
+                        "tile": start + i,
+                        "n_tiles": len(origins),
+                        "slice": sl,
+                        "partial": np.divide(xct_acc, w_acc,
+                                             out=np.zeros_like(xct_acc),
+                                             where=w_acc > 0),
+                    })
 
         xct_acc /= w_acc
         logit_acc /= w_acc[None]

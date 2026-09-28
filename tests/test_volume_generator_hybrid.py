@@ -1337,3 +1337,41 @@ class TestOnStepHook:
         for left, right in zip(a, b):
             if torch.is_tensor(left):
                 assert torch.equal(left, right)
+
+
+class TestOnTileHook:
+    """The decode hook the stage-2 films are drawn from."""
+
+    @staticmethod
+    def _decode(on_tile=None):
+        model, vae = _SpyModel(eps_value=0.3), _LatentVAE()
+        gen, _ = _generator(model, vae, chunk_tiles=(1, 1, 1), n_steps=2)
+        shape = (2 * P, 2 * P, 2 * P)
+        cells = tuple(s // (P // LAT) for s in shape)
+        torch.manual_seed(3)
+        z = torch.randn(1, *cells)[0].unsqueeze(0).repeat(gen.latent_channels, 1, 1, 1) \
+            if hasattr(gen, "latent_channels") else torch.randn(1, *cells)
+        return gen._decode_canvas(z, shape, torch.float32, 8, on_tile=on_tile)
+
+    def test_it_fires_once_per_tile(self):
+        seen = []
+        self._decode(on_tile=seen.append)
+        assert seen, "the hook never fired"
+        assert len(seen) == seen[0]["n_tiles"]
+        assert [r["tile"] for r in seen] == list(range(len(seen)))
+
+    def test_the_partial_is_weight_normalised_and_in_range(self):
+        """Not the raw accumulator: that darkens with every overlap."""
+        seen = []
+        self._decode(on_tile=seen.append)
+        last = seen[-1]["partial"]
+        assert np.isfinite(last).all()
+        # The XCT head of the stub maps into [0, 1]; a Tukey SUM would leave
+        # values well above it once windows overlap.
+        assert last.max() <= 1.5, last.max()
+
+    def test_attaching_it_changes_nothing(self):
+        a_xct, a_log = self._decode(on_tile=None)
+        b_xct, b_log = self._decode(on_tile=lambda rec: None)
+        assert np.array_equal(a_xct, b_xct)
+        assert np.array_equal(a_log, b_log)
