@@ -285,8 +285,14 @@ def main() -> None:
     ap.add_argument("--device", default="cuda",
                     help="cuda, or cpu to check a gate while a training run "
                          "holds the GPU — slower, but it cannot OOM the run")
-    ap.add_argument("--out-name", default="calibration_probe",
-                    help="subdirectory under the campaign root")
+    # DERIVED FROM THE RUN, not a constant. The default used to be the bare
+    # "calibration_probe", so a sweep that probed two rungs in a row wrote both
+    # into one directory and the second silently destroyed the first. That is
+    # what happened to rf-64 on 2026-09-27: rf-2 ran next and overwrote it, and
+    # the loss only showed as a blank cell in the compare table.
+    ap.add_argument("--out-name", default=None,
+                    help="subdirectory under the campaign root; defaults to "
+                         "calibration_probe_<experiment>_<variant>")
     args = ap.parse_args()
 
     import zarr
@@ -324,7 +330,10 @@ def main() -> None:
         "n_panels": int(rows.panel_id.nunique()),
         "taus": list(TAUS), "gate": GATE, "device": args.device,
     }
-    out_dir = OUT_ROOT / args.out_name
+    name = args.out_name or (
+        f"calibration_probe_{cfg['experiment']['name']}_"
+        f"{cfg['experiment']['variant']}")
+    out_dir = OUT_ROOT / name
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json({**meta, "summary": summ}, out_dir)
     write_findings(build_findings(meta, summ), out_dir)
