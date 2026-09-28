@@ -228,6 +228,7 @@ real-vs-real floor.
 | `bench_batch_size.py` | Throughput vs batch size (loader-only, train, eval) + peak GPU memory, using the real model and loaders. |
 | `profile_vae_memory.py` | Single-config peak-memory profile of the real `train_step` on synthetic batches. |
 | `vrrae_interim_basis.py` | Gives a MID-TRAINING VRRAE checkpoint a usable `U_f` from a few dozen train patches, into a scratch run directory the L1 and figure harnesses can read. A run in progress cannot otherwise be looked at: the basis is derived only after the last step, and in eval mode the RR layer projects onto it. Never a table row. |
+| `denoising_video.py` | The reverse process as a film, for presentations: one 192-cubed chunk step by step, or a 384-cubed volume through the production chunked sampler with the working chunk outlined. Frames are the decoded x0 PREDICTION on the FIXED 0-255 raw-scan scale — not the noisy latent, and not stretched per frame. Driven by `VolumeGenerator`'s `on_step` hook. |
 | `investigate_vrrae_throughput_cliff.py` | 💀 Self-labelled THROWAWAY: reproduces the cuDNN 64-bit-indexing backward cliff on the GB10. |
 | `rebuild_tensorboard.py` | Rebuilds TensorBoard event files from a run's `metrics.jsonl`. |
 | `convert_patch_samples_to_tiff.py` | Migrates legacy patch-sample `.npz` archives under `runs/` to TIFF. |
