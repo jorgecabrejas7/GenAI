@@ -1060,6 +1060,7 @@ class VolumeGenerator:
         offset_cells: tuple[int, int, int] = (0, 0, 0),
         progress=None,
         generator: torch.Generator | None = None,
+        on_step=None,
     ) -> torch.Tensor:
         """Denoise the whole latent canvas chunk by chunk.  Returns (C, Z, Y, X).
 
@@ -1282,7 +1283,23 @@ class VolumeGenerator:
 
                 t      = torch.tensor([t_val],      dtype=torch.long, device=self.device)
                 t_prev = torch.tensor([t_prev_val], dtype=torch.long, device=self.device)
-                x = schedule.ddim_step(x, t, t_prev, out_sum / weight_sum)
+                model_out = out_sum / weight_sum
+                if on_step is not None:
+                    # The X0 PREDICTION, not the noisy x_t: x_t is noise the eye
+                    # cannot read, while x0 is what the model currently believes
+                    # the finished chunk is. Cloned to CPU so a caller that keeps
+                    # frames cannot pin device memory for the whole run.
+                    on_step({
+                        "chunk_index": chunk_idx,
+                        "step": i,
+                        "t": int(t_val),
+                        "x0": schedule.predict_x0(x, t, model_out).detach().cpu(),
+                        "x": x.detach().cpu(),
+                        "chunk_slice": chunk_sl,
+                        "n_chunks": len(chunks),
+                        "n_steps": len(timesteps) - 1,
+                    })
+                x = schedule.ddim_step(x, t, t_prev, model_out)
                 if progress is not None:
                     progress.update(1)
 
@@ -1530,6 +1547,7 @@ class VolumeGenerator:
         return_class_probs: bool = False,
         return_latents: bool = False,
         seed: int | None = None,
+        on_step=None,
     ) -> tuple:
         """Generate one volume: chunked joint denoising, then blended decode.
 
@@ -1617,6 +1635,7 @@ class VolumeGenerator:
             offset_cells=offset_cells,
             progress=progress,
             generator=generator,
+            on_step=on_step,
         )
         xct, class_logits = self._decode_canvas(
             z_clean, volume_shape, autocast_dtype, decode_batch_size

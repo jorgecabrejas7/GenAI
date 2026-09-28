@@ -1285,3 +1285,55 @@ class TestOverlapPrefixPin:
         np.testing.assert_array_equal(
             z_s[:, :, :, lo:lo + pin_cells].cpu().numpy(),
             z_p[:, :, :, lo:lo + pin_cells].cpu().numpy())
+
+
+# ── the denoising-video step hook ────────────────────────────────────────────
+#
+# It exists for the presentation videos and must be invisible otherwise: a
+# sampler that silently changed behaviour when a debug hook was attached would
+# make every frame a picture of something the production path never does.
+
+class TestOnStepHook:
+
+    @staticmethod
+    def _run(on_step=None, seed=7):
+        model, vae = _SpyModel(eps_value=0.3), _LatentVAE()
+        gen, size_mm = _generator(model, vae, chunk_tiles=(1, 1, 1), n_steps=3)
+        return gen.generate(size_mm, target_porosity=0.03, seed=seed,
+                            return_latents=True, on_step=on_step)
+
+    def test_it_fires_once_per_step_per_chunk(self):
+        seen = []
+        self._run(on_step=seen.append)
+        # 2x2x2 tiles at chunk_tiles (1,1,1) is 8 chunks; n_steps=3 gives 3
+        # DDIM transitions over 4 timesteps.
+        assert seen, "the hook never fired"
+        assert seen[0]["n_chunks"] == 8
+        n_steps = seen[0]["n_steps"]
+        assert len(seen) == 8 * n_steps
+        assert [r["chunk_index"] for r in seen] == sorted(r["chunk_index"] for r in seen)
+        assert [r["step"] for r in seen[:n_steps]] == list(range(n_steps))
+
+    def test_t_decreases_within_a_chunk(self):
+        seen = []
+        self._run(on_step=seen.append)
+        ts = [r["t"] for r in seen if r["chunk_index"] == 0]
+        assert ts == sorted(ts, reverse=True), ts
+
+    def test_it_hands_out_x0_and_x_on_cpu_and_they_differ(self):
+        seen = []
+        self._run(on_step=seen.append)
+        r = seen[0]
+        assert r["x0"].device.type == "cpu" and r["x"].device.type == "cpu"
+        assert r["x0"].shape == r["x"].shape
+        # x is the noisy latent, x0 the model's belief about the clean one. If
+        # these were the same tensor the videos would be showing noise.
+        assert not torch.allclose(r["x0"], r["x"])
+
+    def test_attaching_it_changes_nothing(self):
+        """The whole point: the hook is a window, not a lever."""
+        a = self._run(on_step=None, seed=11)
+        b = self._run(on_step=lambda rec: None, seed=11)
+        for left, right in zip(a, b):
+            if torch.is_tensor(left):
+                assert torch.equal(left, right)
