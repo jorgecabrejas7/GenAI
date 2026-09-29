@@ -249,9 +249,19 @@ def finalize_basis_from_dataloader(
 
 
 
+#: Everything finalisation writes. The BASIS ALONE IS NOT ENOUGH: the
+#: bottleneck also carries a persistent `_basis_finalized` flag, and a
+#: checkpoint with the tensor but not the flag loads into a model that refuses
+#: to fine-tune ("requires an explicitly finalized U_f") even though its basis
+#: is right. The eval harnesses do not notice, because RRLayer projects on
+#: inference_basis in eval mode whatever the flag says — so the inconsistency
+#: is silent until something reads the flag.
+FINALISED_SUFFIXES = ("inference_basis", "_basis_finalized")
+
+
 def basis_keys(state: dict[str, Any]) -> list[str]:
-    """Every ``*.inference_basis`` entry of a model state dict."""
-    return [k for k in state if k.endswith("inference_basis")]
+    """Every entry of a model state dict that finalisation writes."""
+    return [k for k in state if k.endswith(FINALISED_SUFFIXES)]
 
 
 def finalize_best_checkpoint(
@@ -286,7 +296,8 @@ def finalize_best_checkpoint(
 
     payload = torch.load(best_path, map_location="cpu", weights_only=False)
     best_state = payload.get("model")
-    if best_state is None or basis_keys(best_state):
+    already = [k for k in best_state or {} if k.endswith("inference_basis")]
+    if best_state is None or already:
         return None                       # nothing to do, or already stamped
 
     live = {k: v.detach().clone() for k, v in model.state_dict().items()}
