@@ -76,6 +76,12 @@ def main() -> int:
 
     (args.out / "family_table.json").write_text(json.dumps(rows, indent=2) + "\n")
 
+    def name(run: str) -> str:
+        """Keep the TAIL as well as the head. Truncating at 44 characters made
+        the three vrrae-run-0008 rows — as trained, and the two decoder
+        fine-tunes — print identically, which is a table that cannot be read."""
+        return run if len(run) <= 46 else f"{run[:30]}...{run[-13:]}"
+
     hdr = ("| run | L1 | error removed | texture, interior | texture, all "
            "| sharpness, interior | sharpness, all |\n"
            "|---|---|---|---|---|---|---|\n")
@@ -87,12 +93,12 @@ def main() -> int:
     for r in sorted(rows, key=lambda r: (r.get("texture_corr_interior") is None,
                                          r.get("texture_corr_interior") or -2)):
         if "error" in r:
-            body += (f"| `{r['run'][:44]}` | — | — | — | — | — | "
+            body += (f"| `{name(r['run'])}` | — | — | — | — | — | "
                      f"**could not load**: {r['error'][:60]} |\n")
             continue
         ti = r.get("texture_corr_interior")
         si = r.get("sharpness_interior")
-        body += (f"| `{r['run'][:44]}` | {r['l1']:.4f} | "
+        body += (f"| `{name(r['run'])}` | {r['l1']:.4f} | "
                  f"{r['fraction_of_baseline_error_removed']:.1%} | "
                  f"**{'—' if ti is None else f'{ti:+.3f}'}** | "
                  f"{r.get('texture_corr', float('nan')):+.3f} | "
