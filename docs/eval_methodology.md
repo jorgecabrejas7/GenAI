@@ -254,6 +254,21 @@ within-volume slope of 0. The pooled fit is still reported, under the key
 A real volume has no request, so it reports only its **cell-to-cell spread** —
 the noise floor a slope has to beat.
 
+### Chunk-plane porosity band (band ratio)
+
+The seam ratios above measure slice-to-slice *change* at a plane; they cannot
+see a plane where the field is smoothly *depleted*. The band ratio does:
+`scripts/analysis/chunk_plane_profile.py` takes φ (pore / material) in 8-voxel
+slabs at signed offsets from every **non-terminal** chunk plane (−32 … +24; the
+−8 slab is the last 8 voxels before the plane, the +0 slab the first 8 after it)
+and divides each slab's φ by the volume's mean φ. **1 means no bias**; the
+criterion is every non-terminal plane inside ±20 %. Terminal planes (the volume
+edge, a true OOB face) are excluded because real material is itself depleted at
+a surface. Reported per volume as the mean over planes and the worst plane, for
+the trailing (−8) and the leading (+0) side separately, because per-face dropout
+cleared the trailing side (campaign 18: 1.025) while the leading side stays
+inside the criterion on average (0.837) with a worst plane at 0.66–0.77.
+
 ### Assembly seams
 
 `seam_discontinuity` is imported from `poregen.diffusion.sampler`, so the number
