@@ -15,7 +15,7 @@ The reference package needs > 40 GB for one coupon; run one coupon at a time in 
     python scripts/analysis/reference_porosity_maps.py --pattern "Na_04_" --out runs/campaigns/30-reference-onlypores/maps
 """
 from __future__ import annotations
-import argparse, csv, re, sys, time, gc
+import argparse, csv, re, time, gc
 from pathlib import Path
 
 import numpy as np, tifffile
@@ -23,8 +23,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-REF = Path("/home/jorgecabrejas/Dev/UTvsXCT-preprocessing")
-sys.path.insert(0, str(REF))
+# The installed, commit-pinned package. (Campaign 30's maps ran at GenAI cce9000
+# from the clone at UTvsXCT-preprocessing 5d9da5b; the pin is bit-identical to it.)
 from preprocess_tools import onlypores as ref_onlypores, aligner, reslicer, io as ref_io  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
