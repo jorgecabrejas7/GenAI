@@ -14,6 +14,8 @@ import zarr
 logger = logging.getLogger(__name__)
 
 TIFF_EXTENSIONS = {".tif", ".tiff"}
+#: Where the reference notebooks write their masks, beside each raw volume.
+REFERENCE_OUTPUT_DIR = "onlypores files"
 
 
 @dataclass
@@ -48,6 +50,8 @@ def discover_volumes(raw_root: str | Path) -> list[VolumeInfo]:
             continue
         if not tif_path.is_file():
             continue
+        if REFERENCE_OUTPUT_DIR in tif_path.parts:
+            continue  # reference masks beside the volumes, not volumes
 
         rel = tif_path.relative_to(raw_root)
         parts = rel.parts
@@ -102,6 +106,43 @@ def find_walls(volume: np.ndarray) -> tuple[int, int]:
     resliced = reslicer.reslice(reslicer.rotate_90(volume, clockwise=False), "Right")
     _, frontwall, backwall = aligner.crop_walls(resliced)
     return int(frontwall), int(backwall)
+
+
+def reference_outputs(volume_path: str | Path, segmentation: str) -> dict[str, Path]:
+    """The reference notebook outputs for a raw volume and a ``SEGMENTATION`` name.
+
+    ``scripts/build_reference_onlypores.py`` writes them where the notebooks do,
+    ``<volume dir>/onlypores files/``, with the notebook suffixes and the
+    parameters appended so both settings coexist:
+    ``<stem>_{onlypores,samplemask,binary}_r30_k0.125_min8.tif`` and
+    ``<stem>_report_r30_k0.125_min8.txt``.
+    """
+    p = SEGMENTATION[segmentation]
+    tag = f"r{p['sauvola_radius']}_k{p['sauvola_k']}_min{p['min_size_filtering']}"
+    volume_path = Path(volume_path)
+    d = volume_path.parent / REFERENCE_OUTPUT_DIR
+    return {name: d / f"{volume_path.stem}_{name}_{tag}.{'txt' if name == 'report' else 'tif'}"
+            for name in ("onlypores", "samplemask", "binary", "report")}
+
+
+def read_reference_report(path: str | Path) -> dict:
+    """Walls and parameters from a reference notebook report (``*_report_*.txt``)."""
+    import re
+
+    text = Path(path).read_text()
+    def grab(pattern: str) -> str:
+        m = re.search(pattern, text)
+        if m is None:
+            raise ValueError(f"{path}: no match for {pattern!r}")
+        return m.group(1)
+    return {
+        "frontwall": int(grab(r"Front wall slice: (\d+)")),
+        "backwall": int(grab(r"Back wall slice: (\d+)")),
+        "sauvola_radius": int(grab(r"window_size \(sauvola_radius\): (\d+)")),
+        "sauvola_k": float(grab(r"- k: ([0-9.]+)")),
+        "min_size_filtering": int(grab(r"- min_size: (\d+) voxels")),
+        "reference_commit": grab(r'"commit_id": "([0-9a-f]+)"'),
+    }
 
 
 def compute_mask(volume: np.ndarray, segmentation: str) -> tuple[np.ndarray, np.ndarray, dict]:

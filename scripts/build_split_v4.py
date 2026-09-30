@@ -3,9 +3,11 @@
 The split_v3 labels are the reference ``onlypores`` at its function defaults.
 The reference notebooks add two steps to that call: wall exclusion and the
 small-component filter (vault E21, D53; ``runs/campaigns/30-reference-onlypores/audit/``).
-split_v4 makes the labels again with the notebook procedure,
-:func:`poregen.dataset.io.compute_mask`, which calls the commit-pinned
-``preprocess_tools`` package.  It uses one of the two settings the notebooks use:
+split_v4 takes its labels from the reference notebook outputs themselves, which
+``scripts/build_reference_onlypores.py`` writes beside each raw volume in
+``raw_data/MedidasDB/onlypores files/`` with the commit-pinned
+``preprocess_tools``.  Those files are the source of truth; this builder does
+not segment.  It uses one of the two settings the notebooks use:
 
     --segmentation ipynb   data/split_v4_ipynb   radius 30, k 0.125, min size 8  (onlypores.ipynb cell 6)
     --segmentation batch   data/split_v4_batch   radius 15, k 0.2,   min size 8  (onlypores_batch.ipynb cell 5)
@@ -16,10 +18,12 @@ All other steps are those of split_v3 (``docs/dataset_provenance.md``, section
 
 Stages (idempotent, run with ``--stage``)::
 
-    labels   volumes.zarr/<id>/{mask, sample_mask} from the raw TIFF, and
-             labels.json (walls, settings, voxel counts beside split_v3).
-             <id>/xct is a symlink to the split_v3 xct array; the raw TIFF is
-             checked equal to it voxel for voxel first.  Resumable per volume.
+    labels   volumes.zarr/<id>/{mask, sample_mask} from the reference
+             <stem>_onlypores_* and <stem>_samplemask_* TIFFs (255 -> 1), and
+             labels.json (walls and settings from <stem>_report_*, voxel
+             counts beside split_v3).  <id>/xct is a symlink to the split_v3
+             xct array; the raw TIFF is checked equal to it voxel for voxel
+             first.  Resumable per volume.
     audit    Na_04_2 and Na_02_2 against the campaign-30 audit: walls and exact
              pore and sample voxel counts.  Exit code 1 on any mismatch.
     holes    holes/<volume_id>.npy + holes.json, from the new sample_mask
@@ -37,9 +41,8 @@ Usage
     python scripts/build_split_v4.py --segmentation ipynb --stage audit
     python scripts/build_split_v4.py --segmentation ipynb --stage all
 
-The reference needs more than 40 GB per coupon: run the labels stage alone in
-a ``systemd-run --user --scope -p MemoryMax=100G`` scope.  The memmaps come
-afterwards, from ``scripts/extract_patches_memmap.py``.
+The labels stage needs the reference outputs of every volume first.  The
+memmaps come afterwards, from ``scripts/extract_patches_memmap.py``.
 """
 
 from __future__ import annotations
@@ -66,7 +69,7 @@ from poregen.dataset.holes import (  # noqa: E402
     patches_touching_holes,
 )
 from poregen.dataset.io import (  # noqa: E402
-    SEGMENTATION, compute_mask, discover_volumes, save_labels_zarr,
+    SEGMENTATION, read_reference_report, reference_outputs, save_labels_zarr,
 )
 from poregen.dataset.patch_index import (  # noqa: E402
     build_patch_index_for_volume, patch_fractions, save_patch_index,
@@ -80,6 +83,7 @@ log = logging.getLogger("build_split_v4")
 V3_ROOT = REPO / "data" / "split_v3"
 V3_ZARR = V3_ROOT / "volumes.zarr"
 RAW_ROOT = REPO / "raw_data"
+RAW_SOURCE = "MedidasDB"     # volume_id = f"{RAW_SOURCE}__{stem}"
 AUDIT_DIR = REPO / "runs" / "campaigns" / "30-reference-onlypores" / "audit"
 
 #: Set by :func:`configure` from ``--segmentation``.
@@ -171,21 +175,13 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
-def _cgroup_memory_peak() -> int | None:
-    """Peak memory of this process's cgroup (the systemd-run scope), in bytes."""
-    try:
-        rel = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[1]
-        return int(Path(f"/sys/fs/cgroup{rel}/memory.peak").read_text())
-    except (OSError, IndexError, ValueError):
-        return None
-
 
 # ---------------------------------------------------------------------------
 # Stage: labels
 # ---------------------------------------------------------------------------
 
 def stage_labels(only: list[str] | None = None) -> dict:
-    """Label every volume with the reference pipeline; resumable per volume."""
+    """Store the reference labels of every volume; resumable per volume."""
     from preprocess_tools.io import load_tif
 
     DST_ROOT.mkdir(parents=True, exist_ok=True)
@@ -197,18 +193,16 @@ def stage_labels(only: list[str] | None = None) -> dict:
                       "clockwise=False); reslicer.reslice(., 'Right'); "
                       "aligner.crop_walls(resliced) -> frontwall, backwall; "
                       "onlypores.onlypores(volume, frontwall, backwall, **params)"),
+        "source": ("reference notebook outputs, raw_data/MedidasDB/onlypores files/"
+                   "<stem>_{onlypores,samplemask,report}_<params>, written by "
+                   "scripts/build_reference_onlypores.py"),
         "label_rule": "0 material, 1 pore (mask), 2 air (sample_mask == 0); air wins",
         "volumes": {},
     })
-    import importlib.metadata as md
-    payload["preprocess_tools"] = {
-        "version": md.version("preprocess_tools"),
-        "direct_url": json.loads(md.distribution("preprocess_tools").read_text("direct_url.json") or "{}"),
-    }
     records = payload["volumes"]
+    params = SEGMENTATION[SEGMENTATION_NAME]
 
     v3 = zarr.open_group(str(V3_ZARR), mode="r")
-    paths = {v.volume_id: v.path for v in discover_volumes(RAW_ROOT)}
     vols = volume_ids()
     if only:
         vols = [v for v in vols if any(f"_{o}_" in v for o in only)]
@@ -221,7 +215,18 @@ def stage_labels(only: list[str] | None = None) -> dict:
             log.info("[%2d/%d] %s: done already", i, len(vols), vid)
             continue
         t0 = time.perf_counter()
-        volume = load_tif(paths[vid])
+        source, stem = vid.split("__", 1)
+        if source != RAW_SOURCE:
+            raise SystemExit(f"{vid}: not a {RAW_SOURCE} volume")
+        raw_path = RAW_ROOT / RAW_SOURCE / f"{stem}.tif"
+        ref = reference_outputs(raw_path, SEGMENTATION_NAME)
+        missing = [str(p) for p in ref.values() if not p.exists()]
+        if missing:
+            raise SystemExit(f"{vid}: reference outputs missing: {missing}")
+        report = read_reference_report(ref["report"])
+        if {k: report[k] for k in params} != params:
+            raise SystemExit(f"{vid}: report parameters {report} are not {params}")
+        volume = load_tif(raw_path)
         g3 = v3[vid]
         if volume.dtype != np.uint8 or volume.shape != g3["xct"].shape:
             raise SystemExit(f"{vid}: raw {volume.dtype} {volume.shape} vs "
@@ -232,8 +237,15 @@ def stage_labels(only: list[str] | None = None) -> dict:
             if not np.array_equal(volume[z0:z0 + SLAB], np.asarray(g3["xct"][z0:z0 + SLAB])):
                 raise SystemExit(f"{vid}: raw TIFF differs from split_v3 xct at z {z0}")
 
-        pores, sample, seg = compute_mask(volume, SEGMENTATION_NAME)
         del volume
+        pore_tif, sample_tif = load_tif(ref["onlypores"]), load_tif(ref["samplemask"])
+        for name, arr in (("onlypores", pore_tif), ("samplemask", sample_tif)):
+            if arr.shape != g3["xct"].shape or not np.isin(np.unique(arr), (0, 255)).all():
+                raise SystemExit(f"{vid}: {name} TIFF is {arr.dtype} {arr.shape}, values "
+                                 f"{np.unique(arr)[:5]}; expected 0/255 of the volume's shape")
+        pores = (pore_tif == 255).astype(np.uint8)
+        sample = sample_tif == 255
+        del pore_tif, sample_tif
         gc.collect()
 
         c = dict.fromkeys(("pore", "sample", "v3_pore", "v3_sample", "shared_pore",
@@ -258,16 +270,16 @@ def stage_labels(only: list[str] | None = None) -> dict:
 
         records[vid] = {
             "panel_id": panel_id(vid),
-            "raw_tif": str(paths[vid].relative_to(REPO)),
+            "raw_tif": str(raw_path.relative_to(REPO)),
+            "reference_files": {k: str(p.relative_to(REPO)) for k, p in ref.items()},
+            "reference_commit": report["reference_commit"],
             "shape_zyx": list(g3["xct"].shape),
             "raw_equals_split_v3_xct": True,
-            "frontwall": seg["frontwall"], "backwall": seg["backwall"],
+            "frontwall": report["frontwall"], "backwall": report["backwall"],
             "counts": c,
             "vvf": c["pore"] / c["sample"],
             "vvf_split_v3": c["v3_pore"] / c["v3_sample"],
             "wall_s": round(time.perf_counter() - t0, 1),
-            "cgroup_memory_peak_gb": (round(_cgroup_memory_peak() / 1e9, 2)
-                                      if _cgroup_memory_peak() else None),
         }
         _write_json(rec_path, payload)
         r = records[vid]
@@ -715,8 +727,9 @@ def stage_report() -> str:
          f"Reference pipeline `{labels['procedure']}`, settings `{SEGMENTATION_NAME}`: "
          f"sauvola_radius {params['sauvola_radius']}, sauvola_k {params['sauvola_k']}, "
          f"min_size_filtering {params['min_size_filtering']}. "
-         f"preprocess_tools {labels['preprocess_tools']['version']} at "
-         f"`{labels['preprocess_tools']['direct_url'].get('vcs_info', {}).get('commit_id')}`.",
+         f"Read from the reference notebook outputs ({labels['source']}); "
+         f"preprocess_tools commit(s) in their reports: "
+         f"{', '.join(sorted({r['reference_commit'] for r in labels['volumes'].values()}))}.",
          "",
          "`volumes.zarr/<id>/xct` is a symlink to the split_v3 xct array (checked "
          "equal to the raw TIFF voxel for voxel on every volume); `mask` and "
