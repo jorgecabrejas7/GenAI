@@ -7,7 +7,7 @@ Per raw TIFF: io.load_tif -> reslicer.rotate_90(v, False) -> reslicer.reslice(.,
 for each configuration:
     ipynb : radius 30, k 0.125, min_size 8   (produccion/onlypores/onlypores.ipynb cell 6)
     batch : radius 15, k 0.2,   min_size 8   (produccion/onlypores/onlypores_batch.ipynb cell 5)
-Outputs per specimen and configuration in <out>/<config>/: <specimen>_vvf_map.tif (float32 column porosity
+Outputs per specimen and configuration in <out>/<config>/ (and the 3-D pore/sample masks as compressed uint8 0/255 TIFFs in <out>/../masks/<config>/, the notebook's output format, for the dataset builder to reuse): <specimen>_vvf_map.tif (float32 column porosity
 over (y, x): pores / sample voxels along z), <specimen>_vvf_map.png, <specimen>_vvf_cells64.csv (64x64 cell map),
 and one vvf.csv per configuration with the whole-volume VVF = pores / sample_mask (the notebook's number).
 The reference package needs > 40 GB for one coupon; run one coupon at a time in a memory-capped scope.
@@ -79,6 +79,15 @@ def main():
                 continue
             pores, sample, _binary = ref_onlypores.onlypores(volume, fw, bw, **CONFIGS[cfg])
             pores = pores.astype(bool); sample = sample.astype(bool)
+            # The 3-D masks, in the notebook's own output format (uint8 0/255, deflate-compressed),
+            # so the dataset builder consumes them instead of recomputing: <masks>/<config>/<stem>_onlypores.tif
+            # and <stem>_samplemask.tif, plus a text report with walls and parameters.
+            mdir = out.parent / "masks" / cfg; mdir.mkdir(parents=True, exist_ok=True)
+            tifffile.imwrite(mdir / f"{p.stem}_onlypores.tif", pores.astype(np.uint8) * 255, compression="zlib", compressionargs={"level": 6})
+            tifffile.imwrite(mdir / f"{p.stem}_samplemask.tif", sample.astype(np.uint8) * 255, compression="zlib", compressionargs={"level": 6})
+            (mdir / f"{p.stem}_report.txt").write_text(
+                f"reference pipeline UTvsXCT-preprocessing 5d9da5b\nconfig {cfg}: {CONFIGS[cfg]}\nsize rule: remove components < min_size, keep == min_size\n"
+                f"frontwall {fw} backwall {bw}\nshape (z,y,x) {volume.shape}\npore_voxels {int(pores.sum())} sample_voxels {int(sample.sum())}\n")
             n_p, n_s = int(pores.sum()), int(sample.sum()); vvf = n_p / n_s if n_s else float("nan")
             ps, ss = pores.sum(0).astype(np.float32), sample.sum(0).astype(np.float32)
             vmap = np.where(ss > 0, ps / np.maximum(ss, 1), np.nan).astype(np.float32)
