@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from poregen.configuration import ResolvedExperiment
+from poregen.paths import DEFAULT_SPLIT
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,21 @@ def next_run_index(experiment_name: str, runs_root: Path) -> int:
     return max_index + 1
 
 
+def _run_split(cfg: dict[str, Any]) -> str | None:
+    """The split a config reads: dataset_root for a VAE, the split inside
+    latents_root for an LDM, which has no dataset_root of its own."""
+    data = cfg.get("data") or {}
+    root = data.get("dataset_root")
+    if isinstance(root, str) and root:
+        return root
+    latents = data.get("latents_root")
+    if isinstance(latents, str):
+        m = re.search(r"(?:^|/)(split_[^/]+)(?:/|$)", latents)
+        if m:
+            return m.group(1)
+    return None
+
+
 def build_run_name(
     cfg: dict[str, Any],
     *,
@@ -87,6 +103,15 @@ def build_run_name(
         transform = item.get("transform")
         value = _format_field_value(_deep_get(cfg, path), transform)
         suffix_parts.append(f"{label}{value}")
+
+    # A RUN ON ANY SPLIT BUT THE PUBLISHED ONE SAYS SO IN ITS NAME. A split_v4
+    # rf-8 and the split_v3 rf-8 behind the paper would otherwise have names
+    # that differ only in run index and timestamp, and a glob for "the rf-8
+    # run" would pick whichever is newer. split_v3 names are unchanged, so no
+    # existing run is renamed and every resume still parses.
+    split = _run_split(cfg)
+    if split is not None and split != DEFAULT_SPLIT:
+        suffix_parts.append(f"ds{split.removeprefix('split_')}")
 
     suffix = "-".join(suffix_parts)
     base = f"{experiment_name}-run-{run_index:0{index_width}d}-{timestamp}"

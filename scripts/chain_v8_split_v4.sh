@@ -134,7 +134,12 @@ if [ ! -d "$REPO/data/$SPLIT" ]; then
     say "STOP NOTICE: data/$SPLIT does not exist. Nothing is launched."
     exit 1
 fi
-for f in patch_index.parquet splits.json volumes.zarr; do
+# THE SAME FILE SET split_v3 HAS, plus the two the build writes LAST. The
+# build's own rc line cannot be trusted — it reports tee, not python — so its
+# success is judged by what it left behind: build_report.md is the final stage
+# of --stage all, and patches_meta.json the extractor's.
+for f in patch_index.parquet splits.json volumes.zarr class_weights.json \
+         build_report.md patches_meta.json patches_xct.bin patches_label.bin; do
     if [ ! -e "$REPO/data/$SPLIT/$f" ]; then
         say "STOP NOTICE: data/$SPLIT/$f is missing — the build is incomplete."
         exit 1
@@ -148,13 +153,16 @@ step "split_v3 gate reference" gates "5 s" \
 
 # ── 1. the VAE, exactly rf-8 ───────────────────────────────────────────────
 tb tb-vae "$REPO/runs/vae" 6006
-if ! smoke r08/reduction-factor-8 rf8; then
+if ! smoke r08/reduction-factor-8_v4 rf8; then
     say "STOP NOTICE: rf-8 does not fit at its own batch under the cap."
     exit 1
 fi
 run_watched "r08 rf-8 on $SPLIT" r08_rf8 "30 h" \
-    python scripts/train_vae.py run r08/reduction-factor-8
-VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*archv2-conv_noattn_dualbranch_cls-z8-*/ 2>/dev/null | head -1)
+    python scripts/train_vae.py run r08/reduction-factor-8_v4
+# The run name carries -ds<split> on any split but the published one
+# (poregen.runtime.runs), so this glob cannot pick r08-run-0004.
+VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*-z8-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "$VAE" ] && { say "STOP NOTICE: no rf-8 run on $SPLIT was found after training."; exit 1; }
 say "VAE = $(basename "${VAE%/}")"
 
 # ── 1b. the r08 acceptance checks, exactly the split_v3 ones ───────────────
@@ -197,7 +205,8 @@ check "ldm06 two-volume smoke" ldm_smoke fatal \
     bash scripts/ldm06_bringup.sh --smoke-only
 run_watched "ldm06 facedrop_from_start (130k)" ldm06 "16 h" \
     python scripts/train_ldm.py run ldm06/facedrop_from_start
-LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
+LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "$LDM" ] && { say "STOP NOTICE: no ldm06 run on $SPLIT was found after training."; exit 1; }
 say "LDM = $(basename "${LDM%/}")"
 
 # ── 3b. the LDM convergence gates, the same ones run-0001 was read on ──────
@@ -236,7 +245,8 @@ step "ddpm3d measure" ddpm3d_meas "8 min" \
     --root "$REPO/runs/campaigns/23-ddpm3d-baseline$SUF"
 run_watched "ldm25 phi-only (40k)" ldm25 "19 h" \
     python scripts/train_ldm.py run ldm25/phi_only
-LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*/ 2>/dev/null | head -1)
+LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "$LDM25" ] && { say "STOP NOTICE: no ldm25 run on $SPLIT was found after training."; exit 1; }
 C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF"
 for A in real-floor porosity_global microstructure cfg; do
     step "c25 generate $A" "c25_gen_$A" "varies" \

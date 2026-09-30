@@ -42,6 +42,19 @@ extends: ldm06/base
 
 overrides:
   training:
-    #: THE CHANGE, and the only one.
+    #: THE CHANGE against base's behaviour, and the only one.
     drop_nb_face: 0.1
     drop_nb: 0.05
+
+    #: THE v4 CADENCE, set by the author: partial validation every 1000 steps,
+    #: everything expensive every 10000. The 2000-step generation eval was the
+    #: cost — about 13 % of the wall together with the full validation and the
+    #: checkpoint write — and none of these touch what the model learns, only
+    #: how often it is looked at. There is no early stopping on the LDM, so no
+    #: stopping rule moves with them.
+    eval_every: 1000
+    full_val_every: 10000
+    gen_eval_every: 10000
+    gen_eval_samples: 64
+    gen_eval_ddim_steps: 50
+    save_every: 10000

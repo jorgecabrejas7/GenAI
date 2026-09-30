@@ -1,0 +1,33 @@
+experiment:
+  name: r08
+  variant: reduction-factor-8_v4
+  description: >-
+    r08 rf-8 for the split_v4 rebuild: THE SAME RUNG, with the validation
+    cadence the author set for v4 and a name that says v4. Every other value
+    is reduction-factor-8.yaml's, so the architecture, the loss, the batch and
+    the stopping rule are the split_v3 run's.
+
+    WHY A SEPARATE FILE. reduction-factor-8.yaml is the config behind
+    r08-run-0004, the paper's VAE, and every published number traces to it.
+    Editing it for v4 would make that trace point at a file that no longer
+    describes the run it produced. split_v3 configs are not edited.
+
+    THE ONE CHANGE: eval_every 62 -> 1000, partial validation every 1000
+    steps. The stopping rule is untouched and does not move with it — this
+    family stops on early_stopping_patience_steps 3000, in STEPS, which
+    campaign 09 fixed precisely because a re-split once halved eval_every and
+    silently halved the effective patience with it.
+
+    WHAT DOES MOVE, and the author has heard it: best.ckpt is chosen at eval
+    time, so validating 16x less often gives 16x fewer chances to choose it.
+    On split_v3 this rung stopped at step 36720 of 71690, so which checkpoint
+    is kept is a real choice. The author asked for 1000 knowing this.
+
+    The dataset is not named here: POREGEN_SPLIT=split_v4 redirects it, and
+    this file is equally valid on split_v5 when that build comes.
+
+extends: r08/reduction-factor-8
+
+overrides:
+  training:
+    eval_every: 1000

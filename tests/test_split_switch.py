@@ -135,3 +135,34 @@ class TestNoScriptKeepsItsOwnCopy:
         assert not offenders, (
             "these DEFAULTS name the split directly instead of asking "
             "poregen.paths: " + ", ".join(sorted(set(offenders))))
+
+
+class TestARunOnAnotherSplitSaysSo:
+    """A split_v4 rf-8 and the split_v3 rf-8 behind the paper would otherwise
+    have names differing only in index and timestamp, and a glob for "the rf-8
+    run" would take whichever is newer."""
+
+    @staticmethod
+    def _name(exp):
+        import poregen.configuration.experiments as E
+        from poregen.runtime.runs import build_run_name
+        return build_run_name(E.resolve_experiment(exp).cfg, run_index=1)
+
+    def test_a_published_split_run_is_named_as_before(self):
+        """No existing run is renamed, so every resume still parses."""
+        assert "dsv" not in self._name("r08/reduction-factor-8")
+        assert "dsv" not in self._name("ldm06/base")
+
+    def test_a_vae_on_split_v4_carries_it(self, forced):
+        forced("split_v4")
+        assert self._name("r08/reduction-factor-8_v4").endswith("-dsv4")
+
+    def test_an_ldm_on_split_v4_carries_it_from_its_latent_store(self, forced):
+        """An LDM has no dataset_root; its split is inside latents_root."""
+        forced("split_v4")
+        assert self._name("ldm06/facedrop_from_start").endswith("-dsv4")
+
+    def test_the_family_prefix_does_not_move(self, forced):
+        """tb-vae and tb-ldm group by the leading experiment name."""
+        forced("split_v4")
+        assert self._name("r08/reduction-factor-8_v4").startswith("r08-run-0001-")
