@@ -59,6 +59,11 @@ def main() -> int:
         for vid in ids:
             if vid in done:
                 continue
+            g = z[vid]
+            if "sample_mask" not in g:
+                # JI_11 is in the store but excluded from every split and carries no labels.
+                print(f"{vid}: no labels in the store (excluded volume), skipped", flush=True)
+                continue
             t0 = time.time()
             raw = RAW / (vid.split("__", 1)[1] + ".tif")
             xct = ref_io.load_tif(str(raw))
@@ -66,7 +71,6 @@ def main() -> int:
             del _binary, xct
             pores = pores.astype(bool)
             sample = sample.astype(bool)
-            g = z[vid]
             m_stored = g["mask"][:]
             s_stored = g["sample_mask"][:]
             row = {
