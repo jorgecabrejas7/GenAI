@@ -52,9 +52,10 @@ from poregen.models.vae.base import CLASS_AIR, CLASS_PORE  # noqa: E402
 from poregen.training.checkpoint import load_checkpoint  # noqa: E402
 from poregen.training.data import build_patch_dataloaders  # noqa: E402
 from poregen.training.engine import to_device_inputs  # noqa: E402
+from poregen.paths import data_root
 
 OUT_ROOT = REPO / "runs/campaigns/09-r08-latent-sweep"
-SPLITS_JSON = REPO / "data/split_v3/splits.json"
+SPLITS_JSON = data_root() / "splits.json"
 
 GATES = {
     "porosity_mae": ("<", 0.005),

@@ -48,6 +48,7 @@ from poregen.eval_v4.io import (
 )
 from poregen.eval_v4.manifest import Manifest, head_commit
 from poregen.eval_v4.microstructure import S2_WINDOW
+from poregen.paths import data_root as _split_root
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ def build_floor_volumes(
     import zarr  # noqa: PLC0415
 
     repo = Path(repo) if repo else repo_root()
-    data_root = Path(data_root) if data_root else repo / "data" / "split_v3"
+    data_root = Path(data_root) if data_root else _split_root(repo=repo)
     rw = _real_windows(repo)
     commit = head_commit(repo)
 

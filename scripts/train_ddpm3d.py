@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 
 import torch
+from poregen.paths import data_root
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -26,7 +27,7 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path,
                     default=REPO / "runs" / "campaigns" / "23-ddpm3d-baseline" / "train")
-    ap.add_argument("--data-root", type=Path, default=REPO / "data" / "split_v3")
+    ap.add_argument("--data-root", type=Path, default=data_root())
     ap.add_argument("--steps", type=int, default=120_000)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-hours", type=float, default=24.0)

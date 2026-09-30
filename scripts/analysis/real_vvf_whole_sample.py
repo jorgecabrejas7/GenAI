@@ -20,6 +20,7 @@ import argparse, csv, re, time
 from pathlib import Path
 
 import numpy as np, zarr
+from poregen.paths import data_root
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -31,7 +32,7 @@ def specimen(key: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--store", default=str(REPO / "data/split_v3/volumes.zarr"))
+    ap.add_argument("--store", default=str(data_root() / "volumes.zarr"))
     ap.add_argument("--pattern", default="Na_")
     ap.add_argument("--out", default=str(REPO / "runs/campaigns/21-real-porosity-by-region"))
     a = ap.parse_args()

@@ -70,13 +70,14 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 from preprocess_tools.onlypores import material_mask  # noqa: E402
+from poregen.paths import data_root
 
 #: A frame is ambiguous when the second-largest max-projection component
 #: exceeds this fraction of the largest: no single box is then the specimen.
 AMBIGUOUS_COMPONENT_RATIO = 0.10
 
-ZARR_ROOT = REPO / "data" / "split_v3" / "volumes.zarr"
-SPLITS = REPO / "data" / "split_v3" / "splits.json"
+ZARR_ROOT = data_root() / "volumes.zarr"
+SPLITS = data_root() / "splits.json"
 OUT_DIR = REPO / "runs" / "campaigns" / "15-sample-mask-audit"
 
 

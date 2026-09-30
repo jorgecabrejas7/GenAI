@@ -26,12 +26,13 @@ import json
 from pathlib import Path
 
 import numpy as np
+from poregen.paths import default_split
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--store", default="data/split_v3/latents_r08z8")
+    ap.add_argument("--store", default=f"data/{default_split()}/latents_r08z8")
     ap.add_argument("--split", default="train")
     ap.add_argument("--n", type=int, default=8000,
                     help="random rows to draw. The statistic is a per-channel std over "

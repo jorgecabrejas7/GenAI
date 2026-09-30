@@ -51,6 +51,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from poregen.paths import data_root
 
 REPO = Path(__file__).resolve().parents[2]
 logger = logging.getLogger("real_porosity_by_region")
@@ -355,7 +356,7 @@ a replacement for it.
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data-root", type=Path, default=REPO / "data" / "split_v3")
+    ap.add_argument("--data-root", type=Path, default=data_root())
     ap.add_argument("--out", type=Path,
                     default=REPO / "runs" / "campaigns" / "21-real-porosity-by-region")
     args = ap.parse_args()

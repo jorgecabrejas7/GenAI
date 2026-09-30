@@ -20,6 +20,7 @@ import numpy as np, zarr
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from poregen.paths import data_root
 
 REPO = Path(__file__).resolve().parents[2]
 CELL = 64
@@ -51,7 +52,7 @@ def stats(v):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--store", default=str(REPO / "data/split_v3/volumes.zarr")); ap.add_argument("--pattern", default="Na_")
+    ap.add_argument("--store", default=str(data_root() / "volumes.zarr")); ap.add_argument("--pattern", default="Na_")
     ap.add_argument("--out", default=str(REPO / "runs/campaigns/21-real-porosity-by-region/porosity_histograms"))
     ap.add_argument("--replot", action="store_true", help="re-draw from the saved cells_*.npy and cell_stats.csv without touching the store")
     a = ap.parse_args(); out = Path(a.out); out.mkdir(parents=True, exist_ok=True)

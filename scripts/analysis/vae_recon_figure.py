@@ -24,6 +24,7 @@ import torch
 import torch.nn.functional as F
 
 from vae_val_l1 import finalised_ckpt, load_model_and_patches  # same dir
+from poregen.paths import default_split
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -31,7 +32,7 @@ REPO = Path(__file__).resolve().parents[2]
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", action="append", required=True, help='"label=path[:ckpt]"')
-    ap.add_argument("--split", default="split_v3"); ap.add_argument("--exclude-train-of", default="split_v2")
+    ap.add_argument("--split", default=default_split()); ap.add_argument("--exclude-train-of", default="split_v2")
     ap.add_argument("--n-patches", type=int, default=6)
     ap.add_argument("--out", required=True)
     ap.add_argument("--title", default="",

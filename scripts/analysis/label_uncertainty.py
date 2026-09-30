@@ -73,6 +73,7 @@ import numpy as np
 import zarr
 from skimage import filters
 from skimage.measure import label as label_components, regionprops
+from poregen.paths import data_root
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
@@ -84,7 +85,7 @@ from poregen.eval_v4.manifest import head_commit  # noqa: E402
 from poregen.eval_v4.metrics import POROSITY_GATE  # noqa: E402
 from poregen.eval_v4.real_floor import test_volume_ids  # noqa: E402
 
-DATA_ROOT = REPO / "data" / "split_v3"
+DATA_ROOT = data_root()          # POREGEN_SPLIT redirects this
 ZARR_ROOT = DATA_ROOT / "volumes.zarr"
 OUT_DIR = REPO / "runs" / "campaigns" / "13-label-uncertainty"
 

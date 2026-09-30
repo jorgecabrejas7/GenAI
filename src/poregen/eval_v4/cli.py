@@ -21,6 +21,7 @@ from pathlib import Path
 
 from poregen.eval_v4.cases import ASSESSMENTS, MEASURE_ONLY, build_cases
 from poregen.eval_v4.io import case_dir, repo_root
+from poregen.paths import default_split
 
 log = logging.getLogger("eval_v4")
 
@@ -106,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     f = sub.add_parser("real-floor", help="cut and measure the real test crops")
     _add_root(f)
     f.add_argument("--data-root", type=Path, default=None,
-                   help="dataset root (default data/split_v3)")
+                   help=f"dataset root (default data/{default_split()})")
     f.add_argument("--shapes", nargs="*", default=["small", "large", "micro", "surface"],
                    choices=("small", "large", "micro", "surface"),
                    help="'micro' cuts the matched-porosity reference PAIRS the "

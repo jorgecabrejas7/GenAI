@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import copy
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 import yaml
 
@@ -177,6 +181,82 @@ def _normalise_cfg(cfg: dict[str, Any], *, experiment_id: str) -> dict[str, Any]
         parse_config(core_cfg)
     except (KeyError, TypeError):
         pass
+
+    # THE SPLIT NAMES ARE CHECKED SEPARATELY, because the block above is
+    # allowed to fail. parse_config carries a dataset_root/split_version
+    # consistency rule, but any TypeError from an unrelated field — r08/base's
+    # loss.class_ce_weight, for one — skips the whole validator, so that rule
+    # has not been running on the very configs it matters most for. Warned and
+    # not raised: r08/base ships with the two disagreeing and raising here
+    # would refuse the production VAE config.
+    data = cfg.get("data")
+    if isinstance(data, dict):
+        version, root = data.get("split_version"), data.get("dataset_root")
+        if version is not None and root is not None and root != f"split_{version}":
+            _logger.warning(
+                "%s names its split twice and they disagree: dataset_root=%r "
+                "but split_version=%r. The dataset_root is what is read.",
+                experiment_id, root, version,
+            )
+    return cfg
+
+
+def _apply_split_override(cfg: dict[str, Any], experiment_id: str, *,
+                          outermost: bool) -> dict[str, Any]:
+    """Let POREGEN_SPLIT redirect a config's dataset, latent store and version.
+
+    A switch every config could silently opt out of would not be a switch, so
+    the environment wins over ``data.dataset_root`` — and says so, loudly,
+    because a run that reads different data from the one its config names must
+    not do it quietly.
+
+    THREE KEYS NAME THE SPLIT and they must move together or not at all:
+
+    * ``dataset_root`` — the VAE configs' key. LDM configs do not have it.
+    * ``latents_root`` — the LDM configs' key, a path with the split inside it.
+      A latent store belongs to the split it was encoded from; moving the
+      dataset while the latents stay behind produces a plausible wrong number.
+    * ``split_version`` — a second name for the same split, which
+      ``parse_config`` refuses to let disagree with ``dataset_root``.
+
+    Nothing is ADDED: a config without a key keeps not having it, because
+    inventing one would give an LDM config a dataset root it never reads.
+    """
+    from poregen.paths import split_override  # noqa: PLC0415
+
+    # ONLY ON THE OUTERMOST RESOLUTION. Applying it to each ancestor as the
+    # chain is walked would redirect configs the caller never named and log a
+    # warning per level; the answer that matters is the merged one.
+    forced = split_override() if outermost else None
+    if not forced:
+        return cfg
+    data = cfg.get("data")
+    if not isinstance(data, dict):
+        return cfg
+
+    was = data.get("dataset_root")
+    if was is not None and was != forced:
+        data["dataset_root"] = forced
+        _logger.warning("POREGEN_SPLIT=%s overrides %s's data.dataset_root (%s)",
+                        forced, experiment_id, was)
+
+    latents = data.get("latents_root")
+    if isinstance(latents, str):
+        moved = re.sub(r"(^|/)split_[^/]+(/|$)", rf"\1{forced}\2", latents)
+        if moved != latents:
+            data["latents_root"] = moved
+            _logger.warning("POREGEN_SPLIT=%s moves %s's latents_root to %s",
+                            forced, experiment_id, moved)
+
+    # Only when it AGREED with the root it is paired with. A config whose
+    # split_version already disagrees is a separate problem and this is not
+    # the place to paper over it.
+    version = data.get("split_version")
+    if version is not None and was == f"split_{version}":
+        data["split_version"] = (forced[len("split_"):]
+                                 if forced.startswith("split_") else forced)
+        _logger.warning("POREGEN_SPLIT=%s moves %s's split_version %s -> %s",
+                        forced, experiment_id, version, data["split_version"])
     return cfg
 
 
@@ -235,6 +315,7 @@ def resolve_experiment(
             raise TypeError(f"'overrides' in {experiment_path} must be a mapping.")
         merged = _deep_merge(merged, overrides)
 
+    merged = _apply_split_override(merged, experiment_id, outermost=not _seen)
     merged = _normalise_cfg(merged, experiment_id=experiment_id)
     source_chain.append(str(experiment_path))
 

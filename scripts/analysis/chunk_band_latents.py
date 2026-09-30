@@ -36,6 +36,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from poregen.paths import latents_root
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -207,7 +208,7 @@ def main() -> int:
     ap.add_argument("--planes", type=int, nargs="+", default=[192, 384, 576, 768, 960])
     ap.add_argument("--axes", type=int, nargs="+", default=[1, 2])
     ap.add_argument("--store", type=Path,
-                    default=REPO / "data" / "split_v3" / "latents_r08z8")
+                    default=latents_root("latents_r08z8"))
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 

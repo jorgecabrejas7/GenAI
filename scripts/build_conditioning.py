@@ -53,9 +53,10 @@ from poregen.diffusion.conditioning import (
     POR_LOG_EPS,
     dist6_from_box_array,
 )
+from poregen.paths import data_root
 
 REPO = Path(__file__).resolve().parents[1]
-DATA_ROOT = REPO / "data" / "split_v3"
+DATA_ROOT = data_root()          # POREGEN_SPLIT redirects this
 # The orientation field is a per-VOLUME artefact and lives with the dataset
 # root that first produced it; split_v3's volumes.zarr is a symlink to the same
 # store, so the field describes both roots.

@@ -55,10 +55,11 @@ from poregen.dataset.loader import build_label  # noqa: E402
 from poregen.experiments.train_vae import build_model  # noqa: E402
 from poregen.models.vae.base import CLASS_AIR, CLASS_PORE  # noqa: E402
 from poregen.training.checkpoint import load_checkpoint  # noqa: E402
+from poregen.paths import data_root
 
 OUT_ROOT = REPO / "runs/campaigns/09-r08-latent-sweep"
-INDEX = REPO / "data/split_v3/patch_index.parquet"
-ZARR = REPO / "data/split_v3/volumes.zarr"
+INDEX = data_root() / "patch_index.parquet"
+ZARR = data_root() / "volumes.zarr"
 
 BINS = [0.0, 0.01, 0.03, 0.06, float("inf")]
 BIN_LABELS = ["<1%", "1-3%", "3-6%", ">=6%"]

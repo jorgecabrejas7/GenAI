@@ -41,6 +41,7 @@ from poregen.eval_v4.cases import (
 )
 from poregen.eval_v4.io import TILE, Case, load_cases, repo_root, write_results
 from poregen.eval_v4.manifest import Manifest
+from poregen.paths import latents_root
 
 logger = logging.getLogger(__name__)
 
@@ -1663,7 +1664,7 @@ def measure_stress_geometry(root, repo) -> dict:
 #: metadata so the reported conditioning value is the one the model actually
 #: received rather than a constant copied into source.
 def _por_log_stats(repo: Path) -> tuple[float, float] | None:
-    meta = Path(repo) / "data" / "split_v3" / "latents_r08z8" / "metadata.json"
+    meta = latents_root("latents_r08z8", repo=repo) / "metadata.json"
     if not meta.exists():
         return None
     try:

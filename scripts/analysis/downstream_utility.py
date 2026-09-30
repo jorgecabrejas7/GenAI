@@ -77,6 +77,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import REPO, write_findings, write_json  # noqa: E402
+from poregen.paths import data_root
 
 sys.path.insert(0, str(REPO / "src"))
 
@@ -106,7 +107,7 @@ from poregen.training.seed import seed_everything  # noqa: E402
 PATCH = 64
 STRIDE = 32
 
-DATA_ROOT = REPO / "data" / "split_v3"
+DATA_ROOT = data_root()          # POREGEN_SPLIT redirects this
 PATCH_INDEX = DATA_ROOT / "patch_index.parquet"
 CLASS_WEIGHTS_JSON = DATA_ROOT / "class_weights.json"
 CAMPAIGN_ROOT = REPO / "runs" / "campaigns" / "12-eval-v4"

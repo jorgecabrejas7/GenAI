@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from poregen.paths import default_split
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -64,7 +65,7 @@ def main() -> int:
             # after best.ckpt was written; an RR run's row therefore comes from
             # latest.ckpt (the finalised model), everything else from best.ckpt.
             ckpt = "latest.ckpt" if _needs_latest(d) else "best.ckpt"
-            row = evaluate(d, "split_v3", args.n_batches, 32,
+            row = evaluate(d, default_split(), args.n_batches, 32,
                            exclude_train_of="split_v2", ckpt=ckpt)
             row["checkpoint"] = ckpt
             rows.append(row)

@@ -27,12 +27,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from poregen.paths import default_split
 
 logger = logging.getLogger(__name__)
 
 PATCH = 64
 N_CLASSES = 3
-DATA_ROOT = Path("data/split_v3")
+DATA_ROOT = Path("data") / default_split()
 
 
 @dataclass
