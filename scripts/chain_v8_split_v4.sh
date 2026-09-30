@@ -153,9 +153,18 @@ step "split_v3 gate reference" gates "5 s" \
 
 # ── 1. the VAE, exactly rf-8 ───────────────────────────────────────────────
 tb tb-vae "$REPO/runs/vae" 6006
-if ! smoke r08/reduction-factor-8 rf8; then
-    say "STOP NOTICE: rf-8 does not fit at its own batch under the cap."
+# rc=1 IS A MEMORY RESULT, rc=2 IS NOT. The smoke script says so itself
+# ("NOT A MEMORY RESULT") and the chain used to read both as "does not fit" —
+# the false negative that sent B to its fallback on 2026-09-24, and that stopped
+# this chain's first launch on a script fault. Each is now reported as what it is.
+smoke r08/reduction-factor-8 rf8; SRC=$?
+if [ "$SRC" -eq 1 ]; then
+    say "STOP NOTICE: rf-8 does not fit at its own batch under the cap (a real OOM)."
     exit 1
+elif [ "$SRC" -ne 0 ]; then
+    say "STOP NOTICE: the rf-8 smoke FAILED WITHOUT MEASURING MEMORY (rc=$SRC) — a fault"
+    say "  in the smoke script or the config, not a memory result. See $S/v8_smoke_rf8.log"
+    exit "$SRC"
 fi
 run_watched "r08 rf-8 on $SPLIT" r08_rf8 "30 h" \
     python scripts/train_vae.py run r08/reduction-factor-8
@@ -354,8 +363,13 @@ step "c14 downstream" c14 "10 h" \
 # the harness: L1, texture and sharpness, the columns that refereed campaign 28.
 for pair in "2:32" "4:16" "8:8" "16:4" "32:2" "64:1"; do
     RF=${pair%%:*}; Z=${pair#*:}
-    if ! smoke "r08_grey/reduction-factor-$RF" "grey_rf$RF"; then
-        say "grey rf-$RF SKIPPED: does not fit at its own batch under the cap."
+    smoke "r08_grey/reduction-factor-$RF" "grey_rf$RF"; SRC=$?
+    if [ "$SRC" -eq 1 ]; then
+        say "grey rf-$RF SKIPPED: does not fit at its own batch under the cap (a real OOM)."
+        continue
+    elif [ "$SRC" -ne 0 ]; then
+        say "grey rf-$RF SKIPPED: its smoke FAILED WITHOUT MEASURING MEMORY (rc=$SRC) — a fault,"
+        say "  not a memory result. See $S/v8_smoke_grey_rf$RF.log"
         continue
     fi
     run_watched "grey-only VAE rf-$RF (z=$Z)" "grey_rf$RF" "15 h" \

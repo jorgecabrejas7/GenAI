@@ -29,10 +29,28 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 
 
+def synthetic_batch(bs: int, patch: int, device) -> dict:
+    """Every key a VAE's forward and its loss can read, at the real shapes.
+
+    Not just the grey. The 3-class model's encoder takes the label, and the
+    loss reads the pore mask and the label for its mask and class terms; a
+    batch without them measures a step the trainer never takes, and — as it
+    turned out — raises before it measures anything at all. They also cost
+    memory in the real step, so leaving them out under-states the peak.
+    """
+    shape = (bs, 1, patch, patch, patch)
+    return {
+        "xct": torch.rand(*shape, device=device),
+        "mask": (torch.rand(*shape, device=device) > 0.97).float(),
+        "label": torch.randint(0, 3, (bs, patch, patch, patch), device=device),
+    }
+
+
 def main() -> int:
     from poregen.configuration import resolve_experiment
     from poregen.experiments.train_vae import build_model
     from poregen.losses import compute_total_loss
+    from poregen.training.engine import to_device_inputs
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -55,7 +73,7 @@ def main() -> int:
     patch = int(cfg["model"]["patch_size"])
     # Random input at the real shape and the real batch: the allocator does not
     # care what the numbers are, only how many.
-    batch = {"xct": torch.rand(bs, 1, patch, patch, patch, device=dev)}
+    batch = synthetic_batch(bs, patch, dev)
 
     rank = cfg["model"].get("vrrae_rank")
     if rank is not None and rank > bs:
@@ -66,7 +84,17 @@ def main() -> int:
 
     try:
         model.train()
-        out = model(batch["xct"])
+        # THROUGH THE TRAINER'S OWN INPUT CONTRACT. Each model declares which
+        # batch keys its forward() consumes — (xct, label) for the r08 3-class
+        # VAE, (xct, mask) for the rest — and to_device_inputs feeds exactly
+        # those. Calling model(xct) directly broke on the paper's own VAE: the
+        # v4 rebuild's first stage died on "forward() missing 1 required
+        # positional argument: 'label'", which is not a memory result.
+        # model_args, NOT args: `args` is the parsed command line, and reusing
+        # the name clobbered it — the step succeeded and then the FITS line
+        # raised on args.experiment.
+        _, model_args = to_device_inputs(model, batch, dev)
+        out = model(*model_args)
         # The WHOLE cfg: compute_total_loss does `cfg["loss"]` itself. Passing
         # cfg["loss"] made it look up cfg["loss"]["loss"] and raise KeyError,
         # so this smoke test reported "did not fit" for BOTH A and B without
