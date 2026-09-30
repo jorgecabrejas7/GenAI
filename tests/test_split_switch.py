@@ -30,13 +30,13 @@ class TestTheSwitchItself:
         assert paths.DEFAULT_SPLIT == "split_v3"
 
     def test_the_environment_redirects_it(self, forced):
-        forced("split_v4_ipynb")
-        assert paths.default_split() == "split_v4_ipynb"
-        assert paths.data_root().name == "split_v4_ipynb"
+        forced("split_v4")
+        assert paths.default_split() == "split_v4"
+        assert paths.data_root().name == "split_v4"
 
     def test_an_explicit_argument_beats_the_environment(self, forced):
         """A caller that names a split means it."""
-        forced("split_v4_ipynb")
+        forced("split_v4")
         assert paths.data_root("split_v2").name == "split_v2"
 
     def test_an_empty_variable_is_not_a_split(self, monkeypatch):
@@ -45,9 +45,9 @@ class TestTheSwitchItself:
         assert paths.split_override() is None
 
     def test_a_latent_store_follows_its_split(self, forced):
-        forced("split_v4_ipynb")
+        forced("split_v4")
         assert paths.latents_root("latents_r08z8").parts[-2:] == (
-            "split_v4_ipynb", "latents_r08z8")
+            "split_v4", "latents_r08z8")
 
 
 class TestConfigsFollowTheSwitch:
@@ -60,21 +60,21 @@ class TestConfigsFollowTheSwitch:
 
     def test_a_vae_config_moves_its_dataset_root(self, forced):
         assert self._data("r08/base")["dataset_root"] == "split_v3"
-        forced("split_v4_ipynb")
-        assert self._data("r08/base")["dataset_root"] == "split_v4_ipynb"
+        forced("split_v4")
+        assert self._data("r08/base")["dataset_root"] == "split_v4"
 
     def test_an_ldm_config_moves_its_latent_store(self, forced):
         """LDM configs have no dataset_root at all — they are keyed on the
         store, and a store belongs to the split it was encoded from."""
         before = self._data("ldm06/base")["latents_root"]
         assert "split_v3" in before
-        forced("split_v4_ipynb")
+        forced("split_v4")
         assert self._data("ldm06/base")["latents_root"] == \
-            before.replace("split_v3", "split_v4_ipynb")
+            before.replace("split_v3", "split_v4")
 
     def test_nothing_is_invented(self, forced):
         """An LDM config must not acquire a dataset_root it never reads."""
-        forced("split_v4_ipynb")
+        forced("split_v4")
         assert "dataset_root" not in self._data("ldm06/base")
 
     def test_the_default_is_untouched(self):
@@ -86,12 +86,12 @@ class TestNoScriptKeepsItsOwnCopy:
 
     def test_the_analysis_constants_follow_the_switch(self, forced):
         """These were `REPO / "data" / "split_v3"` written out by hand."""
-        forced("split_v4_ipynb")
+        forced("split_v4")
         for mod in ("scripts.analysis.label_uncertainty",):
             pass  # scripts/ is not a package; covered by the source scan below
         import poregen.baselines.slicegan.data as sg
         importlib.reload(sg)
-        assert sg.DATA_ROOT.name == "split_v4_ipynb"
+        assert sg.DATA_ROOT.name == "split_v4"
 
     def test_no_default_names_the_split_directly(self):
         """Prose may mention split_v3 — it records what was measured, and a

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """docs/PAPER_RUNBOOK.md — one row per experiment the paper uses. (CPU, seconds.)
 
-GENERATED, NOT WRITTEN. The dataset is about to be rebuilt as split_v4_ipynb
+GENERATED, NOT WRITTEN. The dataset is about to be rebuilt as split_v4
 and every experiment must be rerunnable on the new pipeline, so the runbook has
 to be regenerable too: a hand-written table drifts from the run directories the
 moment anything is retrained, and a drifted runbook is worse than none because
@@ -188,7 +188,7 @@ def main() -> int:
     W(f"Every row below was measured on `{DEFAULT_SPLIT}`. To rerun the whole chain on a")
     W("new build, set the switch once — nothing else needs editing:\n")
     W("```bash")
-    W(f"export {SPLIT_ENV}=split_v4_ipynb")
+    W(f"export {SPLIT_ENV}=split_v4")
     W("```\n")
     W(f"`{SPLIT_ENV}` overrides `data.dataset_root`, `data.latents_root` and")
     W("`data.split_version` in every config, and every script default reads")

@@ -1,7 +1,7 @@
 """ONE place that decides which dataset split everything reads.
 
 The project has been rebuilt from ``split_v1`` to ``split_v2`` to ``split_v3``,
-and is about to be rebuilt again as ``split_v4_ipynb``. Each time, the split
+and is about to be rebuilt again as ``split_v4``. Each time, the split
 name was written into configs, script defaults, analysis constants and test
 fixtures separately, so pointing the pipeline at a new build meant editing
 dozens of files and hoping none was missed — and a missed one does not fail,
@@ -12,17 +12,24 @@ So the name lives here, and everything that needs it asks.
     from poregen.paths import default_split, data_root
 
     root = data_root()                  # <repo>/data/split_v3 by default
-    root = data_root("split_v4_ipynb")  # an explicit split always wins
+    root = data_root("split_v4")  # an explicit split always wins
 
 Set ``POREGEN_SPLIT`` to redirect the whole chain at once:
 
-    POREGEN_SPLIT=split_v4_ipynb python scripts/train_vae.py run r08/base
+    POREGEN_SPLIT=split_v4 python scripts/train_vae.py run r08/base
 
 THE ENVIRONMENT VARIABLE OVERRIDES A CONFIG'S OWN ``data.dataset_root``, and
 :func:`poregen.configuration.experiments.resolve_experiment` says so in the
 log when it does. That is deliberate: a switch that every config could silently
 opt out of would not be a switch. An explicit argument in code still wins over
 both, because a caller that names a split means it.
+
+The builds, and the reference segmentation each came from — the name alone does
+not say, and two builds of the same scans can differ only in their labels:
+
+    split_v3         the split every published number was measured on
+    split_v4         reference set r30_k0.125_min8  (onlypores.ipynb cell 6)
+    split_v5         reference set r15_k0.2_min8    (onlypores_batch.ipynb cell 5)
 
 ``DEFAULT_SPLIT`` is NOT changed when a new dataset is built. It stays
 ``split_v3`` until the author moves it, so a rerun of a published number

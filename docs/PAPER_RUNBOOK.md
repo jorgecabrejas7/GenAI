@@ -9,7 +9,7 @@ Every row below was measured on `split_v3`. To rerun the whole chain on a
 new build, set the switch once — nothing else needs editing:
 
 ```bash
-export POREGEN_SPLIT=split_v4_ipynb
+export POREGEN_SPLIT=split_v4
 ```
 
 `POREGEN_SPLIT` overrides `data.dataset_root`, `data.latents_root` and

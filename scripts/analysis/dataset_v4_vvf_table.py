@@ -10,7 +10,7 @@ walls, and the sample-mask voxels that differ.
 Writes <out>/vvf_per_volume.csv and <out>/vvf_per_volume.md, and prints the
 summary lines.
 
-    python scripts/analysis/dataset_v4_vvf_table.py --root data/split_v4_ipynb \
+    python scripts/analysis/dataset_v4_vvf_table.py --root data/split_v4 \
         --out runs/campaigns/31-dataset-v4/ipynb
 """
 from __future__ import annotations

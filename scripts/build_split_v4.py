@@ -9,8 +9,8 @@ split_v4 takes its labels from the reference notebook outputs themselves, which
 ``preprocess_tools``.  Those files are the source of truth; this builder does
 not segment.  It uses one of the two settings the notebooks use:
 
-    --segmentation ipynb   data/split_v4_ipynb   radius 30, k 0.125, min size 8  (onlypores.ipynb cell 6)
-    --segmentation batch   data/split_v4_batch   radius 15, k 0.2,   min size 8  (onlypores_batch.ipynb cell 5)
+    --segmentation ipynb   data/split_v4         radius 30, k 0.125, min size 8  (onlypores.ipynb cell 6)
+    --segmentation batch   data/split_v5         radius 15, k 0.2,   min size 8  (onlypores_batch.ipynb cell 5)
     --segmentation v3      data/split_v3_rebuild radius 30, k 0.125, no filter, no walls
                                                  (the old compute_mask; rebuilds split_v3, see
                                                  docs/REPRODUCE_SPLIT_V3.md)
@@ -123,7 +123,11 @@ SPLIT_RULE = (
 #: Audit run whose parameters each segmentation reproduces.
 AUDIT_RUN = {"ipynb": "single_notebook", "batch": "notebook", "v3": "defaults"}
 #: Root directory per segmentation name.
-ROOT_NAME = {"ipynb": "split_v4_ipynb", "batch": "split_v4_batch", "v3": "split_v3_rebuild"}
+#: The author names the builds by their ORDER, not by the notebook that
+#: produced them: split_v4 is the r30/k0.125/min8 reference set and split_v5
+#: the r15/k0.2/min8 one. The --segmentation flag still names the notebook,
+#: because that is what the caller is choosing between.
+ROOT_NAME = {"ipynb": "split_v4", "batch": "split_v5", "v3": "split_v3_rebuild"}
 AUDIT_SPECIMENS = ("Na_04_2", "Na_02_2")
 
 
