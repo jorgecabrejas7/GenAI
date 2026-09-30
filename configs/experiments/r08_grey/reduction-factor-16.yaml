@@ -1,0 +1,29 @@
+experiment:
+  name: r08_grey
+  variant: reduction-factor-16
+  description: >-
+    GREY ONLY at 16x reduction: the r08/base rung with the encoder fed
+    the XCT grey alone and the decoder reconstructing the grey alone. Part of
+    the single-channel sweep — grey, pore, air, every reduction factor — that
+    asks WHICH CHANNEL limits compression, so each rung is the r08 rung it is
+    named after in everything except what goes in and comes out.
+
+    What changes against r08/base: the model is v2.conv_noattn_xctonly,
+    in_channels 1, with no class head. The 3-class loss terms are inherited and
+    simply do not fire — class_logits and mask_logits are None, so the loss is
+    Charbonnier on the grey plus the KL, verified on a fake batch before this
+    file was written. Everything else — trunk width, latent size, beta, free
+    bits, batch, the step-based stopping rule — is the r08 rung's.
+
+    Cadence is the author's v4 setting, partial validation every 1000 steps.
+    The dataset is not named: POREGEN_SPLIT selects it, and the run name
+    carries -ds<split> on any split but split_v3.
+
+extends: r08/base
+
+overrides:
+  model:
+    name: v2.conv_noattn_xctonly
+    in_channels: 1
+  training:
+    eval_every: 1000
