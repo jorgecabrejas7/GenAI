@@ -287,5 +287,32 @@ step "c14 downstream" c14 "10 h" \
     python scripts/analysis/downstream_utility.py \
     --out "$REPO/runs/campaigns/14-downstream-utility$SUF"
 
+# ── 9. the single-channel sweep: GREY ONLY, six rungs ──────────────────────
+# Which channel limits compression. Each rung is the r08 rung it is named after
+# with the grey-only model swapped in; the stopping rule is r08's, in steps.
+# Pore and air are NOT queued: they need a model and a loss that do not exist,
+# and which reading to build is the author's decision. When it comes they join
+# here, after grey, as their own stage.
+# The rung report and the calibration probe are 3-class instruments — pore and
+# air Dice — and have nothing to measure on a grey-only model, so the check is
+# the harness: L1, texture and sharpness, the columns that refereed campaign 28.
+for pair in "2:32" "4:16" "8:8" "16:4" "32:2" "64:1"; do
+    RF=${pair%%:*}; Z=${pair#*:}
+    if ! smoke "r08_grey/reduction-factor-$RF" "grey_rf$RF"; then
+        say "grey rf-$RF SKIPPED: does not fit at its own batch under the cap."
+        continue
+    fi
+    run_watched "grey-only VAE rf-$RF (z=$Z)" "grey_rf$RF" "15 h" \
+        python scripts/train_vae.py run "r08_grey/reduction-factor-$RF"
+    GREY=$(ls -dt "$REPO"/runs/vae/r08_grey-run-*-z$Z-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+    if [ -z "$GREY" ]; then
+        say "grey rf-$RF: no run directory found after training — check not run"
+        continue
+    fi
+    check "grey rf-$RF harness (L1, texture, sharpness)" "grey_rf${RF}_l1" ok \
+        python scripts/analysis/vae_val_l1.py --run "${GREY%/}" \
+        --split "$SPLIT" --n-batches 20
+done
+
 say "BLOCK COMPLETE — the paper is rebuilt on $SPLIT — $(mem_line)"
-say "TOTAL ETA from the split_v3 wall times: about 130 h of card time."
+say "TOTAL ETA from the split_v3 wall times: about 130 h for the paper, then about 90 h for the six grey rungs."
