@@ -101,8 +101,11 @@ INTERIOR_MARGIN = 64            # distance to the specimen bbox faces
 AIR_HEAVY = 0.5                 # "mostly air" threshold for the report
 SLAB = 64                       # z slices per read when comparing with split_v3
 
-# Not in split_v2 or split_v3 either.
-EXCLUDED = ("MedidasDB__Juan_Ignacio_probetas_11_volume_eq_aligned",)
+# Author's decision 2026-09-30: every volume in the store is in the build, JI_11
+# included (it was left out of split_v2 and split_v3 without a recorded reason).
+# Its xct is in the store but it carries no split_v3 labels, so the per-volume
+# comparisons with split_v3 are None for it.
+EXCLUDED: tuple[str, ...] = ()
 
 # Whole panels, so no panel is split across train/val/test.  split_v3's panels.
 TEST_PANELS = ("Na_05", "Na_09", "JI_8")
@@ -169,7 +172,7 @@ def split_of(pid: str) -> str:
 
 
 def volume_ids() -> list[str]:
-    """The split_v3 volumes: the same 80 coupons."""
+    """Every volume in the store: split_v3's 80 coupons plus JI_11."""
     g = zarr.open_group(str(V3_ZARR), mode="r")
     return sorted(v for v in g.group_keys() if v not in EXCLUDED)
 
@@ -259,13 +262,16 @@ def stage_labels(only: list[str] | None = None) -> dict:
 
         c = dict.fromkeys(("pore", "sample", "v3_pore", "v3_sample", "shared_pore",
                            "pore_new_only", "pore_v3_only", "sample_diff"), 0)
+        in_v3 = "mask" in g3 and "sample_mask" in g3
         for z0 in range(0, depth, SLAB):
             p = pores[z0:z0 + SLAB] > 0
             s = sample[z0:z0 + SLAB]
-            p3 = np.asarray(g3["mask"][z0:z0 + SLAB]) > 0
-            s3 = np.asarray(g3["sample_mask"][z0:z0 + SLAB]) > 0
             c["pore"] += int(np.count_nonzero(p))
             c["sample"] += int(np.count_nonzero(s))
+            if not in_v3:
+                continue
+            p3 = np.asarray(g3["mask"][z0:z0 + SLAB]) > 0
+            s3 = np.asarray(g3["sample_mask"][z0:z0 + SLAB]) > 0
             c["v3_pore"] += int(np.count_nonzero(p3))
             c["v3_sample"] += int(np.count_nonzero(s3))
             c["shared_pore"] += int(np.count_nonzero(p & p3))
@@ -287,14 +293,16 @@ def stage_labels(only: list[str] | None = None) -> dict:
             "frontwall": report["frontwall"], "backwall": report["backwall"],
             "counts": c,
             "vvf": c["pore"] / c["sample"],
-            "vvf_split_v3": c["v3_pore"] / c["v3_sample"],
+            "in_split_v3": in_v3,
+            "vvf_split_v3": (c["v3_pore"] / c["v3_sample"]) if in_v3 else None,
             "wall_s": round(time.perf_counter() - t0, 1),
         }
         _write_json(rec_path, payload)
         r = records[vid]
-        log.info("[%2d/%d] %s: walls %d/%d  VVF %.4f %% (split_v3 %.4f %%)  "
+        log.info("[%2d/%d] %s: walls %d/%d  VVF %.4f %% (split_v3 %s)  "
                  "sample diff %d  %.0fs", i, len(vols), vid, r["frontwall"],
-                 r["backwall"], 100 * r["vvf"], 100 * r["vvf_split_v3"],
+                 r["backwall"], 100 * r["vvf"],
+                 f"{100 * r['vvf_split_v3']:.4f} %" if in_v3 else "not in split_v3",
                  c["sample_diff"], r["wall_s"])
     return payload
 
@@ -370,9 +378,10 @@ def stage_holes() -> dict:
         records[vid] = {k: v for k, v in res.items() if k != "mask"}
         records[vid]["mask_file"] = f"holes/{vid}.npy"
         records[vid]["shape_yx"] = list(res["mask"].shape)
-        same = np.array_equal(res["mask"], np.load(V3_ROOT / v3_holes[vid]["mask_file"]))
-        records[vid]["mask_equals_split_v3"] = bool(same)
-        same_as_v3 += same
+        same = (np.array_equal(res["mask"], np.load(V3_ROOT / v3_holes[vid]["mask_file"]))
+                if vid in v3_holes else None)
+        records[vid]["mask_equals_split_v3"] = same
+        same_as_v3 += bool(same)
         log.info("[%2d/%d] %s: %d holes, same as split_v3: %s", i, len(vols), vid,
                  res["n_holes"], same)
     flagged = {v: r["n_holes"] for v, r in records.items()
@@ -749,8 +758,10 @@ def stage_report() -> str:
          "| volume | panel | walls (front/back) | VVF % | split_v3 VVF % | sample voxels differing from split_v3 |",
          "|---|---|---|---|---|---|"]
     for vid, r in sorted(labels["volumes"].items()):
+        v3_vvf = "—" if r["vvf_split_v3"] is None else f"{100 * r['vvf_split_v3']:.4f}"
         L.append(f"| {vid} | {r['panel_id']} | {r['frontwall']}/{r['backwall']} "
-                 f"| {100 * r['vvf']:.4f} | {100 * r['vvf_split_v3']:.4f} "
+                 f"| {100 * r['vvf']:.4f} | "
+                 f"{v3_vvf} "
                  f"| {r['counts']['sample_diff']} |")
     L += ["", "## Per split", "",
           "| split | volumes | panels | patches before | dropped for holes "
