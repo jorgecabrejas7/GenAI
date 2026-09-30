@@ -42,6 +42,87 @@ def _dig(d, *path, default=None):
     return d
 
 
+def _splits(split: str) -> dict[str, set[str]] | None:
+    """{split name: {volume ids}} for a build, or None when it is not on disk."""
+    f = REPO / "data" / split / "splits.json"
+    d = _load(f)
+    vols = _dig(d or {}, "volumes", default=None)
+    if not isinstance(vols, dict):
+        return None
+    out: dict[str, set[str]] = {}
+    for vol, where in vols.items():
+        out.setdefault(where, set()).add(vol)
+    return out
+
+
+def _short(v: str) -> str:
+    """The readable tail of a volume id."""
+    tail = v
+    for marker in ("probetas_", "Probetas_"):
+        if marker in v:
+            tail = v.rsplit(marker, 1)[-1]
+            break
+    tail = tail.replace("_volume_eq_rotated_aligned", "").replace("_volume_eq_aligned", "")
+    # The Juan_Ignacio panels are numbered 4-12 with no prefix of their own, so
+    # stripping the path leaves a bare "12" that reads as a Nacho specimen.
+    return f"JI_{tail}" if "Juan_Ignacio" in v else tail
+    
+
+
+def _provenance(W, compare_to: str = "split_v4") -> None:
+    """WHICH VOLUMES the gates above were measured on, and whether the rebuild
+    changed them.
+
+    A gate is a number on a dataset. If the rebuild moves a panel between val
+    and test, the rows above stop being a like-for-like comparison and become
+    two numbers on two different sets — and nothing in a table of numbers says
+    so. This is the line that says it.
+    """
+    base = _splits("split_v3")
+    W("\n## Which volumes these gates were measured on\n")
+    if base is None:
+        W("`data/split_v3/splits.json` is not readable, so the provenance of the")
+        W("rows above cannot be stated. Treat every comparison as unverified.\n")
+        return
+    W(f"split_v3: {len(base.get('train', ()))} train, {len(base.get('val', ()))} val, "
+      f"{len(base.get('test', ()))} test volumes.\n")
+    W(f"- **val** — {', '.join(sorted(_short(v) for v in base.get('val', ())))}")
+    W(f"- **test** — {', '.join(sorted(_short(v) for v in base.get('test', ())))}\n")
+
+    other = _splits(compare_to)
+    if other is None:
+        W(f"`data/{compare_to}/splits.json` does not exist yet, so the comparison")
+        W("cannot be made. **The r08 rows above are like-for-like only if")
+        W(f"{compare_to} keeps the same val and test panels.** The stated plan is")
+        W("that it does — split_v3's assignment is kept and only JI_11 is added, to")
+        W("train — and this line will confirm or contradict it the moment the build")
+        W("exists.\n")
+        return
+    same_val = base.get("val", set()) == other.get("val", set())
+    same_test = base.get("test", set()) == other.get("test", set())
+    added = set().union(*other.values()) - set().union(*base.values())
+    removed = set().union(*base.values()) - set().union(*other.values())
+    if same_val and same_test:
+        W(f"**{compare_to} keeps the same val and test panels**, so the r08 rows above")
+        W("are a like-for-like comparison.")
+    else:
+        W(f"**{compare_to} CHANGED the evaluation panels. The r08 rows above are NOT")
+        W("a like-for-like comparison** and must not be read as one.")
+        if not same_val:
+            W(f"  - val gained {sorted(_short(v) for v in other.get('val', set()) - base.get('val', set()))}, "
+              f"lost {sorted(_short(v) for v in base.get('val', set()) - other.get('val', set()))}")
+        if not same_test:
+            W(f"  - test gained {sorted(_short(v) for v in other.get('test', set()) - base.get('test', set()))}, "
+              f"lost {sorted(_short(v) for v in base.get('test', set()) - other.get('test', set()))}")
+    if added:
+        where = {v: w for w, vs in other.items() for v in vs}
+        W(f"\nAdded in {compare_to}: "
+          + ", ".join(f"{_short(v)} ({where[v]})" for v in sorted(added)))
+    if removed:
+        W(f"\nRemoved: {', '.join(sorted(_short(v) for v in removed))}")
+    W("")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -161,6 +242,8 @@ def main() -> int:
               f"orientation {_dig(al, 'orient_zero', 'pct_of_noise'):.2f} %, "
               f"neighbours {_dig(al, 'nb_unknown', 'pct_of_noise'):.2f} %. "
               "A conditioning input whose ablation moves nothing is not being used.\n")
+
+    _provenance(W)
 
     W("\n## How the v4 chain uses these\n")
     W("`scripts/chain_v8_split_v4.sh` runs the same checks as stages and writes a")
