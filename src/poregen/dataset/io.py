@@ -90,7 +90,13 @@ SEGMENTATION: dict[str, dict] = {
     "ipynb": {"sauvola_radius": 30, "sauvola_k": 0.125, "min_size_filtering": 8},
     # onlypores_batch.ipynb, cell 5
     "batch": {"sauvola_radius": 15, "sauvola_k": 0.2, "min_size_filtering": 8},
+    # What PoreGen's compute_mask did until GenAI cce9000: onlypores(xct) at the
+    # function defaults, no wall detection.  The split_v1-v3 labels.
+    "v3": {"sauvola_radius": 30, "sauvola_k": 0.125, "min_size_filtering": -1},
 }
+#: Settings run WITHOUT wall detection: onlypores is called with its default
+#: frontwall=0, backwall=0, as the old compute_mask called it.
+NO_WALLS = frozenset({"v3"})
 
 
 def find_walls(volume: np.ndarray) -> tuple[int, int]:
@@ -119,6 +125,8 @@ def reference_outputs(volume_path: str | Path, segmentation: str) -> dict[str, P
     """
     p = SEGMENTATION[segmentation]
     tag = f"r{p['sauvola_radius']}_k{p['sauvola_k']}_min{p['min_size_filtering']}"
+    if segmentation in NO_WALLS:
+        tag += "_nowalls"
     volume_path = Path(volume_path)
     d = volume_path.parent / REFERENCE_OUTPUT_DIR
     return {name: d / f"{volume_path.stem}_{name}_{tag}.{'txt' if name == 'report' else 'tif'}"
@@ -140,7 +148,7 @@ def read_reference_report(path: str | Path) -> dict:
         "backwall": int(grab(r"Back wall slice: (-?\d+)")),
         "sauvola_radius": int(grab(r"window_size \(sauvola_radius\): (\d+)")),
         "sauvola_k": float(grab(r"- k: ([0-9.]+)")),
-        "min_size_filtering": int(grab(r"- min_size: (\d+) voxels")),
+        "min_size_filtering": int(grab(r"(?:- min_size: |min_size_filtering = )(-?\d+)")),
         "reference_commit": grab(r'"commit_id": "([0-9a-f]+)"'),
     }
 
@@ -163,7 +171,7 @@ def compute_mask(volume: np.ndarray, segmentation: str) -> tuple[np.ndarray, np.
     from preprocess_tools import onlypores
 
     params = SEGMENTATION[segmentation]
-    frontwall, backwall = find_walls(volume)
+    frontwall, backwall = (0, 0) if segmentation in NO_WALLS else find_walls(volume)
     pores, sample_mask, _binary = onlypores.onlypores(volume, frontwall, backwall, **params)
     if pores is None:
         raise ValueError("onlypores found no non-zero voxel in the volume")

@@ -11,6 +11,9 @@ not segment.  It uses one of the two settings the notebooks use:
 
     --segmentation ipynb   data/split_v4_ipynb   radius 30, k 0.125, min size 8  (onlypores.ipynb cell 6)
     --segmentation batch   data/split_v4_batch   radius 15, k 0.2,   min size 8  (onlypores_batch.ipynb cell 5)
+    --segmentation v3      data/split_v3_rebuild radius 30, k 0.125, no filter, no walls
+                                                 (the old compute_mask; rebuilds split_v3, see
+                                                 docs/REPRODUCE_SPLIT_V3.md)
 
 All other steps are those of split_v3 (``docs/dataset_provenance.md``, section
 ``data/split_v3``): drilled holes removed, split by panel, 64³ patches at stride
@@ -69,7 +72,7 @@ from poregen.dataset.holes import (  # noqa: E402
     patches_touching_holes,
 )
 from poregen.dataset.io import (  # noqa: E402
-    SEGMENTATION, read_reference_report, reference_outputs, save_labels_zarr,
+    NO_WALLS, SEGMENTATION, read_reference_report, reference_outputs, save_labels_zarr,
 )
 from poregen.dataset.patch_index import (  # noqa: E402
     build_patch_index_for_volume, patch_fractions, save_patch_index,
@@ -118,14 +121,16 @@ SPLIT_RULE = (
 )
 
 #: Audit run whose parameters each segmentation reproduces.
-AUDIT_RUN = {"ipynb": "single_notebook", "batch": "notebook"}
+AUDIT_RUN = {"ipynb": "single_notebook", "batch": "notebook", "v3": "defaults"}
+#: Root directory per segmentation name.
+ROOT_NAME = {"ipynb": "split_v4_ipynb", "batch": "split_v4_batch", "v3": "split_v3_rebuild"}
 AUDIT_SPECIMENS = ("Na_04_2", "Na_02_2")
 
 
 def configure(segmentation: str) -> None:
     global SEGMENTATION_NAME, DST_ROOT, ZARR_DST
     SEGMENTATION_NAME = segmentation
-    DST_ROOT = REPO / "data" / f"split_v4_{segmentation}"
+    DST_ROOT = REPO / "data" / ROOT_NAME[segmentation]
     ZARR_DST = DST_ROOT / "volumes.zarr"
 
 
@@ -315,10 +320,13 @@ def stage_audit() -> dict:
         summ = json.loads(summ_path.read_text())
         walls = json.loads((d / "walls.json").read_text())["walls"]
         exp_sample = summ["sample_both"] + summ["sample_ref_only"]
-        exp_pore = summ["ref_pores"] - summ["pores_size_eq_min_voxels"]
+        # The defaults run has no size filter, so no exactly-min_size voxels to take off.
+        exp_pore = summ["ref_pores"] - summ.get("pores_size_eq_min_voxels", 0)
         r = labels[vid]
         got = {"frontwall": r["frontwall"], "backwall": r["backwall"],
                "pore": r["counts"]["pore"], "sample": r["counts"]["sample"]}
+        if SEGMENTATION_NAME in NO_WALLS:
+            walls = {"frontwall": 0, "backwall": 0}
         exp = {"frontwall": walls["frontwall"], "backwall": walls["backwall"],
                "pore": exp_pore, "sample": exp_sample}
         match = got == exp
@@ -326,10 +334,10 @@ def stage_audit() -> dict:
         rows.append({"specimen": sp, "audit_file": str(summ_path.relative_to(REPO)),
                      "expected": exp, "got": got, "match": match,
                      "vvf_pct": 100 * r["vvf"],
-                     "audit_vvf_pct_skimage_lt_0_26": summ["vvf_ref_pct"],
+                     "audit_vvf_pct_headline": summ["vvf_ref_pct"],
                      "audit_vvf_pct_skimage_0_26": 100 * exp_pore / exp_sample})
         log.info("%s: %s  walls %d/%d  pores %d (audit %d)  sample %d (audit %d)  "
-                 "VVF %.4f %%  [audit headline %.4f %% with skimage < 0.26]",
+                 "VVF %.4f %%  [audit headline %.4f %%]",
                  sp, "MATCH" if match else "MISMATCH", got["frontwall"], got["backwall"],
                  got["pore"], exp_pore, got["sample"], exp_sample, 100 * r["vvf"],
                  summ["vvf_ref_pct"])
@@ -400,7 +408,7 @@ def stage_splits() -> dict:
     for v, r in per_vol.items():
         panels.setdefault(r["panel_id"], []).append(v)
     payload = {
-        "version": f"v4_{SEGMENTATION_NAME}",
+        "version": ROOT_NAME[SEGMENTATION_NAME],
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "rule": SPLIT_RULE,
         "test_panels": list(TEST_PANELS),
