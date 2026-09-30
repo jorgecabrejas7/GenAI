@@ -1,10 +1,9 @@
 """onlypores porosity of the eval-v3 volumes — global and local (CPU).
 
-Measures every regenerated volume with the SAME segmentation the real dataset
-was built with (``poregen.dataset.segmentation.onlypores`` at the defaults
-``poregen.dataset.io.compute_mask`` uses: sauvola_radius=30, sauvola_k=0.125,
-frontwall=0, backwall=0, min_size_filtering=-1), independently of the model's
-own mask head.
+Measures every regenerated volume with the SAME segmentation the split_v1-v3
+labels were built with (the reference ``preprocess_tools.onlypores.onlypores``
+at its function defaults: sauvola_radius=30, sauvola_k=0.125, frontwall=0,
+backwall=0, min_size_filtering=-1), independently of the model's own mask head.
 
 Scale
 -----
@@ -65,7 +64,7 @@ from air_audit_v2 import REAL_BOX, find_interior_boxes, real_split_names  # noqa
 from onlypores_generated import validate_real  # noqa: E402
 
 sys.path.insert(0, str(REPO / "src"))
-from poregen.dataset.segmentation import onlypores  # noqa: E402
+from preprocess_tools.onlypores import onlypores  # noqa: E402
 
 OUT_DIR = ROOT / "onlypores"
 N_CONTROL_VOLUMES = 5
@@ -332,8 +331,8 @@ def main() -> None:
                 pv.loc[pv.material_mode_u8 > 0, "material_mode_u8"].mean()),
             "real_material_mode_u8_reference": 208.6,
         },
-        "segmentation": "poregen.dataset.segmentation.onlypores at "
-                        "compute_mask defaults (sauvola_radius=30, "
+        "segmentation": "preprocess_tools.onlypores.onlypores at its "
+                        "function defaults (sauvola_radius=30, "
                         "sauvola_k=0.125, min_size_filtering=-1)",
         "real_validation": real_val,
         "real_192_control": control,

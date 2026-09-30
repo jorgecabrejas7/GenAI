@@ -37,6 +37,10 @@ fill-voids>=2.0
 joblib>=1.3
 pyyaml>=6.0
 
+# Reference segmentation, pinned by commit (see pyproject.toml). It pins
+# scikit-image==0.26.0 and PyWavelets==1.10.0.
+preprocess_tools @ git+file:///home/jorgecabrejas/Dev/UTvsXCT-preprocessing@65c1eea6964afd5f7d2a03636ddb7b94370d1050
+
 # Vendored (see third_party/RR_layer, MIT licensed, pinned at commit
 # de2e8a5035cf0d5897a59f7f743fe8c3655a7caa) — RRLayer used by the VRRAE VAE
 # bottleneck (v2.vrrae). Local deviations: third_party/RR_layer/PATCHES.md.

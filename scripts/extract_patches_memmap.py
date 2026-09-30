@@ -292,7 +292,7 @@ def main() -> None:
     # patches_meta.json describes the WHOLE extraction, however many times it
     # was resumed. class_counts only saw this run's volumes, so read the rest
     # straight out of the label array. The counts drive the 3-class weights
-    # (scripts/build_split_v3.py --stage weights), so a partial count is a
+    # (scripts/build_split_v4.py --stage weights), so a partial count is a
     # wrong weight, not just a cosmetic error.
     if resumed_rows:
         rows = np.sort(np.concatenate(resumed_rows))    # sorted → sequential reads

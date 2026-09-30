@@ -3,9 +3,9 @@
 The reference is ``UTvsXCT-preprocessing/produccion/onlypores/onlypores_batch.ipynb``:
 reslice for wall detection, ``aligner.crop_walls``, then
 ``onlypores.onlypores(volume, frontwall, backwall, 15, 0.2, 8)``.  Its code is
-imported from the cloned repository and called unchanged.  ``cv2`` is stubbed
-because ``preprocess_tools/__init__`` pulls in ``register.py``, which the
-onlypores path never calls.
+the installed, commit-pinned ``preprocess_tools`` package, called unchanged.
+(At GenAI 826dbbe, when the audit ran, it was imported from the clone at
+5d9da5b with ``cv2`` stubbed; the pinned commit is bit-identical to it.)
 
 Three reference runs per volume:
   notebook        : the batch notebook's walls and parameters (15, 0.2, min size 8)
@@ -16,13 +16,13 @@ Three reference runs per volume:
              no filter) — the call PoreGen's ``compute_mask`` makes
 
 Each is compared voxel by voxel with ``volumes.zarr[<key>]['mask']`` and
-``['sample_mask']``, read in z-slabs.  Then the repo-root ``onlypores.py``
-material mask (column projection) is computed for the figure: one
-through-thickness (z, x) slice through a drilled hole, showing the reference,
-stored and repo-root sample masks.
+``['sample_mask']``, read in z-slabs.  The ``base`` stage saves one
+through-thickness (z, x) slice through a drilled hole of the XCT and the stored
+masks for the figure.  (At 826dbbe this stage was ``root`` and also computed the
+repo-root ``onlypores.py`` column mask; that program is deleted.)
 
 Usage (memory capped, CPU only, one stage per process, walls first):
-  for st in walls notebook single_notebook defaults root; do
+  for st in walls notebook single_notebook defaults base; do
     systemd-run --user --scope -p MemoryMax=40G -p MemorySwapMax=0 env LOKY_MAX_CPU_COUNT=4 \
       python scripts/analysis/reference_onlypores_audit.py Na_04_2 $st --out <dir>
   done
@@ -35,15 +35,12 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
 import zarr
 from scipy import ndimage
 
-REF_REPO = Path("/home/jorgecabrejas/Dev/UTvsXCT-preprocessing")
 GENAI = Path(__file__).resolve().parents[2]
 ZARR = GENAI / "data/split_v3/volumes.zarr"
 RAW = GENAI / "raw_data/MedidasDB"
@@ -52,8 +49,6 @@ SLAB = 64
 
 
 def import_reference():
-    sys.modules.setdefault("cv2", types.ModuleType("cv2"))
-    sys.path.insert(0, str(REF_REPO))
     from preprocess_tools import aligner, io, onlypores, reslicer
     return aligner, io, onlypores, reslicer
 
@@ -168,7 +163,7 @@ RUNS = {  # name -> (sauvola_radius, sauvola_k, min_size_filtering, use walls)
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("specimen", help="e.g. Na_04_2")
-    ap.add_argument("stage", choices=["walls", "sample", *RUNS, "root"],
+    ap.add_argument("stage", choices=["walls", "sample", *RUNS, "base"],
                     help="one stage per process: the reference's np.where bounding box alone "
                          "peaks near 30 GB on a full coupon")
     ap.add_argument("--out", required=True, type=Path)
@@ -241,24 +236,11 @@ def main():
         json.dump(report, open(out / f"summary_{tag}.json", "w"), indent=1)
 
     else:
-        # ── repo-root onlypores.py material mask (column projection), for the figure ──
-        sys.path.insert(0, str(GENAI))
-        import onlypores as root_op
-        mz0, mz1, my0, my1, mx0, mx1 = root_op._get_bounding_box(volume)
-        sm3 = root_op.material_mask(volume[mz0:mz1 + 1, my0:my1 + 1, mx0:mx1 + 1], threshold=-1)
-        col = np.any(sm3, axis=0)
-        del sm3
-        gc.collect()
-        root_sample_zx = np.zeros(volume.shape[::2], bool)
-        root_sample_zx[mz0:mz1 + 1, mx0:mx1 + 1] = col[yc - my0][None, :]
+        # ── the XCT and stored masks on the figure's slice ──
         np.savez_compressed(
             out / "slice_base.npz", y=yc, xct=volume[:, yc, :],
             stored_sample=np.asarray(zg["sample_mask"][:, yc, :]).astype(bool),
-            stored_pores=np.asarray(zg["mask"][:, yc, :]).astype(bool),
-            root_sample=root_sample_zx)
-        json.dump({"root_column_mask_frac_of_volume":
-                   float(col.sum() * (mz1 - mz0 + 1) / np.prod(volume.shape))},
-                  open(out / "summary_root.json", "w"), indent=1)
+            stored_pores=np.asarray(zg["mask"][:, yc, :]).astype(bool))
 
 
 if __name__ == "__main__":

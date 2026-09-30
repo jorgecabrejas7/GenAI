@@ -1,8 +1,9 @@
 """Figure for reference_onlypores_audit.py: one through-thickness (z, x) slice per specimen.
 
 Rows: XCT; reference sample mask (preprocess_tools.onlypores.material_mask);
-stored sample mask (volumes.zarr 'sample_mask'); repo-root onlypores.py mask
-(column projection); pores of each notebook parameter set vs stored labels.
+stored sample mask (volumes.zarr 'sample_mask'); pores of each notebook
+parameter set vs stored labels.  (The published figure at GenAI 826dbbe also had
+the repo-root onlypores.py column mask; that program is deleted.)
 
 Usage: python scripts/analysis/reference_onlypores_audit_plot.py <audit out dir> Na_04_2 Na_02_2
 """
@@ -49,7 +50,7 @@ def plot_profiles(out, specs):
 def main():
     out = Path(sys.argv[1])
     specs = sys.argv[2:]
-    fig, axes = plt.subplots(6, len(specs), figsize=(9 * len(specs), 11), squeeze=False)
+    fig, axes = plt.subplots(5, len(specs), figsize=(9 * len(specs), 9.5), squeeze=False)
     for j, sp in enumerate(specs):
         d = dict(np.load(out / sp / "slice_base.npz"))
         d["ref_sample"] = np.load(_run_file(out / sp, "slice", "notebook"))["sample"]
@@ -59,14 +60,13 @@ def main():
             ("XCT", d["xct"], "gray"),
             (f"reference sample mask ({d['ref_sample'].mean():.1%} of slice)", d["ref_sample"], "gray"),
             (f"stored sample_mask ({d['stored_sample'].mean():.1%})", d["stored_sample"], "gray"),
-            (f"repo-root onlypores.py column mask ({d['root_sample'].mean():.1%})", d["root_sample"], "gray"),
         ]
         for i, (t, im, cm) in enumerate(rows):
             axes[i, j].imshow(im, cmap=cm, aspect="auto", interpolation="nearest")
             axes[i, j].set_title(f"{sp}  y={int(d['y'])}  {t}", fontsize=9)
         lab = d["stored_pores"]
         for i, (run, t) in enumerate((("notebook", "batch notebook 15/0.2/8"),
-                                      ("single_notebook", "onlypores.ipynb 30/0.125/8")), start=4):
+                                      ("single_notebook", "onlypores.ipynb 30/0.125/8")), start=3):
             ref = d[f"ref_pores_{run}"]
             rgb = np.zeros(ref.shape + (3,))
             rgb[ref & lab] = (1, 1, 1)

@@ -126,7 +126,7 @@ def compute_total_loss(
                     "loss.class_weights is required for a 3-class head — "
                     "unweighted cross-entropy is dominated by the material "
                     "class and both minority classes collapse. Compute them "
-                    "with `python scripts/build_split_v3.py --stage weights` "
+                    "with `python scripts/build_split_v4.py --segmentation <name> --stage weights` "
                     "and paste the result into the experiment config."
                 )
             class_weights = torch.tensor(

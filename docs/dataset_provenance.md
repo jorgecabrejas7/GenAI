@@ -68,7 +68,9 @@ evaluated.
 
 Built 2026-09-02. This is the root the r08 VAE and ldm06 use. Everything below
 is reproducible from committed code — `scripts/build_split_v3.py` and
-`scripts/extract_patches_memmap.py`.
+`scripts/extract_patches_memmap.py` at GenAI `cce9000`. (After that commit
+`build_split_v3.py` became `scripts/build_split_v4.py`, which makes new labels;
+check out `cce9000` to run the commands below.)
 
 **`volumes.zarr` here is a symlink**, not data:
 

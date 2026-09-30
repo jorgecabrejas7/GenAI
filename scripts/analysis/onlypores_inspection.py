@@ -26,11 +26,12 @@ What it produces (all under ``runs/campaigns/04-measurement-limits/onlypores_ins
    three volumes: sauvola_radius x sauvola_k, and the material-mask
    thresholding approach.
 
-The production functions in ``poregen.dataset.segmentation`` are NOT modified.
-This module re-implements the same steps with the intermediates exposed, and
-asserts on the first volume that its Sauvola output is bit-identical to
-``segmentation.sauvola_thresholding`` and that its pore mask is bit-identical to
-``segmentation.onlypores``.
+The segmentation is the reference ``preprocess_tools.onlypores`` (the
+commit-pinned UTvsXCT-preprocessing dependency), at its function defaults — the
+split_v1-v3 label settings.  This module re-implements the same steps with the
+intermediates exposed, and asserts on the first volume that its Sauvola output
+is bit-identical to ``onlypores.sauvola_thresholding`` and that its pore mask is
+bit-identical to ``onlypores.onlypores``.
 
 Usage:
     python scripts/analysis/onlypores_inspection.py            # everything
@@ -67,7 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import REPO, savefig, set_style, write_json  # noqa: E402
 
 sys.path.insert(0, str(REPO / "src"))
-from poregen.dataset import segmentation as seg  # noqa: E402
+from preprocess_tools import onlypores as ref  # noqa: E402
 
 import matplotlib  # noqa: E402
 
@@ -80,7 +81,7 @@ VOL_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes"
 PROBE_ROOT = REPO / "runs" / "campaigns" / "06-ldm06-probe" / "ldm06_probe" / "volumes"
 ZARR_ROOT = REPO / "data" / "split_v2" / "volumes.zarr"
 
-# onlypores production defaults, exactly as poregen.dataset.io.compute_mask calls it
+# reference onlypores function defaults: the settings of the split_v1-v3 labels
 SAUVOLA_RADIUS = 30
 SAUVOLA_K = 0.125
 MIN_SIZE_FILTERING = -1
@@ -285,9 +286,27 @@ def load_entry(spec: dict) -> tuple[np.ndarray, np.ndarray | None, dict]:
 # Debug re-implementation of the onlypores pipeline (intermediates exposed)
 # ---------------------------------------------------------------------------
 
+def content_bbox(xct: np.ndarray, margin: int = 2) -> tuple[int, int, int, int, int, int] | None:
+    """The box ``onlypores.onlypores`` crops to (its steps 1-3), for analyses that
+    call its sub-steps on the same array.
+
+    Inclusive ``(min_z, max_z, min_y, max_y, min_x, max_x)`` of the non-zero
+    voxels plus *margin* on every side, clamped to the volume; ``None`` when the
+    volume has no non-zero voxel.
+    """
+    non_zero = xct > 0
+    lims = []
+    for axis in range(3):
+        idx = np.flatnonzero(non_zero.any(axis=tuple(a for a in range(3) if a != axis)))
+        if idx.size == 0:
+            return None
+        lims += [max(0, int(idx[0]) - margin), min(xct.shape[axis] - 1, int(idx[-1]) + margin)]
+    return tuple(lims)
+
+
 def sauvola_debug(volume: np.ndarray, window_size: int,
                   k: float) -> tuple[np.ndarray, np.ndarray]:
-    """Mirror of ``segmentation.sauvola_thresholding_concurrent`` that also
+    """Mirror of ``onlypores.sauvola_thresholding_concurrent`` that also
     returns a 0-255 histogram of every local threshold in the volume.
 
     Returns (binary [material=True], thr_hist (256,) int64).
@@ -334,7 +353,7 @@ def material_threshold(cropped: np.ndarray, approach: str) -> float:
 def material_mask_debug(cropped: np.ndarray, approach: str = "otsu",
                         component: str = "first",
                         bbox_crop: bool = True) -> dict:
-    """Mirror of ``segmentation.material_mask`` with intermediates exposed.
+    """Mirror of ``onlypores.material_mask`` with intermediates exposed.
 
     ``approach='otsu', component='first', bbox_crop=True`` reproduces production
     exactly, including its use of ``regionprops(...)[0]`` — the FIRST label of
@@ -430,7 +449,7 @@ def process_volume(spec: dict, verify: bool = False) -> dict:
     vid = spec["vid"]
     log(f"{vid}: shape {native.shape} ({native.size/1e6:.1f} Mvox)")
 
-    bbox = seg.content_bbox(native)
+    bbox = content_bbox(native)
     if bbox is None:
         raise RuntimeError(f"{vid}: empty volume")
     z0, z1, y0, y1, x0, x1 = bbox
@@ -444,7 +463,7 @@ def process_volume(spec: dict, verify: bool = False) -> dict:
     # ── (b) Sauvola ──
     binary, thr_hist = sauvola_debug(cropped, SAUVOLA_RADIUS, SAUVOLA_K)
     if verify:
-        ref_bin = seg.sauvola_thresholding(cropped, window_size=SAUVOLA_RADIUS, k=SAUVOLA_K)
+        ref_bin = ref.sauvola_thresholding(cropped, window_size=SAUVOLA_RADIUS, k=SAUVOLA_K)
         meta["sauvola_matches_production"] = bool(np.array_equal(binary, ref_bin))
         del ref_bin
 
@@ -456,7 +475,7 @@ def process_volume(spec: dict, verify: bool = False) -> dict:
     pore = np.logical_and(~binary, sample)
 
     if verify:
-        p_ref, s_ref, b_ref = seg.onlypores(native)
+        p_ref, s_ref, b_ref = ref.onlypores(native)
         meta["pore_matches_production"] = bool(np.array_equal(
             p_ref[z0:z1 + 1, y0:y1 + 1, x0:x1 + 1], pore))
         meta["sample_matches_production"] = bool(np.array_equal(
@@ -793,7 +812,7 @@ def sensitivity(specs: list[dict]) -> pd.DataFrame:
     for spec in specs:
         vid = spec["vid"]
         native, _ref, _m = load_entry(spec)
-        bbox = seg.content_bbox(native)
+        bbox = content_bbox(native)
         z0, z1, y0, y1, x0, x1 = bbox
         cropped = np.ascontiguousarray(native[z0:z1 + 1, y0:y1 + 1, x0:x1 + 1])
         del native

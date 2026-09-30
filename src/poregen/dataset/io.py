@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import tifffile
 import zarr
 
 logger = logging.getLogger(__name__)
@@ -79,31 +78,58 @@ def discover_volumes(raw_root: str | Path) -> list[VolumeInfo]:
     return volumes
 
 
-def load_volume(path: str | Path) -> np.ndarray:
-    """Load a single multi-page TIFF as a uint8 3-D array ``(D, H, W)``."""
-    vol = tifffile.imread(str(path))
-    if vol.ndim != 3:
-        raise ValueError(f"Expected 3-D volume, got shape {vol.shape} from {path}")
-    return vol.astype(np.uint8, copy=False)
+#: The two settings the reference notebooks run ``onlypores`` with
+#: (UTvsXCT-preprocessing, ``produccion/onlypores/``).  Each builds its own
+#: dataset root.  The notebooks disagree with each other; both are kept.
+SEGMENTATION: dict[str, dict] = {
+    # onlypores.ipynb, cell 6
+    "ipynb": {"sauvola_radius": 30, "sauvola_k": 0.125, "min_size_filtering": 8},
+    # onlypores_batch.ipynb, cell 5
+    "batch": {"sauvola_radius": 15, "sauvola_k": 0.2, "min_size_filtering": 8},
+}
 
 
-def compute_mask(xct: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Compute pore mask and sample (foreground) mask via ``onlypores``.
+def find_walls(volume: np.ndarray) -> tuple[int, int]:
+    """Front and back wall slices of *volume*, as the reference notebooks find them.
+
+    The notebooks rotate and reslice the volume only to find the walls
+    (``reslicer.rotate_90(volume, clockwise=False)``, then
+    ``reslicer.reslice(., 'Right')``, then ``aligner.crop_walls``); ``onlypores``
+    then runs on the original volume.  Both are views, so no copy is made.
+    """
+    from preprocess_tools import aligner, reslicer
+
+    resliced = reslicer.reslice(reslicer.rotate_90(volume, clockwise=False), "Right")
+    _, frontwall, backwall = aligner.crop_walls(resliced)
+    return int(frontwall), int(backwall)
+
+
+def compute_mask(volume: np.ndarray, segmentation: str) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Pore mask and sample mask of a raw volume, with the reference pipeline.
+
+    Runs the reference notebook procedure: :func:`find_walls`, then
+    ``preprocess_tools.onlypores.onlypores(volume, frontwall, backwall, ...)``
+    with the settings ``SEGMENTATION[segmentation]``.  *volume* is the raw
+    TIFF as ``preprocess_tools.io.load_tif`` returns it, axes ``(z, y, x)`` with
+    z through the thickness.
 
     Returns
     -------
     pore_mask : uint8 array, values in {0, 1}
-    sample_mask : bool array, True where material (not background/air)
+    sample_mask : bool array, True inside the specimen (internal pores filled)
+    record : dict with the walls and the settings, for the build record
     """
-    from poregen.dataset.segmentation import onlypores as _onlypores
+    from preprocess_tools import onlypores
 
-    pore_mask, sample_mask, _binary = _onlypores(xct)
-
-    if pore_mask is None:
-        logger.warning("onlypores returned None — using zeros pore mask and full foreground")
-        return np.zeros_like(xct, dtype=np.uint8), np.ones(xct.shape, dtype=bool)
-
-    return pore_mask.astype(np.uint8), sample_mask.astype(bool)
+    params = SEGMENTATION[segmentation]
+    frontwall, backwall = find_walls(volume)
+    pores, sample_mask, _binary = onlypores.onlypores(volume, frontwall, backwall, **params)
+    if pores is None:
+        raise ValueError("onlypores found no non-zero voxel in the volume")
+    del _binary
+    record = {"segmentation": segmentation, **params,
+              "frontwall": frontwall, "backwall": backwall}
+    return pores.astype(np.uint8), sample_mask.astype(bool), record
 
 
 def compute_volume_stats(xct: np.ndarray, sample_mask: np.ndarray) -> dict:
@@ -272,6 +298,35 @@ def save_volume_zarr(
         mask.shape,
         chunk_size,
     )
+
+
+def save_labels_zarr(
+    mask: np.ndarray,
+    sample_mask: np.ndarray,
+    out_root: str | Path,
+    volume_id: str,
+    xct_array: str | Path,
+    chunk_size: tuple[int, int, int] = (64, 64, 64),
+) -> None:
+    """Write new labels for a volume whose ``xct`` already exists in another store.
+
+    ``mask`` is written like :func:`save_volume_zarr` writes it (uncompressed,
+    64³ chunks) and ``sample_mask`` like :func:`save_sample_mask_zarr`.
+    ``<volume_id>/xct`` becomes a symlink to the existing array directory
+    *xct_array*, so the grey data is not copied.  The caller checks that the
+    raw volume equals that array.
+    """
+    store_path = Path(out_root) / "volumes.zarr"
+    root = zarr.open_group(str(store_path), mode="a")
+    grp = root.require_group(volume_id)
+    grp.create_array("mask", data=mask.astype(np.uint8, copy=False),
+                     chunks=chunk_size, compressors=None, overwrite=True)
+    save_sample_mask_zarr(sample_mask, out_root, volume_id, chunk_size=chunk_size)
+    link = store_path / volume_id / "xct"
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(Path(xct_array).resolve(), target_is_directory=True)
+    logger.info("Saved %s  mask=%s  xct -> %s", volume_id, mask.shape, link.resolve())
 
 
 def save_sample_mask_zarr(

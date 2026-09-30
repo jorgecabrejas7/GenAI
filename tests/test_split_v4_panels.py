@@ -1,4 +1,4 @@
-"""split_v3: panel-level splits and drilled-hole removal.
+"""split_v3/v4: panel-level splits and drilled-hole removal.
 
 Two invariants are worth a test. A panel must never appear in two splits —
 that is the whole point of the v3 split — and the hole detector must find the
@@ -20,8 +20,8 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def _load_builder():
-    path = REPO / "scripts" / "build_split_v3.py"
-    spec = importlib.util.spec_from_file_location("build_split_v3", path)
+    path = REPO / "scripts" / "build_split_v4.py"
+    spec = importlib.util.spec_from_file_location("build_split_v4", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

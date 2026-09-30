@@ -37,7 +37,7 @@ alone.
 
 ### split_v3 — the current dataset
 
-`data/split_v3` is built by `scripts/build_split_v3.py` and replaces `split_v2`
+`data/split_v3` was built by `scripts/build_split_v3.py` (GenAI `cce9000`; the script is now `scripts/build_split_v4.py`) and replaces `split_v2`
 for the r08 VAE and ldm06. Its `volumes.zarr` is a **symlink** to the split_v2
 store; nothing is copied and `data/split_v2` is never written. Three things
 differ:
@@ -433,7 +433,7 @@ engine reads that attribute rather than hard-coding the pair.
 - For a 3-class head, `loss.class_weights` is **required** and
   `compute_total_loss` refuses to run without it: unweighted cross-entropy is
   dominated by the material class and both minority classes collapse. Compute
-  them with `python scripts/build_split_v3.py --stage weights`
+  them with `python scripts/build_split_v4.py --segmentation <name> --stage weights`
   (`w_c = 1 / (n_classes · f_c)`, so `Σ f_c w_c = 1`) and paste the result into
   the experiment config. Soft Dice is averaged over pore and air only —
   material is the background and its Dice sits near 1 regardless

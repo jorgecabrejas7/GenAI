@@ -5,7 +5,7 @@ Usage
 ::
 
     build_dataset --raw_root ./raw_data --out_root ./data/split_v1 \
-        --n_train 40 --n_val 5 --n_test 5 --seed 123
+        --segmentation ipynb --n_train 40 --n_val 5 --n_test 5 --seed 123
 
     # Only compute per-volume intensity stats from existing zarr data:
     build_dataset --out_root ./data/split_v1 --stats_only
@@ -20,15 +20,17 @@ import logging
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import zarr
+from preprocess_tools.io import load_tif
 
 from poregen.dataset.io import (
+    SEGMENTATION,
     compute_mask,
     compute_volume_stats,
     compute_volume_stats_from_zarr,
     discover_volumes,
-    load_volume,
     load_volume_stats,
     save_volume_stats,
     save_volume_zarr,
@@ -58,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--raw_root", type=str, default="./raw_data")
     p.add_argument("--out_root", type=str, default="./data/split_v1")
+    p.add_argument(
+        "--segmentation",
+        choices=sorted(SEGMENTATION),
+        default=None,
+        help="Reference onlypores setting the labels are built with (required for a full build).",
+    )
     p.add_argument("--patch_size", type=int, default=64)
     p.add_argument("--stride", type=int, default=32)
     p.add_argument(
@@ -157,8 +165,8 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── Full build mode ──────────────────────────────────────────────────────
 
-    if args.n_train is None or args.n_val is None or args.n_test is None:
-        logger.error("--n_train, --n_val, and --n_test are required for a full build.")
+    if args.n_train is None or args.n_val is None or args.n_test is None or args.segmentation is None:
+        logger.error("--segmentation, --n_train, --n_val and --n_test are required for a full build.")
         return
 
     # ---- 1. Discover volumes ------------------------------------------------
@@ -231,12 +239,15 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         # Load raw volume (needed if zarr or stats are missing)
-        xct = load_volume(vi.path)
+        xct = load_tif(vi.path)
+        if xct.ndim != 3 or xct.dtype != np.uint8:
+            raise ValueError(f"expected a 3-D uint8 volume, got {xct.dtype} {xct.shape} from {vi.path}")
         vi.shape = xct.shape
         logger.info("  shape=%s  dtype=%s", xct.shape, xct.dtype)
 
         # Mask + stats from raw data (onlypores gives sample_mask for free)
-        pore_mask, sample_mask = compute_mask(xct)
+        pore_mask, sample_mask, seg_record = compute_mask(xct, args.segmentation)
+        logger.info("  walls=%d/%d", seg_record["frontwall"], seg_record["backwall"])
 
         if not zarr_exists:
             save_volume_zarr(

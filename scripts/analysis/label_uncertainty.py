@@ -1,7 +1,7 @@
 """How much of the reported porosity error is label noise?  (CPU, read-only)
 
 Every porosity number in this project is measured against labels that
-``poregen.dataset.segmentation.onlypores`` produced, and ``onlypores`` has
+the reference ``preprocess_tools.onlypores.onlypores`` produced, and ``onlypores`` has
 tunable parameters.  If moving those parameters inside a defensible range moves
 porosity by more than the control error we report, the control error describes
 the segmenter, not the model.  This script measures that range so the
@@ -38,7 +38,7 @@ A test volume is ~200 × 3400 × 1600 uint8, so nine full pore masks would be
   then ``fill_voids``), so it is built once per method and held bit-packed.
 
 Both claims are asserted in ``tests/test_label_uncertainty.py`` against the
-production ``onlypores`` on a synthetic volume with a known answer.
+reference ``onlypores`` on a synthetic volume with a known answer.
 
 The material thresholds come from a 256-bin histogram of the crop.  For uint8
 data that histogram is lossless, it is exactly the one skimage builds itself,
@@ -72,15 +72,14 @@ from pathlib import Path
 import numpy as np
 import zarr
 from skimage import filters
+from skimage.measure import label as label_components, regionprops
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from poregen.dataset.segmentation import (  # noqa: E402
-    content_bbox,
-    material_mask,
-    sauvola_thresholding_nonconcurrent,
-)
+from onlypores_inspection import content_bbox  # noqa: E402
+from preprocess_tools.onlypores import sauvola_thresholding_nonconcurrent  # noqa: E402
 from poregen.eval_v4.manifest import head_commit  # noqa: E402
 from poregen.eval_v4.metrics import POROSITY_GATE  # noqa: E402
 from poregen.eval_v4.real_floor import test_volume_ids  # noqa: E402
@@ -89,8 +88,8 @@ DATA_ROOT = REPO / "data" / "split_v3"
 ZARR_ROOT = DATA_ROOT / "volumes.zarr"
 OUT_DIR = REPO / "runs" / "campaigns" / "13-label-uncertainty"
 
-#: Production defaults — ``dataset.io.compute_mask`` calls ``onlypores`` with
-#: no arguments, so these are the settings every stored label was built with.
+#: The reference ``onlypores`` function defaults: the settings the split_v1-v3
+#: labels were built with (campaign 13 measures those labels).
 SAUVOLA_RADIUS = 30
 SAUVOLA_K = 0.125
 MIN_SIZE_FILTERING = -1
@@ -135,6 +134,28 @@ def material_threshold(counts: np.ndarray, method: str) -> float:
     return float(MATERIAL_METHODS[method](hist=hist))
 
 
+def material_mask_at(cropped: np.ndarray, threshold: float) -> np.ndarray:
+    """``preprocess_tools.onlypores.material_mask`` with the global threshold given.
+
+    The reference takes Otsu of *cropped*; this sensitivity analysis needs the
+    same mask at other thresholds, which the reference cannot be asked for.
+    Every other step is the reference's: max-projection along z, bounding box
+    of the FIRST projected component (``regionprops(...)[0]``), ``fill_voids``
+    inside it.  At the Otsu threshold it equals the reference bit for bit
+    (``tests/test_label_uncertainty.py``).
+    """
+    import fill_voids
+
+    binary = cropped > threshold
+    props = regionprops(label_components(np.max(binary, axis=0)))
+    if not props:
+        return binary
+    minr, minc, maxr, maxc = props[0].bbox
+    sample = np.zeros_like(binary)
+    sample[:, minr:maxr, minc:maxc] = fill_voids.fill(binary[:, minr:maxr, minc:maxc], in_place=False)
+    return sample
+
+
 # ---------------------------------------------------------------------------
 # The measurement
 # ---------------------------------------------------------------------------
@@ -167,13 +188,8 @@ def measure(
     thresholds = {m: material_threshold(counts, m) for m in unique_methods}
 
     # One material mask per method, held bit-packed along X (1/8 of the bool).
-    packed: dict[str, np.ndarray] = {}
-    errors: dict[str, str] = {}
-    for m in unique_methods:
-        try:
-            packed[m] = np.packbits(material_mask(cropped, threshold=thresholds[m]), axis=-1)
-        except ValueError as exc:  # ambiguous specimen — a finding, not a crash
-            errors[m] = str(exc)
+    packed = {m: np.packbits(material_mask_at(cropped, thresholds[m]), axis=-1)
+              for m in unique_methods}
 
     variants = [(k, m) for k in sauvola_k for m in material_methods if m in packed]
     n = len(variants)
@@ -222,7 +238,6 @@ def measure(
 
     return {
         "material_thresholds": thresholds,
-        "material_errors": errors,
         "sauvola_radius": sauvola_radius,
         "slab_y": slab,
         "crop_shape": [int(v) for v in cropped.shape],

@@ -33,8 +33,6 @@ pytest tests/ -v
 
 ```
 GenAI/
-├── onlypores.py                 # archived root copy; the dataset build uses
-│                                #   src/poregen/dataset/segmentation.py
 ├── pyproject.toml
 ├── src/poregen/
 │   ├── dataset/

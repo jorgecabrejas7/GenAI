@@ -69,11 +69,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import REPO, savefig, set_style  # noqa: E402
 from onlypores_inspection import (  # noqa: E402
     MIN_CC, SAUVOLA_K, SAUVOLA_RADIUS, T_BEST, ZARR_ROOT,
-    detector_mask, material_mask_debug, sauvola_debug, to_native_u8,
+    content_bbox, detector_mask, material_mask_debug, sauvola_debug, to_native_u8,
 )
 
 sys.path.insert(0, str(REPO / "src"))
-from poregen.dataset import segmentation as seg  # noqa: E402
+from preprocess_tools import onlypores as ref  # noqa: E402
 
 import matplotlib  # noqa: E402
 
@@ -118,9 +118,9 @@ def segment(native: np.ndarray, sauvola_radius: int, sauvola_k: float,
     """onlypores with exposed knobs -> (pore_mask, sample_mask, info).
 
     With the default arguments this is bit-identical to
-    ``poregen.dataset.segmentation.onlypores(native)``.
+    ``preprocess_tools.onlypores.onlypores(native)``.
     """
-    bbox = seg.content_bbox(native)
+    bbox = content_bbox(native)
     if bbox is None:
         raise SystemExit("volume has no non-zero voxel")
     z0, z1, y0, y1, x0, x1 = bbox
@@ -136,7 +136,7 @@ def segment(native: np.ndarray, sauvola_radius: int, sauvola_k: float,
     del binary, mm
 
     if min_size_filtering > 0:
-        pore = seg.clean_pores(pore, min_size=min_size_filtering)
+        pore = ref.clean_pores(pore, min_size=min_size_filtering)
 
     info = {"content_bbox": [int(v) for v in bbox],
             "sauvola_radius": sauvola_radius, "sauvola_k": sauvola_k,

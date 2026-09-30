@@ -1,11 +1,13 @@
 """Is any stored ``sample_mask`` built on a dust speck?  (CPU, read-only)
 
-``poregen.dataset.segmentation.material_mask`` takes the specimen bounding box
-from the max-projection of the Otsu binary.  Until the F9 fix it used
+The reference ``preprocess_tools.onlypores.material_mask`` takes the specimen
+bounding box from the max-projection of the Otsu binary, with
 ``regionprops(labels)[0]`` — the FIRST label, which is raster order, not size.
-A bright artefact above and left of the coupon therefore became "the specimen"
-and the stored ``sample_mask`` collapsed to that artefact's bounding box.  The
-dataset was built with the old code, so every stored mask has to be checked.
+A bright artefact above and left of the coupon would therefore become "the
+specimen" and the stored ``sample_mask`` would collapse to that artefact's
+bounding box.  PoreGen once switched to the largest component (the F9 fix,
+commit 14110bc); the reference is the source of truth, so that change is gone
+and every mask the reference builds has to be checked.
 
 What this does
 --------------
@@ -14,11 +16,12 @@ the same slice of the stored ``sample_mask`` — ~1 MB of decoded data per volum
 nothing bulk — and on that one slice reports:
 
 * the projected areas of the components the specimen box is chosen from,
-* which component the OLD rule (first label) and the NEW rule (largest area)
+* which component the reference rule (first label) and the largest-area rule
   each pick, and whether they disagree,
-* whether the new ambiguity gate (second-largest > 10 % of largest) would fire,
-* the bounding box of the stored mask against the bounding box the fixed
-  function picks, and the Dice between the two masks.
+* whether the second-largest component exceeds 10 % of the largest (two
+  comparable objects in the frame),
+* the bounding box of the stored mask against the bounding box the reference
+  ``material_mask`` picks on the slice, and the Dice between the two masks.
 
 Reading the decisive columns
 ----------------------------
@@ -34,7 +37,7 @@ failure documented for 192³ interior crops in
 ``runs/campaigns/05-eval-v3-fixed-decode/onlypores/``.  Dice here measures the
 single-slice approximation as much as it measures the stored mask.
 
-A volume is flagged when the two rules disagree, when the ambiguity gate fires,
+A volume is flagged when the two rules disagree, when the frame is ambiguous,
 or when the stored box covers less than ``--bbox-frac`` of the recomputed one —
 the signature of a mask built on an artefact.
 
@@ -66,10 +69,11 @@ from skimage.measure import regionprops
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
-from poregen.dataset.segmentation import (  # noqa: E402
-    AMBIGUOUS_COMPONENT_RATIO,
-    material_mask,
-)
+from preprocess_tools.onlypores import material_mask  # noqa: E402
+
+#: A frame is ambiguous when the second-largest max-projection component
+#: exceeds this fraction of the largest: no single box is then the specimen.
+AMBIGUOUS_COMPONENT_RATIO = 0.10
 
 ZARR_ROOT = REPO / "data" / "split_v3" / "volumes.zarr"
 SPLITS = REPO / "data" / "split_v3" / "splits.json"
@@ -148,26 +152,16 @@ def audit_volume(grp) -> dict:
     row["stored_bbox"] = list(stored_bb) if stored_bb else None
     row["stored_bbox_area"] = bbox_area(stored_bb)
 
-    if row["ambiguous"]:
-        # The fixed function refuses this slice; that refusal IS the finding.
-        row["recomputed_bbox"] = None
-        row["recomputed_bbox_area"] = 0
-        row["recomputed_mask_fraction"] = None
-        row["dice"] = None
-        row["stored_over_recomputed_bbox"] = None
-        row["error"] = "material_mask raises: ambiguous specimen selection"
-    else:
-        recomputed = material_mask(xct[None])[0]
-        rec_bb = bbox_of(recomputed)
-        row["recomputed_bbox"] = list(rec_bb) if rec_bb else None
-        row["recomputed_bbox_area"] = bbox_area(rec_bb)
-        row["recomputed_mask_fraction"] = float(recomputed.mean())
-        row["dice"] = dice(stored, recomputed)
-        row["stored_over_recomputed_bbox"] = (
-            row["stored_bbox_area"] / row["recomputed_bbox_area"]
-            if row["recomputed_bbox_area"] else None
-        )
-        row["error"] = None
+    recomputed = material_mask(xct[None])[0]
+    rec_bb = bbox_of(recomputed)
+    row["recomputed_bbox"] = list(rec_bb) if rec_bb else None
+    row["recomputed_bbox_area"] = bbox_area(rec_bb)
+    row["recomputed_mask_fraction"] = float(recomputed.mean())
+    row["dice"] = dice(stored, recomputed)
+    row["stored_over_recomputed_bbox"] = (
+        row["stored_bbox_area"] / row["recomputed_bbox_area"]
+        if row["recomputed_bbox_area"] else None
+    )
     return row
 
 

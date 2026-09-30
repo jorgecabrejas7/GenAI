@@ -4,10 +4,10 @@ The model's own mask head under-reports porosity where air is massive
 (``runs/campaigns/03-eval-v2-buggy-decode/audit/findings.md``: median pore capture drops to ~0.03 in
 64³ cells with >15% dark air).  Every porosity-control result so far is
 mask-based, so this script measures the generated volumes with the SAME
-segmentation the real dataset was built with —
-``poregen.dataset.segmentation.onlypores`` at its default parameters, exactly
-as ``poregen.dataset.io.compute_mask`` calls it (sauvola_radius=30,
-sauvola_k=0.125, frontwall=0, backwall=0, min_size_filtering=-1).
+segmentation the split_v1-v3 labels were built with — the reference
+``preprocess_tools.onlypores.onlypores`` at its function defaults
+(sauvola_radius=30, sauvola_k=0.125, frontwall=0, backwall=0,
+min_size_filtering=-1).
 
 Intensity scale
 ---------------
@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import REPO, savefig, set_style, write_json  # noqa: E402
 
 sys.path.insert(0, str(REPO / "src"))
-from poregen.dataset.segmentation import onlypores  # noqa: E402
+from preprocess_tools.onlypores import onlypores  # noqa: E402
 
 OUT_DIR = REPO / "runs" / "campaigns" / "04-measurement-limits" / "onlypores_generated"
 VOL_ROOT = REPO / "runs" / "campaigns" / "03-eval-v2-buggy-decode" / "volumes"
@@ -729,9 +729,9 @@ def write_findings(pv: pd.DataFrame, pc: pd.DataFrame, res: dict,
     A("# Onlypores porosity of generated volumes")
     A("")
     A(f"Measured {len(pv)} generated volumes and {len(pc)} 64³ cells with "
-      "`poregen.dataset.segmentation.onlypores` — the exact function and the "
-      "exact default parameters `poregen.dataset.io.compute_mask` uses when the "
-      "REAL dataset is built (`sauvola_radius=30, sauvola_k=0.125, frontwall=0, "
+      "`preprocess_tools.onlypores.onlypores` — the exact function and the "
+      "exact parameters the split_v1-v3 REAL labels were built with "
+      "(`sauvola_radius=30, sauvola_k=0.125, frontwall=0, "
       "backwall=0, min_size_filtering=-1`).")
     A("")
     A("**Grayscale scale.** The sampler writes `expit(xct_out)`, so the saved "
@@ -1025,8 +1025,8 @@ def main() -> None:
         "n_cells": int(len(pc)),
         "runtime_seconds": runtime,
         "onlypores_entry_point":
-            "poregen.dataset.segmentation.onlypores (defaults, as "
-            "poregen.dataset.io.compute_mask calls it)",
+            "preprocess_tools.onlypores.onlypores (function defaults, as "
+            "the split_v1-v3 labels were built)",
         "onlypores_params": {"frontwall": 0, "backwall": 0, "sauvola_radius": 30,
                              "sauvola_k": 0.125, "min_size_filtering": -1},
         "scale_inversion": "clip(logit(v), 0, 1) * 255 -> uint8",

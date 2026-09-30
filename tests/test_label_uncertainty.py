@@ -6,8 +6,9 @@ worth nothing unless the machinery that produced it is shown to be faithful, so
 these tests fix a synthetic volume where the right answer can be written down
 in closed form, and check four separate claims:
 
-1. the streaming, slab-by-slab pipeline reproduces the production ``onlypores``
-   exactly — same pore voxels, same material voxels;
+1. the streaming, slab-by-slab pipeline reproduces the reference ``onlypores``
+   (``preprocess_tools.onlypores``) exactly at the settings the script perturbs
+   — same pore voxels, same material voxels;
 2. raising ``sauvola_k`` lowers porosity, by the amount the Sauvola formula
    predicts for this volume and no other amount;
 3. two variants asked for with identical parameters agree at Dice exactly 1.0,
@@ -45,6 +46,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from skimage import filters
 
 REPO = Path(__file__).resolve().parents[1]
 # The analysis scripts are not an installable package.  Importing the script
@@ -54,9 +56,9 @@ sys.path.insert(0, str(REPO / "scripts" / "analysis"))
 sys.path.insert(0, str(REPO / "src"))
 
 import label_uncertainty as LU  # noqa: E402
+from onlypores_inspection import content_bbox  # noqa: E402
 from poregen.dataset.loader import build_label  # noqa: E402
-from poregen.dataset.segmentation import (  # noqa: E402
-    content_bbox,
+from preprocess_tools.onlypores import (  # noqa: E402
     material_mask,
     onlypores,
     sauvola_thresholding_concurrent,
@@ -118,8 +120,18 @@ def variant(result: dict, name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_streaming_reproduces_production_onlypores():
-    """The slab-by-slab pipeline is the production pipeline, voxel for voxel.
+def test_material_mask_at_otsu_is_the_reference():
+    """The threshold-swapped material mask equals the reference's at its own Otsu."""
+    rng = np.random.default_rng(3)
+    volumes = [cropped_volume(),
+               np.pad(np.clip(rng.normal(180, 40, (20, 30, 40)), 1, 255).astype(np.uint8), 4)]
+    for volume in volumes:
+        otsu = float(filters.threshold_otsu(volume))
+        assert np.array_equal(LU.material_mask_at(volume, otsu), material_mask(volume))
+
+
+def test_streaming_reproduces_reference_onlypores():
+    """The slab-by-slab pipeline is the reference pipeline, voxel for voxel.
 
     A slab width that divides nothing evenly is used on purpose: if Sauvola were
     not independent per (z, x) plane, the seams would show up as a count

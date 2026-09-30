@@ -164,18 +164,3 @@ class TestEncoding:
 
     def test_out_of_range_values_are_clipped(self):
         assert encode_material_u8(np.array([-0.5, 1.5])).tolist() == [0, 255]
-
-
-def test_compute_sample_mask_fills_internal_voids():
-    """The specimen envelope still comes from the XCT for dataset building."""
-    from poregen.dataset.segmentation import compute_sample_mask
-
-    xct = np.zeros((40, 40, 40), np.uint8)
-    xct[8:32, 8:32, 8:32] = 200          # bright specimen cube
-    xct[18:22, 18:22, 18:22] = 10        # dark internal pore
-    sm = compute_sample_mask(xct)
-    assert sm is not None
-    assert sm[20, 20, 20]                # internal pore is filled: material envelope
-    assert sm[16:24, 16:24, 16:24].all()
-    assert not sm[2, 2, 2]               # exterior air stays out
-    assert not sm[:6].any()

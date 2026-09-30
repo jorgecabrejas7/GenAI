@@ -10,7 +10,7 @@ root program's Sauvola binary is identical to the dataset's, and its pores INSID
 with the stored labels to 12 voxels out of 14.4 million. But its material mask leaks: on these
 aligned volumes it marks 8.8 % of the box that is air as sample, and 85 million dark air voxels
 (mean grey 34) then count as pores, which reads as 8.6 % where the sample holds 1.38 %. The stored
-sample mask (poregen.dataset.segmentation.material_mask) does not leak, so the label volumes are the
+sample mask (the reference preprocess_tools.onlypores.material_mask) does not leak, so the label volumes are the
 whole-sample answer at the same segmentation.
 
     python scripts/analysis/real_vvf_whole_sample.py --pattern Na_ --out runs/campaigns/21-real-porosity-by-region

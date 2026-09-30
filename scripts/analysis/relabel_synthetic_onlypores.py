@@ -15,10 +15,16 @@ and the arm would no longer isolate the pore labelling function.
 
     air      = decoder label == 2                     (unchanged)
     material = not air
-    pore     = production Sauvola (radius 30, k 0.125) inside material
+    pore     = reference Sauvola (radius 30, k 0.125) inside material
 
-`min_size_filtering` is -1, as `dataset.io.compute_mask` leaves it, so no
-component filter is applied — the stored dataset labels had none either.
+These are the split_v1-v3 label settings: the reference `onlypores` at its
+function defaults. `min_size_filtering` is -1 there, so no component filter is
+applied — the split_v1-v3 labels had none either.
+
+The window is `sauvola_radius` itself (30, made odd: 31), as the reference
+`onlypores` passes it to `sauvola_thresholding`. Until 2026-09-30 this script
+passed 2 * 30 + 1 = 61, which is not what the reference does; campaign 14's
+relabelled arms were made with 61.
 
 WHY NOT `onlypores()` ITSELF. That function derives the material mask with a
 GLOBAL Otsu, which needs a whole scan and misfires on a crop — campaign 13's
@@ -49,8 +55,7 @@ if str(REPO / "scripts" / "analysis") not in sys.path:
 
 logger = logging.getLogger("relabel")
 
-#: Production segmentation settings — `dataset.io.compute_mask` calls
-#: `onlypores` with no arguments, so these are what every stored label used.
+#: The reference `onlypores` function defaults: the split_v1-v3 label settings.
 SAUVOLA_RADIUS = 30
 SAUVOLA_K = 0.125
 
@@ -60,12 +65,12 @@ OUT_NAME = "label_onlypores.tif"
 
 
 def relabel(xct: np.ndarray, decoder_label: np.ndarray) -> np.ndarray:
-    from poregen.dataset.segmentation import sauvola_thresholding_nonconcurrent
+    from preprocess_tools.onlypores import sauvola_thresholding_nonconcurrent
 
     air = decoder_label == LABEL_AIR
     material = ~air
     binary = sauvola_thresholding_nonconcurrent(
-        xct, window_size=2 * SAUVOLA_RADIUS + 1, k=SAUVOLA_K)
+        xct, window_size=SAUVOLA_RADIUS, k=SAUVOLA_K)
     pore = (~binary) & material
     out = np.full(decoder_label.shape, LABEL_MATERIAL, np.uint8)
     out[pore] = LABEL_PORE
