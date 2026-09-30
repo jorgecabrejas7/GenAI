@@ -27,7 +27,7 @@ capped at 64 voxels and normalised, ordered
 ``poregen.diffusion.conditioning.dist6_from_box_array`` is the single
 implementation; the sampler calls its scalar twin for generated volumes.
 
-Run:  python scripts/build_conditioning.py --store data/split_v3/latents_<rung>
+Run:  python scripts/build_conditioning.py --store data/<split>/latents_<rung>
 
 ``--store`` is required and has no default: the store name follows the chosen
 rung, so a default here silently annotates whichever rung was current when the
@@ -413,7 +413,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", required=True,
                     help="Latent store to annotate, e.g. "
-                         "data/split_v3/latents_r08z8. Required and never "
+                         "data/<split>/latents_r08z8. Required and never "
                          "defaulted: the store name follows the rung, so a "
                          "default annotates the wrong store as soon as the "
                          "rung changes.")

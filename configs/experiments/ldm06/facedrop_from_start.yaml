@@ -1,0 +1,47 @@
+experiment:
+  name: ldm06
+  variant: facedrop_from_start
+  description: >-
+    ldm06/base WITH PER-FACE NEIGHBOUR DROPOUT FROM STEP 0, so there is no
+    fine-tune stage. Everything else is base's.
+
+    WHY. The chunk-plane band is a training-distribution defect, not an
+    inference one: ldm06 drops neighbours PER ITEM, so of 1 598 000 training
+    windows 75.65 % have a mixed set and every non-EXISTS face in all of them
+    is OOB. The model never once saw five EXISTS and one UNKNOWN, which is
+    exactly the state the chunked sampler produces at a frontier. `facedrop`
+    corrected that after the fact with a 15 000-step fine-tune; doing it from
+    step 0 removes the two-stage pipeline instead of repairing its output.
+    Campaign 29 established that the dropout and not the fine-tuning is what
+    clears the band — a matched control at drop_nb_face 0 left the -8 slab at
+    0.187 against the untouched model's 0.192 — so the correction can be moved
+    to the start without losing its cause.
+
+    WHAT THIS FILE CHANGES AGAINST base.yaml, and it is only the dropout:
+
+        drop_nb_face  absent -> 0.1    each EXISTS face dropped independently
+        drop_nb       0.1    -> 0.05   the all-six null arm, kept but smaller
+                                       because the per-face draw now supplies
+                                       most of the neighbour dropout
+
+    OOB faces are never dropped: turning an edge into UNKNOWN would claim the
+    specimen continues where it does not, trading this artefact for one at
+    every surface.
+
+    WHAT facedrop.yaml ALSO CHANGED, AND THIS FILE DOES NOT. That file is a
+    short corrective fine-tune, so nine further keys differ from base and all
+    nine belong to being a fine-tune rather than to the dropout:
+    init_from (warm start from ldm06-run-0001), total_steps 130000 -> 15000,
+    lr 1e-4 -> 2e-5, scheduler cosine -> none with lr_min dropped and
+    warmup_steps 250 -> 0, ema_decay 0.9999 -> 0.999 (a 0.9999 EMA over 15k
+    steps would still be averaging in pre-fine-tune weights at the end), and
+    gen_eval_every and sample_every to 0. A run that trains for 130 000 steps
+    from scratch wants none of them, so this file takes base's values.
+
+extends: ldm06/base
+
+overrides:
+  training:
+    #: THE CHANGE, and the only one.
+    drop_nb_face: 0.1
+    drop_nb: 0.05

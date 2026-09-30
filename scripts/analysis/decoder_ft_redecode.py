@@ -50,6 +50,7 @@ from poregen.eval_v4 import microstructure as MS  # noqa: E402
 from poregen.experiments.train_vae import load_vae_from_checkpoint  # noqa: E402
 from poregen.metrics.recon import sharpness_proxy  # noqa: E402
 from poregen.runtime.preflight import prepare_patch_dataloaders  # noqa: E402
+from poregen.paths import default_split
 
 logger = logging.getLogger("decoder_ft_redecode")
 
@@ -460,7 +461,7 @@ def main() -> int:
 
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
     repo = Path(__file__).resolve().parents[2]
-    data_root = repo / "data" / cfg["data"].get("dataset_root", "split_v3")
+    data_root = repo / "data" / cfg["data"].get("dataset_root", default_split())
     results = {
         "baseline": str(args.baseline), "baseline_run": str(base_run),
         "finetuned": str(args.finetuned), "finetuned_run": str(ft_run),
