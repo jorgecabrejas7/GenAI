@@ -74,3 +74,20 @@ def latents_root(store: str, split: str | None = None,
                  *, repo: str | Path | None = None) -> Path:
     """``<repo>/data/<split>/<store>`` — a latent store under the same split."""
     return data_root(split, repo=repo) / store
+
+
+#: The environment variable that points every LDM config at a different frozen
+#: VAE. It exists for the same reason POREGEN_SPLIT does, one level down: an
+#: LDM is tied to the VAE whose latents it trains on, and train_ldm REFUSES to
+#: start when cfg['vae']['checkpoint'] differs from the store's own recorded
+#: encoder. On split_v3 the bring-up script met that by editing and committing
+#: ldm06/base.yaml. On a rebuild the config files are not edited, so the chain
+#: names the new VAE here once it exists.
+VAE_ENV = "POREGEN_VAE_CHECKPOINT"
+
+
+def vae_checkpoint_override() -> str | None:
+    """The VAE checkpoint forced by the environment, or None."""
+    value = os.environ.get(VAE_ENV, "").strip()
+    return value or None
+

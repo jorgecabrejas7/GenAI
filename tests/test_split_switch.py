@@ -155,7 +155,7 @@ class TestARunOnAnotherSplitSaysSo:
 
     def test_a_vae_on_split_v4_carries_it(self, forced):
         forced("split_v4")
-        assert self._name("r08/reduction-factor-8_v4").endswith("-dsv4")
+        assert self._name("r08/reduction-factor-8").endswith("-dsv4")
 
     def test_an_ldm_on_split_v4_carries_it_from_its_latent_store(self, forced):
         """An LDM has no dataset_root; its split is inside latents_root."""
@@ -165,4 +165,33 @@ class TestARunOnAnotherSplitSaysSo:
     def test_the_family_prefix_does_not_move(self, forced):
         """tb-vae and tb-ldm group by the leading experiment name."""
         forced("split_v4")
-        assert self._name("r08/reduction-factor-8_v4").startswith("r08-run-0001-")
+        assert self._name("r08/reduction-factor-8").startswith("r08-run-0001-")
+
+
+class TestTheVaeFollowsTheRebuild:
+    """train_ldm REFUSES to start when cfg['vae']['checkpoint'] differs from
+    the store's recorded encoder. A rebuild trains a new VAE, so without this
+    the v4 LDM stage would stop ~36 hours in, after the VAE and the store."""
+
+    @staticmethod
+    def _vae(exp):
+        import poregen.configuration.experiments as E
+        return E.resolve_experiment(exp).cfg.get("vae", {}).get("checkpoint")
+
+    def test_unset_leaves_the_published_vae(self):
+        assert "r08-run-0004" in self._vae("ldm06/facedrop_from_start")
+
+    def test_set_redirects_every_ldm(self, monkeypatch):
+        monkeypatch.setenv("POREGEN_VAE_CHECKPOINT", "runs/vae/new/best.ckpt")
+        assert self._vae("ldm06/facedrop_from_start") == "runs/vae/new/best.ckpt"
+        assert self._vae("ldm25/phi_only") == "runs/vae/new/best.ckpt"
+
+    def test_a_vae_config_acquires_no_vae_key(self, monkeypatch):
+        monkeypatch.setenv("POREGEN_VAE_CHECKPOINT", "runs/vae/new/best.ckpt")
+        assert self._vae("r08/reduction-factor-8") is None
+
+    def test_it_works_without_the_split_switch(self, monkeypatch):
+        """The two are independent: one must not need the other to be set."""
+        monkeypatch.delenv("POREGEN_SPLIT", raising=False)
+        monkeypatch.setenv("POREGEN_VAE_CHECKPOINT", "runs/vae/new/best.ckpt")
+        assert self._vae("ldm06/facedrop_from_start") == "runs/vae/new/best.ckpt"

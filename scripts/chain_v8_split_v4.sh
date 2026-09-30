@@ -153,16 +153,23 @@ step "split_v3 gate reference" gates "5 s" \
 
 # ── 1. the VAE, exactly rf-8 ───────────────────────────────────────────────
 tb tb-vae "$REPO/runs/vae" 6006
-if ! smoke r08/reduction-factor-8_v4 rf8; then
+if ! smoke r08/reduction-factor-8 rf8; then
     say "STOP NOTICE: rf-8 does not fit at its own batch under the cap."
     exit 1
 fi
 run_watched "r08 rf-8 on $SPLIT" r08_rf8 "30 h" \
-    python scripts/train_vae.py run r08/reduction-factor-8_v4
+    python scripts/train_vae.py run r08/reduction-factor-8
 # The run name carries -ds<split> on any split but the published one
 # (poregen.runtime.runs), so this glob cannot pick r08-run-0004.
 VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*-z8-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
 [ -z "$VAE" ] && { say "STOP NOTICE: no rf-8 run on $SPLIT was found after training."; exit 1; }
+# EVERY LDM BELOW MUST DECODE WITH THIS VAE. train_ldm refuses to start when
+# cfg['vae']['checkpoint'] differs from the store's recorded encoder, and the
+# LDM configs name r08-run-0004 — split_v3's VAE. On split_v3 the bring-up met
+# that by editing and committing ldm06/base.yaml; on the rebuild no config file
+# is edited, so the new VAE is named here once and every resolution follows it.
+export POREGEN_VAE_CHECKPOINT="${VAE%/}/best.ckpt"
+say "POREGEN_VAE_CHECKPOINT=$POREGEN_VAE_CHECKPOINT for every LDM stage"
 say "VAE = $(basename "${VAE%/}")"
 
 # ── 1b. the r08 acceptance checks, exactly the split_v3 ones ───────────────
@@ -183,9 +190,19 @@ check "recon figure" recon_fig ok \
     --out "$REPO/runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf8"
 
 # ── 2. the latent store and its conditioning ───────────────────────────────
+STORE="data/$SPLIT/latents_r08z8"
 step "latent store" latents "6 h" \
     python scripts/build_latent_dataset.py --checkpoint "${VAE%/}/best.ckpt" \
-    --output "data/$SPLIT/latents_r08z8"
+    --output "$STORE"
+# THE SPLIT_V3 BRING-UP'S OWN CHECKS (scripts/ldm06_bringup.sh), not new ones:
+# the eight store files, then — after the conditioning — its three sidecars and
+# a LatentDataset that serves a real batch. A store that loads is not the same
+# as a store that is correct.
+for f in metadata.json train/latents.bin train/index.parquet train/material.bin \
+         train/air.bin train/pore.bin val/latents.bin test/latents.bin; do
+    [ -e "$STORE/$f" ] || { say "STOP NOTICE: store missing $f"; exit 1; }
+done
+say "CHECK store files PASS (the eight the split_v3 bring-up required)"
 # The SAMPLED std reference, before anything is scored against it. ldm06 trains
 # with latent_mode sampled, so the target's per-channel std is
 # sqrt(1 + (sigma_rms/per_channel_std)^2) — 1.863 on split_v3, NOT 1.0. Scoring
@@ -194,15 +211,28 @@ check "latent std reference" latent_std ok \
     python scripts/analysis/latent_std_reference.py \
     --store "data/$SPLIT/latents_r08z8"
 step "conditioning" conditioning "1 h" \
-    python scripts/build_conditioning.py --store "data/$SPLIT/latents_r08z8"
+    python scripts/build_conditioning.py --store "$STORE"
+for sp in train val test; do
+    [ -e "$STORE/$sp/cond.parquet" ] || { say "STOP NOTICE: conditioning missing $sp/cond.parquet"; exit 1; }
+done
+say "CHECK conditioning files PASS"
+check "LatentDataset serves a real batch (split_v3 bring-up VERIFY)" store_verify fatal \
+    python -c "
+import json, pathlib, sys
+from poregen.diffusion.latents import LatentDataset
+store = pathlib.Path('$STORE')
+meta = json.loads((store / 'metadata.json').read_text())
+print('z_channels', meta['latent_shape'][0], 'pore_status',
+      meta.get('material', {}).get('pore_status', 'MISSING'))
+ds = LatentDataset(store, split='train')
+assert len(ds) > 0, 'empty dataset'
+b = ds[0]
+print('batch keys', sorted(b), 'n rows', len(ds))
+print('VERIFY OK')
+"
 
 # ── 3. the LDM, with the dropout from step 0 — no fine-tune stage ──────────
 tb tb-ldm "$REPO/runs/ldm" 6007
-# TWO VOLUMES BEFORE 16 HOURS. The bring-up generates a pair on the untrained
-# model: it cannot look good, and it is not meant to — it proves the store, the
-# conditioning, the sampler and the decoder are wired to each other.
-check "ldm06 two-volume smoke" ldm_smoke fatal \
-    bash scripts/ldm06_bringup.sh --smoke-only
 run_watched "ldm06 facedrop_from_start (130k)" ldm06 "16 h" \
     python scripts/train_ldm.py run ldm06/facedrop_from_start
 LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
@@ -216,39 +246,64 @@ say "LDM = $(basename "${LDM%/}")"
 check "ldm convergence check" ldm_converge fatal \
     python scripts/diag_ldm_samples.py --run "${LDM%/}" --ckpt latest
 
-# ── 4. the paper's campaigns, in the runbook's order ───────────────────────
-# real-floor FIRST in every campaign: every ratio is measured against it.
+# ── 4. the paper's campaigns, BY THE SPLIT_V3 PROCEDURE ────────────────────
+# Campaign 18 is run by scripts/regen_eval_v4.sh — the script that produced the
+# split_v3 campaign 18 — not by a loop written here. Its generation order, its
+# measure pass (including the measure-only field_stats), the capped
+# memorisation pass, the inspection pack, the report and the notebook are then
+# the split_v3 ones by construction.
+#
+# ONE deliberate difference, and it follows from the rebuild: regen symlinks
+# the real floor from split_v3's campaign 12, whose labels are split_v3's. The
+# v4 floor is cut from split_v4 FIRST, so regen finds it present and does not
+# link the old one. Every other campaign then shares that floor by symlink, as
+# the split_v3 campaigns shared campaign 12's.
 C18="$REPO/runs/campaigns/18-eval-v4-final$SUF"
-for A in real-floor sampler porosity_global porosity_local microstructure \
-         geometry surface layup assembly multichunk cfg; do
-    step "c18 generate $A" "c18_gen_$A" "varies" \
-        python -m poregen.eval_v4.cli generate "$A" --model "${LDM%/}" \
-        --ckpt latest --weights ema --out "$C18"
-    step "c18 measure $A" "c18_meas_$A" "varies" \
-        python -m poregen.eval_v4.cli measure "$A" --root "$C18"
-done
-step "c18 report" c18_report "1 min" \
-    python -m poregen.eval_v4.cli report --root "$C18"
-# The gate tables campaign 18 is judged on, beside the split_v3 ones.
-check "c18 gate table" c18_gates ok \
-    python scripts/analysis/build_eval_v4_notebook.py --root "$C18"
+mkdir -p "$C18"
+step "real floor on $SPLIT (shared by every v4 campaign)" real_floor "10 min" \
+    python -m poregen.eval_v4.cli real-floor --root "$C18" \
+    --shapes small large micro surface
+link_floor() { mkdir -p "$1"; [ -e "$1/real_floor" ] || ln -s "$C18/real_floor" "$1/real_floor"; }
 
-# ── 5. the three baselines ─────────────────────────────────────────────────
-step "slicegan train" slicegan "11 h" python scripts/train_slicegan.py
+step "campaign 18 via regen_eval_v4.sh (production sampler)" c18 "16 h" \
+    env CKPT_RUN="${LDM%/}" CKPT=latest SAMPLER=production OUT="$C18" \
+    SCRATCH="$S/v8_regen18" bash scripts/regen_eval_v4.sh
+# regen does NOT exit non-zero when a sub-stage fails — it is written so one
+# failing assessment cannot kill the rest — so its own log is read for them.
+check "campaign 18 sub-stages all rc=0" c18_substages ok \
+    bash -c "! grep -E 'rc=[1-9]' '$C18/regen.log'"
+
+# ── 5. the three baselines, trained INTO the v4 directories ────────────────
+# train_slicegan.py and train_ddpm3d.py default --out to the split_v3 campaign
+# directories. Without --out they would OVERWRITE the split_v3 baselines.
+C22="$REPO/runs/campaigns/22-slicegan-baseline$SUF"; link_floor "$C22"
+step "slicegan train" slicegan "11 h" \
+    python scripts/train_slicegan.py --out "$C22/train"
+[ -e "$C22/train/latest.ckpt" ] || { say "STOP NOTICE: slicegan left no latest.ckpt"; exit 1; }
+step "slicegan sample" slicegan_sample "30 min" \
+    python scripts/analysis/slicegan_sample.py --checkpoint "$C22/train/latest.ckpt" --root "$C22"
 step "slicegan measure" slicegan_meas "8 min" \
-    python -m poregen.eval_v4.cli measure slicegan \
-    --root "$REPO/runs/campaigns/22-slicegan-baseline$SUF"
+    python -m poregen.eval_v4.cli measure slicegan --root "$C22"
+step "slicegan report" slicegan_report "1 min" \
+    python -m poregen.eval_v4.cli report --root "$C22"
+
+C23="$REPO/runs/campaigns/23-ddpm3d-baseline$SUF"; link_floor "$C23"
 step "ddpm3d train" ddpm3d "24 h" \
-    python scripts/train_ddpm3d.py --data-root "data/$SPLIT"
+    python scripts/train_ddpm3d.py --data-root "data/$SPLIT" --out "$C23/train"
+[ -e "$C23/train/latest.ckpt" ] || { say "STOP NOTICE: ddpm3d left no latest.ckpt"; exit 1; }
+step "ddpm3d sample" ddpm3d_sample "2 h" \
+    python scripts/analysis/ddpm3d_sample.py --checkpoint "$C23/train/latest.ckpt" --root "$C23"
 step "ddpm3d measure" ddpm3d_meas "8 min" \
-    python -m poregen.eval_v4.cli measure ddpm3d \
-    --root "$REPO/runs/campaigns/23-ddpm3d-baseline$SUF"
+    python -m poregen.eval_v4.cli measure ddpm3d --root "$C23"
+step "ddpm3d report" ddpm3d_report "1 min" \
+    python -m poregen.eval_v4.cli report --root "$C23"
+
 run_watched "ldm25 phi-only (40k)" ldm25 "19 h" \
     python scripts/train_ldm.py run ldm25/phi_only
 LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
 [ -z "$LDM25" ] && { say "STOP NOTICE: no ldm25 run on $SPLIT was found after training."; exit 1; }
-C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF"
-for A in real-floor porosity_global microstructure cfg; do
+C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF"; link_floor "$C25"
+for A in porosity_global microstructure cfg; do
     step "c25 generate $A" "c25_gen_$A" "varies" \
         python -m poregen.eval_v4.cli generate "$A" --model "${LDM25%/}" \
         --ckpt 40000 --weights ema --out "$C25"
@@ -259,7 +314,7 @@ step "c25 report" c25_report "1 min" \
     python -m poregen.eval_v4.cli report --root "$C25"
 
 # ── 6. the ablation ────────────────────────────────────────────────────────
-C24="$REPO/runs/campaigns/24-ablation$SUF"
+C24="$REPO/runs/campaigns/24-ablation$SUF"; link_floor "$C24"
 step "c24 generate" c24_gen "6 h" \
     python -m poregen.eval_v4.cli generate ablation --model "${LDM%/}" \
     --ckpt latest --weights ema --out "$C24"
@@ -269,10 +324,11 @@ step "c24 report" c24_report "1 min" \
     python -m poregen.eval_v4.cli report --root "$C24"
 
 # ── 7. the budget-matched row ──────────────────────────────────────────────
-# ldm06 at the phi-only baseline's own 40 000 steps. On split_v4 the base run
-# IS the facedrop-from-start run, so the step checkpoint comes from it.
-C27="$REPO/runs/campaigns/27-budget-matched-40k$SUF"
-for A in real-floor porosity_global microstructure sampler; do
+# ldm06 at the phi-only baseline's own 40 000 steps. On split_v3 that was the
+# base run, run-0001; on the rebuild the base run IS facedrop_from_start, so its
+# step-40000 checkpoint is the analogue. save_every 10000 keeps that step.
+C27="$REPO/runs/campaigns/27-budget-matched-40k$SUF"; link_floor "$C27"
+for A in porosity_global microstructure sampler; do
     step "c27 generate $A" "c27_gen_$A" "varies" \
         python -m poregen.eval_v4.cli generate "$A" --model "${LDM%/}" \
         --ckpt 40000 --weights ema --out "$C27"

@@ -15,8 +15,8 @@ experiment:
     file was written. Everything else — trunk width, latent size, beta, free
     bits, batch, the step-based stopping rule — is the r08 rung's.
 
-    Cadence is the author's v4 setting, partial validation every 1000 steps.
-    The dataset is not named: POREGEN_SPLIT selects it, and the run name
+    Cadence is the r08 rung's own, unchanged: on the rebuild only the LDM's
+    validation cadence moves, never a VAE's. The dataset is not named: POREGEN_SPLIT selects it, and the run name
     carries -ds<split> on any split but split_v3.
 
 extends: r08/reduction-factor-2
@@ -25,5 +25,3 @@ overrides:
   model:
     name: v2.conv_noattn_xctonly
     in_channels: 1
-  training:
-    eval_every: 1000

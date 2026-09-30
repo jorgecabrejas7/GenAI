@@ -228,31 +228,44 @@ def _apply_split_override(cfg: dict[str, Any], experiment_id: str, *,
     # chain is walked would redirect configs the caller never named and log a
     # warning per level; the answer that matters is the merged one.
     forced = split_override() if outermost else None
-    if not forced:
-        return cfg
     data = cfg.get("data")
     if not isinstance(data, dict):
-        return cfg
+        data = {}
 
     was = data.get("dataset_root")
-    if was is not None and was != forced:
+    if forced and was is not None and was != forced:
         data["dataset_root"] = forced
         _logger.warning("POREGEN_SPLIT=%s overrides %s's data.dataset_root (%s)",
                         forced, experiment_id, was)
 
     latents = data.get("latents_root")
-    if isinstance(latents, str):
+    if forced and isinstance(latents, str):
         moved = re.sub(r"(^|/)split_[^/]+(/|$)", rf"\1{forced}\2", latents)
         if moved != latents:
             data["latents_root"] = moved
             _logger.warning("POREGEN_SPLIT=%s moves %s's latents_root to %s",
                             forced, experiment_id, moved)
 
+    # THE FROZEN VAE. An LDM is tied to the VAE its latents came from, and
+    # train_ldm refuses to start when this key disagrees with the store's own
+    # record. A rebuild trains a new VAE, so the dataset and the VAE move
+    # together or the LDM cannot start. Only a config that already names a
+    # VAE is redirected; nothing is invented.
+    from poregen.paths import vae_checkpoint_override  # noqa: PLC0415
+
+    vae_forced = vae_checkpoint_override() if outermost else None
+    vae = cfg.get("vae")
+    if vae_forced and isinstance(vae, dict) and vae.get("checkpoint") \
+            and vae["checkpoint"] != vae_forced:
+        _logger.warning("POREGEN_VAE_CHECKPOINT moves %s's vae.checkpoint %s -> %s",
+                        experiment_id, vae["checkpoint"], vae_forced)
+        vae["checkpoint"] = vae_forced
+
     # Only when it AGREED with the root it is paired with. A config whose
     # split_version already disagrees is a separate problem and this is not
     # the place to paper over it.
     version = data.get("split_version")
-    if version is not None and was == f"split_{version}":
+    if forced and version is not None and was == f"split_{version}":
         data["split_version"] = (forced[len("split_"):]
                                  if forced.startswith("split_") else forced)
         _logger.warning("POREGEN_SPLIT=%s moves %s's split_version %s -> %s",
