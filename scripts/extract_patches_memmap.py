@@ -138,6 +138,11 @@ def main() -> None:
     parser.add_argument("--verify", action="store_true",
                         help="After extraction, compare 128 random patches "
                              "against zarr (seed 42).")
+    parser.add_argument("--link-xct-from", metavar="PATH", default=None,
+                        help="Another split root whose patch_index.parquet has exactly the same "
+                             "(volume_id, z0, y0, x0) rows (same scans, different labels): its "
+                             "patches_xct.bin is hard-linked instead of re-extracted, and only "
+                             "patches_label.bin is written. Halves disk and time.")
     args = parser.parse_args()
 
     data_root = Path(args.data_root).resolve()
@@ -177,10 +182,35 @@ def main() -> None:
         bytes_per_arr / 1e9, bytes_per_arr / 1e9, 2 * bytes_per_arr / 1e9,
     )
 
+    # ------------------------------------------------------------------
+    # Grey-level patches shared with another root (labels-only rebuild)
+    # ------------------------------------------------------------------
+    link_src: Path | None = None
+    if args.link_xct_from:
+        src_root = Path(args.link_xct_from).resolve()
+        link_src = src_root / "patches_xct.bin"
+        src_df = pd.read_parquet(str(src_root / "patch_index.parquet"),
+                                 columns=["volume_id", "z0", "y0", "x0", "ps"])
+        keys = ["volume_id", "z0", "y0", "x0", "ps"]
+        if len(src_df) != N or not src_df[keys].reset_index(drop=True).equals(
+                df[keys].reset_index(drop=True)):
+            log.error("--link-xct-from: the patch rows of %s differ from %s; the grey "
+                      "patches cannot be shared.", src_root, data_root)
+            raise SystemExit(1)
+        if not link_src.exists() or link_src.stat().st_size != bytes_per_arr:
+            log.error("--link-xct-from: %s missing or not %d bytes.", link_src, bytes_per_arr)
+            raise SystemExit(1)
+        if link_src.stat().st_dev != os.stat(data_root).st_dev:
+            log.error("--link-xct-from: %s is on another filesystem; a hard link needs the same one.",
+                      link_src)
+            raise SystemExit(1)
+        log.info("Grey patches: hard link to %s (rows identical).", link_src)
+
+    need = (1 if link_src else 2) * bytes_per_arr
     free = shutil.disk_usage(data_root).free
-    if free < 2 * bytes_per_arr:
+    if free < need:
         log.error("Need %.1f GB but only %.1f GB free on %s.",
-                  2 * bytes_per_arr / 1e9, free / 1e9, data_root)
+                  need / 1e9, free / 1e9, data_root)
         raise SystemExit(1)
 
     # ------------------------------------------------------------------
@@ -223,7 +253,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Open / create partial memmaps
     # ------------------------------------------------------------------
-    mmap_xct   = _open_partial(xct_partial,   shape, dtype)
+    if link_src is not None:
+        xct_partial.unlink(missing_ok=True)
+        os.link(link_src, xct_partial)
+        mmap_xct = None
+    else:
+        mmap_xct = _open_partial(xct_partial, shape, dtype)
     mmap_label = _open_partial(label_partial, shape, dtype)
 
     zarr_root: zarr.Group = zarr.open_group(str(zarr_root_path), mode="r")
@@ -255,7 +290,7 @@ def main() -> None:
 
             # Load full volume into RAM (one big sequential zarr read)
             grp = zarr_root[vid]
-            xct_vol   = np.asarray(grp["xct"], dtype=np.uint8)
+            xct_vol   = None if mmap_xct is None else np.asarray(grp["xct"], dtype=np.uint8)
             label_vol = build_label_volume(
                 np.asarray(grp["mask"], dtype=np.uint8),
                 np.asarray(grp["sample_mask"], dtype=np.uint8),
@@ -271,11 +306,13 @@ def main() -> None:
                     z0, y0, x0 = int(row["z0"]), int(row["y0"]), int(row["x0"])
                     gi = row_indices[local_i]
                     patch = label_vol[z0:z0+ps, y0:y0+ps, x0:x0+ps]
-                    mmap_xct  [gi] = xct_vol[z0:z0+ps, y0:y0+ps, x0:x0+ps]
+                    if mmap_xct is not None:
+                        mmap_xct[gi] = xct_vol[z0:z0+ps, y0:y0+ps, x0:x0+ps]
                     mmap_label[gi] = patch
                     class_counts += np.bincount(patch.ravel(), minlength=3)
 
-                mmap_xct.flush()
+                if mmap_xct is not None:
+                    mmap_xct.flush()
                 mmap_label.flush()
                 pbar.update(chunk_end - chunk_start)
 
@@ -330,6 +367,7 @@ def main() -> None:
         "hole_rule": report["hole_rule"],
         "split_rule": report["split_rule"],
         "parquet_sha256": parquet_sha,
+        "xct_linked_from": str(link_src) if link_src else None,
     }
     with open(meta_tmp, "w") as fh:
         json.dump(meta, fh, indent=2)
