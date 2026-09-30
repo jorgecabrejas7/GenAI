@@ -106,6 +106,7 @@ class TestNoScriptKeepsItsOwnCopy:
         ALLOWED = {
             "paths.py", "build_split_v3.py", "build_split_v4.py",
             "verify_split_v3_reference.py", "dataset_v4_vvf_table.py",
+            "split_v3_reproducibility.py",
             "reference_onlypores_audit.py",
         }
         repo = paths.repo_root()

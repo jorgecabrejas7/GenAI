@@ -86,6 +86,37 @@ run_watched() {  # a training stage: watched for host pressure at +5 min
     [ "$rc" -ne 0 ] && { say "STOP NOTICE: $tag failed — see $S/v8_$tag.log"; exit "$rc"; }
     return 0
 }
+#: A CHECK, not a stage: it reports and, for all but the fatal gates, carries
+#  on. The labels changed between split_v3 and split_v4, so a moved number may
+#  be the improvement the rebuild is for. Only a degenerate cell, a kill switch
+#  that cannot separate two requested porosities, and a non-finite loss mean the
+#  run is not working — those stop the chain.
+check() {
+    local label="$1" tag="$2" fatal="$3"; shift 3
+    gate "check $label"
+    say "CHECK $label start"
+    local t0=$SECONDS
+    choom -n 1000 -- "$@" > "$S/v8_check_$tag.log" 2>&1
+    local rc=$?
+    local verdict; [ "$rc" -eq 0 ] && verdict=PASS || verdict=FAIL
+    say "CHECK $label $verdict (rc=$rc) in $((SECONDS-t0))s — see $S/v8_check_$tag.log"
+    if [ "$rc" -ne 0 ] && [ "$fatal" = "fatal" ]; then
+        say "STOP NOTICE: $label is a fatal gate — the run is not working."
+        exit "$rc"
+    fi
+    return 0
+}
+tb() {   # TensorBoard for a family, in its own tmux, never on the card
+    local sess="$1" logdir="$2" port="$3"
+    if tmux has-session -t "$sess" 2>/dev/null; then
+        say "TB $sess already up"
+    else
+        tmux new-session -d -s "$sess" \
+            "tensorboard --logdir $logdir --port $port --bind_all" 2>/dev/null \
+            && say "TB $sess on :$port ($logdir)" \
+            || say "TB $sess could NOT start — monitoring only, not fatal"
+    fi
+}
 smoke() {
     local exp="$1" tag="$2"
     say "SMOKE $exp (cap $SMOKE_FRACTION, $SPLIT)"
@@ -110,8 +141,13 @@ for f in patch_index.parquet splits.json volumes.zarr; do
     fi
 done
 say "data/$SPLIT present; POREGEN_SPLIT=$SPLIT exported for every stage"
+# The split_v3 numbers every check below is read against, regenerated from the
+# split_v3 runs themselves so the comparison cannot drift from what they did.
+step "split_v3 gate reference" gates "5 s" \
+    env POREGEN_SPLIT=split_v3 python scripts/analysis/split_v3_gate_reference.py
 
 # ── 1. the VAE, exactly rf-8 ───────────────────────────────────────────────
+tb tb-vae "$REPO/runs/vae" 6006
 if ! smoke r08/reduction-factor-8 rf8; then
     say "STOP NOTICE: rf-8 does not fit at its own batch under the cap."
     exit 1
@@ -121,18 +157,55 @@ run_watched "r08 rf-8 on $SPLIT" r08_rf8 "30 h" \
 VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*archv2-conv_noattn_dualbranch_cls-z8-*/ 2>/dev/null | head -1)
 say "VAE = $(basename "${VAE%/}")"
 
+# ── 1b. the r08 acceptance checks, exactly the split_v3 ones ───────────────
+# Read against docs/SPLIT_V3_GATES.md: r08-run-0004 scored val/test pore Dice
+# 0.9175/0.9033, air Dice 0.9964/0.9886, porosity MAE 0.00112/0.00214, dense
+# pore Dice 0.8162 with a 0.1050 gap, and L1 0.0346 with texture +0.359 and
+# sharpness 0.816 on the harness.
+check "r08 rung report" rung_report ok \
+    python scripts/analysis/r08_rung_report.py --run "${VAE%/}"
+check "r08 calibration probe (dense panels)" calib ok \
+    python scripts/analysis/r08_calibration_probe.py --run "${VAE%/}"
+check "vae_val_l1 harness (L1, texture, sharpness)" val_l1 ok \
+    python scripts/analysis/vae_val_l1.py --run "${VAE%/}" \
+    --split "$SPLIT" --n-batches 20
+check "recon figure" recon_fig ok \
+    python scripts/analysis/vae_recon_figure.py \
+    --run "v4 rf-8=${VAE%/}" --split "$SPLIT" \
+    --out "$REPO/runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf8"
+
 # ── 2. the latent store and its conditioning ───────────────────────────────
 step "latent store" latents "6 h" \
     python scripts/build_latent_dataset.py --checkpoint "${VAE%/}/best.ckpt" \
     --output "data/$SPLIT/latents_r08z8"
+# The SAMPLED std reference, before anything is scored against it. ldm06 trains
+# with latent_mode sampled, so the target's per-channel std is
+# sqrt(1 + (sigma_rms/per_channel_std)^2) — 1.863 on split_v3, NOT 1.0. Scoring
+# against 1.0 charges the model for the posterior width it was trained on.
+check "latent std reference" latent_std ok \
+    python scripts/analysis/latent_std_reference.py \
+    --store "data/$SPLIT/latents_r08z8"
 step "conditioning" conditioning "1 h" \
     python scripts/build_conditioning.py --store "data/$SPLIT/latents_r08z8"
 
 # ── 3. the LDM, with the dropout from step 0 — no fine-tune stage ──────────
+tb tb-ldm "$REPO/runs/ldm" 6007
+# TWO VOLUMES BEFORE 16 HOURS. The bring-up generates a pair on the untrained
+# model: it cannot look good, and it is not meant to — it proves the store, the
+# conditioning, the sampler and the decoder are wired to each other.
+check "ldm06 two-volume smoke" ldm_smoke fatal \
+    bash scripts/ldm06_bringup.sh --smoke-only
 run_watched "ldm06 facedrop_from_start (130k)" ldm06 "16 h" \
     python scripts/train_ldm.py run ldm06/facedrop_from_start
 LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*/ 2>/dev/null | head -1)
 say "LDM = $(basename "${LDM%/}")"
+
+# ── 3b. the LDM convergence gates, the same ones run-0001 was read on ──────
+# run-0001 scored por_mae 0.001119 (ema_ddim50), std ratio 1.8006 against the
+# sampled reference 1.863, x0_sat 1.1e-07, degen 0.0, and a kill switch that
+# separated 0.005 from 0.05 by 0.0442. degen and direction_ok are FATAL.
+check "ldm convergence check" ldm_converge fatal \
+    python scripts/diag_ldm_samples.py --run "${LDM%/}" --ckpt latest
 
 # ── 4. the paper's campaigns, in the runbook's order ───────────────────────
 # real-floor FIRST in every campaign: every ratio is measured against it.
@@ -147,6 +220,9 @@ for A in real-floor sampler porosity_global porosity_local microstructure \
 done
 step "c18 report" c18_report "1 min" \
     python -m poregen.eval_v4.cli report --root "$C18"
+# The gate tables campaign 18 is judged on, beside the split_v3 ones.
+check "c18 gate table" c18_gates ok \
+    python scripts/analysis/build_eval_v4_notebook.py --root "$C18"
 
 # ── 5. the three baselines ─────────────────────────────────────────────────
 step "slicegan train" slicegan "11 h" python scripts/train_slicegan.py
