@@ -31,6 +31,13 @@ def test_report_gives_walls_and_parameters(tmp_path: Path):
         "min_size_filtering": 8, "reference_commit": "65c1eea6964afd5f7d2a03636ddb7b94370d1050"}
 
 
+def test_report_keeps_a_wall_the_reference_did_not_find(tmp_path: Path):
+    """aligner.find_frontwall returns -1 when no flat region exists; onlypores then excludes nothing."""
+    p = tmp_path / "r.txt"
+    p.write_text(REPORT.replace("Front wall slice: 12", "Front wall slice: -1"))
+    assert read_reference_report(p)["frontwall"] == -1
+
+
 def test_discovery_skips_the_reference_outputs(tmp_path: Path):
     src = tmp_path / "MedidasDB"
     (src / "onlypores files").mkdir(parents=True)

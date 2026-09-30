@@ -136,8 +136,8 @@ def read_reference_report(path: str | Path) -> dict:
             raise ValueError(f"{path}: no match for {pattern!r}")
         return m.group(1)
     return {
-        "frontwall": int(grab(r"Front wall slice: (\d+)")),
-        "backwall": int(grab(r"Back wall slice: (\d+)")),
+        "frontwall": int(grab(r"Front wall slice: (-?\d+)")),
+        "backwall": int(grab(r"Back wall slice: (-?\d+)")),
         "sauvola_radius": int(grab(r"window_size \(sauvola_radius\): (\d+)")),
         "sauvola_k": float(grab(r"- k: ([0-9.]+)")),
         "min_size_filtering": int(grab(r"- min_size: (\d+) voxels")),
