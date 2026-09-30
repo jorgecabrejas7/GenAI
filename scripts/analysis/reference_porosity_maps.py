@@ -28,6 +28,20 @@ import matplotlib.pyplot as plt
 from preprocess_tools import onlypores as ref_onlypores, aligner, reslicer, io as ref_io  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
+
+# THE SIZE RULE, MADE EXPLICIT. The notebooks remove components SMALLER than min_size and keep
+# components of exactly min_size (scikit-image < 0.26 semantics of remove_small_objects(min_size=8)).
+# From scikit-image 0.26 the deprecated ``min_size`` maps to ``max_size`` and removes size <= 8 too.
+# The reference's clean_pores calls remove_small_objects(labeled, min_size=min_size, connectivity=3);
+# this wrapper pins the intended rule regardless of the installed version (author's decision 2026-09-30).
+import skimage.morphology as _skm
+_orig_rso = _skm.remove_small_objects
+def _rso_keep_min(ar, min_size=64, connectivity=1, *args, **kwargs):
+    try:
+        return _orig_rso(ar, max_size=min_size - 1, connectivity=connectivity)
+    except TypeError:                     # older scikit-image: min_size already means "smaller than"
+        return _orig_rso(ar, min_size=min_size, connectivity=connectivity)
+ref_onlypores.remove_small_objects = _rso_keep_min
 CONFIGS = {"ipynb": dict(sauvola_radius=30, sauvola_k=0.125, min_size_filtering=8),
            "batch": dict(sauvola_radius=15, sauvola_k=0.2, min_size_filtering=8)}
 
