@@ -34,6 +34,27 @@ def _load(p: Path):
         return None
 
 
+#: The split_v3 VAE every number in the VAE section must come from.
+REF_VAE = "r08-run-0004"
+
+
+def _ref_only(d, what: str, W) -> dict | None:
+    """``d`` if it is REF_VAE's, else None after saying whose it is.
+
+    campaign 09's directories are keyed by experiment, not run, so a rung
+    report or probe of another run (the split_v4 rf-8, 2026-10-02) lands on the
+    same path. Its numbers must never be printed as split_v3's.
+    """
+    if d is None:
+        return None
+    run = Path(str(d.get("run_dir", ""))).name
+    if run.startswith(REF_VAE):
+        return d
+    W(f"**The {what} on disk is for `{run or 'an unnamed run'}`, not "
+      f"`{REF_VAE}`.** Its numbers are not split_v3's and are not shown.\n")
+    return None
+
+
 def _dig(d, *path, default=None):
     for k in path:
         if not isinstance(d, dict) or k not in d:
@@ -142,10 +163,12 @@ def main() -> int:
     # ── the VAE ────────────────────────────────────────────────────────────
     rung = _load(REPO / "runs/campaigns/09-r08-latent-sweep/r08_reduction-factor-8/results.json")
     W("\n## r08 rf-8 (`r08-run-0004`, step 36720) — the VAE\n")
-    if rung is None:
+    on_disk = rung is not None
+    rung = _ref_only(rung, "rung report", W)
+    if not on_disk:
         W("**The rung report is not on disk.** Run "
           "`python scripts/analysis/r08_rung_report.py --run <run>` first.\n")
-    else:
+    elif rung is not None:
         W("| gate | val | test | where from |")
         W("|---|---|---|---|")
         for label, key in (("porosity MAE", "porosity_mae"), ("air MAE", "air_mae"),
@@ -167,6 +190,7 @@ def main() -> int:
 
     probe = _load(REPO / "runs/campaigns/09-r08-latent-sweep"
                   "/calibration_probe_r08_reduction-factor-8/results.json")
+    probe = _ref_only(probe, "calibration probe", W)
     if probe is not None:
         W("\n### Dense panels (`Na_10`, `Na_09`, `Pegaso_1`) — the number capacity moved\n")
         W("From `r08_calibration_probe.py`, which samples all 17 panels; the rung")
