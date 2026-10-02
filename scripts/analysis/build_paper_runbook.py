@@ -147,6 +147,11 @@ def run_facts(pattern: str) -> dict | None:
     cfg = yaml.safe_load(cfg_p.read_text())
     exp, data, tr = cfg.get("experiment", {}), cfg.get("data", {}), cfg.get("training", {})
     last, seen = None, 0
+    # A RESUMED RUN RESTARTS ITS elapsed CLOCK. Each segment's elapsed counts
+    # from that segment's launch, so the last row holds only the last segment:
+    # ldm06 run-0001 read 16.1 h from it, for four segments that sum to 77.7 h.
+    # A drop in elapsed marks a new segment; the wall time is the segment sum.
+    seg_done, seg_max, segments = 0.0, 0.0, 1
     m = d / "metrics.jsonl"
     if m.exists():
         for line in m.read_text().splitlines():
@@ -155,7 +160,13 @@ def run_facts(pattern: str) -> dict | None:
             try:
                 last = json.loads(line); seen += 1
             except json.JSONDecodeError:
-                pass
+                continue
+            e = last.get("elapsed")
+            if e is None:
+                continue
+            if e < seg_max - 1.0:
+                seg_done, segments = seg_done + seg_max, segments + 1
+            seg_max = e
     eid = f"{exp.get('name')}/{exp.get('variant')}"
     cfg_file = f"configs/experiments/{eid}.yaml"
     return dict(
@@ -165,7 +176,8 @@ def run_facts(pattern: str) -> dict | None:
         batch=data.get("batch_size") or cfg.get("data", {}).get("batch_size") or "—",
         planned=tr.get("total_steps") or "—",
         reached=(last or {}).get("step", "—"),
-        hours=round((last or {}).get("elapsed", 0) / 3600.0, 1),
+        hours=round((seg_done + seg_max) / 3600.0, 1),
+        segments=segments,
         # LDM runs keep theirs in checkpoints/; VAE runs at the top level.
         ckpt=_ckpt_name(d),
         seed=tr.get("seed", "not recorded"),
@@ -193,8 +205,10 @@ def main() -> int:
     W(f"`{SPLIT_ENV}` overrides `data.dataset_root`, `data.latents_root` and")
     W("`data.split_version` in every config, and every script default reads")
     W("`poregen.paths`. See `tests/test_split_switch.py`.\n")
-    W("**Wall time is the GB10's**, from the run's own last metric row, and it is")
-    W("elapsed time including validation — not GPU time. **Memory** is the whole")
+    W("**Wall time is the GB10's**, summed over the run's own metric rows, and it is")
+    W("elapsed time including validation — not GPU time. A resumed run restarts its")
+    W("clock, so its wall time is the sum of its segments and is marked; steps a")
+    W("resume repeated are counted, because the card spent them. **Memory** is the whole")
     W("121 GB unified pool, shared by host and device: no second job may run beside")
     W("a training job. Batch sizes below are what fitted.\n")
 
@@ -209,7 +223,9 @@ def main() -> int:
             W(f"| {what} | `{pattern}` | **NOT ON DISK** | — | — | — | — | — |")
             continue
         W(f"| {what} | `{f['run'][:44]}` | `{f['config']}` | `{f['root']}` | "
-          f"{f['batch']} | {f['planned']} / {f['reached']} | {f['hours']} | {f['ckpt']} |")
+          f"{f['batch']} | {f['planned']} / {f['reached']} | {f['hours']}"
+          + (f" ({f['segments']} segments, resumed)" if f["segments"] > 1 else "")
+          + f" | {f['ckpt']} |")
 
     W("\n### Launch commands\n")
     W("```bash")

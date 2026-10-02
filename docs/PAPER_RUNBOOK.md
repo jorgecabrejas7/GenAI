@@ -16,8 +16,10 @@ export POREGEN_SPLIT=split_v4
 `data.split_version` in every config, and every script default reads
 `poregen.paths`. See `tests/test_split_switch.py`.
 
-**Wall time is the GB10's**, from the run's own last metric row, and it is
-elapsed time including validation — not GPU time. **Memory** is the whole
+**Wall time is the GB10's**, summed over the run's own metric rows, and it is
+elapsed time including validation — not GPU time. A resumed run restarts its
+clock, so its wall time is the sum of its segments and is marked; steps a
+resume repeated are counted, because the card spent them. **Memory** is the whole
 121 GB unified pool, shared by host and device: no second job may run beside
 a training job. Batch sizes below are what fitted.
 
@@ -26,12 +28,12 @@ a training job. Batch sizes below are what fitted.
 
 | what | run | config | dataset root | batch | steps planned/reached | wall h | checkpoint |
 |---|---|---|---|---|---|---|---|
-| rf-2, z=32, 2x reduction | `r08-run-0010-20260915-033921-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-2.yaml` | `split_v3` | 128 | 71690 / 36360 | 6.8 | `best.ckpt` |
+| rf-2, z=32, 2x reduction | `r08-run-0010-20260915-033921-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-2.yaml` | `split_v3` | 128 | 71690 / 36360 | 42.8 (3 segments, resumed) | `best.ckpt` |
 | rf-4, z=16, 4x | `r08-run-0006-20260906-064505-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-4.yaml` | `split_v3` | 128 | 71690 / 16680 | 14.5 | `best.ckpt` |
 | rf-8, z=8, 8x — THE PAPER'S VAE | `r08-run-0004-20260904-035134-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-8.yaml` | `split_v3` | 128 | 71690 / 36720 | 30.0 | `best.ckpt` |
 | base, z=4, 16x | `r08-run-0003-20260903-164115-archv2-conv_noa` | `configs/experiments/r08/base.yaml` | `split_v3` | 128 | 71690 / 12600 | 11.1 | `best.ckpt` |
 | rf-32, z=2, 32x | `r08-run-0005-20260905-132215-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-32.yaml` | `split_v3` | 128 | 71690 / 15960 | 17.3 | `best.ckpt` |
-| rf-64, z=1, 64x | `r08-run-0012-20260923-092913-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-64.yaml` | `split_v3` | 128 | 71690 / 20520 | 20.5 | `best.ckpt` |
+| rf-64, z=1, 64x | `r08-run-0012-20260923-092913-archv2-conv_noa` | `configs/experiments/r08/reduction-factor-64.yaml` | `split_v3` | 128 | 71690 / 20520 | 21.3 (2 segments, resumed) | `best.ckpt` |
 
 ## VAE — rejected variants
 
@@ -43,7 +45,7 @@ a training job. Batch sizes below are what fitted.
 
 | what | run | config | dataset root | batch | steps planned/reached | wall h | checkpoint |
 |---|---|---|---|---|---|---|---|
-| ldm06 base, 130k | `ldm06-run-0001-20260907-145657-z8-c128-bs256` | `configs/experiments/ldm06/base.yaml` | `data/split_v3/latents_r08z8` | — | 130000 / 129999 | 16.1 | `checkpoints/best.ckpt` |
+| ldm06 base, 130k | `ldm06-run-0001-20260907-145657-z8-c128-bs256` | `configs/experiments/ldm06/base.yaml` | `data/split_v3/latents_r08z8` | — | 130000 / 129999 | 77.7 (4 segments, resumed) | `checkpoints/best.ckpt` |
 | facedrop fine-tune, 15k — THE PAPER'S LDM | `ldm06-run-0002-20260912-085535-z8-c128-bs256` | `configs/experiments/ldm06/facedrop.yaml` | `data/split_v3/latents_r08z8` | — | 15000 / 14999 | 8.3 | `checkpoints/best.ckpt` |
 
 ## LDM — controls
@@ -56,7 +58,7 @@ a training job. Batch sizes below are what fitted.
 
 | what | run | config | dataset root | batch | steps planned/reached | wall h | checkpoint |
 |---|---|---|---|---|---|---|---|
-| ldm05, the pre-r08 rung | `ldm05-run-0001-20260827-114902-z4-c128-bs256` | `configs/experiments/ldm05/base.yaml` | `data/split_v2/latents_r07z4` | — | 130000 / 129999 | 9.0 | `checkpoints/best.ckpt` |
+| ldm05, the pre-r08 rung | `ldm05-run-0001-20260827-114902-z4-c128-bs256` | `configs/experiments/ldm05/base.yaml` | `data/split_v2/latents_r07z4` | — | 130000 / 129999 | 57.6 (2 segments, resumed) | `checkpoints/best.ckpt` |
 | ldm04 | `ldm04-run-0001-20260824-170627-z4-c128-bs256` | `configs/experiments/ldm04/base.yaml` | `data/split_v2/latents_r07z4` | — | 200000 / 119999 | 49.6 | `checkpoints/best.ckpt` |
 
 ## Baselines
@@ -69,10 +71,10 @@ a training job. Batch sizes below are what fitted.
 
 | what | run | config | dataset root | batch | steps planned/reached | wall h | checkpoint |
 |---|---|---|---|---|---|---|---|
-| flat SVD bottleneck | `vrrae03-run-0003-20260805-194536-archv2-vrra` | `configs/experiments/vrrae03/base.yaml` | `split_v2` | 768 | 11948 / 1860 | 2.3 | `best.ckpt` |
+| flat SVD bottleneck | `vrrae03-run-0003-20260805-194536-archv2-vrra` | `configs/experiments/vrrae03/base.yaml` | `split_v2` | 768 | 11948 / 1860 | 4.3 (2 segments, resumed) | `best.ckpt` |
 | flat linear twin | `vrrae04-run-0001-20260806-024901-archv2-vrra` | `configs/experiments/vrrae04/base.yaml` | `split_v2` | 768 | 11948 / 11948 | 10.8 | `best.ckpt` |
-| V0, flat linear, KL off | `vrrae-run-0001-20260922-183011-archv2-vrrae_` | `configs/experiments/vrrae/beta0.yaml` | `split_v2` | 768 | 11948 / 11948 | 8.2 | `best.ckpt` |
-| B, flat FC 1024, rank 768 | `vrrae-run-0006-20260924-214300-archv2-vrrae-` | `configs/experiments/vrrae/b_fallback.yaml` | `split_v3` | 1024 | 7857 / 7857 | 3.1 | `best.ckpt` |
+| V0, flat linear, KL off | `vrrae-run-0001-20260922-183011-archv2-vrrae_` | `configs/experiments/vrrae/beta0.yaml` | `split_v2` | 768 | 11948 / 11948 | 14.9 (2 segments, resumed) | `best.ckpt` |
+| B, flat FC 1024, rank 768 | `vrrae-run-0006-20260924-214300-archv2-vrrae-` | `configs/experiments/vrrae/b_fallback.yaml` | `split_v3` | 1024 | 7857 / 7857 | 13.8 (2 segments, resumed) | `best.ckpt` |
 | A0, flat SVD, KL off | `vrrae-run-0009-20260926-040856-archv2-vrrae-` | `configs/experiments/vrrae/a0.yaml` | `split_v3` | 1024 | 7857 / 7857 | 15.1 | `best.ckpt` |
 | conv k*=8, beta 1e-5 | `vrrae-run-0008-20260925-145717-archv2-vrrae_` | `configs/experiments/vrrae/conv_k8_b1e-5.yaml` | `split_v2` | 128 | 71690 / — | 0.0 | `best.ckpt` |
 | conv k*=8, beta 1e-3 | `vrrae-run-0010-20260929-085705-archv2-vrrae_` | `configs/experiments/vrrae/conv_k8_b1e-3.yaml` | `split_v2` | 128 | 71690 / 18960 | 13.8 | `best.ckpt` |
