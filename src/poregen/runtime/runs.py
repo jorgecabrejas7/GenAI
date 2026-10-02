@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from poregen.configuration import ResolvedExperiment
-from poregen.paths import DEFAULT_SPLIT
+from poregen.paths import split_tag
 
 
 @dataclass(frozen=True)
@@ -110,8 +110,8 @@ def build_run_name(
     # run" would pick whichever is newer. split_v3 names are unchanged, so no
     # existing run is renamed and every resume still parses.
     split = _run_split(cfg)
-    if split is not None and split != DEFAULT_SPLIT:
-        suffix_parts.append(f"ds{split.removeprefix('split_')}")
+    if split is not None and split_tag(split):
+        suffix_parts.append(split_tag(split))
 
     suffix = "-".join(suffix_parts)
     base = f"{experiment_name}-run-{run_index:0{index_width}d}-{timestamp}"

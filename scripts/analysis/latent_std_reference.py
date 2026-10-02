@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-from poregen.paths import default_split
+from poregen.paths import default_split, std_reference_path
 
 
 def main() -> int:
@@ -41,10 +41,13 @@ def main() -> int:
                          "latents.bin the training dataloader is using, and a 50k-row "
                          "pass slowed ldm06 from 1.74 to 2.43 s/step.")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default="runs/campaigns/09-r08-latent-sweep/latent_std_reference.json")
+    ap.add_argument("--out", default=None,
+                    help="default runs/campaigns/09-r08-latent-sweep/"
+                         "latent_std_reference[-ds<v>].json, by the store's split")
     args = ap.parse_args()
 
     root = Path(args.store)
+    out_path = Path(args.out) if args.out else std_reference_path(root)
     meta = json.loads((root / "metadata.json").read_text())
     if meta["storage"]["pack_scheme"] != "mu_then_std":
         raise SystemExit(f"unexpected pack scheme {meta['storage']['pack_scheme']!r}")
@@ -88,7 +91,7 @@ def main() -> int:
     predicted = np.sqrt(mu_std ** 2 + sig_rms ** 2)   # identical by construction
 
     out = {
-        "store": str(root), "split": args.split,
+        "store": str(root), "dataset_split": root.parent.name, "split": args.split,
         "rows_drawn": int(len(rows)), "voxels_per_channel": int(count),
         "mu_normalised_std": mu_std.tolist(),
         "posterior_sigma_rms_normalised": sig_rms.tolist(),
@@ -102,8 +105,8 @@ def main() -> int:
             "by construction and is NOT the right reference."
         ),
     }
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(json.dumps(out, indent=2))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, indent=2))
 
     # Write it back into the store, which is what the diag reads. A reference
     # kept only in a campaign file can be paired with the wrong store; one that
@@ -134,7 +137,7 @@ def main() -> int:
         print(f"{c:>3}{mu_std[c]:>14.4f}{sig_rms[c]:>17.4f}{smp_std[c]:>14.4f}{predicted[c]:>11.4f}")
     print(f"{'mean':>3}{mu_std.mean():>14.4f}{sig_rms.mean():>17.4f}"
           f"{smp_std.mean():>14.4f}{predicted.mean():>11.4f}")
-    print(f"\nwrote {args.out}")
+    print(f"\nwrote {out_path}")
     return 0
 
 

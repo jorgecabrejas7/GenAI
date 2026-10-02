@@ -55,7 +55,7 @@ from poregen.dataset.loader import build_label  # noqa: E402
 from poregen.experiments.train_vae import build_model  # noqa: E402
 from poregen.models.vae.base import CLASS_AIR, CLASS_PORE  # noqa: E402
 from poregen.training.checkpoint import load_checkpoint  # noqa: E402
-from poregen.paths import data_root
+from poregen.paths import data_root, split_tag
 
 OUT_ROOT = REPO / "runs/campaigns/09-r08-latent-sweep"
 INDEX = data_root() / "patch_index.parquet"
@@ -293,7 +293,7 @@ def main() -> None:
     # the loss only showed as a blank cell in the compare table.
     ap.add_argument("--out-name", default=None,
                     help="subdirectory under the campaign root; defaults to "
-                         "calibration_probe_<experiment>_<variant>")
+                         "calibration_probe_<experiment>_<variant>[-ds<v>]")
     args = ap.parse_args()
 
     import zarr
@@ -324,16 +324,21 @@ def main() -> None:
 
     meta = {
         "experiment": f"{cfg['experiment']['name']}/{cfg['experiment']['variant']}",
-        "run_dir": str(run_dir), "step": step,
+        "run_dir": str(run_dir), "run": run_dir.name, "step": step,
+        "split": data_root().name,
         "z_channels": cfg["model"]["z_channels"],
         "class_weights": weights.tolist(),
         "per_bin": args.per_bin, "n_patches": int(len(rows)),
         "n_panels": int(rows.panel_id.nunique()),
         "taus": list(TAUS), "gate": GATE, "device": args.device,
     }
+    # The split joins the name for any split but split_v3: campaign 09 is keyed
+    # by experiment, so the split_v4 rf-8 probe replaced the split_v3 one on
+    # 2026-10-02.
+    tag = split_tag(data_root().name)
     name = args.out_name or (
         f"calibration_probe_{cfg['experiment']['name']}_"
-        f"{cfg['experiment']['variant']}")
+        f"{cfg['experiment']['variant']}" + (f"-{tag}" if tag else ""))
     out_dir = OUT_ROOT / name
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json({**meta, "summary": summ}, out_dir)

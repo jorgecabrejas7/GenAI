@@ -18,7 +18,7 @@ reports:
 * per-panel rows, since a whole panel is one split in split_v3 and a panel is
   the unit that can be atypical.
 
-Outputs -> ``runs/campaigns/09-r08-latent-sweep/<experiment>/``: results.json
+Outputs -> ``runs/campaigns/09-r08-latent-sweep/<experiment>[-ds<v>]/``: results.json
 and findings.md. Run it once per rung; ``--compare`` then assembles the
 cross-rung table.
 
@@ -52,7 +52,7 @@ from poregen.models.vae.base import CLASS_AIR, CLASS_PORE  # noqa: E402
 from poregen.training.checkpoint import load_checkpoint  # noqa: E402
 from poregen.training.data import build_patch_dataloaders  # noqa: E402
 from poregen.training.engine import to_device_inputs  # noqa: E402
-from poregen.paths import data_root
+from poregen.paths import data_root, split_tag
 
 OUT_ROOT = REPO / "runs/campaigns/09-r08-latent-sweep"
 SPLITS_JSON = data_root() / "splits.json"
@@ -369,14 +369,27 @@ def run_one(run_dir: Path, batch_size: int, min_bin_n: int) -> dict:
         "model": cfg["model"]["name"],
         "n_params": sum(p.numel() for p in model.parameters()),
         "dataset_root": cfg["data"]["dataset_root"],
+        "run": run_dir.name,
+        "split": Path(cfg["data"]["dataset_root"]).name,
         "min_bin_n": min_bin_n,
     }
-    out_dir = OUT_ROOT / meta["experiment"].replace("/", "_")
+    out_dir = OUT_ROOT / out_name(meta["experiment"].replace("/", "_"), meta["split"])
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json({**meta, "calibration": cal, "splits": per_split}, out_dir)
     write_findings(build_findings(meta, per_split, min_bin_n), out_dir)
     log(f"wrote {out_dir}")
     return {**meta, "splits": per_split}
+
+
+def out_name(key: str, split: str) -> str:
+    """``key`` on the published split, ``key-ds<v>`` on any other.
+
+    campaign 09 is keyed by experiment; without the split a split_v4 rerun of a
+    rung lands on the split_v3 rung's directory and replaces its files, which is
+    what happened to rf-8 on 2026-10-02.
+    """
+    tag = split_tag(split)
+    return f"{key}-{tag}" if tag else key
 
 
 def _last(rows, split):
@@ -414,7 +427,7 @@ def gather_rung(run_dir: Path) -> dict | None:
     active = lv.get("mu_active_fraction")
     n_active = lv.get("mu_n_active")
 
-    key = exp.replace("/", "_")
+    key = out_name(exp.replace("/", "_"), Path(cfg["data"]["dataset_root"]).name)
     out = {"experiment": exp, "variant": variant, "run_dir": str(run_dir),
            "z_channels": cfg["model"]["z_channels"], "step": vf.get("step"),
            "wall_h": wall_h, "stopped": stopped,

@@ -64,6 +64,29 @@ def split_override() -> str | None:
     return value or None
 
 
+def split_tag(split: str) -> str:
+    """``"ds<v>"`` for any split but the published one, ``""`` for it.
+
+    The single rule for marking an artefact with the split it was made on: run
+    names and analysis output directories both use it, so split_v3's names stay
+    exactly as they were and a split_v4 output can never take a split_v3 path.
+    """
+    name = Path(split).name
+    return "" if name == DEFAULT_SPLIT else f"ds{name.removeprefix('split_')}"
+
+
+def std_reference_path(store: str | Path) -> Path:
+    """Where ``latent_std_reference.py`` writes the measurement for ``store``.
+
+    One file per split (``latent_std_reference[-ds<v>].json``): every split's
+    store is called ``latents_r08z8``, so a single file let the split_v4 store's
+    measurement replace split_v3's on 2026-10-02.
+    """
+    tag = split_tag(Path(store).resolve().parent.name)
+    return (repo_root() / "runs" / "campaigns" / "09-r08-latent-sweep"
+            / f"latent_std_reference{'-' + tag if tag else ''}.json")
+
+
 def data_root(split: str | None = None, *, repo: str | Path | None = None) -> Path:
     """``<repo>/data/<split>``, with the split resolved as documented above."""
     base = Path(repo) if repo is not None else repo_root()

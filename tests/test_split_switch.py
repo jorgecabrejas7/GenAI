@@ -195,3 +195,33 @@ class TestTheVaeFollowsTheRebuild:
         monkeypatch.delenv("POREGEN_SPLIT", raising=False)
         monkeypatch.setenv("POREGEN_VAE_CHECKPOINT", "runs/vae/new/best.ckpt")
         assert self._vae("ldm06/facedrop_from_start") == "runs/vae/new/best.ckpt"
+
+
+# ── analysis outputs carry the split, as run names do ────────────────────────
+
+def test_split_tag_is_empty_only_for_the_published_split():
+    from poregen.paths import DEFAULT_SPLIT, split_tag
+    assert split_tag(DEFAULT_SPLIT) == ""
+    assert split_tag("split_v4") == "dsv4"
+    assert split_tag("data/split_v5") == "dsv5"
+
+
+def test_std_reference_is_one_file_per_split():
+    from poregen.paths import repo_root, std_reference_path
+    camp = repo_root() / "runs/campaigns/09-r08-latent-sweep"
+    assert std_reference_path("data/split_v3/latents_r08z8") \
+        == camp / "latent_std_reference.json"
+    assert std_reference_path("data/split_v4/latents_r08z8") \
+        == camp / "latent_std_reference-dsv4.json"
+
+
+def test_rung_report_directory_keeps_split_v3_names():
+    import importlib.util
+    from poregen.paths import repo_root
+    spec = importlib.util.spec_from_file_location(
+        "r08_rung_report", repo_root() / "scripts/analysis/r08_rung_report.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.out_name("r08_reduction-factor-8", "split_v3") == "r08_reduction-factor-8"
+    assert mod.out_name("r08_reduction-factor-8", "split_v4") \
+        == "r08_reduction-factor-8-dsv4"

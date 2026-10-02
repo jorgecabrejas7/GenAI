@@ -55,6 +55,7 @@ from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, decode_label, decode_xct
 from poregen.diffusion.sampler import DDIMSampler
 from poregen.experiments.base import find_repo_root
+from poregen.paths import std_reference_path
 from poregen.experiments.train_vae import load_vae_from_checkpoint
 from poregen.training.ldm_engine import sample_neighbours
 from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
@@ -237,11 +238,11 @@ def load_std_reference(store: Path) -> np.ndarray | None:
             logger.warning("could not read channel_stats from %s: %s", meta, exc)
     # Fallback: the standalone measurement, only if it names THIS store.
     repo = find_repo_root(__file__)
-    cand = repo / "runs/campaigns/09-r08-latent-sweep/latent_std_reference.json"
+    cand = std_reference_path(store)
     if cand.exists():
         try:
             d = json.loads(cand.read_text())
-            if Path(d.get("store", "")).name == Path(store).name:
+            if (repo / d.get("store", "")).resolve() == Path(store).resolve():
                 return np.asarray(d["sampled_std"], dtype=np.float64)
             logger.warning("%s is for store %s, not %s — ignored",
                            cand, d.get("store"), store)
