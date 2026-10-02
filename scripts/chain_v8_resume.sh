@@ -10,7 +10,11 @@
 #
 #     START_AT=store POREGEN_SPLIT=split_v4 bash scripts/chain_v8_resume.sh
 #
-# Stages, in order: rf8 store ldm06 c18 baselines c24 c27 c14 grey.
+# Stages, in order: rf8 rf8checks store ldm06 c18 baselines c24 c27 c14 grey.
+# rf8checks is rf-8's four acceptance checks ALONE — the rung report, the
+# calibration probe, the harness and the recon figure — so a trainer that
+# had to be stopped after early stopping can still be checked on its
+# best.ckpt without retraining.
 # A skipped stage's outputs are read back from disk: the VAE and the LDM by
 # their -ds<split> run names, so a resume past rf-8 still exports
 # POREGEN_VAE_CHECKPOINT and still cannot pick split_v3's r08-run-0004.
@@ -54,9 +58,9 @@ cd "$REPO" || exit 1
 
 #: Resume point. Everything before it is skipped; everything from it runs.
 START_AT="${START_AT:-rf8}"
-case " rf8 store ldm06 c18 baselines c24 c27 c14 grey " in
+case " rf8 rf8checks store ldm06 c18 baselines c24 c27 c14 grey " in
     *" $START_AT "*) ;;
-    *) echo "START_AT must be one of: rf8 store ldm06 c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
+    *) echo "START_AT must be one of: rf8 rf8checks store ldm06 c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
 esac
 _reached=0
 at() {
@@ -219,6 +223,12 @@ if at rf8; then
     say "POREGEN_VAE_CHECKPOINT=$POREGEN_VAE_CHECKPOINT for every LDM stage"
     say "VAE = $(basename "${VAE%/}")"
 
+fi
+[ -z "${VAE:-}" ] && VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*-z8-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "$VAE" ] && { say "STOP NOTICE: resuming past rf-8 but no rf-8 run on $SPLIT exists"; exit 1; }
+export POREGEN_VAE_CHECKPOINT="${VAE%/}/best.ckpt"
+say "VAE = $(basename "${VAE%/}") (POREGEN_VAE_CHECKPOINT set)"
+if at rf8checks; then
     # ── 1b. the r08 acceptance checks, exactly the split_v3 ones ───────────────
     # Read against docs/SPLIT_V3_GATES.md: r08-run-0004 scored val/test pore Dice
     # 0.9175/0.9033, air Dice 0.9964/0.9886, porosity MAE 0.00112/0.00214, dense
@@ -237,10 +247,6 @@ if at rf8; then
         --out "$REPO/runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf8"
 
 fi
-[ -z "${VAE:-}" ] && VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*-z8-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
-[ -z "$VAE" ] && { say "STOP NOTICE: resuming past rf-8 but no rf-8 run on $SPLIT exists"; exit 1; }
-export POREGEN_VAE_CHECKPOINT="${VAE%/}/best.ckpt"
-say "VAE = $(basename "${VAE%/}") (POREGEN_VAE_CHECKPOINT set)"
 if at store; then
     # ── 2. the latent store and its conditioning ───────────────────────────────
     STORE="data/$SPLIT/latents_r08z8"
