@@ -202,7 +202,8 @@ check "recon figure" recon_fig ok \
 STORE="data/$SPLIT/latents_r08z8"
 step "latent store" latents "6 h" \
     python scripts/build_latent_dataset.py --checkpoint "${VAE%/}/best.ckpt" \
-    --output "$STORE"
+    --output "$STORE" \
+    --min-free-ratio 1.3
 # THE SPLIT_V3 BRING-UP'S OWN CHECKS (scripts/ldm06_bringup.sh), not new ones:
 # the eight store files, then — after the conditioning — its three sidecars and
 # a LatentDataset that serves a real batch. A store that loads is not the same

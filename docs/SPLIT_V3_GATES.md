@@ -81,12 +81,10 @@ split_v3: 58 train, 11 val, 11 test volumes.
 - **val** — JI_12, Na_01_1, Na_01_2, Na_01_3, Na_01_4, Na_01_5, Na_08_1, Na_08_2, Na_08_3, Na_08_4, Na_08_5
 - **test** — JI_8, Na_05_1, Na_05_2, Na_05_3, Na_05_4, Na_05_5, Na_09_1, Na_09_2, Na_09_3, Na_09_4, Na_09_5
 
-`data/split_v4/splits.json` does not exist yet, so the comparison
-cannot be made. **The r08 rows above are like-for-like only if
-split_v4 keeps the same val and test panels.** The stated plan is
-that it does — split_v3's assignment is kept and only JI_11 is added, to
-train — and this line will confirm or contradict it the moment the build
-exists.
+**split_v4 keeps the same val and test panels**, so the r08 rows above
+are a like-for-like comparison.
+
+Added in split_v4: JI_11 (train)
 
 
 ## How the v4 chain uses these
