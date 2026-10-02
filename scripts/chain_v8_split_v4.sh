@@ -213,6 +213,18 @@ for f in metadata.json train/latents.bin train/index.parquet train/material.bin 
     [ -e "$STORE/$f" ] || { say "STOP NOTICE: store missing $f"; exit 1; }
 done
 say "CHECK store files PASS (the eight the split_v3 bring-up required)"
+# ALLOCATED MUST MATCH APPARENT. np.memmap(w+) creates the files at full size
+# as SPARSE files, so the eight-file check passes from the first second and the
+# LatentDataset verify reads one row; neither would see a region the build never
+# wrote. du's allocated size within 2 % of the apparent size is what says every
+# block was written.
+ALLOC=$(du -sB1 "$STORE" | cut -f1); APPAR=$(du -sB1 --apparent-size "$STORE" | cut -f1)
+if python3 -c "import sys; sys.exit(0 if $ALLOC >= 0.98*$APPAR else 1)"; then
+    say "CHECK store allocated vs apparent PASS — $ALLOC of $APPAR bytes"
+else
+    say "STOP NOTICE: the store has HOLES — $ALLOC of $APPAR bytes allocated"
+    exit 1
+fi
 # The SAMPLED std reference, before anything is scored against it. ldm06 trains
 # with latent_mode sampled, so the target's per-channel std is
 # sqrt(1 + (sigma_rms/per_channel_std)^2) — 1.863 on split_v3, NOT 1.0. Scoring
