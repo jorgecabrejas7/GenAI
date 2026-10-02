@@ -65,9 +65,9 @@ def _otsu_from_hist(hist: np.ndarray) -> int:
     return int(np.nanargmax(sigma_b))
 
 
-def volume_profiles(volume_id: str) -> dict:
+def volume_profiles(volume_id: str, zarr_root: Path = ZARR_ROOT) -> dict:
     """Stream one volume and return exact per-slice profiles for all 3 axes."""
-    g = zarr.open_group(str(ZARR_ROOT), mode="r")[volume_id]
+    g = zarr.open_group(str(zarr_root), mode="r")[volume_id]
     xct_a, mask_a = g["xct"], g["mask"]
     D, H, W = xct_a.shape
 

@@ -10,7 +10,7 @@
 #
 #     START_AT=store POREGEN_SPLIT=split_v4 bash scripts/chain_v8_resume.sh
 #
-# Stages, in order: rf8 rf8checks store ldm06 c18 baselines c24 c27 c14 grey.
+# Stages, in order: rf8 rf8checks store conditioning ldm06 c18 baselines c24 c27 c14 grey.
 # rf8checks is rf-8's four acceptance checks ALONE — the rung report, the
 # calibration probe, the harness and the recon figure — so a trainer that
 # had to be stopped after early stopping can still be checked on its
@@ -58,9 +58,9 @@ cd "$REPO" || exit 1
 
 #: Resume point. Everything before it is skipped; everything from it runs.
 START_AT="${START_AT:-rf8}"
-case " rf8 rf8checks store ldm06 c18 baselines c24 c27 c14 grey " in
+case " rf8 rf8checks store conditioning ldm06 c18 baselines c24 c27 c14 grey " in
     *" $START_AT "*) ;;
-    *) echo "START_AT must be one of: rf8 rf8checks store ldm06 c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
+    *) echo "START_AT must be one of: rf8 rf8checks store conditioning ldm06 c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
 esac
 _reached=0
 at() {
@@ -263,6 +263,18 @@ if at store; then
         [ -e "$STORE/$f" ] || { say "STOP NOTICE: store missing $f"; exit 1; }
     done
     say "CHECK store files PASS (the eight the split_v3 bring-up required)"
+    # ALLOCATED MUST MATCH APPARENT. np.memmap(w+) creates the files at full size
+    # as SPARSE files, so the eight-file check passes from the first second and the
+    # LatentDataset verify reads one row; neither would see a region the build never
+    # wrote. du's allocated size within 2 % of the apparent size is what says every
+    # block was written.
+    ALLOC=$(du -sB1 "$STORE" | cut -f1); APPAR=$(du -sB1 --apparent-size "$STORE" | cut -f1)
+    if python3 -c "import sys; sys.exit(0 if $ALLOC >= 0.98*$APPAR else 1)"; then
+        say "CHECK store allocated vs apparent PASS — $ALLOC of $APPAR bytes"
+    else
+        say "STOP NOTICE: the store has HOLES — $ALLOC of $APPAR bytes allocated"
+        exit 1
+    fi
     # The SAMPLED std reference, before anything is scored against it. ldm06 trains
     # with latent_mode sampled, so the target's per-channel std is
     # sqrt(1 + (sigma_rms/per_channel_std)^2) — 1.863 on split_v3, NOT 1.0. Scoring
@@ -270,6 +282,12 @@ if at store; then
     check "latent std reference" latent_std ok \
         python scripts/analysis/latent_std_reference.py \
         --store "data/$SPLIT/latents_r08z8"
+
+fi
+if at conditioning; then
+    # A split that adds volumes gets its own orientation field here
+    # (data/<split>/orientation_field.json): split_v2's records unchanged, plus a
+    # no-stacking-sequence record per added volume — JI_11 on split_v4.
     step "conditioning" conditioning "1 h" \
         python scripts/build_conditioning.py --store "$STORE"
     for sp in train val test; do

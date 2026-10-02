@@ -469,3 +469,55 @@ def test_store_metadata_is_json_serialisable(synthetic_store):
     meta = json.loads((root / "metadata.json").read_text())
     assert "assembly" not in meta          # the parity block is gone for good
     assert "geometry" in meta["conditioning"]
+
+
+# ── the orientation field of a split that adds volumes ───────────────────────
+
+JI_7 = "MedidasDB__Juan_Ignacio_probetas_7_volume_eq_aligned"
+JI_11 = "MedidasDB__Juan_Ignacio_probetas_11_volume_eq_aligned"
+
+
+def test_orientation_field_follows_the_split():
+    mod = _load_builder()
+    assert mod.orientation_field_path(REPO / "data/split_v3/latents_r08z8") \
+        == mod.ORIENT_BASE
+    assert mod.orientation_field_path(REPO / "data/split_v4/latents_r08z8") \
+        == REPO / "data/split_v4/orientation_field.json"
+
+
+def test_an_added_volume_gets_the_no_sequence_record():
+    mod = _load_builder()
+    if not mod.ORIENT_BASE.exists():
+        pytest.skip("split_v2 orientation field not present")
+    base = json.loads(mod.ORIENT_BASE.read_text())
+    g = {"extent": {"z": [3, 190], "y": [2, 3000], "x": [50, 1600]},
+         "shape": [200, 3100, 1700]}
+    field = mod.extend_orientation_field(
+        base, {"vol_new": g}, mod.ORIENT_BASE, REPO / "data/split_v4/volumes.zarr")
+    assert {k: field["volumes"][k] for k in base["volumes"]} == base["volumes"]
+    new = field["volumes"]["vol_new"]
+    # The same record JI_7 has, with its own shape and extent.
+    assert new.keys() == base["volumes"][JI_7].keys()
+    assert new["orientation_usable"] is False and new["theta_deg"] is None
+    assert new["reason"] == base["volumes"][JI_7]["reason"]
+    assert new["extent_foreground"] == g["extent"] and new["shape"] == g["shape"]
+    assert field["summary"]["n_volumes"] == len(base["volumes"]) + 1
+    assert field["summary"]["n_orientation_unusable"] == \
+        base["summary"]["n_orientation_unusable"] + 1
+    assert field["provenance"]["added_volumes"] == ["vol_new"]
+    with pytest.raises(ValueError):
+        mod.extend_orientation_field(base, {JI_7: g}, mod.ORIENT_BASE,
+                                     REPO / "data/split_v4/volumes.zarr")
+
+
+def test_split_v4_field_is_split_v2_plus_ji11():
+    mod = _load_builder()
+    v4 = REPO / "data/split_v4/orientation_field.json"
+    if not (v4.exists() and mod.ORIENT_BASE.exists()):
+        pytest.skip("split_v4 orientation field not built")
+    base = json.loads(mod.ORIENT_BASE.read_text())["volumes"]
+    vols = json.loads(v4.read_text())["volumes"]
+    assert len(base) == 80
+    assert set(vols) - set(base) == {JI_11}
+    assert {k: vols[k] for k in base} == base
+    assert vols[JI_11]["orientation_usable"] is False
