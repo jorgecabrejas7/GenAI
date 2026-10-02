@@ -296,18 +296,18 @@ if at conditioning; then
     say "CHECK conditioning files PASS"
     check "LatentDataset serves a real batch (split_v3 bring-up VERIFY)" store_verify fatal \
         python -c "
-    import json, pathlib, sys
-    from poregen.diffusion.latents import LatentDataset
-    store = pathlib.Path('$STORE')
-    meta = json.loads((store / 'metadata.json').read_text())
-    print('z_channels', meta['latent_shape'][0], 'pore_status',
-          meta.get('material', {}).get('pore_status', 'MISSING'))
-    ds = LatentDataset(store, split='train')
-    assert len(ds) > 0, 'empty dataset'
-    b = ds[0]
-    print('batch keys', sorted(b), 'n rows', len(ds))
-    print('VERIFY OK')
-    "
+import json, pathlib, sys
+from poregen.diffusion.latents import LatentDataset
+store = pathlib.Path('$STORE')
+meta = json.loads((store / 'metadata.json').read_text())
+print('z_channels', meta['latent_shape'][0], 'pore_status',
+      meta.get('material', {}).get('pore_status', 'MISSING'))
+ds = LatentDataset(store, split='train')
+assert len(ds) > 0, 'empty dataset'
+b = ds[0]
+print('batch keys', sorted(b), 'n rows', len(ds))
+print('VERIFY OK')
+"
 
 fi
 if at ldm06; then
