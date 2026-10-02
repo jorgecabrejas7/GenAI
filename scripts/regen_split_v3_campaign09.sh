@@ -2,7 +2,9 @@
 # Regenerate the split_v3 rf-8 files in campaign 09 that the split_v4 rf-8
 # replaced on 2026-10-02: the rung report, the calibration probe and the latent
 # std reference, all of r08-run-0004 on split_v3, into their original paths.
-# The paper's six-rung table traces to these JSONs.
+# The paper's six-rung table traces to these JSONs. --n 50000 is the row count
+# the split_v3 store's channel_stats were measured on (the default 8000 is sized
+# to run beside a trainer; this job runs with the card to itself).
 #
 # Waits for PID $1 (the GPU job ahead of it) to exit first: never two CUDA jobs.
 #     setsid nohup bash scripts/regen_split_v3_campaign09.sh <pid> &
@@ -25,7 +27,7 @@ fail=0
 for job in \
     "rung_report|python scripts/analysis/r08_rung_report.py --run $RUN" \
     "probe|python scripts/analysis/r08_calibration_probe.py --run $RUN" \
-    "latent_std|python scripts/analysis/latent_std_reference.py --store data/split_v3/latents_r08z8"; do
+    "latent_std|python scripts/analysis/latent_std_reference.py --store data/split_v3/latents_r08z8 --n 50000"; do
     tag=${job%%|*}; cmd=${job#*|}
     t0=$(date +%s)
     choom -n 1000 -- $cmd > "$S/regen_v3_$tag.log" 2>&1
