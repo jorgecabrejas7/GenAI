@@ -187,6 +187,10 @@ def main() -> None:
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit", type=int, default=None, help="Encode at most N patches per split (smoke test)")
+    ap.add_argument("--min-free-ratio", type=float, default=2.0,
+                    help="Refuse to start unless free space is at least this many times the estimated "
+                         "store size. The store is written in place (no temporary copy), so 2.0 is a "
+                         "margin, not a need; 1.3 is enough when the disk is known to be otherwise idle.")
     args = ap.parse_args()
 
     repo = _find_repo_root()
@@ -243,11 +247,11 @@ def main() -> None:
         "Planned: %d patches  estimated store size %.1f GB  (free: %.1f GB)",
         n_planned, est_bytes / 1e9, free_bytes / 1e9,
     )
-    if free_bytes < 2 * est_bytes:
+    if free_bytes < args.min_free_ratio * est_bytes:
         raise SystemExit(
-            f"Aborting: free space ({free_bytes / 1e9:.1f} GB) is below 2x the "
-            f"estimated store size ({est_bytes / 1e9:.1f} GB). Free up disk space "
-            f"or use --limit / a different --output filesystem."
+            f"Aborting: free space ({free_bytes / 1e9:.1f} GB) is below {args.min_free_ratio:g}x the "
+            f"estimated store size ({est_bytes / 1e9:.1f} GB). Free up disk space, lower "
+            f"--min-free-ratio, or use --limit / a different --output filesystem."
         )
 
     autocast_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
