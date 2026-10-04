@@ -10,7 +10,7 @@
 #
 #     START_AT=store POREGEN_SPLIT=split_v4 bash scripts/chain_v8_resume.sh
 #
-# Stages, in order: rf8 rf8checks store conditioning ldm06 c18 baselines c24 c27 c14 grey.
+# Stages, in order: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 grey.
 # rf8checks is rf-8's four acceptance checks ALONE — the rung report, the
 # calibration probe, the harness and the recon figure — so a trainer that
 # had to be stopped after early stopping can still be checked on its
@@ -58,9 +58,9 @@ cd "$REPO" || exit 1
 
 #: Resume point. Everything before it is skipped; everything from it runs.
 START_AT="${START_AT:-rf8}"
-case " rf8 rf8checks store conditioning ldm06 c18 baselines c24 c27 c14 grey " in
+case " rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 grey " in
     *" $START_AT "*) ;;
-    *) echo "START_AT must be one of: rf8 rf8checks store conditioning ldm06 c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
+    *) echo "START_AT must be one of: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
 esac
 _reached=0
 at() {
@@ -319,12 +319,18 @@ if at ldm06; then
     [ -z "$LDM" ] && { say "STOP NOTICE: no ldm06 run on $SPLIT was found after training."; exit 1; }
     say "LDM = $(basename "${LDM%/}")"
 
+fi
+[ -z "${LDM:-}" ] && LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+if at converge; then
     # ── 3b. the LDM convergence gates, the same ones run-0001 was read on ──────
     # run-0001 scored por_mae 0.001119 (ema_ddim50), std ratio 1.8006 against the
     # sampled reference 1.863, x0_sat 1.1e-07, degen 0.0, and a kill switch that
     # separated 0.005 from 0.05 by 0.0442. degen and direction_ok are FATAL.
+    # --ckpt is the diag's default, checkpoints/latest.ckpt: a bare "latest"
+    # resolved to <run>/latest, which does not exist (stop at 20:30:53 Oct 4).
+    say "LDM = $(basename "${LDM%/}")"
     check "ldm convergence check" ldm_converge fatal \
-        python scripts/diag_ldm_samples.py --run "${LDM%/}" --ckpt latest
+        python scripts/diag_ldm_samples.py --run-dir "${LDM%/}"
 
 fi
 [ -z "${LDM:-}" ] && LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
