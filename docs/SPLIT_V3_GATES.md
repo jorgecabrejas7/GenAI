@@ -15,11 +15,11 @@ difference is SEEN and explained rather than missed.
 |---|---|---|---|
 | porosity MAE | 0.00112 | 0.00214 | `r08_rung_report.py` |
 | air MAE | 0.00025 | 0.00031 | `r08_rung_report.py` |
-| pore Dice | 0.91746 | 0.90325 | `r08_rung_report.py` |
-| air Dice | 0.99640 | 0.98862 | `r08_rung_report.py` |
-| material Dice | 0.99804 | 0.99645 | `r08_rung_report.py` |
-| worst judged bin MAE @tau=0.8 | 0.00089 | — | calibration block |
-| worst judged bin MAE @argmax | 0.01203 | — | calibration block |
+| pore Dice | 0.91747 | 0.90320 | `r08_rung_report.py` |
+| air Dice | 0.99637 | 0.98861 | `r08_rung_report.py` |
+| material Dice | 0.99805 | 0.99648 | `r08_rung_report.py` |
+| worst judged bin MAE @tau=0.8 | 0.00091 | — | calibration block |
+| worst judged bin MAE @argmax | 0.01206 | — | calibration block |
 
 Patches: 266,119 val, 290,446 test. 769,364 parameters.
 
@@ -45,6 +45,22 @@ report sees val and test only and structurally cannot report these.
 Measured on the 5 split_v3 val volumes split_v2 never trained on, with
 the fixed basis. **Read texture, not L1**: on this family L1 ranks the
 mean grey level and a flat grey block scores well on it.
+
+
+## The six r08 rungs — the paper's latent-compression table
+
+Each split_v4 rung is read against its own split_v3 row. Rung report on
+val/test (pore Dice, air Dice, porosity MAE), the tau calibrated on val, and
+the calibration probe's dense-panel pore Dice (argmax).
+
+| rung | split_v3 run | val pore Dice | test pore Dice | val air Dice | val por MAE | test por MAE | tau | worst bin @tau | dense Dice | rest Dice |
+|---|---|---|---|---|---|---|---|---|---|---|
+| rf-2, z=32 | `r08-run-0010` | 0.91026 | 0.89745 | 0.99674 | 0.00037 | 0.00107 | 0.65 | 0.00099 | 0.8403 | 0.9209 |
+| rf-4, z=16 | `r08-run-0006` | 0.91741 | 0.90185 | 0.99640 | 0.00152 | 0.00286 | 0.9 | 0.00197 | 0.8054 | 0.9180 |
+| rf-8, z=8 | `r08-run-0004` | 0.91747 | 0.90320 | 0.99637 | 0.00112 | 0.00214 | 0.8 | 0.00091 | 0.8165 | 0.9206 |
+| rf-16, z=4 (r08/base) | `r08-run-0003` | 0.87426 | 0.85127 | 0.99567 | 0.00090 | 0.00221 | 0.75 | 0.00160 | 0.7491 | 0.8880 |
+| rf-32, z=2 | `r08-run-0005` | 0.79794 | 0.77058 | 0.99532 | 0.00311 | 0.00421 | 0.8 | 0.00104 | 0.6533 | 0.8317 |
+| rf-64, z=1 | `r08-run-0012` | 0.71933 | 0.68247 | 0.99547 | 0.00199 | 0.00312 | 0.75 | 0.00257 | 0.5851 | 0.7782 |
 
 
 ## ldm06 — the LDM

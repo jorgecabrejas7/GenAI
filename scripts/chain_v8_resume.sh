@@ -10,7 +10,7 @@
 #
 #     START_AT=store POREGEN_SPLIT=split_v4 bash scripts/chain_v8_resume.sh
 #
-# Stages, in order: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 grey.
+# Stages, in order: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 rungs grey.
 # rf8checks is rf-8's four acceptance checks ALONE — the rung report, the
 # calibration probe, the harness and the recon figure — so a trainer that
 # had to be stopped after early stopping can still be checked on its
@@ -58,9 +58,9 @@ cd "$REPO" || exit 1
 
 #: Resume point. Everything before it is skipped; everything from it runs.
 START_AT="${START_AT:-rf8}"
-case " rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 grey " in
+case " rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 rungs grey " in
     *" $START_AT "*) ;;
-    *) echo "START_AT must be one of: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 grey" >&2; exit 2 ;;
+    *) echo "START_AT must be one of: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 rungs grey" >&2; exit 2 ;;
 esac
 _reached=0
 at() {
@@ -442,6 +442,49 @@ if at c14; then
         --out "$REPO/runs/campaigns/14-downstream-utility$SUF"
 
 fi
+if at rungs; then
+    # ── 8b. the other five r08 rungs, for the paper's six-rung table ───────────
+    # rf-8 was built at stage 1; these are the remaining rows, each EXACTLY its
+    # split_v3 config, with the same smoke and the same four checks as rf-8. Each
+    # is read against its own split_v3 row in docs/SPLIT_V3_GATES.md. The rung
+    # report and the probe write to <dir>-ds<v> (poregen.paths.split_tag), so no
+    # split_v3 file is touched. A rung that does not fit is skipped, as for grey.
+    # Cost from the runbook's segment-summed wall times: about 107 h.
+    for spec in "2:32:r08/reduction-factor-2" "4:16:r08/reduction-factor-4" \
+                "16:4:r08/base" "32:2:r08/reduction-factor-32" \
+                "64:1:r08/reduction-factor-64"; do
+        RF=${spec%%:*}; rest=${spec#*:}; Z=${rest%%:*}; EXP=${rest#*:}
+        smoke "$EXP" "rung_rf$RF"; SRC=$?
+        if [ "$SRC" -eq 1 ]; then
+            say "rung rf-$RF SKIPPED: does not fit at its own batch under the cap (a real OOM)."
+            continue
+        elif [ "$SRC" -ne 0 ]; then
+            say "rung rf-$RF SKIPPED: its smoke FAILED WITHOUT MEASURING MEMORY (rc=$SRC) — a fault,"
+            say "  not a memory result. See $S/v8_smoke_rung_rf$RF.log"
+            continue
+        fi
+        run_watched "r08 rf-$RF (z=$Z, $EXP) on $SPLIT" "rung_rf$RF" "22 h" \
+            python scripts/train_vae.py run "$EXP"
+        RUNG=$(ls -dt "$REPO"/runs/vae/r08-run-*-z$Z-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+        if [ -z "$RUNG" ]; then
+            say "rung rf-$RF: no run directory found after training — checks not run"
+            continue
+        fi
+        say "rung rf-$RF = $(basename "${RUNG%/}")"
+        check "rf-$RF rung report" "rung_rf${RF}_report" ok \
+            python scripts/analysis/r08_rung_report.py --run "${RUNG%/}"
+        check "rf-$RF calibration probe (dense panels)" "rung_rf${RF}_calib" ok \
+            python scripts/analysis/r08_calibration_probe.py --run "${RUNG%/}"
+        check "rf-$RF vae_val_l1 harness (L1, texture, sharpness)" "rung_rf${RF}_l1" ok \
+            python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" \
+            --split "$SPLIT" --n-batches 20
+        check "rf-$RF recon figure" "rung_rf${RF}_fig" ok \
+            python scripts/analysis/vae_recon_figure.py \
+            --run "v4 rf-$RF=${RUNG%/}" --split "$SPLIT" \
+            --out "$REPO/runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf$RF"
+    done
+
+fi
 if at grey; then
     # ── 9. the single-channel sweep: GREY ONLY, six rungs ──────────────────────
     # Which channel limits compression. Each rung is the r08 rung it is named after
@@ -477,4 +520,4 @@ if at grey; then
 
 fi
 say "BLOCK COMPLETE — the paper is rebuilt on $SPLIT — $(mem_line)"
-say "TOTAL ETA from the split_v3 wall times: about 130 h for the paper, then about 90 h for the six grey rungs."
+say "TOTAL ETA from the runbook's segment-summed wall times: the paper, then about 107 h for the five r08 rungs, then about 90 h for the six grey rungs."

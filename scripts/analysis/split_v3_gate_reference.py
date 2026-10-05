@@ -38,6 +38,17 @@ def _load(p: Path):
 REF_VAE = "r08-run-0004"
 
 
+#: The six split_v3 rungs: (label, campaign-09 key, run that produced it).
+RUNGS = (
+    ("rf-2, z=32", "r08_reduction-factor-2", "r08-run-0010"),
+    ("rf-4, z=16", "r08_reduction-factor-4", "r08-run-0006"),
+    ("rf-8, z=8", "r08_reduction-factor-8", "r08-run-0004"),
+    ("rf-16, z=4 (r08/base)", "r08_base", "r08-run-0003"),
+    ("rf-32, z=2", "r08_reduction-factor-32", "r08-run-0005"),
+    ("rf-64, z=1", "r08_reduction-factor-64", "r08-run-0012"),
+)
+
+
 def _ref_only(d, what: str, W) -> dict | None:
     """``d`` if it is REF_VAE's, else None after saying whose it is.
 
@@ -214,6 +225,37 @@ def main() -> int:
             W("\nMeasured on the 5 split_v3 val volumes split_v2 never trained on, with")
             W("the fixed basis. **Read texture, not L1**: on this family L1 ranks the")
             W("mean grey level and a flat grey block scores well on it.\n")
+
+    # ── the six rungs ──────────────────────────────────────────────────────
+    W("\n## The six r08 rungs — the paper's latent-compression table\n")
+    W("Each split_v4 rung is read against its own split_v3 row. Rung report on")
+    W("val/test (pore Dice, air Dice, porosity MAE), the tau calibrated on val, and")
+    W("the calibration probe's dense-panel pore Dice (argmax).\n")
+    W("| rung | split_v3 run | val pore Dice | test pore Dice | val air Dice | "
+      "val por MAE | test por MAE | tau | worst bin @tau | dense Dice | rest Dice |")
+    W("|---|---|---|---|---|---|---|---|---|---|---|")
+    camp = REPO / "runs/campaigns/09-r08-latent-sweep"
+    for rung, key, run in RUNGS:
+        rep = _load(camp / key / "results.json")
+        prb = _load(camp / f"calibration_probe_{key}" / "results.json")
+        rep_ok = rep is not None and Path(str(rep.get("run_dir", ""))).name.startswith(run)
+        prb_ok = prb is not None and Path(str(prb.get("run_dir", ""))).name.startswith(run)
+        if not rep_ok:
+            W(f"| {rung} | `{run}` | **rung report missing or not {run}** "
+              "| | | | | | | | |")
+            continue
+        sp = rep["splits"]
+        cal = rep.get("calibration", {})
+        dense = rest = "—"
+        if prb_ok:
+            dvr = _dig(prb, "summary", "argmax", "dense_vs_rest") or {}
+            dense = f"{_dig(dvr, 'dense', 'dice_pore'):.4f}" if _dig(dvr, "dense", "dice_pore") is not None else "—"
+            rest = f"{_dig(dvr, 'rest', 'dice_pore'):.4f}" if _dig(dvr, "rest", "dice_pore") is not None else "—"
+        W(f"| {rung} | `{run}` | {sp['val']['dice_pore']:.5f} | {sp['test']['dice_pore']:.5f} | "
+          f"{sp['val']['dice_air']:.5f} | {sp['val']['porosity_mae']:.5f} | "
+          f"{sp['test']['porosity_mae']:.5f} | {cal.get('tau')} | "
+          f"{cal.get('worst_bin_mae_val', float('nan')):.5f} | {dense} | {rest} |")
+    W("")
 
     # ── the LDM ────────────────────────────────────────────────────────────
     W("\n## ldm06 — the LDM\n")
