@@ -38,6 +38,21 @@ def _load(p: Path):
 REF_VAE = "r08-run-0004"
 
 
+#: rf-8's ORIGINAL split_v3 values: the ones the paper was written on and the
+#: vault records, from the r08-run-0004 rung report and probe as they were
+#: before the split_v4 rf-8 overwrote them (this table at commit 781e6e0). The
+#: report was regenerated on 2026-10-04 and differs in the 4th-5th decimal —
+#: the evaluation is not bit-reproducible — so the regenerated values are shown
+#: beside these, marked, and the v4 rungs are read against these.
+RF8_ORIGINAL = {
+    "porosity_mae": (0.00112, 0.00214), "air_mae": (0.00025, 0.00031),
+    "dice_pore": (0.91746, 0.90325), "dice_air": (0.99640, 0.98862),
+    "dice_material": (0.99804, 0.99645),
+    "tau": 0.8, "worst_bin_tau": 0.00089, "worst_bin_argmax": 0.01203,
+    "dense": 0.8162, "rest": 0.9211, "gap": 0.1050,
+}
+REGEN_NOTE = "regenerated 2026-10-04, evaluation not bit-reproducible (4th–5th decimal)"
+
 #: The six split_v3 rungs: (label, campaign-09 key, run that produced it).
 RUNGS = (
     ("rf-2, z=32", "r08_reduction-factor-2", "r08-run-0010"),
@@ -180,21 +195,24 @@ def main() -> int:
         W("**The rung report is not on disk.** Run "
           "`python scripts/analysis/r08_rung_report.py --run <run>` first.\n")
     elif rung is not None:
-        W("| gate | val | test | where from |")
-        W("|---|---|---|---|")
+        W("**val / test = the ORIGINAL values** (what the paper was written on). The")
+        W(f"last two columns are the report on disk, {REGEN_NOTE}.\n")
+        W("| gate | val | test | val, regenerated | test, regenerated |")
+        W("|---|---|---|---|---|")
         for label, key in (("porosity MAE", "porosity_mae"), ("air MAE", "air_mae"),
                            ("pore Dice", "dice_pore"), ("air Dice", "dice_air"),
                            ("material Dice", "dice_material")):
+            ov, ot = RF8_ORIGINAL[key]
             v = _dig(rung, "splits", "val", key)
             t = _dig(rung, "splits", "test", key)
-            W(f"| {label} | {v:.5f} | {t:.5f} | `r08_rung_report.py` |"
-              if v is not None and t is not None else
-              f"| {label} | — | — | not in the report |")
+            W(f"| {label} | {ov:.5f} | {ot:.5f} | {v:.5f} | {t:.5f} |")
         tau = _dig(rung, "calibration", "tau")
         wb = _dig(rung, "calibration", "worst_bin_mae_val")
         am = _dig(rung, "calibration", "argmax_worst_bin_mae_val")
-        W(f"| worst judged bin MAE @tau={tau} | {wb:.5f} | — | calibration block |")
-        W(f"| worst judged bin MAE @argmax | {am:.5f} | — | calibration block |")
+        W(f"| worst judged bin MAE @tau={RF8_ORIGINAL['tau']} (regenerated tau={tau}) | "
+          f"{RF8_ORIGINAL['worst_bin_tau']:.5f} | — | {wb:.5f} | — |")
+        W(f"| worst judged bin MAE @argmax | {RF8_ORIGINAL['worst_bin_argmax']:.5f} | — | "
+          f"{am:.5f} | — |")
         W(f"\nPatches: {_dig(rung, 'splits', 'val', 'n_patches'):,} val, "
           f"{_dig(rung, 'splits', 'test', 'n_patches'):,} test. "
           f"{_dig(rung, 'n_params'):,} parameters.\n")
@@ -208,7 +226,8 @@ def main() -> int:
         W("report sees val and test only and structurally cannot report these.\n")
         W("| dense pore Dice | rest | gap |")
         W("|---|---|---|")
-        W("| 0.8162 | 0.9211 | 0.1050 |")
+        W(f"| {RF8_ORIGINAL['dense']:.4f} | {RF8_ORIGINAL['rest']:.4f} | "
+          f"{RF8_ORIGINAL['gap']:.4f} |")
         W("\n(campaign 09's README table; the probe's own JSON keys the same run.)\n")
 
     fam = _load(REPO / "runs/campaigns/28-vrrae-family/family_table.json")
@@ -251,6 +270,13 @@ def main() -> int:
             dvr = _dig(prb, "summary", "argmax", "dense_vs_rest") or {}
             dense = f"{_dig(dvr, 'dense', 'dice_pore'):.4f}" if _dig(dvr, "dense", "dice_pore") is not None else "—"
             rest = f"{_dig(dvr, 'rest', 'dice_pore'):.4f}" if _dig(dvr, "rest", "dice_pore") is not None else "—"
+        if run == "r08-run-0004":
+            o = RF8_ORIGINAL
+            W(f"| {rung} | `{run}` | {o['dice_pore'][0]:.5f} | {o['dice_pore'][1]:.5f} | "
+              f"{o['dice_air'][0]:.5f} | {o['porosity_mae'][0]:.5f} | "
+              f"{o['porosity_mae'][1]:.5f} | {o['tau']} | {o['worst_bin_tau']:.5f} | "
+              f"{o['dense']:.4f} | {o['rest']:.4f} |")
+            rung = f"{rung}, {REGEN_NOTE}"
         W(f"| {rung} | `{run}` | {sp['val']['dice_pore']:.5f} | {sp['test']['dice_pore']:.5f} | "
           f"{sp['val']['dice_air']:.5f} | {sp['val']['porosity_mae']:.5f} | "
           f"{sp['test']['porosity_mae']:.5f} | {cal.get('tau')} | "
