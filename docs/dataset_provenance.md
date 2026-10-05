@@ -66,6 +66,20 @@ evaluated.
 
 ## `data/split_v3`
 
+> **2026-10-05 — the memmaps and the latent store are gone.** `patches_xct.bin`,
+> `patches_label.bin` (565 GB each) and `latents_r08z8/` (272 GB) were removed on
+> the author's instruction to make room for `data/split_v5`, once split_v3 had been
+> proven exactly reproducible: `scripts/analysis/split_v3_reproducibility.py`
+> recomputed every volume's labels from the raw TIFFs with the reference
+> `onlypores` at its defaults and found 0 voxels different on all 80
+> (`runs/campaigns/30-reference-onlypores/audit/split_v3_reproducibility.csv`,
+> with SHA-256 of the stored arrays). What stays: `patch_index.parquet`,
+> `splits.json`, `holes/`, `holes.json`, `class_weights.json`, `index_report.json`,
+> `patches_meta.json` (carries the parquet SHA-256), the reports and the
+> `volumes.zarr` symlink. Rebuild: the commands under "Rebuild, in one command"
+> below at GenAI `cce9000`, then the latent store from
+> `runs/vae/r08-run-0004-.../best.ckpt`. ~3 h CPU + ~2 h GPU.
+
 Built 2026-09-02. This is the root the r08 VAE and ldm06 use. Everything below
 is reproducible from committed code — `scripts/build_split_v3.py` and
 `scripts/extract_patches_memmap.py` at GenAI `cce9000`. (After that commit
