@@ -280,7 +280,43 @@ def bucket_metrics(z: torch.Tensor, sat: float, por: torch.Tensor,
         "por_mae": float(np.abs(por.cpu().numpy() - phi).mean()),
         "air_mean": float(air.mean()),
         "degen": float(((por < _DEGENERATE_LO) | (por > _DEGENERATE_HI)).float().mean()),
+        # The degenerate cells the request does NOT explain: saturated, or
+        # pore-free when a porosity above the floor was asked. split_v4's val
+        # set is 11 % pore-free patches, so an obeyed phi=0 request is a
+        # degenerate cell by the plain count above and must not fail the gate.
+        "degen_unrequested": float(degen_unrequested(por.cpu().numpy(), phi)),
     }
+
+
+def degen_unrequested(por: np.ndarray, phi: np.ndarray) -> float:
+    """Fraction of cells that are saturated, or empty against a non-empty ask."""
+    por = np.asarray(por, dtype=np.float64)
+    phi = np.asarray(phi, dtype=np.float64)
+    bad = (por > _DEGENERATE_HI) | ((por < _DEGENERATE_LO) & (phi > _DEGENERATE_LO))
+    return float(bad.mean()) if bad.size else 0.0
+
+
+def fatal_failures(entry: dict) -> list[str]:
+    """The two conditions that mean the run is not working.
+
+    A degenerate cell the request does not explain, in any variant and bucket,
+    and a kill switch whose high ask does not deliver more pore than its low
+    one. Everything else this script reports is read by a person.
+    """
+    fails = []
+    for vname, v in entry["variants"].items():
+        for b, m in v["buckets"].items():
+            if m["degen_unrequested"] > 0:
+                fails.append(f"{vname} bucket {b}: degen_unrequested "
+                             f"{m['degen_unrequested']:.3f}")
+    ks = entry.get("killswitch")
+    if ks is not None:
+        for wname in ("raw", "ema"):
+            if wname in ks and not ks[wname]["direction_ok"]:
+                fails.append(f"kill switch ({wname}): asked {ks['asked_hi']} "
+                             f"delivered {ks[wname]['por_hi']:.4f}, not above "
+                             f"asked {ks['asked_lo']} -> {ks[wname]['por_lo']:.4f}")
+    return fails
 
 
 def weighted_overall(buckets: dict[str, dict], freq: dict[str, float]) -> dict:
@@ -798,6 +834,16 @@ def main() -> None:
 
     print(f"\nPNGs in {out_dir}")
     print(f"wall-clock: {time.perf_counter() - t_start:.1f}s")
+
+    # THE GATE. This script used to exit 0 whatever it measured, so a chain
+    # stage that called it "fatal" only ever caught a crash.
+    fails = fatal_failures(entry)
+    if fails:
+        print("\nFATAL — the run is not working:")
+        for f in fails:
+            print(f"  {f}")
+        raise SystemExit(1)
+    print("\nGATE PASS: no unrequested degenerate cell; kill switch direction holds.")
 
 
 if __name__ == "__main__":
