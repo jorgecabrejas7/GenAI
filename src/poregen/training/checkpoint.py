@@ -319,3 +319,21 @@ def copy_checkpoint(src: str | Path, dst: str | Path) -> Path:
     shutil.copy2(src_path, tmp_path)
     tmp_path.replace(dst_path)
     return dst_path
+
+
+def checkpoint_identity(path: str | Path) -> dict[str, Any]:
+    """The sha256 of a checkpoint file and the training step it holds.
+
+    A path names a file, not its contents: resuming a run rewrites best.ckpt
+    in place, and a latent store that recorded only the path would still
+    "match" the new weights. Stores record this; the LDM checks it.
+    """
+    import hashlib
+
+    path = Path(path)
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    step = torch.load(path, map_location="cpu", weights_only=False).get("step")
+    return {"sha256": h.hexdigest(), "step": None if step is None else int(step)}

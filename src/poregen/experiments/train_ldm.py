@@ -73,6 +73,31 @@ def _build_scheduler(cfg: dict[str, Any], optimizer: torch.optim.Optimizer) -> A
     return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
 
+def check_vae_weights(ckpt: Path, metadata: dict[str, Any]) -> None:
+    """The checkpoint's WEIGHTS must be the ones that built the store.
+
+    The path check above cannot see a resumed VAE: best.ckpt keeps its path and
+    changes its contents. The store records the file's sha256 and step.
+    """
+    from poregen.training.checkpoint import checkpoint_identity
+
+    if "vae_checkpoint_sha256" not in metadata:
+        raise RuntimeError(
+            "The latent store records no vae_checkpoint_sha256, so the weights "
+            "that built it cannot be checked. Rebuild the store, or record the "
+            "identity of the checkpoint that built it."
+        )
+    have = checkpoint_identity(ckpt)
+    if have["sha256"] != metadata["vae_checkpoint_sha256"]:
+        raise RuntimeError(
+            "VAE weights mismatch: the latent store was built by the checkpoint "
+            f"at step {metadata.get('vae_checkpoint_step')} "
+            f"(sha256 {metadata['vae_checkpoint_sha256'][:12]}…), but {ckpt} now "
+            f"holds step {have['step']} (sha256 {have['sha256'][:12]}…). "
+            "Rebuild the store from these weights, or decode with the old ones."
+        )
+
+
 def _load_vae_decoder(
     cfg: dict[str, Any],
     metadata: dict[str, Any],
@@ -104,6 +129,7 @@ def _load_vae_decoder(
             "configured for decoding. Fix cfg['vae']['checkpoint'] or rebuild "
             "the latent store."
         )
+    check_vae_weights(ckpt, metadata)
 
     vae, _, _, _ = load_vae_from_checkpoint(ckpt, device)
     for p in vae.parameters():
@@ -274,7 +300,13 @@ def run_ldm_experiment(
         ) from exc
 
     tb_writer = SummaryWriter(str(run_ctx.run_dir / "tb"))
-    update_run_metadata(run_ctx.run_dir, {"status": "running", "device": str(device)})
+    # The run is bound to the WEIGHTS that built its store, not only to the
+    # store's path: a store rebuilt in place from a resumed VAE keeps its path.
+    update_run_metadata(run_ctx.run_dir, {
+        "status": "running", "device": str(device),
+        "vae_checkpoint_sha256":
+            data["train_loader"].dataset.metadata["vae_checkpoint_sha256"],
+    })
 
     try:
         try:

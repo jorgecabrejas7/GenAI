@@ -206,6 +206,7 @@ def main() -> None:
     )
     from poregen.experiments.train_vae import load_vae_from_checkpoint, resolve_data_root
     from poregen.models.vae.base import CLASS_AIR, CLASS_PORE
+    from poregen.training.checkpoint import checkpoint_identity
     from poregen.training.engine import encoder_input_keys
 
     model, cfg, cfg_text, run_dir = load_vae_from_checkpoint(checkpoint, device)
@@ -374,9 +375,12 @@ def main() -> None:
     logger.info("Per-channel mean: %s", np.array2string(ch_mean, precision=4))
     logger.info("Per-channel std:  %s", np.array2string(ch_std, precision=4))
 
+    vae_identity = checkpoint_identity(checkpoint)
     metadata = {
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "vae_checkpoint": str(checkpoint),
+        "vae_checkpoint_sha256": vae_identity["sha256"],
+        "vae_checkpoint_step": vae_identity["step"],
         "vae_run_dir": str(run_dir),
         "vae_config_sha256": hashlib.sha256(cfg_text.encode()).hexdigest(),
         "vae_config": cfg,

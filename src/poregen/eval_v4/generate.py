@@ -147,7 +147,33 @@ def resolve_latent_store(
             "Decoding with a different VAE than the encoder that produced the "
             "latents is silently wrong."
         )
+    from poregen.experiments.train_ldm import check_vae_weights  # noqa: PLC0415
+    check_vae_weights(store_ckpt, meta)
     return root, meta
+
+
+def check_run_store_binding(run_dir: Path, meta: dict) -> None:
+    """The run must have been trained on the store as it is NOW.
+
+    A store rebuilt in place from a resumed VAE keeps its path and checkpoint
+    path, and its weights check passes against the NEW checkpoint, so only the
+    sha the run recorded at training time can tell an LDM trained on the old
+    latents from one trained on these.
+    """
+    run_meta = json.loads((Path(run_dir) / "run_metadata.json").read_text())
+    if "vae_checkpoint_sha256" not in run_meta:
+        raise RuntimeError(
+            f"{run_dir}/run_metadata.json records no vae_checkpoint_sha256: it "
+            "does not say which VAE's latents it was trained on. Record it with "
+            "scripts/record_store_vae_identity.py --ldm-run."
+        )
+    if run_meta["vae_checkpoint_sha256"] != meta["vae_checkpoint_sha256"]:
+        raise RuntimeError(
+            f"{run_dir} was trained on latents of VAE sha256 "
+            f"{run_meta['vae_checkpoint_sha256'][:12]}…, but its store now holds "
+            f"latents of {meta['vae_checkpoint_sha256'][:12]}… (step "
+            f"{meta.get('vae_checkpoint_step')}). It cannot be decoded from this store."
+        )
 
 
 def theta_for_canvas(
@@ -265,6 +291,7 @@ class VolumeRunner:
         # Before the first model call: which store this run belongs to, and
         # whether it agrees with the run about latent width and decoder.
         root, meta = resolve_latent_store(cfg, self.repo)
+        check_run_store_binding(self.run_dir, meta)
         self.latents_root = root
 
         model = build_denoiser(cfg).to(self.device)

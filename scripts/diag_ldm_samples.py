@@ -56,6 +56,8 @@ from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, decode_label, decode_
 from poregen.diffusion.sampler import DDIMSampler
 from poregen.experiments.base import find_repo_root
 from poregen.paths import std_reference_path
+from poregen.eval_v4.generate import check_run_store_binding
+from poregen.experiments.train_ldm import check_vae_weights
 from poregen.experiments.train_vae import load_vae_from_checkpoint
 from poregen.training.ldm_engine import sample_neighbours
 from poregen.models.diffusion import UNet3DConfig, UNet3DDenoiser
@@ -605,6 +607,10 @@ def main() -> None:
     mean_dev = val_ds.channel_mean.to(device)
     std_dev = val_ds.channel_std.to(device)
 
+    # The run must be the one trained on these latents, and the checkpoint
+    # must still hold the weights that wrote them (a resumed VAE keeps its path).
+    check_vae_weights(Path(val_ds.metadata["vae_checkpoint"]), val_ds.metadata)
+    check_run_store_binding(run_dir, val_ds.metadata)
     vae, _, _, _ = load_vae_from_checkpoint(Path(val_ds.metadata["vae_checkpoint"]), device)
     for prm in vae.parameters():
         prm.requires_grad_(False)

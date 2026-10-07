@@ -648,8 +648,19 @@ def _store(tmp_path: Path, *, name: str, z: int, vae_ckpt: Path) -> Path:
     """A latent store that is only its metadata - no arrays are needed here."""
     root = tmp_path / "data" / name
     root.mkdir(parents=True)
+    import torch
+
+    from poregen.training.checkpoint import checkpoint_identity
+
+    # The store records the WEIGHTS of the checkpoint that built it, so the
+    # placeholder file the tests create has to be a loadable checkpoint.
+    if vae_ckpt.exists() and not vae_ckpt.stat().st_size:
+        torch.save({"step": 1, "model": {}}, vae_ckpt)
+    ident = checkpoint_identity(vae_ckpt)
     (root / "metadata.json").write_text(json.dumps({
         "vae_checkpoint": str(vae_ckpt),
+        "vae_checkpoint_sha256": ident["sha256"],
+        "vae_checkpoint_step": ident["step"],
         "latent_shape": [z, 16, 16, 16],
         "normalization": {
             "per_channel_mean": [0.0] * z,
