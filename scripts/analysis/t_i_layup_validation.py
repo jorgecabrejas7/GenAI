@@ -1964,12 +1964,33 @@ def main() -> None:
                     help="run on this many volumes only and print a projection")
     ap.add_argument("--recompute-maps", action="store_true")
     ap.add_argument("--recompute-slabs", action="store_true")
+    # A SUBSET RUN, for volumes that join a split later (JI_11) or gain a
+    # stacking sequence later (JI_7, JI_8). Every estimate here is per volume,
+    # so a subset reproduces the full run's records for those volumes; it
+    # writes to its own directory so campaign 01's T-I — which the sampler and
+    # the conditioning read — is never touched.
+    ap.add_argument("--volumes", nargs="*", default=None,
+                    help="volume ids to run (default: every volume with ground truth)")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="output directory (default: campaign 01's T-I); required with --volumes")
     args = ap.parse_args()
 
+    global OUT_DIR, CACHE, SLAB_CACHE
+    if args.volumes is not None and args.out_dir is None:
+        raise SystemExit("--volumes needs --out-dir: a subset must not write campaign 01's T-I")
+    if args.out_dir is not None:
+        OUT_DIR = args.out_dir
+        CACHE = OUT_DIR / "angular_maps.npz"
+        SLAB_CACHE = OUT_DIR / "slab_features.npz"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     gt = load_ground_truth()
     g = zarr.open_group(str(ZARR_ROOT), mode="r")
     volume_ids = sorted(k for k in g.group_keys() if k in gt["volumes"])
+    if args.volumes is not None:
+        missing = sorted(set(args.volumes) - set(volume_ids))
+        if missing:
+            raise SystemExit(f"not in {ZARR_ROOT} with ground truth: {missing}")
+        volume_ids = sorted(args.volumes)
     print(f"{len(volume_ids)} volumes with ground truth")
 
     if args.smoke:
