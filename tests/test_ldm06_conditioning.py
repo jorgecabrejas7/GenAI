@@ -485,39 +485,51 @@ def test_orientation_field_follows_the_split():
         == REPO / "data/split_v4/orientation_field.json"
 
 
-def test_an_added_volume_gets_the_no_sequence_record():
+JI_8 = "MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned"
+JI_12 = "MedidasDB__Juan_Ignacio_probetas_12_volume_eq_aligned"
+
+
+def test_split_records_replace_and_add_and_leave_the_rest():
     mod = _load_builder()
     if not mod.ORIENT_BASE.exists():
         pytest.skip("split_v2 orientation field not present")
     base = json.loads(mod.ORIENT_BASE.read_text())
     g = {"extent": {"z": [3, 190], "y": [2, 3000], "x": [50, 1600]},
          "shape": [200, 3100, 1700]}
-    field = mod.extend_orientation_field(
-        base, {"vol_new": g}, mod.ORIENT_BASE, REPO / "data/split_v4/volumes.zarr")
-    assert {k: field["volumes"][k] for k in base["volumes"]} == base["volumes"]
-    new = field["volumes"]["vol_new"]
-    # The same record JI_7 has, with its own shape and extent.
-    assert new.keys() == base["volumes"][JI_7].keys()
-    assert new["orientation_usable"] is False and new["theta_deg"] is None
-    assert new["reason"] == base["volumes"][JI_7]["reason"]
-    assert new["extent_foreground"] == g["extent"] and new["shape"] == g["shape"]
+    new = {JI_7: dict(base["volumes"][JI_12]), "vol_new": mod.no_sequence_record(g)}
+    field = mod.extend_orientation_field(base, new, mod.ORIENT_BASE, {"why": "test"})
+    others = set(base["volumes"]) - {JI_7}
+    assert {k: field["volumes"][k] for k in others} == {k: base["volumes"][k] for k in others}
+    assert field["volumes"][JI_7] == base["volumes"][JI_12]
+    assert field["volumes"]["vol_new"]["orientation_usable"] is False
+    assert field["volumes"]["vol_new"].keys() == base["volumes"][JI_8].keys()
     assert field["summary"]["n_volumes"] == len(base["volumes"]) + 1
-    assert field["summary"]["n_orientation_unusable"] == \
-        base["summary"]["n_orientation_unusable"] + 1
-    assert field["provenance"]["added_volumes"] == ["vol_new"]
-    with pytest.raises(ValueError):
-        mod.extend_orientation_field(base, {JI_7: g}, mod.ORIENT_BASE,
-                                     REPO / "data/split_v4/volumes.zarr")
+    assert field["provenance"]["replaced_or_added_volumes"] == sorted([JI_7, "vol_new"])
 
 
-def test_split_v4_field_is_split_v2_plus_ji11():
+def test_split_v2_field_rebuilds_from_its_records():
+    """The refactor into orientation_record + field_from_records is exact."""
+    mod = _load_builder()
+    if not (mod.ORIENT_BASE.exists() and mod.LAYUP_FIELD.exists() and mod.TA_PROFILES.exists()):
+        pytest.skip("campaign 01 artefacts not present")
+    base = json.loads(mod.ORIENT_BASE.read_text())
+    rebuilt = mod.build_orientation_field()
+    assert rebuilt["volumes"] == base["volumes"]
+    assert rebuilt["summary"] == base["summary"]
+
+
+def test_split_v4_field_gives_every_ji_coupon_its_sequence():
     mod = _load_builder()
     v4 = REPO / "data/split_v4/orientation_field.json"
     if not (v4.exists() and mod.ORIENT_BASE.exists()):
         pytest.skip("split_v4 orientation field not built")
     base = json.loads(mod.ORIENT_BASE.read_text())["volumes"]
     vols = json.loads(v4.read_text())["volumes"]
-    assert len(base) == 80
-    assert set(vols) - set(base) == {JI_11}
-    assert {k: vols[k] for k in base} == base
-    assert vols[JI_11]["orientation_usable"] is False
+    three = {JI_7, JI_8, JI_11}
+    assert len(base) == 80 and set(vols) == set(base) | {JI_11}
+    others = set(base) - three
+    assert len(others) == 78
+    assert {k: vols[k] for k in others} == {k: base[k] for k in others}
+    for k in three:
+        assert vols[k]["orientation_usable"] is True
+        assert vols[k]["sequence_id"] == "B"

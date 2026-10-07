@@ -62,7 +62,7 @@ from poregen.diffusion.conditioning import (
     POR_LOG_EPS,
     dist6_from_box_array,
 )
-from poregen.paths import DEFAULT_SPLIT, data_root
+from poregen.paths import DEFAULT_SPLIT, data_root, split_tag
 
 REPO = Path(__file__).resolve().parents[1]
 DATA_ROOT = data_root()          # POREGEN_SPLIT redirects this
@@ -166,59 +166,81 @@ def orientation_field_path(store: Path) -> Path:
     return store.parent / "orientation_field.json"
 
 
-def extend_orientation_field(base: dict, added: dict[str, dict],
-                             base_path: Path, zarr_root: Path) -> dict:
-    """``base`` with one no-sequence record per volume in ``added``.
-
-    ``added`` maps volume id -> ``foreground_extent`` output.  The base records
-    are copied unchanged; only the summary counts and provenance change.
-    """
-    vols = dict(base["volumes"])
-    for vid, g in sorted(added.items()):
-        if vid in vols:
-            raise ValueError(f"{vid} already has a record in {base_path}")
-        vols[vid] = {
-            "shape": g["shape"],
-            "extent_foreground": g["extent"],
-            "orientation_usable": False,
-            "confidence": "none",
-            "reason": NO_SEQUENCE_REASON,
-            "theta_deg": None,
-        }
-    summary = dict(base["summary"])
-    summary["n_volumes"] = len(vols)
-    summary["n_orientation_unusable"] = (
-        base["summary"]["n_orientation_unusable"] + len(added))
+def no_sequence_record(g: dict) -> dict:
+    """A volume with a foreground extent and no stacking sequence to read."""
     return {
-        **base,
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "provenance": {
-            **base["provenance"],
-            "extended_from": str(base_path.relative_to(REPO)),
-            "extended_from_sha256": sha256(base_path),
-            "added_volumes": sorted(added),
-            "added_extent_source": (
-                "scripts/analysis/t_a_periodicity.py::volume_profiles on "
-                f"{zarr_root.relative_to(REPO)}"),
-        },
-        "summary": summary,
-        "volumes": vols,
+        "shape": g["shape"],
+        "extent_foreground": g["extent"],
+        "orientation_usable": False,
+        "confidence": "none",
+        "reason": NO_SEQUENCE_REASON,
+        "theta_deg": None,
     }
 
 
+def extend_orientation_field(base: dict, records: dict[str, dict],
+                             base_path: Path, sources: dict) -> dict:
+    """``base`` with ``records`` added or replacing its own.
+
+    Every other record is copied unchanged; the summary is recomputed by the
+    same code as the base's, and the provenance says what changed and why.
+    """
+    vols = dict(base["volumes"])
+    vols.update(records)
+    field = field_from_records(vols)
+    field["provenance"] = {
+        **base["provenance"],
+        "extended_from": str(base_path.relative_to(REPO)),
+        "extended_from_sha256": sha256(base_path),
+        "replaced_or_added_volumes": sorted(records),
+        **sources,
+    }
+    return field
+
+
+def split_layup_field(split: str) -> Path:
+    """The T-I subset run for a split's own volumes (t_i_layup_validation --volumes)."""
+    return TI_DIR.parent / f"T-I-{split_tag(split)}" / "layup_field.json"
+
+
 def build_split_orientation_field(store: Path) -> dict:
-    """split_v2's field plus a record for every store volume it lacks."""
+    """split_v2's field, with the split's own T-I records and new volumes.
+
+    A volume the split's T-I subset run fitted (``T-I-ds<v>``) gets its record
+    from that fit, by the same ``orientation_record`` as split_v2's — split_v4:
+    JI_7, JI_8 and JI_11, which the author gave the JI stacking sequence on
+    2026-10-07. A volume the split adds and nothing fitted gets an extent-only,
+    no-sequence record. Every other record is split_v2's, unchanged.
+    """
     sys.path.insert(0, str(REPO / "scripts" / "analysis"))
     from t_a_periodicity import volume_profiles  # noqa: E402
 
     base = json.load(open(ORIENT_BASE))
+    gt = json.load(open(GT_PATH))
     zarr_root = store.parent / "volumes.zarr"
-    missing = sorted(store_volumes(store) - set(base["volumes"]))
-    added = {}
-    for vid in missing:
-        print(f"      T-A profile of {vid} ...", flush=True)
-        added[vid] = foreground_extent(volume_profiles(vid, zarr_root))
-    return extend_orientation_field(base, added, ORIENT_BASE, zarr_root)
+    ti = split_layup_field(store.parent.name)
+    lf = json.load(open(ti))["volumes"] if ti.exists() else {}
+    geo = foreground_extents()
+    needed = store_volumes(store)
+
+    def extent(vid: str) -> dict:
+        if vid not in geo:
+            print(f"      T-A profile of {vid} ...", flush=True)
+            geo[vid] = foreground_extent(volume_profiles(vid, zarr_root))
+        return geo[vid]
+
+    records = {vid: orientation_record(vid, lf[vid], gt, extent(vid))
+               for vid in sorted(set(lf) & needed)}
+    for vid in sorted(needed - set(base["volumes"]) - set(records)):
+        records[vid] = no_sequence_record(extent(vid))
+    return extend_orientation_field(base, records, ORIENT_BASE, {
+        "split_layup_field": str(ti.relative_to(REPO)) if lf else None,
+        "split_layup_field_sha256": sha256(ti) if lf else None,
+        "ground_truth_sha256_now": sha256(GT_PATH),
+        "extent_source_for_new_volumes": (
+            "scripts/analysis/t_a_periodicity.py::volume_profiles on "
+            f"{zarr_root.relative_to(REPO)}"),
+    })
 
 
 def verify_volume(vid: str, v: dict, gt: dict) -> list[str]:
@@ -273,59 +295,64 @@ def verify_volume(vid: str, v: dict, gt: dict) -> list[str]:
     return fails
 
 
+def orientation_record(vid: str, v: dict, gt: dict, g: dict | None) -> dict:
+    """One volume's record: its T-I layup fit ``v`` checked against the expert
+    ground truth ``gt``, with its foreground extent ``g``."""
+    base = {
+        "shape": v.get("shape") or (g["shape"] if g else None),
+        "extent_foreground": g["extent"] if g else None,
+    }
+    if not v.get("usable"):
+        return {
+            **base,
+            "orientation_usable": False,
+            "confidence": "none",
+            "reason": v.get("reason", "no expert stacking sequence"),
+            "theta_deg": None,
+        }
+    fails = verify_volume(vid, v, gt)
+    plies = np.asarray(gt["volumes"][vid]["plies"], float) % 180.0
+    palindromic = bool(np.allclose(plies, plies[::-1]))
+    margin = float(v["hypothesis_margin_deg"])
+
+    return {
+        **base,
+        "orientation_usable": len(fails) == 0,
+        "verification_failures": fails,
+        "confidence": v["confidence"],
+        "hypothesis_margin_deg": margin,
+        "hypothesis_margin_below_2deg": bool(margin < 2.0),
+        "margin_degenerate_by_symmetry": palindromic,
+        "fit_median_abs_error_deg": v["fit_median_abs_error_deg"],
+        "rotation_offset_deg": v["rotation_offset_deg"],
+        "rotation_offset_sd_deg": v["rotation_offset_sd_deg"],
+        "angle_sign": int(v["angle_sign"]),
+        "z_order_reversed_vs_expert_list": bool(v["z_order_reversed_vs_expert_list"]),
+        "sequence_id": v["sequence_id"],
+        "family": v["family"],
+        "material": v["material"],
+        "ply_thickness_mm": v["ply_thickness_mm"],
+        "n_plies": int(v["n_plies"]),
+        "z_start": int(v["z_start"]),
+        "z_end": int(v["z_end"]),
+        "ply_boundaries_z": v["ply_boundaries_z"],
+        "ply_angle_gt_deg": v["ply_angle_gt_deg"],
+        "ply_angle_image_deg": v["ply_angle_image_deg"],
+        "theta_deg": v["slice_angle_image_deg"],
+    }
+
+
 def build_orientation_field() -> dict:
     gt = json.load(open(GT_PATH))
     lf = json.load(open(LAYUP_FIELD))
     geo = foreground_extents()
+    out_vols = {vid: orientation_record(vid, v, gt, geo.get(vid))
+                for vid, v in lf["volumes"].items()}
+    return field_from_records(out_vols)
 
-    out_vols: dict[str, dict] = {}
-    for vid, v in lf["volumes"].items():
-        g = geo.get(vid)
-        base = {
-            "shape": v.get("shape") or (g["shape"] if g else None),
-            "extent_foreground": g["extent"] if g else None,
-        }
-        if not v.get("usable"):
-            out_vols[vid] = {
-                **base,
-                "orientation_usable": False,
-                "confidence": "none",
-                "reason": v.get("reason", "no expert stacking sequence"),
-                "theta_deg": None,
-            }
-            continue
 
-        fails = verify_volume(vid, v, gt)
-        plies = np.asarray(gt["volumes"][vid]["plies"], float) % 180.0
-        palindromic = bool(np.allclose(plies, plies[::-1]))
-        margin = float(v["hypothesis_margin_deg"])
-
-        out_vols[vid] = {
-            **base,
-            "orientation_usable": len(fails) == 0,
-            "verification_failures": fails,
-            "confidence": v["confidence"],
-            "hypothesis_margin_deg": margin,
-            "hypothesis_margin_below_2deg": bool(margin < 2.0),
-            "margin_degenerate_by_symmetry": palindromic,
-            "fit_median_abs_error_deg": v["fit_median_abs_error_deg"],
-            "rotation_offset_deg": v["rotation_offset_deg"],
-            "rotation_offset_sd_deg": v["rotation_offset_sd_deg"],
-            "angle_sign": int(v["angle_sign"]),
-            "z_order_reversed_vs_expert_list": bool(v["z_order_reversed_vs_expert_list"]),
-            "sequence_id": v["sequence_id"],
-            "family": v["family"],
-            "material": v["material"],
-            "ply_thickness_mm": v["ply_thickness_mm"],
-            "n_plies": int(v["n_plies"]),
-            "z_start": int(v["z_start"]),
-            "z_end": int(v["z_end"]),
-            "ply_boundaries_z": v["ply_boundaries_z"],
-            "ply_angle_gt_deg": v["ply_angle_gt_deg"],
-            "ply_angle_image_deg": v["ply_angle_image_deg"],
-            "theta_deg": v["slice_angle_image_deg"],
-        }
-
+def field_from_records(out_vols: dict[str, dict]) -> dict:
+    """The orientation field around a set of per-volume records."""
     usable = [v for v in out_vols.values() if v["orientation_usable"]]
     conf = {c: sum(1 for v in usable if v["confidence"] == c)
             for c in ("high", "medium", "low")}
@@ -500,10 +527,11 @@ def main() -> None:
                          "default annotates the wrong store as soon as the "
                          "rung changes.")
     ap.add_argument("--rebuild-orientation", action="store_true",
-                    help="Re-derive data/split_v2/orientation_field.json from the "
-                         "T-I fit and the expert ground truth before building the "
-                         "sidecar.  Only needed when those inputs change, and only "
-                         "for a store on the published split.")
+                    help="Re-derive the store's orientation field before the "
+                         "sidecar: split_v2's from campaign 01's T-I and the expert "
+                         "ground truth, or another split's from split_v2's plus its "
+                         "own T-I subset (T-I-ds<v>). Only needed when those inputs "
+                         "change.")
     args = ap.parse_args()
     store = Path(args.store)
     if not store.is_absolute():
@@ -517,20 +545,15 @@ def main() -> None:
         )
 
     orient_out = orientation_field_path(store)
-    if args.rebuild_orientation and orient_out != ORIENT_BASE:
-        raise SystemExit(
-            f"--rebuild-orientation re-derives {ORIENT_BASE.relative_to(REPO)}; "
-            f"{orient_out.relative_to(REPO)} is derived from it. Delete that "
-            "file to re-extend it.")
-    if orient_out != ORIENT_BASE and not orient_out.exists():
+    if orient_out != ORIENT_BASE and (args.rebuild_orientation or not orient_out.exists()):
         print(f"[1/4] extending {ORIENT_BASE.relative_to(REPO)} to "
               f"{store.parent.name} ...", flush=True)
         field = build_split_orientation_field(store)
         orient_out.parent.mkdir(parents=True, exist_ok=True)
         with open(orient_out, "w") as fh:
             json.dump(field, fh, indent=1)
-        print(f"      wrote {orient_out.relative_to(REPO)}; added "
-              f"{field['provenance']['added_volumes']}")
+        print(f"      wrote {orient_out.relative_to(REPO)}; own records for "
+              f"{field['provenance']['replaced_or_added_volumes']}")
     elif orient_out == ORIENT_BASE and (args.rebuild_orientation
                                         or not orient_out.exists()):
         print("[1/4] rebuilding orientation field ...", flush=True)
