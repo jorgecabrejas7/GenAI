@@ -10,7 +10,7 @@
 #
 #     START_AT=store POREGEN_SPLIT=split_v4 bash scripts/chain_v8_resume.sh
 #
-# Stages, in order: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 rungs grey.
+# Stages, in order: rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm25 c25 c24 c27 c14 rungs grey.
 # rf8checks is rf-8's four acceptance checks ALONE — the rung report, the
 # calibration probe, the harness and the recon figure — so a trainer that
 # had to be stopped after early stopping can still be checked on its
@@ -58,9 +58,9 @@ cd "$REPO" || exit 1
 
 #: Resume point. Everything before it is skipped; everything from it runs.
 START_AT="${START_AT:-rf8}"
-case " rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 rungs grey " in
+case " rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm25 c25 c24 c27 c14 rungs grey " in
     *" $START_AT "*) ;;
-    *) echo "START_AT must be one of: rf8 rf8checks store conditioning ldm06 converge c18 baselines c24 c27 c14 rungs grey" >&2; exit 2 ;;
+    *) echo "START_AT must be one of: rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm25 c25 c24 c27 c14 rungs grey" >&2; exit 2 ;;
 esac
 _reached=0
 at() {
@@ -72,6 +72,11 @@ at() {
 #: Campaign directories and the store, defined up front so a later stage can
 #: use them when the stage that normally sets them was skipped.
 STORE="data/$SPLIT/latents_r08z8"
+#: An LDM campaign's directory names the run it scores: run-0004's campaign 18
+#: keeps its original name, and every later one is <name>$SUF-run<NNNN>, so a
+#: retrained ldm06 never writes over the record of the first.
+ldm_tag() { basename "${1%/}" | sed -E 's/^.*-run-([0-9]+)-.*$/run\1/'; }
+c18_dir() { echo "$REPO/runs/campaigns/18-eval-v4-final$SUF-$(ldm_tag "$1")"; }
 C18="$REPO/runs/campaigns/18-eval-v4-final$SUF"
 link_floor() { mkdir -p "$1"; [ -e "$1/real_floor" ] || ln -s "$C18/real_floor" "$1/real_floor"; }
 say() { printf '%s  V8R %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
@@ -247,13 +252,51 @@ if at rf8checks; then
         --out "$REPO/runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf8"
 
 fi
+if [ "$START_AT" = vaecont ]; then
+    # ── 1c. continue rf-8 (the author, 2026-10-07: "train the VAE more") ───────
+    # The weights every existing v4 LDM decodes with are kept under their step
+    # first: the resume rewrites best.ckpt and latest.ckpt in place.
+    VAE_TARGET="${VAE_TARGET:?set VAE_TARGET, the total step count to continue to}"
+    OLD_STEP=$(python -c "import torch,sys; print(torch.load(sys.argv[1], map_location='cpu', weights_only=False)['step'])" "${VAE%/}/latest.ckpt")
+    for c in best latest; do
+        keep="${VAE%/}/${c}_step${OLD_STEP}.ckpt"
+        if [ -e "$keep" ]; then
+            cmp -s "$keep" "${VAE%/}/$c.ckpt" || { say "STOP NOTICE: $keep exists and differs from $c.ckpt"; exit 1; }
+        else
+            cp -p "${VAE%/}/$c.ckpt" "$keep" || { say "STOP NOTICE: could not keep $c.ckpt"; exit 1; }
+        fi
+        say "kept ${c}.ckpt (step $OLD_STEP) as $(basename "$keep")"
+    done
+    run_watched "rf-8 continued to $VAE_TARGET (early stopping off)" vaecont "11 h" \
+        python scripts/train_vae.py resume "${VAE%/}" latest.ckpt \
+        --total-steps "$VAE_TARGET" --no-early-stopping
+    check "continued rf-8 rung report" vc_rung_report ok \
+        python scripts/analysis/r08_rung_report.py --run "${VAE%/}"
+    check "continued rf-8 calibration probe (dense panels)" vc_calib ok \
+        python scripts/analysis/r08_calibration_probe.py --run "${VAE%/}"
+    check "continued rf-8 vae_val_l1 harness (L1, texture, sharpness)" vc_val_l1 ok \
+        python scripts/analysis/vae_val_l1.py --run "${VAE%/}" \
+        --split "$SPLIT" --n-batches 20
+    check "continued rf-8 recon figure" vc_recon_fig ok \
+        python scripts/analysis/vae_recon_figure.py \
+        --run "v4 rf-8 @$VAE_TARGET=${VAE%/}" --split "$SPLIT" \
+        --out "$REPO/runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf8_s$VAE_TARGET"
+    say "VAE CONTINUED. The store is next: move $STORE aside, then START_AT=store."
+    exit 0
+fi
 if at store; then
     # ── 2. the latent store and its conditioning ───────────────────────────────
     STORE="data/$SPLIT/latents_r08z8"
+    # NEVER OVER AN EXISTING STORE. The LDM runs trained on it are bound to its
+    # VAE weights, and a rebuild in place would destroy the latents they decode.
+    # The old store is moved aside (or deleted) by hand, on the author's word.
+    if [ -e "$STORE/metadata.json" ]; then
+        say "STOP NOTICE: $STORE already exists. Move it aside before rebuilding it."
+        exit 1
+    fi
     step "latent store" latents "6 h" \
         python scripts/build_latent_dataset.py --checkpoint "${VAE%/}/best.ckpt" \
-        --output "$STORE" \
-        --min-free-ratio 1.3
+        --output "$STORE"
     # THE SPLIT_V3 BRING-UP'S OWN CHECKS (scripts/ldm06_bringup.sh), not new ones:
     # the eight store files, then — after the conditioning — its three sidecars and
     # a LatentDataset that serves a real batch. A store that loads is not the same
@@ -334,6 +377,7 @@ if at converge; then
 
 fi
 [ -z "${LDM:-}" ] && LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -n "${LDM:-}" ] && C18=$(c18_dir "$LDM")
 if at c18; then
     # ── 4. the paper's campaigns, BY THE SPLIT_V3 PROCEDURE ────────────────────
     # Campaign 18 is run by scripts/regen_eval_v4.sh — the script that produced the
@@ -347,7 +391,7 @@ if at c18; then
     # v4 floor is cut from split_v4 FIRST, so regen finds it present and does not
     # link the old one. Every other campaign then shares that floor by symlink, as
     # the split_v3 campaigns shared campaign 12's.
-    C18="$REPO/runs/campaigns/18-eval-v4-final$SUF"
+    C18=$(c18_dir "$LDM")
     mkdir -p "$C18"
     step "real floor on $SPLIT (shared by every v4 campaign)" real_floor "10 min" \
         python -m poregen.eval_v4.cli real-floor --root "$C18" \
@@ -389,11 +433,18 @@ if at baselines; then
     step "ddpm3d report" ddpm3d_report "1 min" \
         python -m poregen.eval_v4.cli report --root "$C23"
 
+
+fi
+if at ldm25; then
     run_watched "ldm25 phi-only (40k)" ldm25 "19 h" \
         python scripts/train_ldm.py run ldm25/phi_only
     LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
     [ -z "$LDM25" ] && { say "STOP NOTICE: no ldm25 run on $SPLIT was found after training."; exit 1; }
-    C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF"; link_floor "$C25"
+
+fi
+[ -z "${LDM25:-}" ] && LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+if at c25; then
+    C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF-$(ldm_tag "$LDM25")"; link_floor "$C25"
     for A in porosity_global microstructure cfg; do
         step "c25 generate $A" "c25_gen_$A" "varies" \
             python -m poregen.eval_v4.cli generate "$A" --model "${LDM25%/}" \
@@ -408,7 +459,7 @@ fi
 [ -z "${LDM25:-}" ] && LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
 if at c24; then
     # ── 6. the ablation ────────────────────────────────────────────────────────
-    C24="$REPO/runs/campaigns/24-ablation$SUF"; link_floor "$C24"
+    C24="$REPO/runs/campaigns/24-ablation$SUF-$(ldm_tag "$LDM")"; link_floor "$C24"
     step "c24 generate" c24_gen "6 h" \
         python -m poregen.eval_v4.cli generate ablation --model "${LDM%/}" \
         --ckpt latest --weights ema --out "$C24"
@@ -423,7 +474,7 @@ if at c27; then
     # ldm06 at the phi-only baseline's own 40 000 steps. On split_v3 that was the
     # base run, run-0001; on the rebuild the base run IS facedrop_from_start, so its
     # step-40000 checkpoint is the analogue. save_every 10000 keeps that step.
-    C27="$REPO/runs/campaigns/27-budget-matched-40k$SUF"; link_floor "$C27"
+    C27="$REPO/runs/campaigns/27-budget-matched-40k$SUF-$(ldm_tag "$LDM")"; link_floor "$C27"
     for A in porosity_global microstructure sampler; do
         step "c27 generate $A" "c27_gen_$A" "varies" \
             python -m poregen.eval_v4.cli generate "$A" --model "${LDM%/}" \
