@@ -723,16 +723,50 @@ def run_experiment(
     return run_ctx.run_dir
 
 
+def apply_resume_overrides(
+    cfg: dict[str, Any],
+    *,
+    total_steps: int | None = None,
+    no_early_stopping: bool = False,
+) -> dict[str, Any]:
+    """Change the stopping rule of a run being resumed; return what changed.
+
+    A resume reads the run's own resolved config, so a run that early-stopped
+    resumes into the same rule and stops again. Continuing such a run to a
+    fixed step count needs the two fields below changed — and the change has
+    to be on record, so every override is returned as {field: [old, new]} for
+    run_metadata, and the caller rewrites resolved_config.yaml.
+    """
+    tcfg = cfg["training"]
+    changed: dict[str, Any] = {}
+    if total_steps is not None:
+        changed["training.total_steps"] = [tcfg["total_steps"], int(total_steps)]
+        tcfg["total_steps"] = int(total_steps)
+    if no_early_stopping:
+        for key in ("early_stopping_patience_steps", "early_stopping_patience"):
+            changed[f"training.{key}"] = [tcfg.get(key, 0), 0]
+            tcfg[key] = 0
+    return changed
+
+
 def resume_run(
     run_ref: str | Path,
     *,
     checkpoint_name: str = "latest.ckpt",
     repo_root: str | Path | None = None,
+    total_steps: int | None = None,
+    no_early_stopping: bool = False,
 ) -> Path:
-    """Resume an interrupted run from its saved config and checkpoint."""
+    """Resume an interrupted run from its saved config and checkpoint.
+
+    ``total_steps`` and ``no_early_stopping`` continue a run past the rule it
+    stopped on; see :func:`apply_resume_overrides`.
+    """
     repo = find_repo_root(repo_root)
     run_dir = resolve_run_directory(run_ref, repo_root=repo)
     cfg = _load_run_config(run_dir)
+    overrides = apply_resume_overrides(
+        cfg, total_steps=total_steps, no_early_stopping=no_early_stopping)
 
     seed_everything(
         int(cfg["training"]["seed"]),
@@ -809,6 +843,7 @@ def resume_run(
             "status": "resuming",
             "resume_from": str(checkpoint_path),
             "resume_step": start_step,
+            "resume_overrides": overrides,
         },
     )
     try:

@@ -159,6 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="latest.ckpt",
         help="Checkpoint filename or path to resume from.",
     )
+    resume_parser.add_argument(
+        "--total-steps", type=int, default=None,
+        help="Continue to this total step count instead of the run's own.",
+    )
+    resume_parser.add_argument(
+        "--no-early-stopping", action="store_true",
+        help="Turn early stopping off for the continued run.",
+    )
 
     clone_parser = subparsers.add_parser("clone", help="Clone an experiment into a new variant YAML.")
     clone_parser.add_argument("source", help="Source experiment id or YAML path.")
@@ -1899,7 +1907,9 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "resume":
-        run_dir = resume_run(args.run_ref, checkpoint_name=args.checkpoint, repo_root=repo_root)
+        run_dir = resume_run(args.run_ref, checkpoint_name=args.checkpoint, repo_root=repo_root,
+                             total_steps=args.total_steps,
+                             no_early_stopping=args.no_early_stopping)
         print(run_dir)
         return
 
