@@ -13,7 +13,7 @@ Replace `REMOTE` below with the machine's address (192.168.8.x) and `USER` with 
 # miniforge, Python 3.13 — same as here (python 3.13.12, base env)
 curl -L -o Miniforge3.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-aarch64.sh
 bash Miniforge3.sh -b -p ~/miniforge3 && ~/miniforge3/bin/conda init bash && exec bash
-conda install -y python=3.13
+conda create -y -n poregen python=3.13 && conda activate poregen   # a named env, not base
 # PyTorch for the GB10 (CUDA 13.0 build, as here: torch 2.12.1+cu130)
 pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu130
 # torchvision: the matching cu130 wheel; see docs/DEVELOPMENT.md ("torchvision") for the exact command
@@ -75,8 +75,8 @@ CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=4 python -m pytest -q tests/test_split_swi
 
 ```bash
 cd ~/Dev/GenAI
-tmux new-session -d -s rungs "POREGEN_SPLIT=split_v4 bash scripts/chain_rungs_remote.sh 2>&1 | tee runs/campaigns/chain_rungs.log"
-tmux new-session -d -s tb "tensorboard --logdir runs/vae --port 6006 --bind_all"
+tmux new-session -d -s rungs "source ~/miniforge3/bin/activate poregen && POREGEN_SPLIT=split_v4 bash scripts/chain_rungs_remote.sh"
+tmux new-session -d -s tb "source ~/miniforge3/bin/activate poregen && tensorboard --logdir runs/vae --port 6006 --bind_all"
 ```
 
 `scripts/chain_rungs_remote.sh` runs the five rungs in order with the smoke test, the four checks
