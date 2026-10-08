@@ -42,6 +42,10 @@ run_watched() {
     local t0=$SECONDS
     choom -n 1000 -- "$@" > "$S/$tag.log" 2>&1 &
     local pid=$!
+    # A minute-by-minute pressure timeline beside every trainer, so a stall
+    # leaves evidence (scripts/analysis/host_pressure_log.sh exits with it).
+    bash scripts/analysis/host_pressure_log.sh "$pid" "$REPO/runs/vae" \
+        > "$S/pressure_$tag.tsv" 2>&1 &
     ( sleep 300
       if kill -0 "$pid" 2>/dev/null; then
           say "$tag +5min: $(mem_line)"
