@@ -575,3 +575,5 @@ configs no longer exist.
 | `inference/`, `diagnostics/`, `eval_results/`, `best_ddim_300/`, `demo_render/`, `logs/` | Output and ad-hoc analysis artefacts from earlier rungs (mostly git-ignored). |
 
 Markers: **⚠** stale/broken assumption · **🕰** historical, superseded but kept · **💀** dead or throwaway.
+
+| `docs/REMOTE_RUNG_SWEEP.md` | How to run the five-rung r08 ablation on a second GB10: environment (from `requirements-lock-gb10.txt`, this machine's pip freeze), the rsync of code + split_v4 memmaps only, verification, launch with `scripts/chain_rungs_remote.sh`, and `scripts/pull_remote_results.sh` to read the results from here. |
