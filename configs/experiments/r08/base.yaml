@@ -41,6 +41,14 @@ overrides:
     early_stopping_patience_steps: 3000
 
   data:
+    # PINNED host buffers (configs/machines/dgx_spark.yaml says false). On the
+    # GB10 the GPU reads pageable host memory through the CPU page tables
+    # (PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES = 1), so an unpinned
+    # transfer depends on reclaimable, swappable pages. Every hang the VAE
+    # family had (rf-2 at 9000, rf-8 v4 at 25000 and 36102, vrrae) sat in a
+    # pageable host<->GPU copy; the LDM family, pinned, never hung. The
+    # author's decision, 2026-10-08. Numerics are unchanged.
+    pin_memory: true
     dataset_root: split_v3
     split_version: v2   # the parquet's own "split" column; v3 splits are baked in
 

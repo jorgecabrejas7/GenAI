@@ -26,6 +26,13 @@ def _snapshot(obj: Any) -> Any:
     adding or replacing entries inside them.
     """
     if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            # Into a PINNED buffer: a GPU->pageable copy on the GB10 goes
+            # through the CPU page tables and hung twice here under swap
+            # pressure (rf-2 step 9000, rf-8 v4 step 25000). See r08/base.yaml.
+            out = torch.empty(obj.shape, dtype=obj.dtype, device="cpu", pin_memory=True)
+            out.copy_(obj.detach())
+            return out
         return obj.detach().to("cpu", copy=True)
     if isinstance(obj, dict):
         return {key: _snapshot(value) for key, value in obj.items()}
