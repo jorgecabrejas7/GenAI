@@ -67,7 +67,7 @@ CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=4 python -m pytest -q tests/test_split_swi
 - Set `vm.swappiness=10` as here (`sudo sysctl vm.swappiness=10`).
 - Run numbers: the remote's `runs/vae` starts empty, so its first run is `r08-run-0001-…-dsv4`, which collides
   by number with this machine's. Pre-seed before launch so the numbers continue from here:
-  `cd ~/Dev/GenAI && mkdir -p runs/vae && for i in $(seq -f "%04g" 1 13); do mkdir -p runs/vae/r08-run-$i-seed-placeholder; done`
+  `cd ~/Dev/GenAI && mkdir -p runs/vae/r08-run-0013-seed-placeholder` (only the maximum index counts; a placeholder has no `-z<Z>-`/`-dsv4` and is never read as a run)
   (the chain ignores these empty directories; the real runs become 0014 onward).
 - Start `scripts/analysis/host_pressure_log.sh` beside each trainer, as here (the chain does this).
 
