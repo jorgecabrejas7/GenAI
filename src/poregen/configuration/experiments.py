@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import json
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,6 +203,46 @@ def _normalise_cfg(cfg: dict[str, Any], *, experiment_id: str) -> dict[str, Any]
     return cfg
 
 
+#: The value a config gives ``loss.class_weights`` to take them from its split.
+CLASS_WEIGHTS_FROM_SPLIT = "from_split"
+
+
+def _resolve_split_class_weights(cfg: dict[str, Any], repo: Path) -> dict[str, Any]:
+    """``loss.class_weights: from_split`` -> the active split's own weights.
+
+    The procedure is "sqrt-inverse weights of THE SPLIT'S OWN train class
+    frequencies". A literal in a config is the weights of whichever split it
+    was copied from: r08/base carried split_v3's [0.767, 5.053, 2.587], so the
+    first split_v4 VAE trained with them instead of split_v4's own
+    [0.773, 5.730, 2.619] (found 2026-10-08). Resolved after the split switch
+    has moved data.dataset_root, so it follows POREGEN_SPLIT; the resolved
+    config carries the values AND the file they came from.
+    """
+    loss = cfg.get("loss")
+    if not isinstance(loss, dict) or loss.get("class_weights") != CLASS_WEIGHTS_FROM_SPLIT:
+        return cfg
+    root = (cfg.get("data") or {}).get("dataset_root")
+    if not root:
+        raise ValueError("loss.class_weights is 'from_split' but data.dataset_root is unset")
+    from poregen.paths import data_root  # noqa: PLC0415
+
+    path = Path(root) if Path(root).is_absolute() else data_root(Path(root).name, repo=repo)
+    path = path / "class_weights.json"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"loss.class_weights is 'from_split' and {path} does not exist: the "
+            "split's weights are written by its build (--stage weights).")
+    meta = json.loads(path.read_text())
+    loss["class_weights"] = [float(w) for w in meta["class_weights"]]
+    loss["class_weights_source"] = {
+        "file": str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "weight_rule": meta.get("weight_rule_name"),
+        "n_train_patches": meta.get("n_train_patches"),
+    }
+    return cfg
+
+
 def _apply_split_override(cfg: dict[str, Any], experiment_id: str, *,
                           outermost: bool) -> dict[str, Any]:
     """Let POREGEN_SPLIT redirect a config's dataset, latent store and version.
@@ -329,6 +371,8 @@ def resolve_experiment(
         merged = _deep_merge(merged, overrides)
 
     merged = _apply_split_override(merged, experiment_id, outermost=not _seen)
+    if not _seen:
+        merged = _resolve_split_class_weights(merged, repo)
     merged = _normalise_cfg(merged, experiment_id=experiment_id)
     source_chain.append(str(experiment_path))
 

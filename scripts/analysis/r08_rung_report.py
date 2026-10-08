@@ -317,13 +317,14 @@ def build_findings(meta: dict, per_split: dict, min_bin_n: int) -> str:
     return "\n".join(L)
 
 
-def run_one(run_dir: Path, batch_size: int, min_bin_n: int) -> dict:
+def run_one(run_dir: Path, batch_size: int, min_bin_n: int,
+            checkpoint: str = "best.ckpt") -> dict:
     cfg = yaml.safe_load((run_dir / "resolved_config.yaml").read_text())
-    ckpt = run_dir / "checkpoints" / "best.ckpt"
+    ckpt = run_dir / "checkpoints" / checkpoint
     if not ckpt.exists():
-        ckpt = run_dir / "best.ckpt"
+        ckpt = run_dir / checkpoint
     if not ckpt.exists():
-        raise SystemExit(f"no best.ckpt under {run_dir}")
+        raise SystemExit(f"no {checkpoint} under {run_dir}")
 
     device = torch.device("cuda")
     model = build_model(cfg, device)
@@ -595,13 +596,17 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--min-bin-n", type=int, default=MIN_BIN_N)
     ap.add_argument("--compare", action="store_true")
+    # A run stopped by SIGTERM (the plateau rule) never wrote its final
+    # best.ckpt; its last weights are latest.ckpt.
+    ap.add_argument("--checkpoint", default="best.ckpt",
+                    help="checkpoint file inside the run (default best.ckpt)")
     args = ap.parse_args()
     if args.compare:
         compare()
         return
     if not args.run:
         raise SystemExit("--run or --compare required")
-    run_one(Path(args.run), args.batch_size, args.min_bin_n)
+    run_one(Path(args.run), args.batch_size, args.min_bin_n, args.checkpoint)
 
 
 if __name__ == "__main__":

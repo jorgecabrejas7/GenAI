@@ -225,3 +225,35 @@ def test_rung_report_directory_keeps_split_v3_names():
     assert mod.out_name("r08_reduction-factor-8", "split_v3") == "r08_reduction-factor-8"
     assert mod.out_name("r08_reduction-factor-8", "split_v4") \
         == "r08_reduction-factor-8-dsv4"
+
+
+# ── the loss weights are the active split's own ──────────────────────────────
+
+class TestClassWeightsFollowTheSplit:
+    """sqrt-inverse weights of the split's OWN train frequencies, never a copy.
+
+    r08/base once carried split_v3's weights as a literal, and the first
+    split_v4 VAE trained with them (found 2026-10-08).
+    """
+
+    @pytest.mark.parametrize("split", ["split_v3", "split_v4"])
+    def test_resolved_weights_are_the_split_file(self, monkeypatch, split):
+        import json
+        from poregen.configuration.experiments import resolve_experiment
+
+        f = paths.data_root(split) / "class_weights.json"
+        if not f.exists():
+            pytest.skip(f"{f} not present")
+        monkeypatch.setenv(paths.SPLIT_ENV, split)
+        loss = resolve_experiment("r08/reduction-factor-8").cfg["loss"]
+        assert loss["class_weights"] == json.loads(f.read_text())["class_weights"]
+        assert loss["class_weights_source"]["file"] == f"data/{split}/class_weights.json"
+
+    def test_no_experiment_config_carries_a_weight_literal(self):
+        import re
+        offenders = []
+        for f in (paths.repo_root() / "configs").rglob("*.yaml"):
+            for i, line in enumerate(f.read_text().splitlines(), 1):
+                if re.match(r"\s*class_weights:\s*\[", line):
+                    offenders.append(f"{f.relative_to(paths.repo_root())}:{i}")
+        assert not offenders, "class weights must come from the split: " + ", ".join(offenders)

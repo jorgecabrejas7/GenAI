@@ -66,8 +66,11 @@ overrides:
     class_dice_classes: [1, 2]
     # w_c proportional to 1/sqrt(f_c), normalised so sum_c f_c * w_c = 1, so
     # the weighted loss keeps the magnitude of an unweighted one. Measured on
-    # the split_v3 TRAIN split by `build_split_v3.py --stage weights`; source
-    # numbers and patch count in data/split_v3/class_weights.json. Without
+    # the ACTIVE split's TRAIN patches by its build (--stage weights) and read
+    # at resolution from <data root>/class_weights.json ("from_split"); the
+    # resolved config carries the values and loss.class_weights_source. On
+    # split_v3: 0.767078 / 5.052971 / 2.587425 (train frequencies
+    # 0.900142 / 0.020744 / 0.079114 over 1598000 patches). Without
     # weights the loss is dominated by material and both minority classes
     # collapse, so compute_total_loss refuses to run when this is unset.
     #
@@ -79,6 +82,7 @@ overrides:
     # improved pore Dice, so the bias was calibration from the weights rather
     # than a recall/precision trade. See
     # runs/campaigns/09-r08-latent-sweep/calibration_probe/.
-    # train frequencies material/pore/air = 0.900142 / 0.020744 / 0.079114
-    # over 1598000 patches.
-    class_weights: [0.767078, 5.052971, 2.587425]
+    #
+    # NOT A LITERAL: a literal is the weights of the split it was copied from.
+    # It made the first split_v4 VAE train with split_v3's weights (2026-10-08).
+    class_weights: from_split
