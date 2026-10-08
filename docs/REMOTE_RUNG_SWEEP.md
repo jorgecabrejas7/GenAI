@@ -21,6 +21,7 @@ pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu130
 mkdir -p ~/Dev && cd ~/Dev && git clone git@github.com:jorgecabrejas7/GenAI.git GenAI && cd GenAI
 pip install -r requirements-lock-gb10.txt
 pip install -e . --no-deps
+pip install -e third_party/RR_layer      # vendored; the VAE model registry imports it
 python -c "import torch, poregen; print(torch.__version__, torch.cuda.get_device_name(0))"
 ```
 
