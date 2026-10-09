@@ -2046,6 +2046,14 @@ def main() -> None:
         np.savez_compressed(SLAB_CACHE, records=slab_recs)
 
     sl = analyse_slabs(slab_recs, per_volume, gt, recs)
+    if args.volumes is not None:
+        # A subset has no population to summarise: the family statistics and
+        # figures need every family present. Its product is the per-volume
+        # layup field, built by the same function as the full run's.
+        field = build_layup_field(per_volume, gt, sl)
+        fp = write_json(field, OUT_DIR, "layup_field.json")
+        print(f"wrote {fp}  (subset: {', '.join(volume_ids)})")
+        return
     slab_summary = summarise_slabs(sl)
     slab_summary["single_window_control"] = single_window_control(per_volume, gt)
     slab_summary["window_agreement"] = window_agreement(slab_recs, per_volume, gt)
