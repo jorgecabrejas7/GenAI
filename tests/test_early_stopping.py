@@ -139,3 +139,47 @@ class TestPatienceInSteps:
             t = resolve_experiment(f"r08/{variant}").cfg["training"]
             assert t["early_stopping_patience_steps"] == 3000, variant
             assert t["early_stopping_patience"] == 0, variant
+
+
+# ---------------------------------------------------------------------------
+# The loop's state survives a resume
+# ---------------------------------------------------------------------------
+
+def _run(tmp_path, total_steps, start_step=0, resume_state=None, patience=3):
+    model = _Model()
+    loader = torch.utils.data.DataLoader(_Dataset(), batch_size=1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)   # nothing improves
+
+    def loss_fn(output, batch, step):
+        total = output.xct_out.mean()
+        return {"total": total, "xct_loss": total.detach() * 0.0,
+                "kl_per_channel": torch.zeros(2)}
+
+    return train_loop(
+        model, loader, loader, optimizer, torch.amp.GradScaler(enabled=False), loss_fn,
+        total_steps=total_steps, eval_every=1, val_batches=1, save_every=1,
+        image_log_every=0, montecarlo_every=0, montecarlo_batch_size=0, sample_every=0,
+        run_dir=tmp_path, device=torch.device("cpu"), autocast_dtype=torch.bfloat16,
+        start_step=start_step, resume_state=resume_state,
+        early_stopping_patience=patience, early_stopping_metric="val.xct_loss",
+    )
+
+
+def test_every_checkpoint_records_the_loop_state(tmp_path):
+    from poregen.training.checkpoint import load_checkpoint
+    _run(tmp_path, total_steps=2, patience=10)
+    import time; time.sleep(0.5)                      # the async save thread
+    _, meta = load_checkpoint(tmp_path / f"{tmp_path.name}_step00000002.ckpt", _Model())
+    ls = meta["loop_state"]
+    assert ls["early_best_value"] == 0.0 and ls["early_no_improve"] == 1
+
+
+def test_a_resume_continues_patience_instead_of_restarting_it(tmp_path):
+    """Patience 3 with nothing improving stops at the 4th check. Resumed after
+    2 checks WITH the state it stops 2 checks later; without it, 4 later."""
+    state = {"best_metric_value": None, "early_best_value": 0.0, "early_no_improve": 1}
+    with_state = _run(tmp_path / "a", total_steps=20, start_step=2, resume_state=state)
+    without = _run(tmp_path / "b", total_steps=20, start_step=2)
+    n = lambda h: len([r for r in h if r["split"] == "train"])
+    assert with_state[-1]["event"] == "early_stopping"
+    assert (n(with_state), n(without)) == (2, 4)

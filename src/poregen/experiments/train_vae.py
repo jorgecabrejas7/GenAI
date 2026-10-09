@@ -490,8 +490,8 @@ def _prepare_resume_state(
     device: torch.device,
     discriminator: torch.nn.Module | None = None,
     disc_optimizer: torch.optim.Optimizer | None = None,
-) -> tuple[int, int]:
-    checkpoint_step, _ = load_checkpoint(
+) -> tuple[int, int, dict[str, Any] | None]:
+    checkpoint_step, ckpt_meta = load_checkpoint(
         checkpoint_path,
         model=model,
         optimizer=optimizer,
@@ -525,7 +525,13 @@ def _prepare_resume_state(
             checkpoint_step,
         )
 
-    return checkpoint_step, remaining_steps
+    loop_state = ckpt_meta.get("loop_state")
+    if loop_state is None:
+        logger.warning(
+            "%s carries no loop_state (saved before checkpoints recorded it): "
+            "early-stopping patience and the best metric restart at the resume.",
+            Path(checkpoint_path).name)
+    return checkpoint_step, remaining_steps, loop_state
 
 
 def _load_run_config(run_dir: Path) -> dict[str, Any]:
@@ -806,7 +812,7 @@ def resume_run(
     # and its optimizer moments, and a fresh pair would restart the GAN.
     discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
 
-    start_step, remaining_steps = _prepare_resume_state(
+    start_step, remaining_steps, loop_state = _prepare_resume_state(
         cfg=cfg,
         run_dir=run_dir,
         checkpoint_path=checkpoint_path,
@@ -872,6 +878,7 @@ def resume_run(
                 device=device,
                 autocast_dtype=autocast_dtype,
                 start_step=start_step,
+                resume_state=loop_state,
                 max_grad_norm=cfg["training"]["max_grad_norm"],
                 scheduler=scheduler,
                 tb_writer=tb_writer,

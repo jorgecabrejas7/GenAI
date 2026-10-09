@@ -660,6 +660,7 @@ def train_loop(
     discriminator: nn.Module | None = None,
     disc_optimizer: torch.optim.Optimizer | None = None,
     disc_weight: float = 0.01,
+    resume_state: dict[str, Any] | None = None,
     latent_bank: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Training loop with full real-time TensorBoard monitoring.
@@ -758,10 +759,21 @@ def train_loop(
 
     montecarlo_every = image_log_every if montecarlo_every is None else montecarlo_every
     best_target_split, best_target_key = _parse_metric_target(best_metric)
-    best_metric_value: float | None = None
+    # THE LOOP'S OWN STATE survives a resume. Without it a resumed run starts
+    # patience at zero and treats its first eval as a new best, so it stops
+    # later than an uninterrupted run and can overwrite best.ckpt with worse
+    # weights (2026-10-09, the remote rf-8 resumed after a stall). Every
+    # checkpoint carries it as metadata["loop_state"]; resume_run passes it in.
+    rs = resume_state or {}
+    best_metric_value: float | None = rs.get("best_metric_value")
     early_target_split, early_target_key = _parse_metric_target(early_stopping_metric)
-    early_best_value: float | None = None
-    early_no_improve = 0
+    early_best_value: float | None = rs.get("early_best_value")
+    early_no_improve = int(rs.get("early_no_improve", 0))
+
+    def _loop_state() -> dict[str, Any]:
+        return {"best_metric_value": best_metric_value,
+                "early_best_value": early_best_value,
+                "early_no_improve": early_no_improve}
     stop_requested = False
     if early_stopping_mode not in {"min", "max"}:
         raise ValueError("early_stopping_mode must be 'min' or 'max'")
@@ -810,6 +822,7 @@ def train_loop(
             step=int(record["step"]) + (0 if record.get("full_eval") else 1),
             metadata={
                 "total_steps": total_steps,
+                "loop_state": _loop_state(),
                 "best_metric": best_metric,
                 "best_mode": best_mode,
                 "best_value": metric_float,
@@ -1101,7 +1114,7 @@ def train_loop(
                 save_checkpoint_async(
                     run_dir / ckpt_name,
                     model, optimizer, scaler, step=step + 1,
-                    metadata={"total_steps": total_steps},
+                    metadata={"total_steps": total_steps, "loop_state": _loop_state()},
                     scheduler=scheduler,
                     latest_path=run_dir / "latest.ckpt" if save_latest else None,
                     thread_holder=_ckpt_thread_holder,
@@ -1178,6 +1191,7 @@ def train_loop(
                 "early_stopping_metric": early_stopping_metric,
                 "early_stopping_best_value": early_best_value,
                 "early_stopping_checks_without_improvement": early_no_improve,
+                "loop_state": _loop_state(),
                 "planned_final_step": start_step + total_steps,
                 "actual_final_step": final_step,
             },

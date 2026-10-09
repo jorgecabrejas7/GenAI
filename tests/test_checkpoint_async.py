@@ -190,7 +190,7 @@ class TestDiscriminatorRoundTrip:
 
         resumed_disc, resumed_opt, _ = build_discriminator(cfg, device)
         resumed_model = _model()
-        start_step, remaining = _prepare_resume_state(
+        start_step, remaining, _ = _prepare_resume_state(
             cfg=cfg,
             run_dir=tmp_path,
             checkpoint_path=tmp_path / "latest.ckpt",
