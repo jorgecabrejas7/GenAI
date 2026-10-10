@@ -35,6 +35,8 @@ rsync -avP --partial data/split_v4/patches_meta.json data/split_v4/patch_index.p
   data/split_v4/labels.json data/split_v4/build_report.md data/split_v4/holes.json \
   data/split_v4/orientation_field.json USER@REMOTE:~/Dev/GenAI/data/split_v4/
 rsync -avP --partial data/split_v4/holes USER@REMOTE:~/Dev/GenAI/data/split_v4/
+# the harness and the recon figure exclude split_v2's train volumes: they read data/split_v2/splits.json (28 KB)
+ssh USER@REMOTE 'mkdir -p ~/Dev/GenAI/data/split_v2' && rsync -avP data/split_v2/splits.json data/split_v2/patch_index.parquet USER@REMOTE:~/Dev/GenAI/data/split_v2/
 rsync -avP --partial data/split_v4/patches_xct.bin data/split_v4/patches_label.bin USER@REMOTE:~/Dev/GenAI/data/split_v4/
 # the label store AND the grey arrays it links to (-L dereferences the per-volume xct symlinks into split_v1's zarr,
 # so the remote needs no split_v1): the calibration probe reads it. ~290 GB.
