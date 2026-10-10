@@ -95,13 +95,57 @@ def decide(rows: list[dict], z: int) -> dict:
     return {"step": rows[-1]["step"], **q, "stop": bool(reasons), "reasons": reasons}
 
 
-def wait_pid(pid: int) -> None:
-    while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(30)
+def pid_state(pid: int) -> str | None:
+    """The process state letter from /proc, or None when the PID is gone."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        return None
+
+
+def is_trainer(pid: int) -> bool:
+    """--pid must be the python trainer itself, not a wrapper around it.
+
+    A tmux shell, a `| tee` pipeline or `bash -c` outlives the trainer, and
+    os.kill(pid, 0) succeeds on it for ever: the 2026-10-10 remote watch sat
+    in phase 1 for 25 min after rf-8 exited. choom execs, so its PID is fine.
+    """
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        return False
+    return any(a.endswith(b"train_vae.py") for a in args)
+
+
+def trainer_finished(pid: int, run: Path) -> str | None:
+    """Why the trainer is done, or None while it runs.
+
+    Gone, or a zombie (its parent has not reaped it; os.kill(pid, 0) still
+    succeeds on a zombie), or its run says so: run_metadata status completed or
+    failed is written as the last act of training, before teardown.
+    """
+    st = pid_state(pid)
+    if st is None:
+        return "process gone"
+    if st == "Z":
+        return "process is a zombie (exited, not reaped)"
+    try:
+        status = json.loads((run / "run_metadata.json").read_text()).get("status")
+    except (FileNotFoundError, json.JSONDecodeError):
+        status = None
+    if status in ("completed", "failed"):
+        return f"run_metadata status {status}"
+    return None
+
+
+def wait_gpu_free(pid: int, timeout: float = 600.0) -> bool:
+    """After the run says it is done, the process must still release the GPU."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if pid_state(pid) in (None, "Z"):
+            return True
+        time.sleep(10)
+    return False
 
 
 def main() -> int:
@@ -123,8 +167,18 @@ def main() -> int:
             fh.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S"), **kw}) + "\n")
 
     # ── phase 1: until the trainer's own early stop ─────────────────────────
+    if not is_trainer(a.pid):
+        note(phase=1, refused=f"PID {a.pid} is not a train_vae.py process (a wrapper?)")
+        print(f"PID {a.pid} is not a train_vae.py process; pass the python trainer's PID",
+              file=sys.stderr)
+        return 2
     note(phase=1, watching_pid=a.pid, z_channels=z)
-    wait_pid(a.pid)
+    while (why := trainer_finished(a.pid, run)) is None:
+        time.sleep(30)
+    note(phase=1, trainer_done=why)
+    if not wait_gpu_free(a.pid):
+        note(phase=1, ended="the run finished but its process still holds on after 600 s; no resume")
+        return 1
     events = [json.loads(l) for l in open(run / "metrics.jsonl")
               if '"split": "event"' in l]
     if not events or events[-1].get("event") != "early_stopping":

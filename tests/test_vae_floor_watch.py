@@ -39,3 +39,28 @@ def test_xct_and_sharpness_guards():
     assert "xct_loss" in fw.decide(rows, 8)["reasons"][0]
     rows = [row(1, .6), row(2, .5), row(3, .4, sharp=0.785), row(4, .3, sharp=0.785)]
     assert "sharpness" in fw.decide(rows, 8)["reasons"][0]
+
+
+# ── phase 1 must see the trainer end, whatever wraps it ──────────────────────
+
+def test_a_zombie_trainer_counts_as_finished(tmp_path):
+    import subprocess, time
+    child = subprocess.Popen(["true"])        # exits at once; not reaped yet
+    time.sleep(0.5)
+    assert fw.pid_state(child.pid) == "Z"
+    assert "zombie" in fw.trainer_finished(child.pid, tmp_path)
+    child.wait()
+    assert fw.trainer_finished(child.pid, tmp_path) == "process gone"
+
+
+def test_the_run_status_ends_the_wait_even_if_a_process_lingers(tmp_path):
+    import json, os
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"status": "running"}))
+    assert fw.trainer_finished(os.getpid(), tmp_path) is None
+    (tmp_path / "run_metadata.json").write_text(json.dumps({"status": "completed"}))
+    assert fw.trainer_finished(os.getpid(), tmp_path) == "run_metadata status completed"
+
+
+def test_a_wrapper_pid_is_refused():
+    import os
+    assert not fw.is_trainer(os.getpid())    # pytest, not train_vae.py
