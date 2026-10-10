@@ -13,6 +13,11 @@
 #     touch runs/campaigns/STOP_CHAIN     # halt cleanly before the next stage
 #
 # RUNGS overrides the list, e.g. RUNGS="32:2:r08/reduction-factor-32".
+# GREY rungs run through the same loop: an entry whose experiment is
+# r08_grey/... (e.g. "2:32:r08_grey/reduction-factor-2") is found under
+# runs/vae/r08_grey-run-*, logged as grey_rf<N>, and gets the two checks that
+# apply to a grey-only model — the harness and the recon figure. The rung
+# report and the calibration probe are 3-class instruments (pore/air Dice).
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
@@ -76,18 +81,31 @@ say "data/$SPLIT present"
 
 for spec in $RUNGS; do
     RF=${spec%%:*}; rest=${spec#*:}; Z=${rest%%:*}; EXP=${rest#*:}
-    gate "rf-$RF smoke"
+    if [ "${EXP%%/*}" = r08_grey ]; then
+        FAM=r08_grey; T="grey_rf$RF"; NAME="grey rf-$RF"
+    else
+        FAM=r08; T="rf$RF"; NAME="rf-$RF"
+    fi
+    gate "$NAME smoke"
     POREGEN_CUDA_MEM_FRACTION=$SMOKE_FRACTION choom -n 1000 -- \
-        python scripts/analysis/vae_smoke_step.py --experiment "$EXP" > "$S/smoke_rf$RF.log" 2>&1
+        python scripts/analysis/vae_smoke_step.py --experiment "$EXP" > "$S/smoke_$T.log" 2>&1
     SRC=$?
-    say "SMOKE $EXP rc=$SRC — $(grep -E 'peak allocated|OOM at batch|FITS|NOT A MEMORY' "$S/smoke_rf$RF.log" | head -2 | tr '\n' ' ')"
-    if [ "$SRC" -eq 1 ]; then say "rf-$RF SKIPPED: does not fit at its own batch (a real OOM)."; continue
-    elif [ "$SRC" -ne 0 ]; then say "rf-$RF SKIPPED: smoke failed without measuring memory (rc=$SRC)."; continue; fi
-    run_watched "r08 rf-$RF (z=$Z, $EXP) on $SPLIT" "rf$RF" \
-        python scripts/train_vae.py run "$EXP" || { say "rf-$RF training failed — checks not run"; continue; }
-    RUNG=$(ls -dt runs/vae/r08-run-*-z$Z-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
-    [ -z "$RUNG" ] && { say "rf-$RF: no run directory found"; continue; }
-    say "rf-$RF = $(basename "${RUNG%/}")"
+    say "SMOKE $EXP rc=$SRC — $(grep -E 'peak allocated|OOM at batch|FITS|NOT A MEMORY' "$S/smoke_$T.log" | head -2 | tr '\n' ' ')"
+    if [ "$SRC" -eq 1 ]; then say "$NAME SKIPPED: does not fit at its own batch (a real OOM)."; continue
+    elif [ "$SRC" -ne 0 ]; then say "$NAME SKIPPED: smoke failed without measuring memory (rc=$SRC)."; continue; fi
+    run_watched "$FAM $NAME (z=$Z, $EXP) on $SPLIT" "$T" \
+        python scripts/train_vae.py run "$EXP" || { say "$NAME training failed — checks not run"; continue; }
+    RUNG=$(ls -dt runs/vae/$FAM-run-*-z$Z-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+    [ -z "$RUNG" ] && { say "$NAME: no run directory found"; continue; }
+    say "$NAME = $(basename "${RUNG%/}")"
+    if [ "$FAM" = r08_grey ]; then
+        check "$NAME vae_val_l1 harness (L1, texture, sharpness)" "${T}_l1" \
+            python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" --split "$SPLIT" --n-batches 20
+        check "$NAME recon figure" "${T}_fig" \
+            python scripts/analysis/vae_recon_figure.py --run "v4 $NAME=${RUNG%/}" --split "$SPLIT" \
+            --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_$T"
+        continue
+    fi
     check "rf-$RF rung report" "rf${RF}_report" \
         python scripts/analysis/r08_rung_report.py --run "${RUNG%/}"
     check "rf-$RF calibration probe (dense panels)" "rf${RF}_calib" \
