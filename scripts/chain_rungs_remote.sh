@@ -81,10 +81,18 @@ say "data/$SPLIT present"
 
 for spec in $RUNGS; do
     RF=${spec%%:*}; rest=${spec#*:}; Z=${rest%%:*}; EXP=${rest#*:}
+    # A VARIANT of a rung (r08/reduction-factor-16-disc0.2) keeps its suffix in
+    # every log, check and figure name, so it never writes over the plain
+    # rung's (recon_v4_rf16 is run-0014's).
+    VAR=${EXP#*/}
+    case "$VAR" in
+        reduction-factor-$RF-*) SUF="${VAR#reduction-factor-$RF}" ;;
+        *) SUF="" ;;
+    esac
     if [ "${EXP%%/*}" = r08_grey ]; then
-        FAM=r08_grey; T="grey_rf$RF"; NAME="grey rf-$RF"
+        FAM=r08_grey; T="grey_rf$RF$SUF"; NAME="grey rf-$RF$SUF"
     else
-        FAM=r08; T="rf$RF"; NAME="rf-$RF"
+        FAM=r08; T="rf$RF$SUF"; NAME="rf-$RF$SUF"
     fi
     gate "$NAME smoke"
     POREGEN_CUDA_MEM_FRACTION=$SMOKE_FRACTION choom -n 1000 -- \
@@ -106,14 +114,14 @@ for spec in $RUNGS; do
             --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_$T"
         continue
     fi
-    check "rf-$RF rung report" "rf${RF}_report" \
+    check "$NAME rung report" "${T}_report" \
         python scripts/analysis/r08_rung_report.py --run "${RUNG%/}"
-    check "rf-$RF calibration probe (dense panels)" "rf${RF}_calib" \
+    check "$NAME calibration probe (dense panels)" "${T}_calib" \
         python scripts/analysis/r08_calibration_probe.py --run "${RUNG%/}"
-    check "rf-$RF vae_val_l1 harness (L1, texture, sharpness)" "rf${RF}_l1" \
+    check "$NAME vae_val_l1 harness (L1, texture, sharpness)" "${T}_l1" \
         python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" --split "$SPLIT" --n-batches 20
-    check "rf-$RF recon figure" "rf${RF}_fig" \
-        python scripts/analysis/vae_recon_figure.py --run "v4 rf-$RF=${RUNG%/}" --split "$SPLIT" \
-        --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_rf$RF"
+    check "$NAME recon figure" "${T}_fig" \
+        python scripts/analysis/vae_recon_figure.py --run "v4 $NAME=${RUNG%/}" --split "$SPLIT" \
+        --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_$T"
 done
 say "BLOCK COMPLETE — $(mem_line)"

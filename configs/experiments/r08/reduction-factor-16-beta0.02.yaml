@@ -1,0 +1,20 @@
+experiment:
+  name: r08
+  variant: reduction-factor-16-beta0.02
+  description: >-
+    rf-16 (z=4, r08/base) with the KL weight lowered: loss.kl_max_beta 0.02
+    instead of the recipe's 0.05. Free bits (0.1) and everything else are
+    r08/base.
+
+# WHY (the author, 2026-10-12): rf-16 is the LDM's VAE on split_v4 and its
+# texture must be fixed first. run-0014 scored texture 0.256 / sharpness 0.752
+# on the harness against the old rf-8's 0.359 / 0.816. kl_max_beta is the
+# weight on the KL term (losses/total.py beta_schedule; no warmup here), the
+# price the latent pays for carrying information: lowering it lets four
+# channels carry more texture. The sibling r08/reduction-factor-16-disc0.2
+# tries the other lever. The run name carries it already ("-b0.020-").
+extends: r08/base
+
+overrides:
+  loss:
+    kl_max_beta: 0.02

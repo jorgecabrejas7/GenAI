@@ -1,0 +1,34 @@
+experiment:
+  name: r08
+  variant: reduction-factor-16-disc0.2
+  description: >-
+    rf-16 (z=4, r08/base) with the adversarial weight 4x the recipe:
+    discriminator.disc_weight 0.2 instead of 0.05. Everything else is r08/base.
+
+# WHY (the author, 2026-10-12): rf-16 is the LDM's VAE on split_v4 and its
+# texture must be fixed first. run-0014 scored texture 0.256 / sharpness 0.752
+# on the harness against the old rf-8's 0.359 / 0.816. The patch discriminator
+# is the term that rewards high-frequency detail the L1 loss averages away;
+# this variant asks how much of the gap a stronger adversarial term closes.
+# The sibling r08/reduction-factor-16-beta0.02 tries the other lever.
+extends: r08/base
+
+overrides:
+  discriminator:
+    disc_weight: 0.2
+  # The run name carries the discriminator weight ("-dw0.2-"), so this run is
+  # told apart from run-0014 by name, not only by its timestamp. The list is
+  # r08/base's own fields plus dw (a list in an override replaces, not merges).
+  runtime:
+    run_name:
+      fields:
+        - {label: arch, path: model.name, transform: slug}
+        - {label: z, path: model.z_channels}
+        - {label: c, path: model.base_channels}
+        - {label: bs, path: data.batch_size}
+        - {label: lr, path: training.lr, transform: sci}
+        - {label: b, path: loss.kl_max_beta, transform: fixed3}
+        - {label: fb, path: loss.kl_free_bits}
+        - {label: klw, path: loss.kl_warmup_steps}
+        - {label: sched, path: training.scheduler}
+        - {label: dw, path: discriminator.disc_weight}

@@ -87,8 +87,11 @@ def resolve_experiment_path(
                 (repo / candidate),
                 (configs_root / candidate),
                 (configs_root / "experiments" / candidate),
-                (configs_root / "experiments" / candidate).with_suffix(".yaml"),
-                (repo / candidate).with_suffix(".yaml"),
+                # APPEND ".yaml", never with_suffix: with_suffix reads a dot in
+                # a variant name as the extension, so "…-disc0.2" became
+                # "…-disc0.yaml" and the experiment could not be found.
+                configs_root / "experiments" / f"{candidate}.yaml",
+                repo / f"{candidate}.yaml",
             ]
         )
 
