@@ -284,6 +284,14 @@ def main() -> int:
           f"{res['fraction_of_baseline_error_removed']:.1%}")
     print(f"  raw decoder output range           "
           f"[{res['raw_output_range'][0]:.3f}, {res['raw_output_range'][1]:.3f}]")
+    # The texture and sharpness columns were computed but only reached --out,
+    # and the rung chain passes none: the rf-16 texture comparison
+    # (2026-10-12) is judged on exactly these, so they are printed too.
+    fmt = lambda v: "n/a" if v is None else f"{v:+.3f}"
+    print(f"  texture corr, interior / all       {fmt(res['texture_corr_interior'])} / "
+          f"{fmt(res['texture_corr'])}")
+    print(f"  sharpness, interior / all          "
+          f"{fmt(res['sharpness_interior']).lstrip('+')} / {fmt(res['sharpness']).lstrip('+')}")
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(res, indent=2) + "\n")
