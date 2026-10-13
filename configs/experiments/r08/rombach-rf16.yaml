@@ -1,0 +1,71 @@
+experiment:
+  name: r08
+  variant: rombach-rf16
+  description: >-
+    rf-16 (z=4, r08/base: three-class head with class-weighted CE + Dice,
+    3-channel encoder input, from_split class weights, pin_memory, batch 128)
+    trained with the first-stage loss of Rombach et al. 2022 (the LDM
+    autoencoder's LPIPSWithDiscriminator, contperceptual loss): KL summed per
+    sample at weight 1e-6, LPIPS(vgg) at weight 1.0 added to the
+    reconstruction, and the adaptive GAN weight (base 0.5) from step 4500.
+
+# WHY (the author, 2026-10-13, vault D68): rf-16's texture lags the old rf-8
+# (run-0014 texture 0.256 / sharpness 0.752 vs 0.359 / 0.816). The two
+# single-lever siblings (r08/reduction-factor-16-beta0.02, -disc0.2) move one
+# weight of our own recipe; this variant replaces the recipe with the published
+# first-stage loss the LDM paper uses, so the first stage is the standard one.
+#
+# HOW EACH TERM MAPS (our loss terms are MEANS over voxels; Rombach's are SUMS
+# over pixels per sample, then a batch mean — dividing his total by the voxels
+# per patch, 64^3, gives ours with every balance kept):
+#   rec   Charbonnier (~L1) per-voxel mean, xct_weight 1.0       = |x - x_rec|
+#   LPIPS + perceptual_weight * LPIPS on grey slices              = p_weight * LPIPS
+#   KL    + 1e-6 * (KL summed over latent elements, batch mean) / 64^3
+#   GAN   + lambda * L_G,  lambda = 0.5 * ||grad L_rec|| / (||grad L_G|| + 1e-4)
+#         at the last layer of the grey output (model.xct_head), clamped to
+#         [0, 1e4] and detached; generator and discriminator both off before
+#         step 4500.
+# The class head's CE + Dice stays as in r08/base: Rombach has no such term.
+#
+# NOT USED: the learned scalar log-variance of Rombach's loss
+# (nll = rec / exp(logvar) + logvar). It is fixed at 0 here, as it is at
+# initialisation in his code (logvar_init 0.0).
+#
+# NOT CHANGED: the discriminator stays our 2D multi-plane PatchGAN (LSGAN,
+# spectral norm), not his hinge-loss NLayerDiscriminator. Early stopping
+# (val.total, which now includes LPIPS and the rescaled KL) and best.ckpt
+# (val_full.total) are r08/base's.
+extends: r08/base
+
+overrides:
+  loss:
+    kl_reduction: rombach_sum
+    kl_max_beta: 1.0e-6
+    kl_warmup_steps: 0
+    # Rombach has no free bits; the rombach_sum reduction refuses any other value.
+    kl_free_bits: 0.0
+    perceptual_weight: 1.0
+    perceptual_net: vgg
+    perceptual_slices_per_axis: 4
+    disc_adaptive: true
+    disc_start: 4500
+  discriminator:
+    # The BASE weight the adaptive ratio multiplies (Rombach's disc_weight).
+    disc_weight: 0.5
+  # The run name says it is the Rombach recipe and carries its weights. The
+  # list is r08/base's own fields with beta in scientific notation (fixed3
+  # would print 1e-6 as 0.000) plus the new keys (a list replaces, not merges).
+  runtime:
+    run_name:
+      fields:
+        - {label: arch, path: model.name, transform: slug}
+        - {label: z, path: model.z_channels}
+        - {label: c, path: model.base_channels}
+        - {label: bs, path: data.batch_size}
+        - {label: lr, path: training.lr, transform: sci}
+        - {label: kl, path: loss.kl_reduction, transform: slug}
+        - {label: b, path: loss.kl_max_beta, transform: sci}
+        - {label: p, path: loss.perceptual_weight}
+        - {label: dw, path: discriminator.disc_weight}
+        - {label: ds, path: loss.disc_start}
+        - {label: sched, path: training.scheduler}
