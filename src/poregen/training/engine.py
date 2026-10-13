@@ -22,6 +22,7 @@ from poregen.models.vae.base import (
     CLASS_PORE, VAEOutput, decode_label, decode_mask, decode_xct,
 )
 from poregen.models.discriminator import (
+    adaptive_disc_weight,
     extract_multiplane_slices,
     lsgan_gen_loss,
     lsgan_disc_loss,
@@ -200,6 +201,8 @@ def train_step(
     disc_optimizer: torch.optim.Optimizer | None = None,
     disc_weight: float = 0.01,
     adv_fake_latents: torch.Tensor | None = None,
+    disc_adaptive: bool = False,
+    disc_start: int = 0,
 ) -> tuple[dict[str, Any], float, dict[str, Any], dict[str, float]]:
     """Single training step with AMP, optional gradient clipping, and scheduler.
 
@@ -223,6 +226,15 @@ def train_step(
         sampled latent carries no ground-truth label to score against.  This
         is the whole difference between option 1 and option 2: what the
         discriminator calls "fake".
+    disc_adaptive : bool
+        Rombach et al. 2022's adaptive weight: the generator term is weighted
+        by ``disc_weight * ||grad rec_total|| / (||grad L_G|| + 1e-4)`` at the
+        last layer of the grey output (``model.xct_head``), clamped to
+        ``[0, 1e4]`` and detached. Needs ``losses["rec_total"]``, which
+        ``compute_total_loss`` emits when ``loss.disc_adaptive`` is true.
+        Logged as ``disc_lambda`` (the full multiplier, base weight included).
+    disc_start : int
+        No adversarial term and no discriminator update before this step.
 
     Returns
     -------
@@ -257,7 +269,12 @@ def train_step(
     _real_slices: torch.Tensor | None = None
     _gen_adv_loss: torch.Tensor | None = None
 
-    if discriminator is not None and disc_optimizer is not None and disc_weight > 0.0:
+    if (
+        discriminator is not None
+        and disc_optimizer is not None
+        and disc_weight > 0.0
+        and step >= disc_start
+    ):
         if adv_fake_latents is not None:
             # Refiner: score the decoder on the distribution it meets in
             # production. Gradients reach the decoder through this forward,
@@ -275,7 +292,18 @@ def train_step(
         _gen_adv_loss = lsgan_gen_loss(d_fake_gen)
 
         # Add to total BEFORE backward so generator gets adversarial signal
-        losses["total"] = losses["total"] + disc_weight * _gen_adv_loss
+        if disc_adaptive:
+            # The grey output's own last layer. The class head is a separate
+            # conv, so the class loss puts no gradient on this weight.
+            xct_head = getattr(model, "xct_head", None)
+            if xct_head is None:
+                raise ValueError("disc_adaptive needs a model with an xct_head")
+            _disc_lambda = disc_weight * adaptive_disc_weight(
+                losses["rec_total"], _gen_adv_loss, xct_head.weight)
+            losses["total"] = losses["total"] + _disc_lambda * _gen_adv_loss
+            losses["disc_lambda"] = _disc_lambda
+        else:
+            losses["total"] = losses["total"] + disc_weight * _gen_adv_loss
 
     latent_moments = latent_channel_moments(output.mu)
     _mask_pred_tensor = (
@@ -660,6 +688,8 @@ def train_loop(
     discriminator: nn.Module | None = None,
     disc_optimizer: torch.optim.Optimizer | None = None,
     disc_weight: float = 0.01,
+    disc_adaptive: bool = False,
+    disc_start: int = 0,
     resume_state: dict[str, Any] | None = None,
     latent_bank: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -730,7 +760,9 @@ def train_loop(
         is not None.
     disc_weight : float
         Weight applied to the generator adversarial loss.  Start small
-        (0.01) and increase if the adversarial signal is too weak.
+        (0.01) and increase if the adversarial signal is too weak.  With
+        *disc_adaptive* it is the base weight the adaptive ratio multiplies.
+    disc_adaptive, disc_start : see :func:`train_step`.
 
     Returns
     -------
@@ -931,6 +963,8 @@ def train_loop(
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
                 adv_fake_latents=_next_bank_batch(),
+                disc_adaptive=disc_adaptive,
+                disc_start=disc_start,
             )
             _step_elapsed = time.perf_counter() - _step_t0
             step_time_ms  = _step_elapsed * 1000.0

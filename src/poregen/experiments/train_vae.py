@@ -14,7 +14,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from poregen.configuration import ResolvedExperiment, resolve_experiment
 from poregen.experiments.base import find_repo_root
-from poregen.losses import compute_total_loss
+from poregen.losses import build_vae_loss_fn
 from poregen.models.vae import build_vae
 from poregen.runtime import (
     collect_runtime_metadata,
@@ -541,8 +541,16 @@ def _load_run_config(run_dir: Path) -> dict[str, Any]:
     return _load_yaml(resolved_config)
 
 
-def _make_loss_fn(cfg: dict[str, Any]):
-    return lambda output, batch, step: compute_total_loss(output, batch, step, cfg)
+def adversarial_schedule(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``disc_adaptive`` / ``disc_start`` for ``train_loop``, from ``loss.*``.
+
+    Defaults (false / 0) are the historical fixed-weight GAN from step 0.
+    """
+    c = cfg["loss"]
+    return {
+        "disc_adaptive": bool(c.get("disc_adaptive", False)),
+        "disc_start": int(c.get("disc_start", 0)),
+    }
 
 
 def _write_summary(run_dir: Path, summary: dict[str, Any]) -> Path:
@@ -624,7 +632,7 @@ def run_experiment(
     latent_bank = build_latent_bank(cfg, resolved.repo_root)
     optimizer = build_optimizer(cfg, model)
     scheduler = build_scheduler(cfg, optimizer)
-    loss_fn = _make_loss_fn(cfg)
+    loss_fn = build_vae_loss_fn(cfg, device)
     discriminator, disc_optimizer, disc_weight = build_discriminator(cfg, device)
 
     logger.info("Launching %s from %s", resolved.experiment_id, resolved.experiment_path)
@@ -703,6 +711,7 @@ def run_experiment(
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
+                **adversarial_schedule(cfg),
                 latent_bank=latent_bank,
             )
         except Exception as exc:
@@ -824,7 +833,7 @@ def resume_run(
         discriminator=discriminator,
         disc_optimizer=disc_optimizer,
     )
-    loss_fn = _make_loss_fn(cfg)
+    loss_fn = build_vae_loss_fn(cfg, device)
 
     try:
         from torch.utils.tensorboard import SummaryWriter
@@ -900,6 +909,7 @@ def resume_run(
                 discriminator=discriminator,
                 disc_optimizer=disc_optimizer,
                 disc_weight=disc_weight,
+                **adversarial_schedule(cfg),
                 latent_bank=latent_bank,
             )
         except Exception as exc:

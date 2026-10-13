@@ -49,7 +49,7 @@ def synthetic_batch(bs: int, patch: int, device) -> dict:
 def main() -> int:
     from poregen.configuration import resolve_experiment
     from poregen.experiments.train_vae import build_model
-    from poregen.losses import compute_total_loss
+    from poregen.losses import build_vae_loss_fn
     from poregen.training.engine import to_device_inputs
 
     ap = argparse.ArgumentParser(description=__doc__,
@@ -69,6 +69,10 @@ def main() -> int:
 
     torch.cuda.reset_peak_memory_stats(dev)
     model = build_model(cfg, dev)
+    # The trainer's own loss builder: a config with loss.perceptual_weight > 0
+    # carries the frozen LPIPS network, and its activations are part of the
+    # step's peak. (The discriminator step is not part of this smoke test.)
+    loss_fn = build_vae_loss_fn(cfg, dev)
     opt = torch.optim.AdamW(model.parameters(), lr=float(cfg["training"]["lr"]))
     patch = int(cfg["model"]["patch_size"])
     # Random input at the real shape and the real batch: the allocator does not
@@ -95,12 +99,12 @@ def main() -> int:
         # raised on args.experiment.
         _, model_args = to_device_inputs(model, batch, dev)
         out = model(*model_args)
-        # The WHOLE cfg: compute_total_loss does `cfg["loss"]` itself. Passing
+        # The WHOLE cfg: compute_total_loss (inside loss_fn) does `cfg["loss"]` itself. Passing
         # cfg["loss"] made it look up cfg["loss"]["loss"] and raise KeyError,
         # so this smoke test reported "did not fit" for BOTH A and B without
         # ever allocating anything — which skipped A for no reason and sent B
         # to its fallback, and that fallback took the host out of memory.
-        losses = compute_total_loss(out, batch, 0, cfg)
+        losses = loss_fn(out, batch, 0)
         losses["total"].backward()
         opt.step()
         opt.zero_grad(set_to_none=True)

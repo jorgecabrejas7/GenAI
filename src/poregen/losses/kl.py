@@ -105,6 +105,29 @@ def kl_divergence_flat(
     return kl, n_clamped, kl_per_channel
 
 
+def kl_rombach_sum(
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    n_voxels: int,
+) -> torch.Tensor:
+    """KL as the LDM autoencoder reduces it, rescaled to a per-voxel loss.
+
+    Rombach et al. 2022 (``LPIPSWithDiscriminator``) sums the KL over every
+    latent element of a sample and averages over the batch, with weight 1e-6
+    against a reconstruction loss SUMMED over the pixels of a sample. Our
+    reconstruction terms are MEANS over voxels, so the same balance is
+    ``1e-6 * KL_sum / n_voxels`` added to the mean-based total. This returns
+    ``KL_sum / n_voxels``; the caller multiplies by beta (1e-6).
+
+    Works for a spatial ``(B, C, d, h, w)`` and a flat ``(B, C)`` latent.
+    Computed in float32, with the same logvar clamp as ``reparameterize``.
+    """
+    mu = mu.float()
+    logvar = clamp_logvar(logvar.float())
+    kl_elem = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1.0)
+    return kl_elem.flatten(1).sum(dim=1).mean() / float(n_voxels)
+
+
 def beta_schedule(
     step: int,
     warmup_steps: int = 5000,

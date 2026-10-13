@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from poregen.losses.recon import get_recon_loss
 from poregen.losses.mask import combined_class_loss, combined_mask_loss
-from poregen.losses.kl import kl_divergence, kl_divergence_flat, beta_schedule
+from poregen.losses.kl import beta_schedule, kl_divergence, kl_divergence_flat, kl_rombach_sum
 from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, VAEOutput
 
 
@@ -22,6 +23,7 @@ def compute_total_loss(
     mask_sigmoid: torch.Tensor | None = None,
     class_weights: torch.Tensor | None = None,
     class_probs: torch.Tensor | None = None,
+    perceptual: nn.Module | None = None,
 ) -> dict[str, torch.Tensor | float]:
     """Compute combined VAE loss.
 
@@ -54,6 +56,11 @@ def compute_total_loss(
     class_probs : torch.Tensor, optional
         Pre-computed ``softmax(output.class_logits, dim=1)``, for the same
         reason as ``mask_sigmoid``.
+    perceptual : nn.Module, optional
+        The frozen slice-LPIPS module
+        (:func:`poregen.losses.perceptual.build_perceptual`). Required when
+        ``loss.perceptual_weight > 0``; the loss refuses to run without it
+        rather than silently drop the term.
 
     Returns
     -------
@@ -63,6 +70,11 @@ def compute_total_loss(
         mask_dice (or mask_tversky); or (only when
         ``output.class_logits is not None``) class_ce, class_dice,
         class_dice_<i> per scored class, and class_total.
+        Opt-in keys (absent under the default config): ``lpips`` when
+        ``loss.perceptual_weight > 0``; ``kl_rombach`` when
+        ``loss.kl_reduction == "rombach_sum"``; ``rec_total`` (the
+        reconstruction term the adaptive adversarial weight balances against)
+        when ``loss.disc_adaptive`` is true.
 
     Notes
     -----
@@ -78,12 +90,32 @@ def compute_total_loss(
     (``mu.ndim == 2``, i.e. ``(B, C)`` — the VRRAE bottleneck's rank-``C``
     SVD-coefficient posterior).  Free-bits clamping and the beta schedule
     are unchanged in both cases.
+
+    ``loss.kl_reduction`` picks the KL term that enters ``total``:
+    ``per_channel_mean`` (default, the historical recipe — per-channel KL
+    averaged over batch and space, summed over channels, free bits) or
+    ``rombach_sum`` (Rombach et al. 2022: KL summed over every latent element
+    per sample, batch mean, divided by the voxels per patch because our
+    reconstruction terms are per-voxel means; no free bits). ``kl``,
+    ``kl_per_channel`` and ``kl_collapsed_fraction`` are reported either way.
     """
     c = cfg["loss"]
 
     # ── XCT reconstruction ────────────────────────────────────────────
     recon_fn = get_recon_loss(c["xct_loss_type"])
     xct_loss = recon_fn(output.xct_out, batch["xct"])
+
+    # ── Perceptual (opt-in): LPIPS on paired grey slices, added to the
+    #    per-voxel reconstruction term as Rombach's rec = |x-x'| + p*LPIPS ──
+    p_weight = float(c.get("perceptual_weight", 0.0))
+    lpips_loss: torch.Tensor | None = None
+    if p_weight > 0.0:
+        if perceptual is None:
+            raise ValueError(
+                "loss.perceptual_weight > 0 but no perceptual module was "
+                "passed; build it with poregen.losses.perceptual.build_perceptual."
+            )
+        lpips_loss = perceptual(output.xct_out, batch["xct"])
 
     # ── Mask — class-balanced BCE + Dice/Tversky (skipped when the model
     #    variant has no mask head, e.g. v2.vrrae) ───────────────────────
@@ -153,12 +185,34 @@ def compute_total_loss(
     )
     beta = beta_schedule(step, c["kl_warmup_steps"], c["kl_max_beta"])
 
+    kl_reduction = c.get("kl_reduction", "per_channel_mean")
+    kl_rombach: torch.Tensor | None = None
+    if kl_reduction == "per_channel_mean":
+        kl_term = kl
+    elif kl_reduction == "rombach_sum":
+        if float(c["kl_free_bits"]) != 0.0:
+            raise ValueError(
+                "loss.kl_reduction 'rombach_sum' has no free bits; set "
+                "loss.kl_free_bits to 0."
+            )
+        kl_rombach = kl_rombach_sum(
+            output.mu, output.logvar, n_voxels=batch["xct"][0].numel())
+        kl_term = kl_rombach
+    else:
+        raise ValueError(
+            f"loss.kl_reduction must be 'per_channel_mean' or 'rombach_sum', "
+            f"got {kl_reduction!r}"
+        )
+
     # ── Total ─────────────────────────────────────────────────────────
+    rec_total = c["xct_weight"] * xct_loss
+    if lpips_loss is not None:
+        rec_total = rec_total + p_weight * lpips_loss
     total = (
-        c["xct_weight"] * xct_loss
+        rec_total
         + mask_total
         + class_total
-        + beta * kl
+        + beta * kl_term
     )
 
     result: dict[str, Any] = {
@@ -176,5 +230,25 @@ def compute_total_loss(
             if k not in ("mask_total", "mask_bce"):
                 result[k] = v
     result.update(class_dict)
+    if lpips_loss is not None:
+        result["lpips"] = lpips_loss
+    if kl_rombach is not None:
+        result["kl_rombach"] = kl_rombach
+    if c.get("disc_adaptive", False):
+        result["rec_total"] = rec_total
 
     return result
+
+
+def build_vae_loss_fn(cfg: dict[str, Any], device: torch.device):
+    """``loss_fn(output, batch, step)`` for this config, on *device*.
+
+    The one place a VAE loss is assembled from a config: it builds the frozen
+    LPIPS module when ``loss.perceptual_weight > 0`` (otherwise none) and
+    binds it, so training, evaluation and the smoke step score the same total.
+    """
+    from poregen.losses.perceptual import build_perceptual
+
+    perceptual = build_perceptual(cfg, device)
+    return lambda output, batch, step: compute_total_loss(
+        output, batch, step, cfg, perceptual=perceptual)

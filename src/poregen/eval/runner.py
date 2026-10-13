@@ -94,7 +94,7 @@ from poregen.training.checkpoint import load_checkpoint
 from poregen.training.device import get_autocast_dtype
 from poregen.training import build_patch_dataloaders
 from poregen.training.engine import _run_eval
-from poregen.losses import compute_total_loss
+from poregen.losses import build_vae_loss_fn
 
 if TYPE_CHECKING:
     pass
@@ -273,7 +273,7 @@ def _eval_split_losses(
 
     _, val_loader, test_loader = build_patch_dataloaders(cfg, data_root)
     autocast_dtype = get_autocast_dtype(device)
-    loss_fn = lambda output, batch, s: compute_total_loss(output, batch, s, cfg)  # noqa: E731
+    loss_fn = build_vae_loss_fn(cfg, device)
 
     results: dict[str, dict[str, float]] = {}
 

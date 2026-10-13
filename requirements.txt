@@ -47,6 +47,14 @@ preprocess_tools @ git+file:///home/jorgecabrejas/Dev/UTvsXCT-preprocessing@65c1
 # Install editable: pip install -e third_party/RR_layer
 -e ./third_party/RR_layer
 
+# Perceptual loss (LPIPS) for the Rombach-aligned first stage, r08/rombach-rf16
+# (vault D68). It depends on torchvision, so install it with --no-deps for the
+# same reason torchvision is not a line here:
+#   pip install --no-deps lpips==0.1.4
+# Its VGG16 backbone weights (vgg16-397923af.pth) download to
+# ~/.cache/torch/hub/checkpoints on first use. See docs/DEVELOPMENT.md.
+# lpips==0.1.4
+
 # Dev
 pytest>=7.0
 

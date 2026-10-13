@@ -134,3 +134,30 @@ def lsgan_disc_loss(d_real: torch.Tensor, d_fake: torch.Tensor) -> torch.Tensor:
     The discriminator wants to output 1 for real slices and 0 for fakes.
     """
     return 0.5 * ((d_real - 1.0).pow(2).mean() + d_fake.pow(2).mean())
+
+
+# ── adaptive generator weight (Rombach et al. 2022) ───────────────────────────
+
+def adaptive_disc_weight(
+    rec_loss: torch.Tensor,
+    gen_loss: torch.Tensor,
+    last_layer_weight: torch.Tensor,
+    eps: float = 1e-4,
+    max_weight: float = 1e4,
+) -> torch.Tensor:
+    """``||grad_w rec_loss|| / (||grad_w gen_loss|| + eps)``, clamped, detached.
+
+    The LDM autoencoder's ``calculate_adaptive_weight``: the adversarial term
+    is scaled so its gradient at the decoder's last layer matches the
+    reconstruction gradient there. The caller multiplies by the base
+    ``disc_weight``. *last_layer_weight* is the weight of the conv that
+    produces the grey output (``model.xct_head``).
+
+    The ratio is scale-free, so it gives the same balance whether the
+    reconstruction is summed over voxels (Rombach) or averaged (ours). Only
+    the absolute clamp at ``max_weight`` and ``eps`` act in our units.
+    """
+    rec_grad = torch.autograd.grad(rec_loss, last_layer_weight, retain_graph=True)[0]
+    gen_grad = torch.autograd.grad(gen_loss, last_layer_weight, retain_graph=True)[0]
+    weight = torch.norm(rec_grad) / (torch.norm(gen_grad) + eps)
+    return torch.clamp(weight, 0.0, max_weight).detach()

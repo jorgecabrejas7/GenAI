@@ -24,8 +24,8 @@ import torch
 
 from poregen.configuration import resolve_experiment
 from poregen.experiments.base import find_repo_root
+from poregen.losses import build_vae_loss_fn
 from poregen.experiments.train_vae import (
-    _make_loss_fn,
     build_discriminator,
     build_model,
     build_optimizer,
@@ -69,7 +69,7 @@ def bench_one(
 
     model = build_model(cfg, device)
     optimizer = build_optimizer(cfg, model)
-    loss_fn = _make_loss_fn(cfg)
+    loss_fn = build_vae_loss_fn(cfg, device)
     disc, disc_optimizer, disc_weight = build_discriminator(cfg, device)
     scaler = make_scaler(device)
 
