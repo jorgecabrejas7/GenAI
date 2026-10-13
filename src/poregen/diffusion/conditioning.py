@@ -26,10 +26,12 @@ Neighbour availability states
 2 — UNKNOWN: a neighbour exists physically but has not been resolved yet —
     a chunk the sampler has not reached, or the CFG neighbour null.
 
-The data side only ever emits EXISTS and OOB.  UNKNOWN enters training
-through the ``drop_nb`` dropout of the training step (which is exactly the
-neighbour-null arm of the nested CFG) and generation through the chunks the
-sampler has not written yet.
+The data side emits EXISTS for a stored neighbour, OOB for a missing one where
+the specimen ends within one patch on that side, and UNKNOWN for a missing one
+where the specimen continues (a patch removed for a hole or by the index; vault
+D57).  UNKNOWN also enters training through the ``drop_nb`` dropout of the
+training step (exactly the neighbour-null arm of the nested CFG) and generation
+through the chunks the sampler has not written yet.
 
 Neighbours TOUCH, they do not overlap
 -------------------------------------

@@ -60,11 +60,13 @@ the entire neighbour latent is honest face-adjacent context.  What this
 dataset serves is the stored neighbours' CLEAN posterior — mean AND std, from
 the neighbour's own store row.  The training step is what draws
 ``mu + sigma*eps`` from it and noises the draw to its own timestep, and the
-sampler is what replaces them with canvas state.  Availability here is only
-ever EXISTS (the store holds a patch there) or OOB (it does not — the
-specimen ends).
-UNKNOWN is produced by the training step's neighbour dropout and by the
-sampler, never by the store.
+sampler is what replaces them with canvas state.  Availability
+(:func:`face_availability`) is EXISTS when the store holds a patch there, OOB
+when it does not AND the specimen ends on that side within one
+``neighbour_offset`` (``cond_dist6 < 1`` for that face), and UNKNOWN when it
+does not although the specimen continues — a patch dropped for a drilled hole
+or by the index, not the end of the specimen (vault D57).  UNKNOWN is the same
+encoding the training step's neighbour dropout and the sampler use.
 
 Worker safety: the memmaps are opened read-only once in ``__init__``; after
 ``fork()`` each DataLoader worker inherits the mapping, which is safe for
@@ -85,10 +87,12 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from .conditioning import (
+    DIST6_DIRS,
     DIST6_NAMES,
     N_NEIGHBOURS,
     NB_EXISTS,
     NB_OOB,
+    NB_UNKNOWN,
     NEIGHBOUR_DIRS,
     grid_index,
     validate_neighbour_geometry,
@@ -100,6 +104,27 @@ logger = logging.getLogger(__name__)
 _KEY_BASE = 8192           # per-axis key radix; every coordinate must be < this
 
 _DIST6_COLUMNS = tuple(f"cond_dist6_{n}" for n in DIST6_NAMES)
+
+
+#: For each entry of ``NEIGHBOUR_DIRS``, the index of the same face in
+#: ``cond_dist6`` (``DIST6_DIRS`` order).
+NB_TO_DIST6 = np.array([DIST6_DIRS.index(d) for d in NEIGHBOUR_DIRS], dtype=np.int64)
+
+
+def face_availability(nb_rows: np.ndarray, dist6: np.ndarray) -> np.ndarray:
+    """Availability state of each face from the store and the specimen box.
+
+    ``nb_rows`` (..., 6) is the store row of each face neighbour in
+    ``NEIGHBOUR_DIRS`` order, -1 when absent; ``dist6`` (..., 6) is
+    ``cond_dist6`` in ``DIST6_DIRS`` order.  A stored neighbour is EXISTS.  A
+    missing one is OOB only when the specimen ends on that side within one
+    patch (``dist6 < 1``: the gap to the specimen box is under the 64-voxel
+    cap); where the specimen continues (``dist6 == 1``) it is UNKNOWN.
+    """
+    nb_rows = np.asarray(nb_rows)
+    d = np.take(np.asarray(dist6), NB_TO_DIST6, axis=-1)
+    missing = np.where(d >= 1.0, NB_UNKNOWN, NB_OOB)
+    return np.where(nb_rows >= 0, NB_EXISTS, missing).astype(np.int64)
 
 
 #: ``metadata["normalization"]["rule"]`` of a store whose latents are rescaled
@@ -543,9 +568,11 @@ class LatentDataset(Dataset):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """``(nb_latents, nb_std, nb_avail)`` for one row.
 
-        A neighbour is EXISTS when the store holds a patch at that position
-        and OOB when it does not — the specimen ends there, which is exactly
-        what the sampler means by OOB at the edge of the requested volume.
+        A neighbour is EXISTS when the store holds a patch at that position.
+        A missing one is OOB when the specimen ends on that side within one
+        patch — what the sampler means by OOB at the edge of the requested
+        volume — and UNKNOWN when the specimen continues there
+        (:func:`face_availability`).
         The posterior handed over is the CLEAN mean AND std of the whole
         neighbour, read from the one store row the neighbour lives in: at
         ``neighbour_offset == patch_size`` the two patches only touch, so
@@ -553,17 +580,16 @@ class LatentDataset(Dataset):
         Drawing ``mu + sigma*eps`` and noising the draw to its own timestep is
         the training step's job — the target is a posterior DRAW, so a
         mean-valued neighbour would be a distribution the sampler never
-        produces.  OOB neighbours keep zero mean and zero std.
+        produces.  OOB and UNKNOWN neighbours keep zero mean and zero std.
         """
         c = self.latent_shape[0]
         L = self.latent_size
         nb = torch.zeros((N_NEIGHBOURS, c, L, L, L), dtype=torch.float32)
         nb_std = torch.zeros_like(nb)
-        avail = torch.full((N_NEIGHBOURS,), NB_OOB, dtype=torch.int64)
+        avail = torch.from_numpy(face_availability(rows, self._cond_dist6[idx]))
         for i in range(N_NEIGHBOURS):
             if rows[i] < 0:
                 continue
-            avail[i] = NB_EXISTS
             packed = torch.from_numpy(
                 np.asarray(self._latents[int(rows[i])], dtype=np.float32)
             )
@@ -589,7 +615,7 @@ class LatentDataset(Dataset):
         cond_material  (1, 16, 16, 16)             float32    envelope fraction
         nb_latents     (6, C, 16, 16, 16)          float32    neighbour mu
         nb_std         (6, C, 16, 16, 16)          float32    neighbour std
-        nb_avail       (6,)                        int64      EXISTS / OOB
+        nb_avail       (6,)                        int64      EXISTS/OOB/UNKNOWN
         air_fraction   ()                          float32    air voxels / patch
         phi            (1,)                        float32    raw porosity
         label          (64, 64, 64)                uint8      voxel label*

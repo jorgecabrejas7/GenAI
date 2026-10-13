@@ -133,6 +133,13 @@ read from the neighbour's own store row and divided by the same scalar
 `sigma_hat` as the target. The batch therefore carries `nb_latents` (6,C,…) and
 `nb_std` (6,C,…) next to `z` and `std`.
 
+A face with no stored neighbour is OOB only when the specimen ends on that
+side within one patch (`cond_dist6 < 1` for that face, the same box geometry
+`cond_dist6` is built from); where the specimen continues — a patch dropped for
+a drilled hole or by the index — it is UNKNOWN, the encoding the per-face
+dropout and the sampler use (`latents.face_availability`, vault D57). On
+split_v4 train that is 0.84 % of all faces, 5.7 % of the missing ones.
+
 The training step draws each EXISTS neighbour before it noises it
 (`ldm_engine.sample_neighbours`): `mu + sigma*eps`, fresh eps, exactly how the
 target is drawn under `data.latent_mode: sampled`. Conditioning on posterior

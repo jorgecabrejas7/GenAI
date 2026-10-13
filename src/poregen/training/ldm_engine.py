@@ -146,7 +146,7 @@ def sample_neighbours(
     ----------
     nb_latents : (B, 6, C, D, H, W) neighbour posterior means
     nb_std     : (B, 6, C, D, H, W) neighbour posterior stds, same store rows
-    nb_avail   : (B, 6) long — EXISTS / OOB as served by the store
+    nb_avail   : (B, 6) long — EXISTS / OOB / UNKNOWN as served by the store
     """
     exists = (nb_avail == NB_EXISTS).view(*nb_avail.shape, 1, 1, 1, 1)
     return nb_latents + torch.randn_like(nb_latents) * nb_std * exists
@@ -185,7 +185,7 @@ def noise_neighbours(
     Parameters
     ----------
     nb_latents : (B, 6, C, D, H, W) clean neighbour latents (posterior draws)
-    nb_avail   : (B, 6) long — EXISTS / OOB as served by the store
+    nb_avail   : (B, 6) long — EXISTS / OOB / UNKNOWN as served by the store
     t          : (B,) long — the target's timestep
 
     Returns
@@ -208,12 +208,11 @@ def noise_neighbours(
 
     if drop_nb_face_p > 0.0:
         # PER FACE, independently, and only on faces that EXIST.  The store
-        # serves EXISTS or OOB, and the all-six drop above turns items into the
-        # null arm, so without this the model never sees "some neighbours
-        # present, one missing" with UNKNOWN in it: every mixed set it trains on
-        # has OOB as the missing face, which means the specimen ends there.
-        # That is the whole reason the sampler's chunk frontier is off the
-        # training manifold.  OOB faces are left alone: turning an edge into
+        # serves UNKNOWN only where a stored neighbour is missing inside the
+        # specimen (a hole or an index gap), and the all-six drop above turns
+        # items into the null arm, so without this the model rarely sees "some
+        # neighbours present, one missing" with UNKNOWN in it — the sampler's
+        # chunk frontier.  OOB faces are left alone: turning an edge into
         # UNKNOWN would claim the specimen continues where it does not.
         face = ((torch.rand(B, K, device=device) < drop_nb_face_p)
                 & (nb_avail == NB_EXISTS))
