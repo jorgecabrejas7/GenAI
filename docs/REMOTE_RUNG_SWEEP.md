@@ -25,6 +25,18 @@ pip install -e third_party/RR_layer      # vendored; the VAE model registry impo
 python -c "import torch, poregen; print(torch.__version__, torch.cuda.get_device_name(0))"
 ```
 
+Only for `r08/rombach-rf16` (the Rombach-aligned first stage, vault D68), which adds an LPIPS(vgg)
+perceptual term: the `lpips` package, `--no-deps` (it names torchvision, and a plain resolve replaces the
+torch build), and the VGG16 ImageNet weights that torchvision would otherwise download at the first build.
+See docs/DEVELOPMENT.md, "LPIPS".
+
+```bash
+pip install --no-deps lpips==0.1.4
+mkdir -p ~/.cache/torch/hub/checkpoints
+curl -L -o ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth https://download.pytorch.org/models/vgg16-397923af.pth
+sha256sum ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth   # starts 397923af
+```
+
 ## B. From this machine: copy the dataset (~1.35 TB; ~3.5 h at 1 Gb/s, ~25 min at 10 Gb/s)
 
 ```bash

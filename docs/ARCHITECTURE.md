@@ -494,6 +494,62 @@ engine reads that attribute rather than hard-coding the pair.
   the experiment config. Soft Dice is averaged over pore and air only —
   material is the background and its Dice sits near 1 regardless
 
+### Rombach-aligned first stage (opt-in; `r08/rombach-rf16`, vault D68)
+
+Four `loss.*` keys switch the VAE loss to the LDM autoencoder's
+`LPIPSWithDiscriminator` (Rombach et al. 2022). **Their defaults reproduce
+the historical loss exactly**, so every config without them trains as before;
+`tests/test_rombach_loss.py` pins that bit-for-bit.
+
+| Key | Default | Rombach recipe |
+|---|---|---|
+| `loss.kl_reduction` | `per_channel_mean` | `rombach_sum` |
+| `loss.perceptual_weight` (+ `perceptual_net`, `perceptual_slices_per_axis`) | 0 (off) | 1.0, `vgg`, 4 |
+| `loss.disc_adaptive` | false | true (base `discriminator.disc_weight` 0.5) |
+| `loss.disc_start` | 0 | 4500 |
+
+**Units.** Rombach SUMS the reconstruction over the pixels of a sample, then
+averages over the batch; our terms are MEANS over voxels. Dividing his whole
+loss by the voxels per patch (64³) gives ours with every balance kept:
+
+- KL: `rombach_sum` is `sum over latent elements of KL, batch mean / 64³`
+  (`losses/kl.py::kl_rombach_sum`), weighted by `beta` = `kl_max_beta` 1e-6,
+  no warm-up, **no free bits** (refused if set). With free bits off it is the
+  per-channel KL times `d·h·w / 64³` — for rf-16 `kl / 64`, so the recipe's
+  effective per-channel weight is 1.6e-8 against r08/base's 0.05. `kl`,
+  `kl_per_channel` and `kl_collapsed_fraction` are still logged; the term in
+  `total` is logged as `kl_rombach`.
+- LPIPS: `+ perceptual_weight · LPIPS` is added to the per-voxel
+  reconstruction term — his `rec = |x − x_rec| + p_weight · LPIPS`, where the
+  per-sample LPIPS is broadcast over every pixel, divided by the pixel count.
+  Logged as `lpips`.
+- GAN: the adaptive weight `λ = ||∇_w rec_total|| / (||∇_w L_G|| + 1e-4)`,
+  clamped to `[0, 1e4]`, detached, times the base `disc_weight`, at the weight
+  `w` of `model.xct_head` — the 1×1×1 conv producing the grey output. The class
+  head is a separate conv, so the class loss puts no gradient there and
+  `rec_total` is `xct_weight · xct_loss + perceptual_weight · lpips` (the
+  analogue of his `nll_loss`). A ratio is unit-free; only the absolute `1e4`
+  clamp and the `1e-4` epsilon act in our units. Logged as `disc_lambda`
+  (train only). Before `disc_start` there is no generator term AND no
+  discriminator update.
+
+**LPIPS details** (`losses/perceptual.py`): `n` random slices per axis per
+patch (positions independent per patch and axis, the SAME in reconstruction
+and input), grey `[0, 1]` mapped to `[-1, 1]` and replicated to 3 channels,
+mean over all slices. The `lpips.LPIPS(net='vgg')` module is frozen and held in
+`eval()`, lives outside the VAE (never in the optimiser, never in a
+checkpoint; rebuilt from `resolved_config.yaml` on resume) and runs under the
+same autocast as the rest of the loss. `build_vae_loss_fn(cfg, device)` is
+the one place that builds it, so training, `val.total`, the eval runner and the
+smoke step all score the same total — `val.total` (early stopping) and
+`val_full.total` (best.ckpt) include LPIPS and the rescaled KL.
+
+**Not matched** (stated in the config): his learned scalar log-variance
+(`nll = rec / exp(logvar) + logvar`) is fixed at 0, its initial value; the
+discriminator stays our 2D multi-plane spectral-norm PatchGAN with LSGAN
+objectives (his is a BatchNorm `NLayerDiscriminator` with hinge loss and a
+`-mean(D(fake))` generator loss); reconstruction stays Charbonnier (≈ L1).
+
 ## Experiment run structure
 
 Runs land in `runs/vae/<experiment>/<timestamp>-<run_index>/` (and `runs/ldm/…`

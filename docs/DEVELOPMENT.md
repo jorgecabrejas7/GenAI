@@ -20,6 +20,7 @@ build_dataset --help                   # CLI entry point
 
 # Training
 python scripts/train_vae.py run r05/base          # launch by experiment id
+POREGEN_SPLIT=split_v4 python scripts/train_vae.py run r08/rombach-rf16   # Rombach first stage; needs lpips, see below
 python scripts/train_vae.py resume runs/vae/<run_name> checkpoints/<ckpt>
 python scripts/train_ldm.py run ldm06/base        # LDM training
 python scripts/train_ldm.py resume runs/ldm/<run_name> checkpoints/<ckpt>
@@ -98,7 +99,7 @@ Nothing is expected to skip. The end-to-end FID test
 (`tests/test_eval_v4_microstructure.py::TestFid::test_identical_crop_sets_have_zero_fid`)
 used to skip for want of `torchvision`; it no longer does. `torchvision` is
 installed on this machine and the Inception weights are cached, so the test
-**runs** — see [torchvision (FID only)](#torchvision-fid-only) for the exact
+**runs** — see [torchvision (FID and LPIPS)](#torchvision-fid-and-lpips) for the exact
 version pair. It is now the slowest test in the suite: a real Inception forward
 pass on CPU, about 3 minutes with `CUDA_VISIBLE_DEVICES=` set.
 
@@ -135,7 +136,7 @@ Both symlinks point at the real directories, so a test that writes through one
 writes into the live tree. The suite writes to `tmp_path`, but check any new
 test before adding it.
 
-## torchvision (FID only)
+## torchvision (FID and LPIPS)
 
 **Installed pair on this machine: `torch 2.12.1+cu130` with
 `torchvision 0.27.1+cu130`.** Confirm before an eval run:
@@ -150,8 +151,9 @@ working build — stop and repair it before trusting any result.
 
 `torchvision` is NOT an installable line in `requirements.txt` (only a
 recorded comment there, so `pip install -r requirements.txt` cannot pull a
-torch with it) and nothing but FID needs it —
-`eval_v4.microstructure` uses `inception_v3` for the 2048-d feature. It must be
+torch with it). Two things need it: FID —
+`eval_v4.microstructure` uses `inception_v3` for the 2048-d feature — and the
+LPIPS perceptual loss of `r08/rombach-rf16` (below). It must be
 installed **from the PyTorch cu130 index, version-matched, and with
 `--no-deps`**, or pip resolves a torchvision whose `Requires-Dist` pins a
 different torch and silently replaces the working build:
@@ -172,6 +174,37 @@ prefetch them off the GPU rather than discovering the download inside an eval
 run. On this machine they are already cached
 (`~/.cache/torch/hub/checkpoints/inception_v3_google-0cc3c7bd.pth`), which is
 why the end-to-end FID test runs instead of skipping.
+
+### LPIPS (the Rombach first stage, `r08/rombach-rf16`)
+
+`loss.perceptual_weight > 0` builds `lpips.LPIPS(net='vgg')`
+(`src/poregen/losses/perceptual.py`). Every machine that trains such a config
+needs the package, installed **`--no-deps`** for the torchvision reason above
+(its `Requires-Dist` names torchvision):
+
+```bash
+pip install --no-deps lpips==0.1.4
+python -c "import lpips; print(lpips.__file__)"
+```
+
+Its other dependencies (numpy, scipy, tqdm) are already in the lock. The LPIPS
+linear-layer weights ship inside the package. The VGG16 backbone weights do
+NOT: torchvision downloads `vgg16-397923af.pth` (528 MB) from
+`https://download.pytorch.org/models/` to `~/.cache/torch/hub/checkpoints/`
+when the module is first BUILT (no forward pass needed). Fetch them before a
+launch, off the GPU, on a machine with network access:
+
+```bash
+mkdir -p ~/.cache/torch/hub/checkpoints
+curl -L -o ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth \
+    https://download.pytorch.org/models/vgg16-397923af.pth
+sha256sum ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth   # starts 397923af
+```
+
+lpips 0.1.4 is installed in this machine's base env (2026-10-13); the VGG16
+weights were not yet cached then. `vae_smoke_step.py --experiment
+r08/rombach-rf16` builds the module, so it also fetches them when they are
+missing.
 
 ## Deployment target
 
