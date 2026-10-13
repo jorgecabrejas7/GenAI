@@ -165,8 +165,7 @@ def main() -> int:
                                    f"{args.max_voxels/1e6:.0f} Mvox CPU limit"})
             logger.info("skip %s/%s (%.0f Mvox)", assessment, case, n_vox / 1e6)
             continue
-        mean, std = latent_normalisation(src)
-        z_native = z * std[:, None, None, None] + mean[:, None, None, None]
+        z_native = z * latent_normalisation(src)
         src_manifest = json.loads((src / "manifest.json").read_text())
         entry = {"assessment": assessment, "case": case,
                  "source": str(src), "volume_shape": None, "paths": {}}

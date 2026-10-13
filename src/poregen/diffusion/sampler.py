@@ -793,9 +793,8 @@ class VolumeGenerator:
     device        : torch.device
     patch_size    : voxel side length of one tile (default 64)
     latent_size   : latent cells per tile (default 16)
-    latent_mean   : float | (C,1,1,1) per-channel normalisation mean; generated
-                    latents are denormalised ``z*std + mean`` before decoding
-    latent_std    : float | (C,1,1,1) per-channel normalisation std
+    latent_scale  : the store's scalar ``sigma_hat`` (Rombach et al. 2022
+                    Sec. G); generated latents are decoded as ``z * sigma_hat``
     voxel_size_mm : physical voxel size in millimetres (default 0.025 = 25 µm)
     por_log_stats : (mean, std) of ``log(phi + 1e-3)`` on the train split, from
                     the latent store metadata.  Required.
@@ -819,8 +818,7 @@ class VolumeGenerator:
         device: torch.device,
         patch_size: int = 64,
         latent_size: int = 16,
-        latent_mean: torch.Tensor | float = 0.0,
-        latent_std: torch.Tensor | float = 1.0,
+        latent_scale: float = 1.0,
         voxel_size_mm: float = 0.025,
         por_log_stats: tuple[float, float] | None = None,
         theta_deg: np.ndarray | None = None,
@@ -853,8 +851,7 @@ class VolumeGenerator:
         self.device        = device
         self.patch_size    = int(patch_size)
         self.latent_size   = int(latent_size)
-        self.latent_mean   = latent_mean
-        self.latent_std    = latent_std
+        self.latent_scale  = float(latent_scale)
         self.voxel_size_mm = float(voxel_size_mm)
         self.por_log_stats = por_log_stats
         self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
@@ -1508,19 +1505,12 @@ class VolumeGenerator:
         logit_acc = np.zeros((3, *volume_shape), dtype=np.float32)
         w_acc     = np.zeros(volume_shape, dtype=np.float32)
 
-        mean = self.latent_mean
-        std  = self.latent_std
-        if isinstance(mean, torch.Tensor):
-            mean = mean.to(self.device)
-        if isinstance(std, torch.Tensor):
-            std = std.to(self.device)
-
         self.vae.eval()
         for start in range(0, len(origins), decode_batch_size):
             batch = origins[start : start + decode_batch_size]
             z = torch.stack([
                 z_clean[:, o[0]:o[0] + L, o[1]:o[1] + L, o[2]:o[2] + L] for o in batch
-            ]) * std + mean
+            ]) * self.latent_scale
             with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
                 dec = self.vae.decoder(z)
                 xct_out = self.vae.xct_head(dec)

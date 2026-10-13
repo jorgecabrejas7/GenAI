@@ -200,22 +200,21 @@ def _load_ldm(checkpoint: str | Path, device: torch.device) -> torch.nn.Module:
 def _load_vae_and_stats(
     meta: dict,
     device: torch.device,
-) -> tuple[torch.nn.Module, torch.Tensor, torch.Tensor]:
-    """The frozen VAE and per-channel denormalisation stats of a CHECKED store.
+) -> tuple[torch.nn.Module, float]:
+    """The frozen VAE and the scalar latent scale ``sigma_hat`` of a CHECKED store.
 
     ``meta`` comes from :func:`resolve_latent_store`, which has already agreed
     the store's latent width and VAE with the run.  Nothing is decided here.
     """
     from poregen.experiments.train_vae import load_vae_from_checkpoint
 
-    norm = meta["normalization"]
-    c = len(norm["per_channel_mean"])
-    mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
-    std  = torch.tensor(norm["per_channel_std"],  dtype=torch.float32).view(c, 1, 1, 1)
+    from poregen.diffusion.latents import latent_scale
+
+    scale = latent_scale(meta)
 
     vae, _, _, _ = load_vae_from_checkpoint(Path(meta["vae_checkpoint"]), device)
     vae.requires_grad_(False)
-    return vae, mean, std
+    return vae, scale
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -285,7 +284,7 @@ def main() -> None:
     # about latent width and decoder — before the VAE is even loaded.
     latents_root, store_meta = resolve_latent_store(ldm_cfg, repo, override=args.latents_root)
     logger.info("Latent store: %s", latents_root)
-    vae, latent_mean, latent_std = _load_vae_and_stats(store_meta, device)
+    vae, latent_scale = _load_vae_and_stats(store_meta, device)
 
     schedule = DDPMSchedule.from_cfg(ldm_cfg, device)
 
@@ -344,8 +343,7 @@ def main() -> None:
         device=device,
         patch_size=PATCH_SIZE,
         latent_size=PATCH_SIZE // 4,
-        latent_mean=latent_mean,
-        latent_std=latent_std,
+        latent_scale=latent_scale,
         voxel_size_mm=VOXEL_SIZE_MM,
         por_log_stats=por_log_stats,
         theta_deg=theta_deg,

@@ -120,7 +120,7 @@ def _generator(model, vae, chunk_tiles, n_steps=2, tiles=(2, 2, 2), **kw):
     theta = theta_from_layup(tiles[0] * P, [0, 45, 90], 19.6)
     gen = VolumeGenerator(
         sampler, vae, dev, patch_size=P, latent_size=LAT,
-        latent_mean=0.0, latent_std=1.0, voxel_size_mm=VOX_MM,
+        latent_scale=1.0, voxel_size_mm=VOX_MM,
         por_log_stats=(-3.0, 1.0), theta_deg=theta,
         chunk_tiles=chunk_tiles, **kw,
     )

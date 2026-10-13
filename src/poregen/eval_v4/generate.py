@@ -51,6 +51,7 @@ import numpy as np
 import torch
 
 from poregen.diffusion.conditioning import POR_MAX, POR_MIN
+from poregen.diffusion.latents import latent_scale
 from poregen.eval_v4.cases import CaseSpec
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, repo_root, save_case
 from poregen.eval_v4.manifest import Manifest, head_commit
@@ -118,13 +119,12 @@ def resolve_latent_store(
 
     model_z = int(UNet3DConfig.from_cfg(cfg).z_channels)
     store_z = int(meta["latent_shape"][0])
-    norm_z = len(meta["normalization"]["per_channel_mean"])
-    if store_z != model_z or norm_z != model_z:
+    latent_scale(meta)          # refuses a store without the scalar sigma_hat
+    if store_z != model_z:
         raise ValueError(
             "Latent width mismatch between the model and its latent store:\n"
             f"  model z_channels:             {model_z}\n"
             f"  store latent_shape[0]:        {store_z}\n"
-            f"  store normalisation channels: {norm_z}\n"
             f"  store: {root}\n"
             "The run cannot be evaluated against this store."
         )
@@ -311,10 +311,7 @@ class VolumeRunner:
         self.model = model
         self.weights = weights
 
-        norm = meta["normalization"]
-        c = len(norm["per_channel_mean"])
-        self.latent_mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
-        self.latent_std = torch.tensor(norm["per_channel_std"], dtype=torch.float32).view(c, 1, 1, 1)
+        self.latent_scale = latent_scale(meta)
         stand = (meta.get("conditioning") or {}).get("por_standardisation")
         if stand is None:
             raise KeyError(
@@ -370,8 +367,7 @@ class VolumeRunner:
             device=self.device,
             patch_size=PATCH_SIZE,
             latent_size=LATENT_SIZE,
-            latent_mean=self.latent_mean,
-            latent_std=self.latent_std,
+            latent_scale=self.latent_scale,
             voxel_size_mm=VOXEL_SIZE_MM,
             por_log_stats=self.por_log_stats,
             theta_deg=theta,

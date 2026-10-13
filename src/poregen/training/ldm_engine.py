@@ -458,8 +458,7 @@ def _log_sample_volume(
     ddim_steps: int = 50,
     grid: tuple[int, int, int] = (3, 3, 3),
     global_por: float = 0.02,
-    latent_mean: torch.Tensor | float = 0.0,
-    latent_std: torch.Tensor | float = 1.0,
+    latent_scale: float = 1.0,
     patch_size: int = _PATCH_SIZE,
     latent_size: int = 16,
     chunk_tiles: tuple[int, int, int] = (3, 3, 3),
@@ -511,8 +510,7 @@ def _log_sample_volume(
             device=device,
             patch_size=patch_size,
             latent_size=latent_size,
-            latent_mean=latent_mean,
-            latent_std=latent_std,
+            latent_scale=latent_scale,
             por_log_stats=por_log_stats,
             theta_deg=theta_deg,
             chunk_tiles=chunk_tiles,
@@ -570,16 +568,15 @@ def ldm_train_loop(
     ema_decay: float = 0.9999,
     ema_state: dict | None = None,
     vae: nn.Module | None = None,
-    latent_mean: torch.Tensor | float = 0.0,
-    latent_std: torch.Tensor | float = 1.0,
+    latent_scale: float = 1.0,
     val_phi: "np.ndarray | None" = None,
     por_log_stats: tuple[float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Step-based LDM training loop mirroring the VAE train_loop.
 
-    Trains in normalised latent space; *latent_mean*/*latent_std* are the
-    per-channel denormalisation stats from the latent store's metadata, used
-    by every decode path (generation eval, sample visualisation).  What the
+    Trains on latents rescaled by the store's scalar ``sigma_hat``
+    (*latent_scale*, Rombach et al. 2022 Sec. G); every decode path multiplies
+    by it (generation eval, sample visualisation).  What the
     denoiser regresses — ε or v — is the schedule's business, not this loop's:
     ``schedule.training_target`` names the target and every conversion back to
     x̂₀ goes through the schedule too.
@@ -703,7 +700,7 @@ def ldm_train_loop(
                 "loss.decoded.enabled requires the frozen VAE (vae=...) — the "
                 "auxiliary terms are scored on the DECODED x0 estimate."
             )
-        decoded_aux = DecodedAuxLoss(decoded_cfg, vae, latent_mean, latent_std)
+        decoded_aux = DecodedAuxLoss(decoded_cfg, vae, latent_scale)
         _logger.info(
             "Decoded auxiliary loss ON — t < %.2f*T, <=%d items/step, ramp %d steps, "
             "weights air=%.2f dice=%.2f por=%.2f grey=%.2f",
@@ -890,8 +887,7 @@ def ldm_train_loop(
                     gen_metrics = generation_eval(
                         model, schedule, vae,
                         val_dataset=val_loader.dataset,
-                        latent_mean=latent_mean,
-                        latent_std=latent_std,
+                        latent_scale=latent_scale,
                         val_phi=val_phi,
                         device=device,
                         autocast_dtype=autocast_dtype,
@@ -932,8 +928,7 @@ def ldm_train_loop(
                         ddim_steps=sample_ddim_steps,
                         grid=sample_grid,
                         global_por=sample_global_por,
-                        latent_mean=latent_mean,
-                        latent_std=latent_std,
+                        latent_scale=latent_scale,
                         chunk_tiles=chunk_tiles,
                         window_stride=window_stride,
                         decode_stride=decode_stride,

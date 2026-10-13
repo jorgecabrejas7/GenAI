@@ -29,10 +29,15 @@ second script to fall out of step with the store.
   (label 2), i.e. outside the envelope.  Equal to ``1 - material.mean()`` by
   construction — it is computed from the same pooled cells.
 
-Latents are stored RAW (un-normalised).  Per-channel normalisation stats are
-computed over the train split only and stored in ``metadata.json``; the LDM
-data pipeline applies them at load time (see
-``poregen.diffusion.latents.LatentDataset``).
+Latents are stored RAW (un-normalised).  The LDM trains on SAMPLED latents
+``z = mu + sigma*eps`` rescaled by ONE scalar, Rombach et al. 2022 Sec. G:
+``sigma_hat^2 = mean((z - mu_hat)^2)`` over every element ``b, c, h, w``, with
+``mu_hat`` the scalar mean, and ``z <- z / sigma_hat``.  No centring: ``mu_hat``
+is used only inside the variance.  Rombach estimates ``sigma_hat`` on the first
+batch; this script estimates the same quantity on the WHOLE train split, one
+seeded ``eps`` draw per element, which lowers the estimator variance.  The
+scale goes into ``metadata.json``; ``poregen.diffusion.latents.LatentDataset``
+applies it at load time and every decode multiplies by it.
 
 Usage
 -----
@@ -51,8 +56,8 @@ On-disk layout produced (default output: <data_root>/latents_<exp>z<z>/)
 -----------------------
 data/<split>/latents_r08z8/
 ├── metadata.json            — VAE checkpoint + resolved config copy & sha256,
-│                              latent shape, storage record, per-channel
-│                              train-split norm stats, the `material` block,
+│                              latent shape, storage record, the scalar
+│                              train-split sigma_hat, the `material` block,
 │                              creation date, per-split counts
 ├── train/
 │   ├── latents.bin          — float16 C-contiguous memmap, shape
@@ -111,6 +116,9 @@ PORE_MAP_SIDE = 64 // PORE_POOL_VOX
 DEFAULT_CHECKPOINT = "runs/vae/r08-run-*/best.ckpt"
 
 SPLITS = ("train", "val", "test")
+
+# Seed of the eps draw that estimates sigma_hat.  Recorded in the metadata.
+NORM_EPS_SEED = 0
 
 
 def _find_repo_root() -> Path:
@@ -257,10 +265,11 @@ def main() -> None:
 
     autocast_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
-    # Streaming per-channel moments over the TRAIN split (float64 accumulators).
-    ch_sum = torch.zeros(z_channels, dtype=torch.float64, device=device)
-    ch_sumsq = torch.zeros(z_channels, dtype=torch.float64, device=device)
-    ch_count = 0
+    from poregen.diffusion.latents import NORM_RULE, SampledMoments
+
+    # Scalar moments of the SAMPLED train latents (float64 accumulators).
+    moments = SampledMoments()
+    eps_gen = torch.Generator(device=device).manual_seed(NORM_EPS_SEED)
 
     split_counts: dict[str, int] = {}
 
@@ -325,14 +334,17 @@ def main() -> None:
                 mu = mu_raw.float()
                 std = torch.exp(0.5 * logvar_raw.float())
 
+                # The moments are taken on the float16 values the store
+                # holds, which is exactly what the LDM will sample from.
+                mu16 = mu.half()
+                std16 = std.half()
                 if split == "train":
-                    ch_sum += mu.double().sum(dim=(0, 2, 3, 4))
-                    ch_sumsq += mu.double().pow(2).sum(dim=(0, 2, 3, 4))
-                    ch_count += mu.shape[0] * mu.shape[2] * mu.shape[3] * mu.shape[4]
+                    eps = torch.randn(mu16.shape, generator=eps_gen, device=device)
+                    moments.update(mu16.float() + std16.float() * eps)
 
                 b = mu.shape[0]
-                latents[i : i + b, :z_channels] = mu.cpu().numpy().astype(np.float16)
-                latents[i : i + b, z_channels:] = std.cpu().numpy().astype(np.float16)
+                latents[i : i + b, :z_channels] = mu16.cpu().numpy()
+                latents[i : i + b, z_channels:] = std16.cpu().numpy()
                 # The specimen ENVELOPE: pores are inside it, only air is out.
                 cells = pool_material_fractions(label_np != CLASS_AIR, pool_factor)
                 material[i : i + b] = encode_material_u8(cells)
@@ -367,13 +379,9 @@ def main() -> None:
         max_dphi = float(np.abs(df_split["phi"] - df_split["porosity"]).max()) if n else 0.0
         logger.info("[%s] index.parquet written  max|phi - porosity| = %.2e", split, max_dphi)
 
-    if ch_count == 0:
-        raise RuntimeError("Train split produced no patches — cannot compute norm stats.")
-    ch_mean = (ch_sum / ch_count).cpu().numpy()
-    ch_var = (ch_sumsq / ch_count).cpu().numpy() - ch_mean**2
-    ch_std = np.sqrt(np.maximum(ch_var, 0.0))
-    logger.info("Per-channel mean: %s", np.array2string(ch_mean, precision=4))
-    logger.info("Per-channel std:  %s", np.array2string(ch_std, precision=4))
+    mu_hat, sigma_hat = moments.result()
+    logger.info("Sampled train latents: mu_hat=%.6f  sigma_hat=%.6f  (%d elements)",
+                mu_hat, sigma_hat, moments.n)
 
     vae_identity = checkpoint_identity(checkpoint)
     metadata = {
@@ -430,9 +438,23 @@ def main() -> None:
         "splits": split_counts,
         "limit": args.limit,
         "normalization": {
+            "rule": NORM_RULE,
+            "sigma_hat": sigma_hat,
+            "mu_hat": mu_hat,
+            "n_elements": moments.n,
+            "eps_seed": NORM_EPS_SEED,
             "computed_over": "train",
-            "per_channel_mean": ch_mean.tolist(),
-            "per_channel_std": ch_std.tolist(),
+            "definition": (
+                "Rombach et al. 2022 Sec. G. z = mu + sigma*eps (one eps draw per "
+                "element, seed eps_seed); mu_hat = mean(z) and sigma_hat^2 = "
+                "mean((z - mu_hat)^2), both scalars over every element b, c, h, w "
+                "of the float16 train latents. The LDM sees z / sigma_hat; decoding "
+                "multiplies by sigma_hat. No centring: mu_hat is recorded for "
+                "information only."),
+            "estimator_note": (
+                "Rombach estimates sigma_hat on the first batch; this store "
+                "estimates the same quantity on the whole train split, which "
+                "lowers the estimator variance."),
         },
     }
     meta_tmp = out_root / "metadata.json.tmp"

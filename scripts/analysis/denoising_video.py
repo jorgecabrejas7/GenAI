@@ -284,7 +284,7 @@ def main() -> int:
     gen = VolumeGenerator(
         sampler=sampler, vae=runner.vae, device=dev,
         patch_size=PATCH_SIZE, latent_size=LATENT_SIZE,
-        latent_mean=runner.latent_mean, latent_std=runner.latent_std,
+        latent_scale=runner.latent_scale,
         voxel_size_mm=VOXEL_SIZE_MM, por_log_stats=runner.por_log_stats,
         theta_deg=theta, chunk_tiles=(3, 3, 3),
         neighbour_mode="unknown" if mode == "single" else "canvas",

@@ -4,9 +4,9 @@ Reads the layout produced by ``scripts/build_latent_dataset.py`` plus the
 conditioning sidecar produced by ``scripts/build_conditioning.py``::
 
     <root>/                      e.g. data/split_v3/latents_r08z8/
-    ├── metadata.json            — latent shape, storage record, per-channel
-    │                              train-split normalisation stats, VAE
-    │                              provenance, `conditioning` block
+    ├── metadata.json            — latent shape, storage record, the scalar
+    │                              latent scale sigma_hat, VAE provenance,
+    │                              `conditioning` block
     └── <split>/
         ├── latents.bin          — float16 C-contiguous memmap,
         │                          shape (N, 2C, d, h, w); channels 0..C-1 = mu,
@@ -31,9 +31,13 @@ row-aligned with ``patch_index.parquet`` by construction.  Only the decoded
 auxiliary loss needs it, and it is 64x the size of a latent, so it stays
 opt-in.
 
-Latents are stored raw; :class:`LatentDataset` optionally applies per-channel
-normalisation ``(mu - mean_c) / std_c`` at load time.  The posterior std is
-scaled by ``1 / std_c`` under the same affine map.
+Latents are stored raw.  :class:`LatentDataset` optionally rescales them by
+ONE scalar at load time, Rombach et al. 2022 Sec. G: ``z <- z / sigma_hat``,
+where ``sigma_hat`` is the standard deviation, over every element, of the
+SAMPLED train latents ``mu + sigma*eps`` (see :func:`latent_scale`).  There is
+no centring.  The posterior mean and the posterior std are both divided by
+``sigma_hat``, so a draw ``mu' + sigma'*eps`` in the rescaled space is exactly
+``(mu + sigma*eps) / sigma_hat``.  Decoding multiplies back by ``sigma_hat``.
 
 Three distinct strides (conflating them was a documented bug):
 
@@ -98,6 +102,96 @@ _KEY_BASE = 8192           # per-axis key radix; every coordinate must be < this
 _DIST6_COLUMNS = tuple(f"cond_dist6_{n}" for n in DIST6_NAMES)
 
 
+#: ``metadata["normalization"]["rule"]`` of a store whose latents are rescaled
+#: by one scalar (Rombach et al. 2022 Sec. G).  The only rule there is.
+NORM_RULE = "rombach_scalar_sampled"
+
+
+def latent_scale(metadata: dict[str, Any]) -> float:
+    """The store's scalar latent scale ``sigma_hat``.
+
+    The LDM sees ``z / sigma_hat``; every decode multiplies by it.  A store
+    built with the old per-channel normalisation of ``mu`` has no such scalar
+    and is refused: it must be rebuilt with ``scripts/build_latent_dataset.py``.
+    """
+    norm = metadata.get("normalization") or {}
+    if norm.get("rule") != NORM_RULE:
+        raise ValueError(
+            f"latent store normalisation rule is {norm.get('rule')!r}, not "
+            f"{NORM_RULE!r}: the store predates the scalar sigma_hat rescaling "
+            f"(Rombach et al. 2022 Sec. G). Rebuild it with "
+            f"scripts/build_latent_dataset.py."
+        )
+    return float(norm["sigma_hat"])
+
+
+class SampledMoments:
+    """Streaming scalar moments of sampled latents ``mu + sigma*eps``.
+
+    One float64 sum and one sum of squares over every element ``b, c, h, w``;
+    ``sigma_hat^2 = E[z^2] - mu_hat^2`` with ``mu_hat`` the scalar mean.  The
+    store build feeds it every train batch with a seeded ``eps``.
+    """
+
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.total_sq = 0.0
+        self.n = 0
+
+    def update(self, z: torch.Tensor) -> None:
+        z64 = z.double()
+        self.total += float(z64.sum())
+        self.total_sq += float(z64.pow(2).sum())
+        self.n += z.numel()
+
+    def result(self) -> tuple[float, float]:
+        """``(mu_hat, sigma_hat)``."""
+        if self.n == 0:
+            raise RuntimeError("no latent was seen; sigma_hat is undefined")
+        mu_hat = self.total / self.n
+        var = max(self.total_sq / self.n - mu_hat ** 2, 0.0)
+        return mu_hat, float(np.sqrt(var))
+
+
+def sampled_std_reference(root: str | Path, split: str = "train",
+                          n_rows: int = 8000, seed: int = 0) -> dict[str, Any]:
+    """Std of the RESCALED sampled latents ``(mu + sigma*eps) / sigma_hat``.
+
+    The reference a generated latent must match.  It is ~1 by construction on
+    the train split (``sigma_hat`` is that very std), so a value far from 1
+    means the store and its metadata disagree.  Closed form over ``n_rows``
+    random rows: ``E[z^2] = E[mu^2] + E[sigma^2]`` because ``eps`` is
+    independent of ``mu`` with unit variance, so no ``eps`` is drawn.
+    Returns the overall scalar std and the per-channel stds.
+    """
+    root = Path(root)
+    meta = json.loads((root / "metadata.json").read_text())
+    scale = latent_scale(meta)
+    C, d, h, w = meta["latent_shape"]
+    n_total = int(meta["splits"][split])
+    lat = np.memmap(root / split / "latents.bin", dtype=np.float16, mode="r",
+                    shape=(n_total, 2 * C, d, h, w))
+    rng = np.random.default_rng(seed)
+    rows = np.sort(rng.choice(n_total, size=min(int(n_rows), n_total), replace=False))
+    s1 = np.zeros(C, np.float64)
+    s2 = np.zeros(C, np.float64)
+    count = 0
+    for i in range(0, len(rows), 256):
+        packed = np.asarray(lat[rows[i:i + 256]], dtype=np.float64) / scale
+        mu, sig = packed[:, :C], packed[:, C:]
+        s1 += mu.sum(axis=(0, 2, 3, 4))
+        s2 += (mu ** 2 + sig ** 2).sum(axis=(0, 2, 3, 4))
+        count += mu.shape[0] * d * h * w
+    mean_c = s1 / count
+    std_c = np.sqrt(np.maximum(s2 / count - mean_c ** 2, 0.0))
+    mean_all = s1.sum() / (count * C)
+    std_all = float(np.sqrt(max(s2.sum() / (count * C) - mean_all ** 2, 0.0)))
+    return {"store": str(root), "split": split, "rows": int(len(rows)),
+            "seed": int(seed), "sigma_hat": scale,
+            "sampled_std": std_all, "sampled_std_per_channel": std_c.tolist(),
+            "sampled_mean": float(mean_all)}
+
+
 class LatentDataset(Dataset):
     """Random-access dataset of pre-computed VAE posterior latents.
 
@@ -110,8 +204,9 @@ class LatentDataset(Dataset):
     split : str
         One of ``"train"``, ``"val"``, ``"test"``.
     normalize : bool
-        If True, return per-channel normalised latents using the train-split
-        stats stored in ``metadata.json``.  Neighbour latents use the same map.
+        If True, divide the posterior mean and std by the store's scalar
+        ``sigma_hat`` (:func:`latent_scale`).  Neighbour latents use the same
+        scale.
     orientation_field : str | Path | None
         Path to ``orientation_field.json``.  Defaults to the path recorded in
         the store metadata, resolved relative to the repo root.
@@ -148,14 +243,7 @@ class LatentDataset(Dataset):
         with open(self.root / "metadata.json") as fh:
             self.metadata: dict[str, Any] = json.load(fh)
 
-        norm = self.metadata["normalization"]
-        c = len(norm["per_channel_mean"])
-        self.channel_mean = torch.tensor(
-            norm["per_channel_mean"], dtype=torch.float32
-        ).view(c, 1, 1, 1)
-        self.channel_std = torch.tensor(
-            norm["per_channel_std"], dtype=torch.float32
-        ).view(c, 1, 1, 1)
+        self.latent_scale = latent_scale(self.metadata)
 
         storage = self.metadata["storage"]
         if storage["pack_scheme"] != "mu_then_std":
@@ -432,12 +520,12 @@ class LatentDataset(Dataset):
     # -- normalisation helpers -------------------------------------------
 
     def normalize_latent(self, z: torch.Tensor) -> torch.Tensor:
-        """Per-channel normalise a raw latent (C, d, h, w) or (B, C, d, h, w)."""
-        return (z - self.channel_mean) / self.channel_std
+        """Rescale a raw latent, or a posterior std, by ``1 / sigma_hat``."""
+        return z / self.latent_scale
 
     def denormalize_latent(self, z: torch.Tensor) -> torch.Tensor:
         """Invert :meth:`normalize_latent`."""
-        return z * self.channel_std + self.channel_mean
+        return z * self.latent_scale
 
     # -- Dataset protocol -------------------------------------------------
 
@@ -482,7 +570,7 @@ class LatentDataset(Dataset):
             mu, sd = packed[:c], packed[c:]
             if self.normalize:
                 mu = self.normalize_latent(mu)
-                sd = sd / self.channel_std
+                sd = self.normalize_latent(sd)
             nb[i], nb_std[i] = mu, sd
         return nb, nb_std, avail
 
@@ -519,8 +607,8 @@ class LatentDataset(Dataset):
         drilled holes; it deliberately says nothing about where the pores are,
         which the model has to generate.
         ``nb_latents`` / ``nb_std`` are the neighbours' clean posterior mean
-        and std, both read from the neighbour's own store row and put through
-        the same affine map as ``z`` / ``std``.  Nothing in this dataset draws
+        and std, both read from the neighbour's own store row and divided by
+        the same ``sigma_hat`` as ``z`` / ``std``.  Nothing in this dataset draws
         from that posterior or noises it; the training step does both.
 
         ``label`` (the starred row) is present ONLY when the dataset was built with
@@ -538,7 +626,7 @@ class LatentDataset(Dataset):
 
         if self.normalize:
             z = self.normalize_latent(z)
-            std = std / self.channel_std
+            std = self.normalize_latent(std)
 
         vid = str(self._volume_id[idx])
         orient = torch.from_numpy(

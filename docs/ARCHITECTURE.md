@@ -67,6 +67,29 @@ Latents for the LDM stack live in a memmap binary store
 air fraction, all written by one pass of `scripts/build_latent_dataset.py`; see
 `src/poregen/dataset/material.py`.
 
+### Latent normalisation (Rombach et al. 2022 Sec. G)
+
+The LDM trains on SAMPLED latents `z = mu + sigma*eps`, rescaled by ONE scalar.
+`scripts/build_latent_dataset.py` draws one seeded `eps` per element of every
+train latent (as stored, float16), takes the scalar mean `mu_hat` and
+`sigma_hat^2 = mean((z - mu_hat)^2)` over every element `b, c, h, w`, and
+records `sigma_hat`, `mu_hat` (information only), the element count and the
+`eps` seed in `metadata["normalization"]` (`rule: rombach_scalar_sampled`).
+There is no centring: `mu_hat` enters only the variance. Rombach estimates
+`sigma_hat` on the first batch; the store estimates the same quantity on the
+whole train split, which lowers the estimator variance.
+
+`diffusion.latents.latent_scale(metadata)` is the one reader. `LatentDataset`
+divides the posterior mean AND std (target and neighbours) by `sigma_hat`, so a
+training draw `mu' + sigma'*eps` is exactly `(mu + sigma*eps) / sigma_hat`.
+Every decode (`VolumeGenerator`, `DecodedAuxLoss`, `generation_eval`, eval_v4,
+the diag) multiplies by `sigma_hat`. A store without the rule is refused, not
+interpreted: the split_v3 / split_v2 stores (per-channel mean/std of `mu`)
+must be rebuilt to be used by the LDM pipeline. The std reference a generated
+latent is scored against is the std of the rescaled sampled latents —
+~1 by construction — measured by `latents.sampled_std_reference` (the diag
+and `scripts/analysis/latent_std_reference.py` both call it).
+
 ## LDM conditioning contract
 
 The denoiser is `UNet3DDenoiser`. Nothing in it is switchable: every signal
@@ -106,8 +129,8 @@ the sampler both call it.
 ### Neighbours are sampled, then noised
 
 The store serves each neighbour's CLEAN posterior — the mean AND the std, both
-read from the neighbour's own store row and put through the same per-channel
-affine map as the target. The batch therefore carries `nb_latents` (6,C,…) and
+read from the neighbour's own store row and divided by the same scalar
+`sigma_hat` as the target. The batch therefore carries `nb_latents` (6,C,…) and
 `nb_std` (6,C,…) next to `z` and `std`.
 
 The training step draws each EXISTS neighbour before it noises it

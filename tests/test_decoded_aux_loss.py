@@ -258,7 +258,7 @@ def _frozen_vae(z_channels: int = 2) -> _TinyVAE:
 def _aux(**overrides) -> DecodedAuxLoss:
     cfg = DecodedLossConfig(t_max_frac=0.25, ramp_steps=0, max_items=2,
                             **overrides)
-    return DecodedAuxLoss(cfg, _frozen_vae(), latent_mean=0.0, latent_std=1.0)
+    return DecodedAuxLoss(cfg, _frozen_vae(), latent_scale=1.0)
 
 
 def _call_batch(n: int = 4, z_channels: int = 2, t=None):
@@ -279,13 +279,13 @@ class TestDecodedAuxLoss:
 
     def test_it_refuses_a_vae_that_is_not_frozen(self):
         with pytest.raises(ValueError, match="FROZEN"):
-            DecodedAuxLoss(DecodedLossConfig(), _TinyVAE(), 0.0, 1.0)
+            DecodedAuxLoss(DecodedLossConfig(), _TinyVAE(), 1.0)
 
     def test_it_refuses_a_vae_without_a_class_head(self):
         vae = _frozen_vae()
         del vae.class_head
         with pytest.raises(TypeError, match="class_head"):
-            DecodedAuxLoss(DecodedLossConfig(), vae, 0.0, 1.0)
+            DecodedAuxLoss(DecodedLossConfig(), vae, 1.0)
 
     def test_it_returns_one_scalar_and_a_metric_per_term(self):
         aux = _aux()
@@ -367,7 +367,7 @@ class TestDecodedAuxLoss:
 
         aux = DecodedAuxLoss(
             DecodedLossConfig(t_max_frac=0.25, ramp_steps=100, max_items=2),
-            _frozen_vae(), 0.0, 1.0,
+            _frozen_vae(), 1.0,
         )
         early_loss, early = aux(step=0, **kw)
         late_loss, late = aux(step=1000, **kw)
@@ -554,7 +554,7 @@ class TestTrainStepIntegration:
     def _aux_for(batch):
         z_channels = batch["z"].shape[1]
         cfg = DecodedLossConfig(t_max_frac=1.0, ramp_steps=0, max_items=2)
-        return DecodedAuxLoss(cfg, _frozen_vae(z_channels), 0.0, 1.0)
+        return DecodedAuxLoss(cfg, _frozen_vae(z_channels), 1.0)
 
     def test_the_step_reports_every_term_and_the_latent_loss_separately(self, tmp_path):
         """A single summed number cannot say WHICH defect moved."""

@@ -222,7 +222,7 @@ def build(runner, reference, s_nb: float, ddim: int, theta,
     return VolumeGenerator(
         sampler=sampler, vae=runner.vae, device=runner.device,
         patch_size=PATCH_SIZE, latent_size=LATENT_SIZE,
-        latent_mean=runner.latent_mean, latent_std=runner.latent_std,
+        latent_scale=runner.latent_scale,
         voxel_size_mm=VOXEL_SIZE_MM, por_log_stats=runner.por_log_stats,
         theta_deg=theta,
         # One tile per chunk and a window per tile: NO overlap, so nothing

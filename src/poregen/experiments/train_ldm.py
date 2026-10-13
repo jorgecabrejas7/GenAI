@@ -166,8 +166,7 @@ def _prepare_data_and_vae(
         "latents_root": latents_root,
         "train_loader": train_loader,
         "val_loader":   val_loader,
-        "latent_mean":  train_ds.channel_mean,   # (C,1,1,1) CPU float32
-        "latent_std":   train_ds.channel_std,    # (C,1,1,1) CPU float32
+        "latent_scale": train_ds.latent_scale,   # scalar sigma_hat
         "val_phi":      val_loader.dataset.df["phi"].to_numpy(dtype=np.float64),
         "vae":          vae,
     }
@@ -321,8 +320,7 @@ def run_ldm_experiment(
                 scheduler=scheduler,
                 ema_decay=ema_decay,
                 vae=data["vae"],
-                latent_mean=data["latent_mean"],
-                latent_std=data["latent_std"],
+                latent_scale=data["latent_scale"],
                 val_phi=data["val_phi"],
                 por_log_stats=data["por_log_stats"],
             )
@@ -412,8 +410,7 @@ def resume_ldm_run(
                 ema_decay=ema_decay,
                 ema_state=_ema_state,
                 vae=data["vae"],
-                latent_mean=data["latent_mean"],
-                latent_std=data["latent_std"],
+                latent_scale=data["latent_scale"],
                 val_phi=data["val_phi"],
                 por_log_stats=data["por_log_stats"],
             )

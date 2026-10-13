@@ -663,8 +663,7 @@ def _store(tmp_path: Path, *, name: str, z: int, vae_ckpt: Path) -> Path:
         "vae_checkpoint_step": ident["step"],
         "latent_shape": [z, 16, 16, 16],
         "normalization": {
-            "per_channel_mean": [0.0] * z,
-            "per_channel_std": [1.0] * z,
+            "rule": "rombach_scalar_sampled", "sigma_hat": 1.0,
         },
         "conditioning": {"por_standardisation": {"mean": -3.5, "std": 0.5}},
     }))

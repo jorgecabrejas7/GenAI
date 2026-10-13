@@ -281,16 +281,15 @@ class DecodedAuxLoss:
     ----------
     config      : the resolved ``loss.decoded`` block
     vae         : the frozen 3-class VAE (``decoder``, ``xct_head``, ``class_head``)
-    latent_mean, latent_std : (C, 1, 1, 1) per-channel normalisation stats.
-        The LDM trains in normalised space; the decoder expects raw latents.
+    latent_scale : the store's scalar ``sigma_hat``.  The LDM trains on
+        ``z / sigma_hat``; the decoder expects raw latents.
     """
 
     def __init__(
         self,
         config: DecodedLossConfig,
         vae: nn.Module,
-        latent_mean: torch.Tensor | float,
-        latent_std: torch.Tensor | float,
+        latent_scale: float,
     ) -> None:
         for attr in ("decoder", "xct_head", "class_head"):
             if not hasattr(vae, attr):
@@ -308,8 +307,7 @@ class DecodedAuxLoss:
             )
         self.config = config
         self.vae = vae
-        self.latent_mean = latent_mean
-        self.latent_std = latent_std
+        self.latent_scale = float(latent_scale)
 
     def __call__(
         self,
@@ -404,12 +402,7 @@ class DecodedAuxLoss:
         of the graph.
         """
         self.vae.eval()
-        mean, std = self.latent_mean, self.latent_std
-        if isinstance(mean, torch.Tensor):
-            mean = mean.to(x0.device)
-        if isinstance(std, torch.Tensor):
-            std = std.to(x0.device)
-        z = x0 * std + mean
+        z = x0 * self.latent_scale
         with torch.autocast(device_type=x0.device.type, dtype=autocast_dtype,
                             enabled=x0.device.type == "cuda"):
             dec = self.vae.decoder(z)

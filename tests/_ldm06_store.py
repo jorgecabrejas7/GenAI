@@ -109,9 +109,8 @@ def build_store(root: Path) -> tuple[Path, np.ndarray, int, int]:
         "voxel_size_um": 25.0,
         "storage": {"format": "memmap", "file": "latents.bin",
                     "dtype": "float16", "pack_scheme": "mu_then_std"},
-        "normalization": {"computed_over": "train",
-                          "per_channel_mean": [0.0] * C,
-                          "per_channel_std": [1.0] * C},
+        "normalization": {"rule": "rombach_scalar_sampled",
+                          "computed_over": "train", "sigma_hat": 1.0},
         "material": {"files": {"material": "material.bin", "air": "air.bin"}},
         "conditioning": {
             "orientation_field": str(of),

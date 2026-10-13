@@ -46,9 +46,29 @@ MAE_TOLERANCE = 6.0
 LATENT_WIN = 16
 VOX_PER_CELL = 4
 
+def _case_store_is_scalar() -> bool:
+    """True when the case's latent store carries the scalar sigma_hat.
+
+    The split_v3 stores predate it (per-channel normalisation of mu), and the
+    decode path no longer reads that normalisation.
+    """
+    import json
+
+    mf = CASE / "manifest.json"
+    if not mf.exists():
+        return False
+    root = (json.loads(mf.read_text()).get("notes") or {}).get("latents_root")
+    meta = Path(root or "") / "metadata.json"
+    if not meta.exists():
+        return False
+    return "sigma_hat" in (json.loads(meta.read_text()).get("normalization") or {})
+
+
 pytestmark = pytest.mark.skipif(
-    not (CASE / "latents.npy").exists() or BASELINE is None,
-    reason="campaign 18 latents or the r08 baseline checkpoint are not on this machine",
+    not (CASE / "latents.npy").exists() or BASELINE is None
+    or not _case_store_is_scalar(),
+    reason="campaign 18 latents, a scalar-sigma_hat store or the r08 baseline "
+           "checkpoint are not on this machine",
 )
 
 
@@ -75,8 +95,7 @@ def decoded():
     vae, _, _, _ = load_vae_from_checkpoint(BASELINE, torch.device("cpu"))
     vae.eval()
     z = np.load(CASE / "latents.npy").astype(np.float32)
-    mean, std = latent_normalisation(CASE)
-    z_native = z * std[:, None, None, None] + mean[:, None, None, None]
+    z_native = z * latent_normalisation(CASE)
     origin = z.shape[1] // 2 - LATENT_WIN // 2
     stored = tifffile.imread(CASE / "volume.tif")
     v0 = origin * VOX_PER_CELL

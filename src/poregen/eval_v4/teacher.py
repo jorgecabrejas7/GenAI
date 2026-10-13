@@ -21,8 +21,8 @@ the sampler is a multiple of 32 voxels, so a neighbour read out of this canvas
 is a real, contiguous block of real material — it may straddle up to eight
 stored patches, exactly as a generated neighbour straddles the canvas.
 
-What is served is a posterior DRAW, ``mu + sigma * eps``, per-channel
-normalised.  Not the mean: the store holds a posterior and the training step
+What is served is a posterior DRAW, ``mu + sigma * eps``, divided by the
+store's scalar ``sigma_hat``.  Not the mean: the store holds a posterior and the training step
 draws from it, so a mean-valued canvas is a distribution neither the model nor
 the sampler ever sees.  The draw is seeded by the case, so the arm is
 reproducible from its manifest.
@@ -41,6 +41,8 @@ import logging
 from pathlib import Path
 
 import numpy as np
+
+from poregen.diffusion.latents import latent_scale
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +180,7 @@ def reference_latent_canvas(
             f"the store's patch_size is {meta.get('patch_size')}, not {TILE_VOX}; "
             "the canvas tiling assumes one stored patch per tile."
         )
-    norm = meta["normalization"]
-    mean = np.asarray(norm["per_channel_mean"], np.float32).reshape(c, 1, 1, 1)
-    std = np.asarray(norm["per_channel_std"], np.float32).reshape(c, 1, 1, 1)
+    scale = latent_scale(meta)
 
     index = read_index(store_root, split)
     block = find_reference_block(index, shape, split=split, store_root=store_root)
@@ -213,13 +213,13 @@ def reference_latent_canvas(
                 z = mu + sd * rng.standard_normal(mu.shape).astype(np.float32)
                 canvas[:, iz * lz:(iz + 1) * lz,
                        iy * ly:(iy + 1) * ly,
-                       ix * lx:(ix + 1) * lx] = (z - mean) / std
+                       ix * lx:(ix + 1) * lx] = z / scale
 
     provenance = {
         **block,
         "store": str(store_root),
         "n_patches": int(np.prod(tiles)),
-        "draw": "mu + sigma*eps, per-channel normalised",
+        "draw": "mu + sigma*eps, divided by the store's sigma_hat",
         "draw_seed": int(seed),
     }
     logger.info(

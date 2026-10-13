@@ -118,13 +118,11 @@ def _load_vae(vae_run_dir: str | Path, device: torch.device):
     return vae
 
 
-def _load_latent_stats(latents_root: Path) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-channel denormalisation stats from the latent store's metadata.json."""
-    norm = json.loads((latents_root / "metadata.json").read_text())["normalization"]
-    c = len(norm["per_channel_mean"])
-    mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
-    std  = torch.tensor(norm["per_channel_std"],  dtype=torch.float32).view(c, 1, 1, 1)
-    return mean, std
+def _load_latent_scale(latents_root: Path) -> float:
+    """The scalar latent scale ``sigma_hat`` from the store's metadata.json."""
+    from poregen.diffusion.latents import latent_scale
+
+    return latent_scale(json.loads((latents_root / "metadata.json").read_text()))
 
 
 @torch.no_grad()
@@ -134,8 +132,7 @@ def run_chain(
     vae: torch.nn.Module,
     device: torch.device,
     autocast_dtype: torch.dtype,
-    latent_mean: torch.Tensor,
-    latent_std: torch.Tensor,
+    latent_scale: float,
     por: float,
     por_log_stats: tuple[float, float],
     n_steps: int,
@@ -182,7 +179,7 @@ def run_chain(
     mid = PATCH_SIZE // 2
     frames = []
     for z_cpu in intermediates:
-        z_batch = (z_cpu * latent_std + latent_mean).to(device)
+        z_batch = (z_cpu * latent_scale).to(device)
         with torch.autocast(device_type=device.type, dtype=autocast_dtype):
             dec = vae.decoder(z_batch)
             xct_out = vae.xct_head(dec)
@@ -304,7 +301,7 @@ def main() -> None:
     latents_root, _store_meta_checked = resolve_latent_store(
         ldm_cfg, repo, override=args.latents_root
     )
-    latent_mean, latent_std = _load_latent_stats(latents_root)
+    latent_scale = _load_latent_scale(latents_root)
 
     # Raw phi levels must be mapped through the store's porosity transform
     # before they can be used as cond_por.
@@ -334,7 +331,7 @@ def main() -> None:
 
             frames = run_chain(
                 model, schedule, vae, device, autocast_dtype,
-                latent_mean, latent_std, por, por_log_stats, n_steps, SEED,
+                latent_scale, por, por_log_stats, n_steps, SEED,
                 step_pbar=step_pbar,
             )
 

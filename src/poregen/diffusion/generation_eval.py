@@ -47,8 +47,7 @@ def generation_eval(
     vae: torch.nn.Module,
     *,
     val_dataset,
-    latent_mean: torch.Tensor,
-    latent_std: torch.Tensor,
+    latent_scale: float,
     val_phi: np.ndarray,
     device: torch.device,
     autocast_dtype: torch.dtype = torch.bfloat16,
@@ -120,14 +119,12 @@ def generation_eval(
     metrics["std_ratio_avg"] = ch_std.mean().item()
 
     # -- decode-based porosity eval ------------------------------------------
-    mean_dev = latent_mean.to(device)
-    std_dev  = latent_std.to(device)
     vae.eval()
     porosities: list[torch.Tensor] = []
     airs: list[torch.Tensor] = []
     degenerate = 0
     for i in range(0, n_samples, batch_size):
-        z_denorm = gen_z[i : i + batch_size] * std_dev + mean_dev
+        z_denorm = gen_z[i : i + batch_size] * latent_scale
         with torch.autocast(device_type=device.type, dtype=autocast_dtype,
                             enabled=device.type == "cuda"):
             dec = vae.decoder(z_denorm)

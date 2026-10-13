@@ -100,6 +100,7 @@ from pathlib import Path
 
 import numpy as np
 
+from poregen.diffusion.latents import latent_scale
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, TILE, load_cases
 
 logger = logging.getLogger(__name__)
@@ -548,8 +549,7 @@ class PatchStore:
     patch: int
     patch_file: Path
     n_patch_rows: int
-    norm_mean: np.ndarray
-    norm_std: np.ndarray
+    latent_scale: float
 
     @classmethod
     def open(
@@ -602,15 +602,13 @@ class PatchStore:
             )
         n_patch_rows = patch_file.stat().st_size // (PATCH ** 3)
 
-        norm = meta["normalization"]
         return cls(
             root=root, split=split, rows=rows,
             source_rows=idx["source_row"].to_numpy()[rows].astype(np.int64),
             latent_channels=c, latent_spatial=tuple(spatial),
             latent_dtype=np.dtype(storage["dtype"]), n_split_rows=len(idx),
             patch=PATCH, patch_file=patch_file, n_patch_rows=n_patch_rows,
-            norm_mean=np.asarray(norm["per_channel_mean"], np.float32),
-            norm_std=np.asarray(norm["per_channel_std"], np.float32),
+            latent_scale=latent_scale(meta),
         )
 
     # -- geometry ----------------------------------------------------------
@@ -652,17 +650,15 @@ class PatchStore:
         return np.asarray(store[self.rows[pos], :self.latent_channels], np.float32)
 
     def latent_at(self, positions: np.ndarray, memmap=None) -> np.ndarray:
-        """``(n, latent_dim)`` per-channel-normalised posterior means.
+        """``(n, latent_dim)`` posterior means divided by the store's ``sigma_hat``.
 
-        ``positions`` index :attr:`rows`, not the split.  Normalised with the
-        store's own train-split statistics, so every latent channel contributes
-        to the L2 on the same scale: raw channel standard deviations on this
-        store span 0.41 to 0.78, and a raw L2 would be a distance in whichever
-        channel happens to be widest.
+        ``positions`` index :attr:`rows`, not the split.  The distance is taken
+        in the space the LDM generates in: one scalar rescaling (Rombach et al.
+        2022 Sec. G), so the channels keep their own relative widths, exactly
+        as the denoiser sees them.
         """
         mu = self.raw_latent_at(positions, memmap)
-        mu -= self.norm_mean[None, :, None, None, None]
-        mu /= self.norm_std[None, :, None, None, None]
+        mu /= self.latent_scale
         return mu.reshape(len(mu), -1)
 
     def grey_at(self, positions: np.ndarray, memmap=None) -> np.ndarray:
@@ -745,8 +741,7 @@ class PatchStore:
             )
         n = len(mu)
         z = mu.reshape(n, self.latent_channels, *self.latent_spatial).astype(np.float32)
-        z = (z - self.norm_mean[None, :, None, None, None]) \
-            / self.norm_std[None, :, None, None, None]
+        z = z / self.latent_scale
         return z.reshape(n, -1)
 
 
@@ -1210,7 +1205,7 @@ def memorisation(
             "n_rows_in_split": train.n_split_rows,
             "latent_dim": train.latent_dim,
             "grey_dim": train.grey_dim,
-            "latent_scale": "per-channel normalised with the store's train stats",
+            "latent_scale": "divided by the store's scalar sigma_hat (the LDM's own space)",
             "grey_source": str(train.patch_file),
         },
         "assessments_requested": list(assessments),

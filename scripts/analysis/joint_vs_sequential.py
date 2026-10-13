@@ -48,10 +48,8 @@ def main() -> None:
     print(f"Loaded RAW weights at step {step}")
 
     meta = json.loads((LATENTS_ROOT / "metadata.json").read_text())
-    norm = meta["normalization"]
-    c = len(norm["per_channel_mean"])
-    latent_mean = torch.tensor(norm["per_channel_mean"], dtype=torch.float32).view(c, 1, 1, 1)
-    latent_std = torch.tensor(norm["per_channel_std"], dtype=torch.float32).view(c, 1, 1, 1)
+    from poregen.diffusion.latents import latent_scale as store_latent_scale
+    latent_scale = store_latent_scale(meta)
     vae, _, _, _ = load_vae_from_checkpoint(Path(meta["vae_checkpoint"]), device)
     vae.requires_grad_(False)
 
@@ -65,7 +63,7 @@ def main() -> None:
     gen = VolumeGenerator(
         sampler=sampler, vae=vae, device=device,
         patch_size=64, generation_stride=64, neighbour_offset=64,
-        latent_size=16, latent_mean=latent_mean, latent_std=latent_std,
+        latent_size=16, latent_scale=latent_scale,
         voxel_size_mm=0.025,
         por_log_stats=(float(_st["mean"]), float(_st["std"])),
         theta_deg=theta,

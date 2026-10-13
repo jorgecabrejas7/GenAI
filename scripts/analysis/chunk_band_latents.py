@@ -115,16 +115,16 @@ def pore_prob_profile(logit: np.ndarray, axis: int, planes_vox: list[int],
 def store_reference(store_root: Path, n_rows: int = 512, seed: int = 0) -> dict:
     """The scale the model is imitating: sampled latents from the train store.
 
-    `mu + sigma*eps`, per-channel normalised exactly as the sampler's canvas
-    is, so its std is comparable with a generated canvas cell for cell.
+    `mu + sigma*eps`, divided by the store's sigma_hat exactly as the
+    sampler's canvas is, so its std is comparable with a generated canvas cell for cell.
     """
     import pandas as pd
 
     meta = json.loads((store_root / "metadata.json").read_text())
     c, *spatial = (int(v) for v in meta["latent_shape"])
-    norm = meta["normalization"]
-    mean = np.asarray(norm["per_channel_mean"], np.float32).reshape(c, 1, 1, 1)
-    std = np.asarray(norm["per_channel_std"], np.float32).reshape(c, 1, 1, 1)
+    from poregen.diffusion.latents import latent_scale
+
+    scale = latent_scale(meta)
     idx = pd.read_parquet(str(store_root / "train" / "index.parquet"),
                           columns=["source_row"])
     total = len(idx)
@@ -137,7 +137,7 @@ def store_reference(store_root: Path, n_rows: int = 512, seed: int = 0) -> dict:
     for r in rows:
         packed = np.asarray(lat[int(r)], np.float32)
         mu, sd = packed[:c], packed[c:]
-        z = (mu + sd * rng.standard_normal(mu.shape).astype(np.float32) - mean) / std
+        z = (mu + sd * rng.standard_normal(mu.shape).astype(np.float32)) / scale
         flat = z.reshape(c, -1)
         stds.append(flat.std(axis=1).mean())
         abss.append(np.abs(flat).mean(axis=1).mean())

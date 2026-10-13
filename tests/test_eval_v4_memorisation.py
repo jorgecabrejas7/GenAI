@@ -235,8 +235,7 @@ def build_store(root, *, n=16, c=2, spatial=2, patch=MEMO.PATCH,
         "storage": {"pack_scheme": "mu_then_std", "dtype": "float16"},
         "source_patch_index": str(data / "patch_index.parquet"),
         "normalization": {
-            "per_channel_mean": [0.0] * c,
-            "per_channel_std": [1.0] * c,
+            "rule": "rombach_scalar_sampled", "sigma_hat": 1.0,
         },
         "vae_checkpoint": str(root / "vae.ckpt"),
     }))
@@ -284,17 +283,16 @@ class TestPatchStore:
         assert mu[:, 0] == pytest.approx([0.0, 2.0, 4.0])
         assert (mu != 99.0).all()
 
-    def test_the_latent_scale_is_the_store_own_normalisation(self, tmp_path):
+    def test_the_latent_scale_is_the_store_own_sigma_hat(self, tmp_path):
         root = build_store(tmp_path / "s", n=4)
         meta = json.loads((root / "metadata.json").read_text())
-        meta["normalization"] = {"per_channel_mean": [1.0, 2.0],
-                                 "per_channel_std": [2.0, 4.0]}
+        meta["normalization"] = {"rule": "rombach_scalar_sampled", "sigma_hat": 4.0}
         (root / "metadata.json").write_text(json.dumps(meta))
         store = MEMO.PatchStore.open(root, "train")
-        # row 2 holds mu == 2 in both channels -> (2-1)/2 and (2-2)/4.
+        # row 2 holds mu == 2 in both channels -> 2 / 4, no centring.
         mu = store.latent_chunk(1, 2).reshape(1, 2, -1)
         assert mu[0, 0] == pytest.approx(0.5)
-        assert mu[0, 1] == pytest.approx(0.0)
+        assert mu[0, 1] == pytest.approx(0.5)
 
     def test_grey_comes_from_the_source_patches_the_store_names(self, tmp_path):
         store = MEMO.PatchStore.open(build_store(tmp_path / "s", n=16), "train")

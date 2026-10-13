@@ -50,12 +50,11 @@ import torch
 import yaml
 
 from poregen.diffusion.conditioning import NB_UNKNOWN, N_NEIGHBOURS, porosity_to_cond
-from poregen.diffusion.latents import LatentDataset
+from poregen.diffusion.latents import LatentDataset, sampled_std_reference
 from poregen.diffusion.noise_schedule import DDPMSchedule
 from poregen.models.vae.base import CLASS_AIR, CLASS_PORE, decode_label, decode_xct
 from poregen.diffusion.sampler import DDIMSampler
 from poregen.experiments.base import find_repo_root
-from poregen.paths import std_reference_path
 from poregen.eval_v4.generate import check_run_store_binding
 from poregen.experiments.train_ldm import check_vae_weights
 from poregen.experiments.train_vae import load_vae_from_checkpoint
@@ -208,49 +207,22 @@ def sample_bucket(
     )
 
 
-#: Per-channel std of the SAMPLED training latents, loaded once from
-#: latent_std_reference.json. See ``load_std_reference``.
+#: Per-channel std of the SAMPLED, RESCALED train latents, measured once from
+#: the store in ``main``. See ``measure_std_reference``.
 _STD_REF: np.ndarray | None = None
 
 
-def load_std_reference(store: Path) -> np.ndarray | None:
-    """Per-channel std of z = mu + sigma*eps over the train split, or None.
+def measure_std_reference(store: Path, n_rows: int = 4000) -> dict:
+    """Std of ``(mu + sigma*eps) / sigma_hat`` over train rows of the store.
 
-    ``std_ratio`` divides by 1.0, which is the std of the MU-normalised latent:
-    the store's stats normalise mu, so mu-normalised latents have std 1 by
-    construction. But ldm06 trains on ``latent_mode: sampled`` — the target is
-    mu + sigma*eps in that same space, whose per-channel std is
-    sqrt(1 + rms(sigma/std_c)^2) and is strictly greater than 1.
-
-    Scoring generated latents against 1.0 therefore charges the model for the
-    posterior width it was trained to reproduce. Both references are reported;
-    the sampled one is the one a gate should use.
-
-    Produced by scripts/analysis/latent_std_reference.py.
+    ldm06 trains on sampled latents rescaled by the store's scalar
+    ``sigma_hat`` (Rombach et al. 2022 Sec. G), so the reference a generated
+    latent must match is ~1 overall by construction. It is measured, not
+    assumed: a store whose metadata disagrees with its latents shows up here,
+    and one scalar does not equalise the channels, so the per-channel
+    reference is what the per-channel ratio divides by.
     """
-    # The store's own metadata is authoritative: it travels with the latents,
-    # so a reference can never be silently paired with the wrong store.
-    meta = store / "metadata.json"
-    if meta.exists():
-        try:
-            cs = json.loads(meta.read_text()).get("channel_stats") or {}
-            if cs.get("sampled_std"):
-                return np.asarray(cs["sampled_std"], dtype=np.float64)
-        except Exception as exc:                        # noqa: BLE001
-            logger.warning("could not read channel_stats from %s: %s", meta, exc)
-    # Fallback: the standalone measurement, only if it names THIS store.
-    repo = find_repo_root(__file__)
-    cand = std_reference_path(store)
-    if cand.exists():
-        try:
-            d = json.loads(cand.read_text())
-            if (repo / d.get("store", "")).resolve() == Path(store).resolve():
-                return np.asarray(d["sampled_std"], dtype=np.float64)
-            logger.warning("%s is for store %s, not %s — ignored",
-                           cand, d.get("store"), store)
-        except Exception as exc:                        # noqa: BLE001
-            logger.warning("could not read %s: %s", cand, exc)
-    return None
+    return sampled_std_reference(store, "train", n_rows=n_rows, seed=0)
 
 
 def bucket_metrics(z: torch.Tensor, sat: float, por: torch.Tensor,
@@ -486,7 +458,7 @@ def conditioning_alive_check(
 @torch.no_grad()
 def killswitch_check(
     sampler: DDIMSampler, vae: torch.nn.Module, ds: LatentDataset, cond: dict,
-    device: torch.device, mean_dev: torch.Tensor, std_dev: torch.Tensor,
+    device: torch.device, scale: float,
 ) -> dict:
     """Ask phi=lo vs phi=hi with the same seed and conditioning rows; compare
     the delivered pore fraction of the decoded labels."""
@@ -496,7 +468,7 @@ def killswitch_check(
         c = float(porosity_to_cond(phi, por_log_stats))
         ks_cond = {**cond, "cond_por": torch.full_like(cond["cond_por"], c)}
         z, _ = sample_bucket(sampler, ks_cond, SEED)
-        _, label = decode_latents(vae, z * std_dev + mean_dev, device)
+        _, label = decode_latents(vae, z * scale, device)
         delivered.append((label == CLASS_PORE).float().mean(dim=(1, 2, 3)).cpu().numpy())
     lo, hi = delivered
     return {
@@ -604,8 +576,7 @@ def main() -> None:
     if not latents_root.is_absolute():
         latents_root = repo / latents_root
     val_ds = LatentDataset(latents_root, "val", normalize=True)
-    mean_dev = val_ds.channel_mean.to(device)
-    std_dev = val_ds.channel_std.to(device)
+    scale = val_ds.latent_scale
 
     # The run must be the one trained on these latents, and the checkpoint
     # must still hold the weights that wrote them (a resumed VAE keeps its path).
@@ -615,6 +586,14 @@ def main() -> None:
     for prm in vae.parameters():
         prm.requires_grad_(False)
     vae.eval()
+
+    # ── the std reference: the store's own rescaled sampled latents ─────────
+    global _STD_REF
+    std_reference = measure_std_reference(Path(val_ds.root))
+    _STD_REF = np.asarray(std_reference["sampled_std_per_channel"], dtype=np.float64)
+    print(f"std reference (train, (mu + sigma*eps) / sigma_hat, sigma_hat "
+          f"{std_reference['sigma_hat']:.5f}): overall {std_reference['sampled_std']:.4f}, "
+          f"per channel {[round(float(v), 4) for v in _STD_REF]}")
 
     # ── context buckets from real val rows ──────────────────────────────────
     rng = np.random.default_rng(0)
@@ -628,7 +607,7 @@ def main() -> None:
     real_entries: list[tuple[str, np.ndarray, np.ndarray]] = []
     real_por_all: list[torch.Tensor] = []
     for b, cond in conds.items():
-        xct, label = decode_latents(vae, cond["z"] * std_dev + mean_dev, device)
+        xct, label = decode_latents(vae, cond["z"] * scale, device)
         real_por_all.append((label == CLASS_PORE).float().mean(dim=(1, 2, 3)))
         real_entries.extend(grid_entries(xct, label, b))
     real_por = torch.cat(real_por_all)
@@ -648,7 +627,7 @@ def main() -> None:
             entries: list[tuple[str, np.ndarray, np.ndarray]] = []
             for bi, (b, cond) in enumerate(conds.items()):
                 z, sat = sample_bucket(samplers[n_steps], cond, SEED + bi)
-                xct, label = decode_latents(vae, z * std_dev + mean_dev, device)
+                xct, label = decode_latents(vae, z * scale, device)
                 por = (label == CLASS_PORE).float().mean(dim=(1, 2, 3))
                 air = (label == CLASS_AIR).float().mean(dim=(1, 2, 3))
                 per_bucket[b] = bucket_metrics(z, sat, por, air, cond["phi"])
@@ -660,16 +639,6 @@ def main() -> None:
             save_grid(entries, f"{vname}  step={step}", out_dir / f"{vname}.png")
             logger.info("%s done", vname)
 
-    global _STD_REF
-    _STD_REF = load_std_reference(Path(val_ds.root))
-    if _STD_REF is None:
-        logger.warning("no sampled-latent std reference; std_ratio is reported only "
-                       "against the mu-normalised reference of 1.0, which OVERSTATES "
-                       "the ratio for a latent_mode='sampled' run. Produce it with "
-                       "scripts/analysis/latent_std_reference.py.")
-    else:
-        logger.info("sampled-latent std reference: %s",
-                    [round(float(v), 4) for v in _STD_REF])
 
     # ── conditioning-alive check (raw weights, richest bucket) ──────────────
     model.load_state_dict(raw_state)
@@ -711,7 +680,7 @@ def main() -> None:
         for wname, state in (("raw", raw_state), ("ema", ema_state)):
             model.load_state_dict(state)
             killswitch[wname] = killswitch_check(
-                samplers[50], vae, val_ds, ks_cond, device, mean_dev, std_dev)
+                samplers[50], vae, val_ds, ks_cond, device, scale)
 
     # ── report ──────────────────────────────────────────────────────────────
     print(f"\n=== diag_ldm_samples  {run_dir.name}  step={step}  "
@@ -818,6 +787,7 @@ def main() -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_per_bucket": {b: len(r) for b, r in bucket_rows.items()},
         "bucket_frequency": bucket_freq,
+        "std_reference": std_reference,
         # EVERY variant that was computed, not a hardcoded pair. --ddim200
         # spends the GPU time on raw_ddim200 / ema_ddim200 and the old literal
         # then dropped them from the durable record, leaving them only in
