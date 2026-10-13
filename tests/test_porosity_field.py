@@ -83,11 +83,12 @@ def test_mean_matches_target(sampler, corr_lengths, target):
     assert abs(field.mean() - target) < 1e-6
 
 
-def test_values_within_training_phi_range(sampler, corr_lengths):
-    for target in [0.005, 0.03, 0.10]:
+def test_values_are_physical_pore_fractions(sampler, corr_lengths):
+    for target in [0.0, 0.005, 0.03, 0.10, 0.25]:
         field = build_porosity_field((8, 8, 16), target, sampler, corr_lengths, seed=5)
-        assert field.min() >= PHI_MIN
-        assert field.max() <= PHI_MAX
+        assert field.min() >= PHI_MIN == 0.0
+        assert field.max() <= PHI_MAX == 1.0
+        assert field.mean() == pytest.approx(target, abs=1e-9)
 
 
 def test_deterministic_per_seed(sampler, corr_lengths):
@@ -153,10 +154,9 @@ def test_generate_volumes_coherent_distribution():
 
 
 # ── the other local-porosity map builders ────────────────────────────────────
-# Both of these still emit values OUTSIDE the sampler's training range
-# [POR_MIN, POR_MAX].  That is deliberate and is pinned here: the clamp lives
-# at the point of USE, in VolumeGenerator._window_conditioning, so there is one
-# choke point instead of one per map builder.
+# Both of these emit values above the split_v3 train maximum (0.107).  Nothing
+# clamps them: a request outside the training range is a generalisation test,
+# reported by eval_v4, never altered.
 
 def test_build_local_por_map_uniform_is_exact():
     mod = _load_generate_volumes_module()
@@ -166,24 +166,21 @@ def test_build_local_por_map_uniform_is_exact():
     assert all(v == pytest.approx(0.03) for v in m.values())
 
 
-def test_build_local_por_map_center_peak_exceeds_the_training_clamp():
-    from poregen.diffusion.conditioning import POR_MAX
-
+def test_build_local_por_map_center_peak_exceeds_the_split_v3_train_max():
     mod = _load_generate_volumes_module()
     m = mod._build_local_por_map(4, 8, 8, target_por=0.05, distribution="center",
                                  seed=0)
     vals = np.array(list(m.values()))
     assert vals.mean() == pytest.approx(0.05, rel=0.05)
-    assert vals.max() > POR_MAX               # clamped downstream, not here
+    assert vals.max() > 0.107                 # never clamped
     assert vals.min() >= 0.001 and vals.max() <= 0.999
 
 
 def test_gaussian_por_grid_normalises_the_mean_not_the_peak():
     """The in-training sample map: mean == global_por, peak left out of range."""
-    from poregen.diffusion.conditioning import POR_MAX
     from poregen.training.ldm_engine import _gaussian_por_grid
 
     grid = _gaussian_por_grid((3, 3, 3), global_por=0.05)
     vals = np.array(list(grid.values()))
     assert vals.mean() == pytest.approx(0.05, rel=1e-6)
-    assert vals.max() > POR_MAX
+    assert vals.max() > 0.107

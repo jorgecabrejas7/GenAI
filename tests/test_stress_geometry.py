@@ -257,12 +257,11 @@ class TestStressCaseList:
         assert readable == {"taper", "gradient_spots", "cube1024",
                             "two_coupons", "letters"}
 
-    def test_the_painted_field_stays_inside_the_conditioning_clamp(self):
-        """A request above POR_MAX would measure the clamp, not the model."""
-        from poregen.diffusion.conditioning import POR_MAX
-
+    def test_the_painted_field_stays_inside_the_split_v3_train_range(self):
+        """The case measures obedience, not extrapolation, so it stays under
+        the split_v3 train maximum (0.107). Nothing clamps a request."""
         f = SG.field_ramp_and_spots((3, 16, 16), 101)
-        assert f.max() <= POR_MAX
+        assert f.max() <= 0.107
         assert f.min() > 0
         # The ramp must actually ramp, and the spots must actually peak.
         assert f[:, -1, :].mean() > f[:, 0, :].mean() * 3

@@ -296,15 +296,22 @@ class TestNeighbourSourcesEndToEnd:
 
 class TestWindowConditioning:
 
-    def test_porosity_is_clamped_to_the_training_range(self):
+    def test_porosity_is_never_clamped_to_the_training_range(self):
         model = _SpyModel()
         gen, size_mm = _generator(model, _ConstVAE(), (2, 2, 2))
         gen.generate(volume_size_mm=size_mm, target_porosity=0.9,
                      autocast_dtype=torch.float32, window_batch=64)
-        from poregen.diffusion.conditioning import POR_MAX, porosity_to_cond
-        expected = float(porosity_to_cond(POR_MAX, (-3.0, 1.0)))
+        from poregen.diffusion.conditioning import porosity_to_cond
+        expected = float(porosity_to_cond(0.9, (-3.0, 1.0)))
         assert all(float(c["cond_por"].max()) == pytest.approx(expected)
                    for c in model.calls)
+
+    @pytest.mark.parametrize("bad", [-0.01, 1.5])
+    def test_an_unphysical_request_is_refused(self, bad):
+        gen, size_mm = _generator(_SpyModel(), _ConstVAE(), (2, 2, 2))
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            gen.generate(volume_size_mm=size_mm, target_porosity=bad,
+                         autocast_dtype=torch.float32, window_batch=64)
 
     def test_dist6_is_zero_on_the_faces_where_the_volume_ends(self):
         model = _SpyModel()
@@ -403,13 +410,11 @@ class TestWindowPorosityFootprint:
         mean_of_transform = 0.5 * (self._expected(0.01) + self._expected(0.05))
         assert got != pytest.approx(mean_of_transform, rel=1e-3)
 
-    def test_a_footprint_mean_outside_the_training_range_is_still_clamped(self):
-        from poregen.diffusion.conditioning import POR_MAX
-
+    def test_a_footprint_mean_outside_the_training_range_is_used_as_asked(self):
         por_map = {(iz, iy, ix): 0.5
                    for iz in range(2) for iy in range(2) for ix in range(2)}
         got = self._cond_por(por_map, (0, 0, P // 2 // DS))
-        assert got == pytest.approx(self._expected(POR_MAX), rel=1e-6)
+        assert got == pytest.approx(self._expected(0.5), rel=1e-6)
 
     def test_a_tile_missing_from_the_field_falls_back_per_tile(self):
         por_map = {(0, 0, 0): 0.01}          # tile (0,0,1) is not requested
@@ -487,25 +492,20 @@ class TestMaterialPorosityRescaling:
                              por_map=por_map)
         assert got == pytest.approx(self._expected(0.5 * 0.03), rel=1e-6)
 
-    def test_the_scaling_comes_before_the_clip(self):
-        """0.2 * 0.5 = 0.1 is inside the training range; clipping first is not."""
-        from poregen.diffusion.conditioning import POR_MAX
-
+    def test_the_scaling_multiplies_the_request(self):
+        """0.2 material porosity at half material is a full-patch 0.1."""
         got = self._cond_por(self._half_material(), por_default=0.2)
         assert got == pytest.approx(self._expected(0.1), rel=1e-6)
-        assert got != pytest.approx(self._expected(0.5 * POR_MAX), rel=1e-3)
 
     def test_the_scaling_comes_before_the_log_transform(self):
         """`porosity_to_cond` is a log, so scaling after it is a different number."""
         got = self._cond_por(self._half_material(), por_default=0.03)
         assert got != pytest.approx(0.5 * self._expected(0.03), rel=1e-3)
 
-    def test_an_all_air_window_falls_to_the_bottom_of_the_training_range(self):
-        from poregen.diffusion.conditioning import POR_MIN
-
+    def test_an_all_air_window_asks_for_zero_pore(self):
         got = self._cond_por(np.zeros(self.CELLS, dtype=np.float32),
                              por_default=0.03)
-        assert got == pytest.approx(self._expected(POR_MIN), rel=1e-6)
+        assert got == pytest.approx(self._expected(0.0), rel=1e-6)
 
 
 # ── CFG ──────────────────────────────────────────────────────────────────────

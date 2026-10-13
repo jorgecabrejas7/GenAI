@@ -22,7 +22,6 @@ from functools import partial
 import numpy as np
 
 from poregen.eval_v4 import stress_geometry as SG
-from poregen.diffusion.conditioning import POR_MAX, POR_MIN
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, TILE, repo_root
 
 SEEDS = (101, 202, 303)
@@ -96,13 +95,6 @@ class CaseSpec:
     #: :data:`poregen.diffusion.sampler.NEIGHBOUR_MODES`.  ``"canvas"`` is the
     #: production path; only :func:`assembly_modes_cases` asks for another.
     neighbour_mode: str = "canvas"
-    #: Hold the porosity request inside the training range before conditioning
-    #: on it.  ON everywhere but assessment 13, whose whole point is to ask for
-    #: a porosity the training set does not contain.  The clamp is not
-    #: symmetric: at the bottom 0.000, 0.001 and 0.002 all collapse to ONE
-    #: request with it on, and at the top 0.150 is only +0.26 sd of cond_por
-    #: beyond POR_MAX.
-    clamp_porosity: bool = True
     #: builds the requested phi per 64-voxel TILE, given the tile grid and seed
     field_fn: Callable[[tuple[int, int, int], int], np.ndarray] | None = None
     #: builds the requested specimen envelope at VOXEL resolution
@@ -483,8 +475,10 @@ def sampler_cases(repo=None) -> list[CaseSpec]:
 
 
 POROSITY_TARGETS = (0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10)
-#: Above the training range (phi clamps at 0.107), so it is reported as a
-#: failure mode and never enters the dose-response fit.
+#: Above the training range of the split_v3 store (max patch phi 0.107), so it
+#: is reported separately and never enters the dose-response fit. The request
+#: is NOT clamped; its manifest says whether it is outside the run store's own
+#: train range and at which percentile.
 OFF_MANIFOLD_TARGET = 0.15
 
 
@@ -1133,24 +1127,13 @@ OOD_SEQUENCES = {
 #: two cases and not two sets.
 OOD_PITCH_VOX = (8.0, 32.0)
 
-#: (requested phi, is the clamp lifted).  The clamp holds a request inside
-#: [POR_MIN, POR_MAX] = [0.002, 0.107] before conditioning.
-#:
-#: IT IS LIFTED FOR ALL FOUR EXTREMES, NOT ONLY THE HIGH PAIR.  cond_por is
-#: log(phi + 1e-3) standardised, and with the clamp ON the three low requests
-#: are not three requests: 0.000, 0.001 and 0.002 all condition at -0.948 sd,
-#: so the row would be one case run nine times. Lifted, they separate cleanly
-#: to -1.814 / -1.268 / -0.948 sd.
-#:
-#: 0.002 keeps the clamp because there the clamp is a no-op, which makes it the
-#: in-distribution anchor the other four are read against.
-#:
-#: The clamp is far milder at the top: 0.150 conditions at +0.264 sd beyond
-#: POR_MAX and 0.200 at +0.489. So the high pair probes a shorter distance off
-#: the manifold than the low pair does, and the two must not be read as
-#: symmetric extremes.
-OOD_POROSITY = ((0.000, False), (0.001, False), (0.002, True),
-                (0.150, False), (0.200, False))
+#: Requested porosities. No request is clamped (there is no clamp); each
+#: manifest records where the request sits against the run store's train patch
+#: porosity (``porosity_request``: outside the training range or not, and its
+#: train percentile). cond_por is log(phi + 1e-3) standardised, so the low
+#: requests are further apart in cond_por than the high ones and the two ends
+#: must not be read as symmetric extremes.
+OOD_POROSITY = (0.000, 0.001, 0.002, 0.150, 0.200)
 
 #: Isotropic correlation lengths, voxels. Production is (79, 414, 901).
 OOD_CORR_VOX = (16.0, 64.0, 512.0)
@@ -1177,7 +1160,7 @@ def ood_conditioning_cases(repo=None) -> list[CaseSpec]:
 
       1. stacking ORDER, with every angle inside the trained set
       2. ply PITCH, above and below the two trained pitches
-      3. requested POROSITY, below and above the clamped training range
+      3. requested POROSITY, at and beyond the ends of the training range
       4. the field's CORRELATION LENGTH
 
     Pore size and shape are NOT measured here; the author analyses those with
@@ -1211,15 +1194,13 @@ def ood_conditioning_cases(repo=None) -> list[CaseSpec]:
                        "n_ply_blocks": int(np.ceil(SHAPE_LARGE[0] / pitch)),
                        "trained_pitches_vox": [10.0, pitch_a]})
 
-    # -- 3. requested porosity, below and above the clamped range ------------
-    for phi, clamped in OOD_POROSITY:
+    # -- 3. requested porosity, at and beyond the ends of the training range -
+    for phi in OOD_POROSITY:
         for seed in SEEDS:
             add(f"phi{phi:g}_seed{seed}", "porosity",
                 volume_shape=SHAPE_CHUNK, seed=seed, layup=plies_a,
                 ply_thickness_vox=pitch_a, target_phi=phi,
-                clamp_porosity=clamped,
-                notes={"requested_phi": phi, "clamp_lifted": not clamped,
-                       "in_training_range": POR_MIN <= phi <= POR_MAX})
+                notes={"requested_phi": phi})
 
     # -- 4. the field's correlation length -----------------------------------
     for length in OOD_CORR_VOX:

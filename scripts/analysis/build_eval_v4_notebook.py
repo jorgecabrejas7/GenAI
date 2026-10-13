@@ -1075,11 +1075,10 @@ asks for things the data never showed, while staying inside what the conditionin
 1. **Unseen stacking sequences** of the same four angles (four permutations, none equal to a trained one).
 2. **Ply pitch** 8 and 32 voxels, i.e. 24 thin or 6 thick plies filling the 192-voxel depth (the trained pitches are about
    10 and 19.6 voxels, so 8 sits just below the thinner one and 32 well above the thicker one).
-3. **Porosity extremes**: 0, 0.001 and 0.15, 0.20 with the conditioning clamp lifted, and 0.002 as the in-distribution
-   anchor (in production every request is clamped to the training range 0.002–0.107; lifting it shows what the model does
-   when truly extrapolating). The two ends are not symmetric: the conditioning is log(φ + 0.001), so the low pair is
-   further off the training range (0.9 sd) than the high pair (0.5 sd). Every such volume carries `porosity_clamped: false`
-   in its manifest so it can never be mistaken for an in-range one.
+3. **Porosity extremes**: 0, 0.001, 0.002, 0.15 and 0.20. No request is ever clamped; each manifest's
+   `porosity_request` says whether the request is outside the run store's train patch porosity range and at which
+   train percentile it sits, so an out-of-range volume can never be mistaken for an in-range one. The two ends are not
+   symmetric: the conditioning is log(φ + 0.001), which spreads the low requests and compresses the high ones.
 4. **Field correlation lengths** 16, 64 and 512 voxels on the coherent-field case.
 The readers and metrics are the ones of the main eval; their floors are printed. Pore sizes and shapes are analysed
 separately with the author's own program, not here.
@@ -1097,14 +1096,14 @@ else:
         L = readers or {}
         rows.append({"case": c.get("case"), "group": (c.get("notes") or {}).get("group") or str(c.get("case", "")).split("_")[0], "seed": c.get("seed"),
                      "φ req": c.get("requested_global_phi"), "φ delivered": P.get("delivered_phi", pf.get("phi_pore")), "|err|": P.get("abs_error"),
-                     "clamp lifted": (c.get("porosity_clamped") is False) if "porosity_clamped" in c else (c.get("notes") or {}).get("clamp_lifted"),
+                     "outside train range": ((c.get("porosity_request") or {}).get("global") or {}).get("outside_training_range"),
                      "fft |err| deg": (L.get("fft_slice") or {}).get("median_abs_error_deg"), "fft 4-class": (L.get("fft_slice") or {}).get("strict_class_accuracy"),
                      "pore_axes |err| deg": (L.get("pore_axes") or {}).get("median_abs_error_deg"), "pore_axes 4-class": (L.get("pore_axes") or {}).get("strict_class_accuracy"),
                      "corr req vox": c.get("requested_corr_vox"),
                      "local slope": (c.get("local_obedience") or c.get("local") or {}).get("within_volume_slope"), "local R2": (c.get("local_obedience") or c.get("local") or {}).get("within_volume_r2"),
                      "req cell sd": (c.get("local_obedience") or {}).get("requested_cell_sd"), "failed": (c.get("failure") or {}).get("failed")})
     OT = pd.DataFrame(rows); display(OT.round(4))
-    note("Layup floors on real scans: fft_slice 8.2° / 74 %, pore_axes 4.2° / 86 %. Porosity gate ±0.005. A clamp-lifted row is a failure mode by design.")
+    note("Layup floors on real scans: fft_slice 8.2° / 74 %, pore_axes 4.2° / 86 %. Porosity gate ±0.005. A row outside the training range is a generalisation test, not a gated result.")
     lay = OT[OT["fft |err| deg"].notna()]
     if len(lay):
         fig = go.Figure()
@@ -1117,13 +1116,13 @@ else:
     if len(por):
         fig = go.Figure(go.Scatter(x=por["φ req"], y=por["φ delivered"], mode="markers", text=por["case"], marker=dict(size=9)))
         fig.add_trace(go.Scatter(x=[0, 0.2], y=[0, 0.2], mode="lines", name="y = x", line=dict(dash="dash")))
-        fig.update_layout(title="Porosity extremes: delivered vs requested (clamp lifted where marked)", xaxis_title="requested", yaxis_title="delivered", height=380); fig.show()
+        fig.update_layout(title="Porosity extremes: delivered vs requested (no clamp; outside-training-range rows marked)", xaxis_title="requested", yaxis_title="delivered", height=380); fig.show()
 ''')
     md("""
 **How to read it.** Unseen sequences should read back as well as the trained ones if the orientation conditioning is
 genuinely continuous (it is fed as cos 2θ and sin 2θ per depth plane, so nothing in the model ties it to the two trained
 orders). Thinner plies push against the readers' own resolution: compare with B16 at 16 voxels in the main layup table.
-For porosity, the dots should follow the dashed line down to 0; above 0.107 with the clamp lifted we expect saturation
+For porosity, the dots should follow the dashed line down to 0; beyond the train range we expect saturation
 or artefacts, and either is a result to report. For the field scales, a 16-voxel field is below the window size and cannot
 be followed; 512 is above the chunk and tests the sampled-field path at part scale.
 """)
@@ -1520,8 +1519,8 @@ def build_porosity_global() -> None:
 **How the request enters the model.** The target porosity is one number, φ. It is turned into log φ, standardised,
 and injected into every layer of the denoiser (*FiLM* conditioning: it scales and shifts the feature maps). During
 training the value came from the label of the training patch, so the model learned "this much conditioning ⇒ this many
-pore voxels". The request is *clamped* at φ = 0.107, the top of the training range; 0.15 is deliberately beyond it and
-shows what happens off the training manifold.
+pore voxels". The request is never clamped; 0.15 is deliberately beyond the dose-response targets, and its manifest says
+whether it is outside the train patch porosity range and at which percentile.
 
 **The measurement.** For each request (8 levels × 2 step counts × 3 seeds) the delivered φ is pore/material in the label.
 The plot is requested (x) against delivered (y); perfect control is the diagonal. The grey band is ±0.005. The slope of
@@ -1539,7 +1538,7 @@ else:
     xs = np.linspace(0, 0.16, 50)
     fig.add_scatter(x=xs, y=xs, mode="lines", name="y = x", line=dict(color="black", width=1))
     fig.add_scatter(x=np.r_[xs, xs[::-1]], y=np.r_[xs + POROSITY_GATE, (xs - POROSITY_GATE)[::-1]], fill="toself", fillcolor="rgba(120,120,120,0.15)", line=dict(width=0), name="±0.005 gate")
-    fig.add_vline(x=0.107, line_dash="dot", annotation_text="clamp 0.107")
+    fig.add_vline(x=0.107, line_dash="dot", annotation_text="split_v3 train max 0.107")
     fig.update_layout(title="Dose–response: requested vs delivered porosity", height=480); fig.show()
     ins = PG[PG["requested_global_phi"] < 0.12]
     for steps, gg in ins.groupby("ddim_steps"):
@@ -1559,9 +1558,9 @@ if len(PG):
     fig.update_layout(title="Residual per requested level (three seeds)", height=400); fig.show()
 ''')
     md("""
-**Off-manifold request 0.15.** The conditioning value is clamped at 0.107, so the model is asked for 0.107 while the
-table compares to 0.15. This row is a failure mode by design; the questions are whether the volume stays sane
-(no interior air, no collapse) and what porosity it settles at.
+**Request 0.15.** Generated as asked (no clamp); `porosity_request` says whether it is outside the train patch
+porosity range. The questions are whether the volume stays sane (no interior air, no collapse) and what porosity it
+settles at.
 """)
     code(r'''
 if len(PG):
@@ -1580,7 +1579,7 @@ if R is None:
 else:
     print("dose_response:", {k: (round(v, 4) if isinstance(v, float) else v) for k, v in R["dose_response"].items()})
     display(cells_table(R["levels"], ["requested", "n_seeds", "delivered", "abs_error", "within_gate", "failure_rate"]))
-    print("off-manifold:", {k: R["off_manifold"][k] for k in ("requested", "conditioned_phi_after_clamp", "n_seeds")}, ms(R["off_manifold"]["delivered"]))
+    print("off-manifold:", {k: R["off_manifold"][k] for k in ("requested", "porosity_request", "n_seeds")}, ms(R["off_manifold"]["delivered"]))
     show_findings("porosity_global")
 ''')
 

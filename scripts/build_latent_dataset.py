@@ -57,7 +57,8 @@ On-disk layout produced (default output: <data_root>/latents_<exp>z<z>/)
 data/<split>/latents_r08z8/
 ├── metadata.json            — VAE checkpoint + resolved config copy & sha256,
 │                              latent shape, storage record, the scalar
-│                              train-split sigma_hat, the `material` block,
+│                              train-split sigma_hat, the train patch
+│                              porosity distribution, the `material` block,
 │                              creation date, per-split counts
 ├── train/
 │   ├── latents.bin          — float16 C-contiguous memmap, shape
@@ -265,6 +266,7 @@ def main() -> None:
 
     autocast_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
+    from poregen.diffusion.conditioning import porosity_distribution
     from poregen.diffusion.latents import NORM_RULE, SampledMoments
 
     # Scalar moments of the SAMPLED train latents (float64 accumulators).
@@ -272,6 +274,7 @@ def main() -> None:
     eps_gen = torch.Generator(device=device).manual_seed(NORM_EPS_SEED)
 
     split_counts: dict[str, int] = {}
+    train_phi: np.ndarray | None = None
 
     for split in SPLITS:
         ds = _build_split_dataset(data_root, split)
@@ -374,12 +377,18 @@ def main() -> None:
         ].reset_index(drop=True)
         df_split.insert(0, "source_row", source_rows)
         df_split["phi"] = phi_all
+        if split == "train":
+            train_phi = phi_all.copy()
         df_split.to_parquet(str(split_dir / "index.parquet"), index=False)
 
         max_dphi = float(np.abs(df_split["phi"] - df_split["porosity"]).max()) if n else 0.0
         logger.info("[%s] index.parquet written  max|phi - porosity| = %.2e", split, max_dphi)
 
     mu_hat, sigma_hat = moments.result()
+    train_porosity = porosity_distribution(train_phi)
+    logger.info("Train patch porosity: min %.5f  max %.5f  zero-pore %.4f",
+                train_porosity["min"], train_porosity["max"],
+                train_porosity["frac_zero_pore"])
     logger.info("Sampled train latents: mu_hat=%.6f  sigma_hat=%.6f  (%d elements)",
                 mu_hat, sigma_hat, moments.n)
 
@@ -435,6 +444,9 @@ def main() -> None:
             "phi_definition": "fraction of the patch labelled pore (voxel label 1)",
         },
         "voxel_size_um": VOXEL_SIZE_UM,
+        # What the training set contains. A generation request is never
+        # clamped to it; eval_v4 reports every request against it.
+        "train_porosity": train_porosity,
         "splits": split_counts,
         "limit": args.limit,
         "normalization": {

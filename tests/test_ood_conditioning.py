@@ -3,7 +3,8 @@
 Three claims carry this assessment and each is checked here rather than
 asserted in a docstring: no sequence introduces an angle the model never saw,
 no sequence is secretly one of the trained ones, and the porosity extremes are
-actually distinct requests once the clamp is lifted.
+actually distinct requests (no request is clamped), and a request is
+reported against the train porosity, never altered.
 """
 
 from __future__ import annotations
@@ -11,7 +12,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from poregen.diffusion.conditioning import POR_MAX, POR_MIN, porosity_to_cond
+from poregen.diffusion.conditioning import (
+    check_physical_porosity,
+    porosity_distribution,
+    porosity_request_report,
+    porosity_to_cond,
+)
 from poregen.eval_v4.cases import (
     OOD_CORR_VOX,
     OOD_PITCH_VOX,
@@ -95,42 +101,64 @@ class TestPitch:
 
 class TestPorosityExtremes:
 
-    def test_the_clamp_is_lifted_exactly_where_it_would_destroy_the_request(self):
-        lifted = {phi for phi, clamped in OOD_POROSITY if not clamped}
-        kept = {phi for phi, clamped in OOD_POROSITY if clamped}
-        assert lifted == {0.000, 0.001, 0.150, 0.200}
-        # 0.002 IS POR_MIN, so the clamp is a no-op there and the case is the
-        # in-distribution anchor the other four are read against.
-        assert kept == {0.002}
-        assert all(POR_MIN <= p <= POR_MAX for p in kept)
+    def test_no_request_is_clamped_and_the_five_are_distinct(self):
+        assert OOD_POROSITY == (0.000, 0.001, 0.002, 0.150, 0.200)
+        for c in build_cases("ood_conditioning"):
+            assert not hasattr(c, "clamp_porosity")
 
-    def test_with_the_clamp_on_the_three_low_requests_are_one_request(self):
-        """Why the brief's clamp lift had to extend to the low pair.
-
-        The brief lifted the clamp for 0.15 and 0.20 only. Left clamped, the
-        low row is not three requests: it is 0.002 generated nine times.
-        """
-        clamped = {float(np.clip(p, POR_MIN, POR_MAX)) for p in (0.000, 0.001, 0.002)}
-        assert clamped == {POR_MIN}
-
-    def test_lifted_the_low_requests_separate_in_the_conditioning(self):
+    def test_the_low_requests_separate_in_the_conditioning(self):
         cond = [float(porosity_to_cond(p, POR_LOG_STATS)) for p in (0.000, 0.001, 0.002)]
         assert cond[0] < cond[1] < cond[2]
         # Each step is a real distance in the training distribution's own units.
         assert cond[1] - cond[0] > 0.5
         assert cond[2] - cond[1] > 0.3
 
-    def test_the_clamp_is_far_milder_at_the_top_than_at_the_bottom(self):
-        """So the two extremes must not be read as symmetric.
-
-        cond_por is log(phi + 1e-3): the top of the range is compressed.
-        """
+    def test_the_log_compresses_the_top_more_than_the_bottom(self):
+        """So the two extremes must not be read as symmetric."""
         c = {p: float(porosity_to_cond(p, POR_LOG_STATS))
              for p in (0.000, 0.002, 0.107, 0.150, 0.200)}
-        low_gap = c[0.002] - c[0.000]      # what the clamp erases at the bottom
-        high_gap = c[0.200] - c[0.107]     # what it erases at the top
-        assert low_gap > high_gap
-        assert high_gap < 0.6
+        assert c[0.002] - c[0.000] > c[0.200] - c[0.107]
+
+
+class TestPorosityRequestReport:
+
+    DIST = porosity_distribution(np.r_[np.zeros(100), np.linspace(0.001, 0.1, 900)])
+
+    def test_the_distribution_records_range_percentiles_and_zero_fraction(self):
+        d = self.DIST
+        assert d["min"] == 0.0 and d["max"] == pytest.approx(0.1)
+        assert d["frac_zero_pore"] == pytest.approx(0.1)
+        assert set(d["percentiles"]) == {"0.5", "1", "5", "50", "95", "99", "99.5"}
+        assert d["n_patches"] == 1000
+
+    def test_a_request_outside_the_range_is_flagged_never_altered(self):
+        r = porosity_request_report(self.DIST, global_phi=0.2)
+        assert r["global"]["phi"] == 0.2
+        assert r["global"]["outside_training_range"] is True
+        assert r["global"]["train_percentile"] == 100.0
+        assert r["outside_training_range"] is True
+
+    def test_a_request_inside_gets_its_percentile(self):
+        r = porosity_request_report(self.DIST, global_phi=0.0505)
+        assert r["global"]["outside_training_range"] is False
+        assert r["global"]["train_percentile"] == pytest.approx(55.0, abs=1.0)
+        assert r["outside_training_range"] is False
+        # phi = 0 sits at the top of the zero-pore atom, not at 0.
+        assert porosity_request_report(self.DIST, global_phi=0.0)["global"][
+            "train_percentile"] == pytest.approx(10.0, abs=0.6)
+
+    def test_a_field_is_reported_tile_by_tile(self):
+        f = np.array([[[0.01, 0.2], [0.05, 0.05]]])
+        r = porosity_request_report(self.DIST, tile_field=f)
+        assert r["field"]["frac_tiles_outside"] == 0.25
+        assert r["field"]["max"] == 0.2
+        assert r["outside_training_range"] is True
+
+    def test_only_the_physical_bound_is_enforced(self):
+        check_physical_porosity([0.0, 0.5, 1.0])
+        for bad in (-0.01, 1.01, float("nan")):
+            with pytest.raises(ValueError):
+                check_physical_porosity(bad)
 
 
 class TestCaseList:
@@ -161,11 +189,6 @@ class TestCaseList:
                 continue
             assert min(c.volume_shape[1], c.volume_shape[2]) >= LAYUP_WINDOW_VOX, c.name
 
-    def test_only_the_porosity_group_ever_lifts_the_clamp(self):
-        for c in build_cases("ood_conditioning"):
-            if c.notes["group"] != "porosity":
-                assert c.clamp_porosity is True, c.name
-
     def test_the_correlation_lengths_differ_from_production(self):
         """Isotropic is itself off-manifold — the measured lengths are
         (79, 414, 901). The case asks two things at once and must say so."""
@@ -193,7 +216,10 @@ LABEL_MATERIAL, LABEL_PORE, LABEL_AIR = 0, 1, 2
 FAKE_SHAPE = (192, 192, 192)
 
 
-def _write_ood(root, name, *, group, phi, clamped=True, pitch=19.6,
+_TRAIN_DIST = porosity_distribution(np.linspace(0.0, 0.107, 1000))
+
+
+def _write_ood(root, name, *, group, phi, pitch=19.6,
                layup=(45, -45, 90, 0), field=None, notes=None, seed=101):
     rng = np.random.default_rng(seed)
     xct = np.clip(120 + 6 * rng.standard_normal(FAKE_SHAPE), 0, 255).astype(np.uint8)
@@ -206,7 +232,8 @@ def _write_ood(root, name, *, group, phi, clamped=True, pitch=19.6,
         decode="overlapped", decode_overlap=32, s_por=1.0, s_nb=1.0, seed=seed,
         objective="v", cfg_rescale=0.0, requested_global_phi=phi,
         requested_layup=layup, requested_ply_thickness_vox=pitch,
-        requested_material="full", porosity_clamped=clamped,
+        requested_material="full",
+        porosity_request=porosity_request_report(_TRAIN_DIST, global_phi=phi),
         requested_field=None if field is None else FIELD_NPY,
         wall_time_s=1.0, peak_gpu_memory_bytes=1 << 30,
         notes={"group": group, "exploratory": True,
@@ -224,12 +251,9 @@ def ood_measured(tmp_path_factory):
                layup=(0, 90, 90, 0), notes={"sequence": "seq_crossply"})
     _write_ood(root, "pitch32_seed101", group="pitch", phi=0.03, pitch=32.0,
                notes={"pitch_vox": 32.0})
-    _write_ood(root, "phi0_seed101", group="porosity", phi=0.0, clamped=False,
-               notes={"clamp_lifted": True})
-    _write_ood(root, "phi0.2_seed101", group="porosity", phi=0.2, clamped=False,
-               notes={"clamp_lifted": True})
-    _write_ood(root, "phi0.002_seed101", group="porosity", phi=0.002,
-               clamped=True, notes={"clamp_lifted": False})
+    _write_ood(root, "phi0_seed101", group="porosity", phi=0.0)
+    _write_ood(root, "phi0.2_seed101", group="porosity", phi=0.2)
+    _write_ood(root, "phi0.002_seed101", group="porosity", phi=0.002)
     grid = tuple(s // 64 for s in FAKE_SHAPE)
     _write_ood(root, "corr16", group="correlation", phi=0.03,
                field=np.full(grid, 0.03, np.float32),
@@ -250,15 +274,13 @@ class TestMeasurer:
                         "conditioning", "wall_time_s", "porosity_error"):
                 assert key in row, f"{row['case']} is missing {key}"
 
-    def test_the_clamp_is_reported_per_case_and_not_inferred(self, ood_measured):
+    def test_the_training_range_is_reported_per_case_and_not_inferred(self, ood_measured):
         by = {r["case"]: r["conditioning"] for r in ood_measured["per_case"]}
-        assert by["phi0_seed101"]["porosity_clamped"] is False
-        assert by["phi0_seed101"]["phi_conditioned"] == 0.0
-        assert by["phi0_seed101"]["phi_if_clamped"] == POR_MIN
-        assert by["phi0_seed101"]["clamp_changed_the_request"] is True
-        # 0.002 IS POR_MIN, so holding it changes nothing.
-        assert by["phi0.002_seed101"]["porosity_clamped"] is True
-        assert by["phi0.002_seed101"]["phi_conditioned"] == pytest.approx(0.002)
+        assert by["phi0.2_seed101"]["outside_training_range"] is True
+        assert by["phi0.2_seed101"]["requested_phi"] == 0.2
+        assert by["phi0.002_seed101"]["outside_training_range"] is False
+        assert by["phi0_seed101"]["outside_training_range"] is False
+        assert by["phi0.2_seed101"]["train_range"] == pytest.approx([0.0, 0.107])
 
     def test_cond_por_says_how_far_off_the_manifold_each_request_is(self, ood_measured):
         by = {r["case"]: r["conditioning"]["cond_por"]

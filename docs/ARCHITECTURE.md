@@ -331,14 +331,30 @@ log-odds, against one shared interior baseline.
 window is placed every `window_stride` voxels, so at the default stride 32 it
 straddles up to eight tiles. A window's requested φ is the tile field averaged
 over the window's own voxel footprint, each tile weighted by the VOLUME of the
-window it covers (`sampler.window_tile_mean`); the mean is then clamped to
-`[POR_MIN, POR_MAX]` and transformed by `porosity_to_cond`. The average is on
+window it covers (`sampler.window_tile_mean`); the mean is then transformed by
+`porosity_to_cond`. The average is on
 RAW pore fractions and never on `cond_por`: that transform is a log, and the
 mean of the transform is not the transform of the mean. Sampling the tile that
 holds the window CENTRE instead — what the sampler did until this fix — handed a
 window spanning a 0.01 tile and a 0.05 tile one of the two extremes, so the
 50 %-overlap windows on either side of a field step both asked for the wrong
 thing and the requested step was reproduced as a wider, offset one.
+
+### No training-range clamp on a request
+
+A porosity request is never clamped to the training range (the author,
+2026-10-13): a request outside it is a legitimate generalisation test, like an
+unknown stacking sequence or shape. The sampler and `porosity_field` enforce
+only the physical bound `0 ≤ φ ≤ 1` (`conditioning.check_physical_porosity`
+refuses anything else). The store build records the TRAIN patch porosity
+distribution in `metadata["train_porosity"]` (min, max, percentiles
+0.5/1/5/50/95/99/99.5, zero-pore fraction, and a 0.5 %-step quantile grid),
+measured on the patch labels (full-patch φ). eval_v4 writes
+`conditioning.porosity_request_report` into every manifest
+(`porosity_request`): the global request's train percentile, the field's
+range, and `outside_training_range` when any value leaves
+`[train min, train max]`. Note the request is MATERIAL porosity and the
+recorded distribution is full-patch φ; for interior windows the two agree.
 
 ### Material porosity in, full-patch φ out
 
@@ -367,10 +383,8 @@ cond_phi = phi_request × (material fraction of the window)
 where the material fraction is the mean of `material_map` over the window's
 latent cells — every cell covers the same `downsample³` voxels, so that mean IS
 the volume fraction of the window inside the specimen. The scale is applied to
-the value `window_tile_mean` returns, **before** the `[POR_MIN, POR_MAX]` clip
-and **before** `porosity_to_cond`: clipping first would turn a legal request
-(0.2 material porosity at half material = 0.1 full-patch) into a clipped one, and
-`porosity_to_cond` is a log, where a scale becomes an offset. A fully interior
+the value `window_tile_mean` returns, **before** `porosity_to_cond`, which is a
+log, where a scale becomes an offset. A fully interior
 window has fraction 1.0 and is untouched, so nothing changes for a volume with no
 material map.
 

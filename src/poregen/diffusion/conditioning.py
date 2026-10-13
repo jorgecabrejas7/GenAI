@@ -10,7 +10,8 @@ side (latent store construction, ``LatentDataset``) and the model/sampler side
 * the grid index of a patch (:func:`grid_index`),
 * the six per-face distances to the specimen box (:data:`DIST6_DIRS`,
   :func:`dist6_from_box`),
-* the porosity transform (:func:`porosity_to_cond`),
+* the porosity transform (:func:`porosity_to_cond`) and the report of a
+  request against the train porosity (:func:`porosity_request_report`),
 * the geometry guard that keeps neighbours from leaking target content
   (:func:`validate_neighbour_geometry`).
 
@@ -96,10 +97,88 @@ DIST_CAP = 64.0
 # (mean, std) measured on the train split and recorded in the store metadata.
 POR_LOG_EPS = 1e-3
 
-# Porosity conditioning is clamped to the training distribution range (EDA
-# ground truth: min 0.002, max 0.107) so generation never extrapolates.
-POR_MIN = 0.002
-POR_MAX = 0.107
+# A porosity request is NEVER clamped to the training range: a request outside
+# it is a legitimate generalisation test (the author, 2026-10-13), like an
+# unknown stacking sequence or shape.  The only bound is physical, 0 <= phi <= 1.
+# What the training set contained is recorded by the store build
+# (:func:`porosity_distribution`, ``metadata["train_porosity"]``) and every
+# request is REPORTED against it (:func:`porosity_request_report`).
+
+#: Percentiles of the train patch porosity recorded by name in the store.
+POR_PERCENTILES = (0.5, 1.0, 5.0, 50.0, 95.0, 99.0, 99.5)
+#: The full quantile grid the store records, so the percentile of any request
+#: can be read back by interpolation: 0, 0.5, 1, ..., 100.
+POR_QUANTILE_LEVELS = tuple(float(v) for v in np.arange(0.0, 100.0 + 1e-9, 0.5))
+
+
+def check_physical_porosity(phi, what: str = "porosity request") -> None:
+    """Raise unless every value is a physical pore fraction, 0 <= phi <= 1."""
+    a = np.asarray(phi, dtype=np.float64)
+    if not np.all(np.isfinite(a)) or a.min(initial=0.0) < 0.0 or a.max(initial=0.0) > 1.0:
+        raise ValueError(
+            f"{what} must lie in [0, 1] (a pore volume fraction); got "
+            f"min {np.nanmin(a):.4g}, max {np.nanmax(a):.4g}.")
+
+
+def porosity_distribution(phi: np.ndarray) -> dict:
+    """The train patch porosity distribution, as the store records it.
+
+    ``phi`` is the per-patch pore fraction measured on the patch LABELS
+    (``label == 1`` over the whole 64-cubed patch).
+    """
+    phi = np.asarray(phi, dtype=np.float64)
+    if phi.size == 0:
+        raise ValueError("no train patch: the porosity distribution is undefined")
+    return {
+        "n_patches": int(phi.size),
+        "min": float(phi.min()),
+        "max": float(phi.max()),
+        "percentiles": {f"{q:g}": float(np.percentile(phi, q)) for q in POR_PERCENTILES},
+        "frac_zero_pore": float(np.mean(phi == 0.0)),
+        "quantile_levels": list(POR_QUANTILE_LEVELS),
+        "quantiles": [float(v) for v in np.percentile(phi, POR_QUANTILE_LEVELS)],
+        "definition": ("full-patch pore fraction (voxel label == 1) of every TRAIN "
+                       "patch, measured on the patch labels"),
+    }
+
+
+def train_percentile(phi: float, dist: dict) -> float:
+    """Percentile of ``phi`` in the recorded train distribution (0..100)."""
+    q = np.asarray(dist["quantiles"], dtype=np.float64)
+    lv = np.asarray(dist["quantile_levels"], dtype=np.float64)
+    # Quantiles repeat where the distribution has an atom (phi = 0); take the
+    # highest level a value reaches, so phi = 0 reads as the zero-pore fraction.
+    if phi < q[0]:
+        return 0.0
+    if phi > q[-1]:
+        return 100.0
+    return float(lv[np.searchsorted(q, phi, side="right") - 1]
+                 if np.any(q == phi) else np.interp(phi, q, lv))
+
+
+def porosity_request_report(dist: dict, global_phi=None, tile_field=None) -> dict:
+    """Where a request sits against the train distribution.  Never alters it.
+
+    A value outside ``[train min, train max]`` is flagged "outside training
+    range"; the global request also gets its train percentile.  Both the global
+    request and, when one is given, the per-tile field are reported.
+    """
+    lo, hi = float(dist["min"]), float(dist["max"])
+    out: dict = {"train_min": lo, "train_max": hi, "global": None, "field": None}
+    if global_phi is not None:
+        g = float(global_phi)
+        out["global"] = {"phi": g, "outside_training_range": not (lo <= g <= hi),
+                         "train_percentile": train_percentile(g, dist)}
+    if tile_field is not None:
+        f = np.asarray(tile_field, dtype=np.float64)
+        outside = (f < lo) | (f > hi)
+        out["field"] = {"min": float(f.min()), "max": float(f.max()),
+                        "frac_tiles_outside": float(outside.mean()),
+                        "outside_training_range": bool(outside.any())}
+    out["outside_training_range"] = bool(
+        (out["global"] or {}).get("outside_training_range")
+        or (out["field"] or {}).get("outside_training_range"))
+    return out
 
 
 # ── geometry guard: neighbours must not share voxels with the target ──────────

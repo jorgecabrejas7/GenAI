@@ -23,10 +23,12 @@ Recipe (exactly as prescribed):
    accepted — the spec is draw → smooth → rescale-mean, not
    variance-matching.
 3. Rescale the smoothed field so its MEAN equals ``G``, clamp to the
-   training phi range [0.002, 0.107] (D39), rescale the mean once more,
-   then clamp again.  If the target sits near a range edge the final clamp
-   can leave a small residual mean error; ``build_porosity_field`` does not
-   iterate further.
+   PHYSICAL range [0, 1], rescale the mean once more, then clamp again.
+   There is no training-range clamp: a request outside the training
+   distribution is a legitimate generalisation test (the author,
+   2026-10-13), and eval_v4 reports it as such instead of altering it.  If
+   the target sits near 1 the final clamp can leave a small residual mean
+   error; ``build_porosity_field`` does not iterate further.
 """
 
 from __future__ import annotations
@@ -38,11 +40,11 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-# Training phi range (D39).
 logger = logging.getLogger(__name__)
 
-PHI_MIN = 0.002
-PHI_MAX = 0.107
+# The only bound on a local porosity: it is a pore volume fraction.
+PHI_MIN = 0.0
+PHI_MAX = 1.0
 
 # Default artefact locations, relative to the repo root.
 # THE _v3 FITS, AND WHY THE ORIGINALS ARE NOT USED.
@@ -166,9 +168,10 @@ def build_porosity_field(
 ) -> np.ndarray:
     """Build a coherent (gz, gy, gx) field of local porosities with mean ~target.
 
-    Deterministic per ``seed``.  Values lie in [PHI_MIN, PHI_MAX]; the mean
-    equals ``target`` exactly unless the final clamp bites (target near a
-    range edge), in which case a small residual error remains.
+    Deterministic per ``seed``.  Values lie in the physical range [0, 1]; the
+    mean equals ``target`` exactly unless the final clamp bites (target near
+    1), in which case a small residual error remains.  ``target`` 0 gives the
+    all-zero field.
 
     TWO PROPERTIES OF THE DELIVERED FIELD, BOTH MEASURED, NEITHER OBVIOUS.
 
@@ -194,6 +197,10 @@ def build_porosity_field(
        T-E marginal — it is drawn from it and then smoothed, which is a
        different distribution.
     """
+    if not 0.0 <= float(target) <= 1.0:
+        raise ValueError(f"target porosity {target} is not a pore fraction in [0, 1]")
+    if float(target) == 0.0:
+        return np.zeros(grid_shape, dtype=np.float64)
     rng = np.random.default_rng(seed)
     u = rng.uniform(0.0, 1.0, size=grid_shape)
     field = _draw_marginal(float(target), sampler, u)

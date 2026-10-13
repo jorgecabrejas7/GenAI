@@ -29,9 +29,7 @@ import numpy as np
 from poregen.eval_v4 import field_stats as FS
 from poregen.eval_v4 import metrics as M
 from poregen.eval_v4 import stress_geometry as SG
-from poregen.diffusion.conditioning import POR_MAX as OOD_POR_MAX
 from poregen.diffusion.conditioning import porosity_to_cond
-from poregen.diffusion.conditioning import POR_MIN as OOD_POR_MIN
 from poregen.eval_v4.cases import (
     ASSEMBLY_OFFSETS,
     ASSEMBLY_REGION,
@@ -69,11 +67,11 @@ def case_identity(case: Case) -> dict:
         "weights": m.weights,
         "checkpoint_step": m.checkpoint_step,
         "requested_global_phi": m.requested_global_phi,
-        # False when the training-range clamp was lifted. In every row of every
-        # assessment, because a volume generated outside the training range is
-        # not comparable with one generated inside it and no reader should have
-        # to go back to the manifest to find out which it is holding.
-        "porosity_clamped": m.porosity_clamped,
+        # Where the request sits against the train patch porosity: in every
+        # row of every assessment, because a volume generated outside the
+        # training range is a generalisation test and no reader should have to
+        # go back to the manifest to find out which kind it is holding.
+        "porosity_request": m.porosity_request,
         "wall_time_s": m.wall_time_s,
         "peak_gpu_memory_bytes": m.peak_gpu_memory_bytes,
         "git_commit": m.git_commit,
@@ -224,12 +222,12 @@ def measure_porosity_global(root, repo) -> dict:
         "off_manifold": {
             "requested": OFF_MANIFOLD_TARGET,
             "note": (
-                "Above the training range: cond_por clamps at phi = 0.107, so this "
-                "row is a failure mode and is excluded from the fit."
+                "A request beyond the dose-response targets, generated as asked "
+                "(no clamp) and excluded from the fit. porosity_request says "
+                "whether it is outside the run store's train patch porosity and "
+                "at which train percentile."
             ),
-            "conditioned_phi_after_clamp": (
-                off[0]["notes"].get("conditioned_phi_after_clamp") if off else None
-            ),
+            "porosity_request": off[0].get("porosity_request") if off else None,
             "delivered": _agg(off, ("porosity", "delivered_phi")),
             "abs_error": _agg(off, ("porosity", "abs_error")),
             "air_fraction_interior": _agg(off, ("air_fraction_interior",)),
@@ -1732,22 +1730,20 @@ def measure_ood_conditioning(root, repo) -> dict:
         if "porosity" in row:
             row["porosity_error"] = row["porosity"]
 
-        # What the model was actually conditioned on, and whether the clamp
-        # touched it. Without this a row at phi 0.20 cannot be told from one
-        # at 0.107, which is what the clamp would have made of it.
+        # What the model was conditioned on (the request itself: there is no
+        # clamp) and where that request sits against the train porosity.
         if m.requested_global_phi is not None:
             phi = float(m.requested_global_phi)
-            held = float(np.clip(phi, OOD_POR_MIN, OOD_POR_MAX))
+            g = (m.porosity_request or {}).get("global") or {}
             row["conditioning"] = {
                 "requested_phi": phi,
-                "porosity_clamped": m.porosity_clamped,
-                "phi_conditioned": phi if not m.porosity_clamped else held,
-                "phi_if_clamped": held,
-                "clamp_changed_the_request": bool(
-                    not m.porosity_clamped and abs(held - phi) > 1e-12),
-                "cond_por": (float(porosity_to_cond(
-                    phi if not m.porosity_clamped else held, stats))
-                    if stats else None),
+                "outside_training_range": g.get("outside_training_range"),
+                "train_percentile": g.get("train_percentile"),
+                "train_range": ([m.porosity_request["train_min"],
+                                 m.porosity_request["train_max"]]
+                                if m.porosity_request else None),
+                "cond_por": (float(porosity_to_cond(phi, stats))
+                             if stats else None),
                 "cond_por_units": (
                     "standard deviations of log(phi + 1e-3) over the train split"
                     if stats else None),
@@ -1814,16 +1810,13 @@ def measure_ood_conditioning(root, repo) -> dict:
             "conditioning, not a defect of the kind the gated assessments "
             "report, and no threshold is applied to anything in this file."
         ),
-        "clamp_note": (
-            "cond_por is log(phi + 1e-3) standardised, and the training-range "
-            f"clamp holds a request inside [{OOD_POR_MIN}, {OOD_POR_MAX}] before "
-            "conditioning. The clamp is LIFTED for the four extreme requests and "
-            "each says so in `conditioning.porosity_clamped`. It had to be lifted "
-            "at the bottom as well as the top: clamped, 0.000, 0.001 and 0.002 "
-            "all condition identically, so the low row would be one request run "
-            "nine times. The two ends are not symmetric — a log transform "
-            "compresses the top, so the clamp erases 0.87 sd at the bottom and "
-            "0.49 at the top, and 0.150 sits only +0.26 sd beyond the ceiling."
+        "range_note": (
+            "No porosity request is clamped. Each row says whether its request "
+            "is outside the run store's train patch porosity range "
+            "(`conditioning.outside_training_range`) and at which train "
+            "percentile it sits. cond_por is log(phi + 1e-3) standardised, so "
+            "the two ends are not symmetric: the log spreads the low requests "
+            "and compresses the high ones."
         ),
         "not_measured": (
             "pore size and pore shape. The author analyses those with an "

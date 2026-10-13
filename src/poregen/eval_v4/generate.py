@@ -50,7 +50,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from poregen.diffusion.conditioning import POR_MAX, POR_MIN
+from poregen.diffusion.conditioning import porosity_request_report
 from poregen.diffusion.latents import latent_scale
 from poregen.eval_v4.cases import CaseSpec
 from poregen.eval_v4.io import LATENT_DOWNSAMPLE, repo_root, save_case
@@ -293,6 +293,12 @@ class VolumeRunner:
         root, meta = resolve_latent_store(cfg, self.repo)
         check_run_store_binding(self.run_dir, meta)
         self.latents_root = root
+        if "train_porosity" not in meta:
+            raise KeyError(
+                f"{root}/metadata.json has no train_porosity: the store predates the "
+                "recorded train porosity distribution every request is reported "
+                "against. Rebuild it with scripts/build_latent_dataset.py.")
+        self.train_porosity = meta["train_porosity"]
 
         model = build_denoiser(cfg).to(self.device)
         state = torch.load(ckpt_path, map_location=self.device, weights_only=False)
@@ -380,7 +386,6 @@ class VolumeRunner:
             decode_stride=spec.decode_stride,
             neighbour_mode=spec.neighbour_mode,
             reference_latents=reference,
-            clamp_porosity=spec.clamp_porosity,
             ablate=spec.ablate,
         )
         snapped = generator._volume_shape(size_mm)
@@ -424,15 +429,16 @@ class VolumeRunner:
         p_pore = np.clip(probs[1], 1e-6, 1.0 - 1e-6)
         pore_logit = (np.log(p_pore) - np.log1p(-p_pore)).astype(np.float32)
 
-        # What the model was ACTUALLY conditioned on. With the clamp lifted
-        # that is the request itself, so the note below must not keep saying it
-        # was held — a manifest that claims a clamp which did not happen is
-        # worse than one that says nothing.
-        clamped = (
-            (float(np.clip(spec.target_phi, POR_MIN, POR_MAX))
-             if spec.clamp_porosity else float(max(spec.target_phi, 0.0)))
-            if spec.target_phi is not None else None
-        )
+        # The request reaches the model unaltered. Where it sits against the
+        # train patch porosity is REPORTED, never corrected.
+        por_report = porosity_request_report(
+            self.train_porosity, global_phi=spec.target_phi, tile_field=tile_field)
+        if por_report["outside_training_range"]:
+            logger.warning(
+                "%s: porosity request outside the training range [%.4f, %.4f] "
+                "(global %s, field %s) — generated as asked",
+                spec.name, por_report["train_min"], por_report["train_max"],
+                por_report["global"], por_report["field"])
         manifest = Manifest(
             assessment=spec.assessment,
             case=spec.name,
@@ -459,7 +465,7 @@ class VolumeRunner:
             requested_material=(
                 "requested_material.npy" if voxel_material is not None else "full"
             ),
-            porosity_clamped=spec.clamp_porosity,
+            porosity_request=por_report,
             region_offset=spec.region_offset,
             region_shape=spec.region_shape,
             wall_time_s=wall,
@@ -471,7 +477,6 @@ class VolumeRunner:
                 "latents_root": str(self.latents_root),
                 "device": str(self.device),
                 "autocast_dtype": str(self.autocast_dtype),
-                "conditioned_phi_after_clamp": clamped,
                 "neighbour_mode": spec.neighbour_mode,
                 # A sampler setting that changes the result must be in the
                 # manifest, or a trial volume is indistinguishable from a

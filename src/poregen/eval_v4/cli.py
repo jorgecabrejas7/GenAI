@@ -185,13 +185,10 @@ def cmd_generate(args) -> int:
                 f"field={'yes' if s.field_fn else 'no'} "
                 f"material={'painted' if s.material_fn else 'full'}"
                 # The dry run exists so the request list can be checked BEFORE
-                # the GPU is spent on it, and a lifted porosity clamp is the
-                # setting most worth catching there: it is what makes a case
-                # off-manifold, and it was invisible here.
-                + (" CLAMP-LIFTED" if not s.clamp_porosity else "")
-                # Same reason as the clamp: what a campaign-24 case IS lives in
+                # the GPU is spent on it: what a campaign-24 case IS lives in
                 # these three fields, and without them `ply_swap` and `ply_zero`
-                # print as the same line.
+                # print as the same line. Whether a porosity request is outside
+                # the training range is reported in each manifest at generation.
                 + (f" FED-LAYUP={s.cond_layup}" if s.cond_layup else "")
                 + (" FED-BOX-SHIFTED" if s.cond_specimen_box else "")
                 + (f" ABLATE={','.join(s.ablate)}" if s.ablate else "")

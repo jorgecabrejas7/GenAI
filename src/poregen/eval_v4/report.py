@@ -244,12 +244,16 @@ def report_porosity_global(res, root, floor) -> tuple[str, list[str]]:
         f"n {dose['n']}. Gate |error| < {dose['gate']}: "
         f"{fmt(dose['frac_within_gate'], 2)} of volumes.",
         "",
-        "## Off-manifold request (failure mode, not part of the fit)",
+        "## Request beyond the dose-response targets (not part of the fit)",
         "",
         table(
-            ["requested", "conditioned after clamp", "delivered", "|error|",
-             "air (interior)", "fail"],
-            [[fmt(off["requested"], 3), fmt(off.get("conditioned_phi_after_clamp"), 3),
+            ["requested", "outside training range", "train percentile",
+             "delivered", "|error|", "air (interior)", "fail"],
+            [[fmt(off["requested"], 3),
+              fmt(((off.get("porosity_request") or {}).get("global") or {})
+                  .get("outside_training_range")),
+              fmt(((off.get("porosity_request") or {}).get("global") or {})
+                  .get("train_percentile"), 1),
               ms(off["delivered"]), ms(off["abs_error"]),
               ms(off["air_fraction_interior"]), fmt(off.get("failure_rate"), 2)]],
         ),
@@ -1651,24 +1655,25 @@ def report_ood_conditioning(res, root, floor) -> tuple[str, list[str]]:
             rows.append([
                 r["case"],
                 fmt(c.get("requested_phi"), 3),
-                "lifted" if c.get("porosity_clamped") is False else "held",
-                fmt(c.get("phi_conditioned"), 3),
+                ("outside training range" if c.get("outside_training_range")
+                 else "inside" if c.get("outside_training_range") is False else "-"),
+                fmt(c.get("train_percentile"), 1),
                 fmt(c.get("cond_por"), 2),
                 fmt(pe.get("delivered_phi"), 4),
                 fmt(pe.get("error"), 4),
                 fmt((r.get("failure_flags") or {}).get("failed")),
             ])
         text += [
-            "### 3 — requested porosity outside the clamped range",
+            "### 3 — requested porosity at and beyond the training range",
             "",
-            res["clamp_note"],
+            res["range_note"],
             "",
             "`cond_por` is in standard deviations of the training "
             "distribution's own log-porosity, so it says HOW FAR off the "
             "manifold each request is rather than only that it is off.",
             "",
-            table(["case", "requested", "clamp", "conditioned", "cond_por (sd)",
-                   "delivered", "error", "failed"], rows),
+            table(["case", "requested", "vs training range", "train percentile",
+                   "cond_por (sd)", "delivered", "error", "failed"], rows),
             "",
             "**The 0.150 and 0.200 rows are a stated failure mode, not a "
             "target.** They ask for a porosity no training volume has, and a "
@@ -1708,9 +1713,7 @@ def report_ood_conditioning(res, root, floor) -> tuple[str, list[str]]:
 
 
 def _fig_ood_conditioning(res, root) -> list[str]:
-    """Delivered against requested porosity, with the clamp drawn on it."""
-    from poregen.diffusion.conditioning import POR_MAX, POR_MIN  # noqa: PLC0415
-
+    """Delivered against requested porosity, with the training range drawn on it."""
     sel = [r for r in res["per_case"] if r.get("group") == "porosity"]
     if not sel:
         return []
@@ -1724,17 +1727,20 @@ def _fig_ood_conditioning(res, root) -> list[str]:
         logger.warning("ood_conditioning: no delivered porosity to plot")
         plt.close(fig)
         return []
-    lifted = np.array([(r["conditioning"] or {}).get("porosity_clamped") is False
-                       for r in sel])
+    outside = np.array([bool((r["conditioning"] or {}).get("outside_training_range"))
+                        for r in sel])
+    train_range = next(((r["conditioning"] or {}).get("train_range") for r in sel
+                        if (r["conditioning"] or {}).get("train_range")), None)
     lo, hi = 0.0, max(float(np.nanmax(req)), float(np.nanmax(got))) * 1.08
-    ax.axvspan(POR_MIN, POR_MAX, color=FLOOR_COLOR, alpha=0.12,
-               label=f"training range [{POR_MIN}, {POR_MAX}]")
+    if train_range:
+        ax.axvspan(train_range[0], train_range[1], color=FLOOR_COLOR, alpha=0.12,
+                   label=f"train patch range [{train_range[0]:.3g}, {train_range[1]:.3g}]")
     ax.plot([lo, hi], [lo, hi], ls="--", lw=1.0, color=FLOOR_COLOR,
             label="delivered = requested")
-    ax.scatter(req[~lifted], got[~lifted], s=34, color=SERIES_COLORS[0],
-               label="clamp held")
-    ax.scatter(req[lifted], got[lifted], s=34, marker="^",
-               color=SERIES_COLORS[1], label="clamp lifted")
+    ax.scatter(req[~outside], got[~outside], s=34, color=SERIES_COLORS[0],
+               label="inside training range")
+    ax.scatter(req[outside], got[outside], s=34, marker="^",
+               color=SERIES_COLORS[1], label="outside training range")
     ax.set_xlabel("requested porosity")
     ax.set_ylabel("delivered porosity (pore / material)")
     ax.set_xlim(lo, hi)
