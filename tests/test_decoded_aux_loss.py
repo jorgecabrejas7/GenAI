@@ -523,7 +523,7 @@ class TestLatentDatasetLabel:
             },
             "loss": {"decoded": {"enabled": enabled}},
         }
-        train_loader, _ = build_latent_dataloaders(cfg, root)
+        train_loader = build_latent_dataloaders(cfg, root).train
         assert train_loader.dataset.with_label is enabled
         assert ("label" in next(iter(train_loader))) is enabled
 

@@ -558,6 +558,8 @@ def ldm_train_loop(
     scaler: torch.amp.GradScaler,
     schedule: Any,
     cfg: dict[str, Any],
+    *,
+    val_subset_loader: DataLoader | None = None,
     run_dir: str | Path,
     tb_writer: Any | None = None,
     start_step: int = 0,
@@ -581,7 +583,7 @@ def ldm_train_loop(
     x̂₀ goes through the schedule too.
 
     Reads from cfg["training"]:
-      total_steps, log_every, eval_every, val_batches, save_every,
+      total_steps, log_every, eval_every, save_every,  (val_batches is read by build_latent_dataloaders: the size of the fixed periodic-val subset)
       max_grad_norm, compile,
       full_val_every, early_stopping_patience,
       gen_eval_every, gen_eval_samples, gen_eval_ddim_steps,
@@ -612,7 +614,6 @@ def ldm_train_loop(
     total_steps  = int(training_cfg["total_steps"])
     log_every    = int(training_cfg.get("log_every",  10))
     eval_every   = int(training_cfg.get("eval_every", 500))
-    val_batches  = int(training_cfg.get("val_batches", 50))
     save_every   = int(training_cfg.get("save_every", 5000))
     max_grad_norm = training_cfg.get("max_grad_norm")
     if max_grad_norm is not None:
@@ -793,11 +794,12 @@ def ldm_train_loop(
                     tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
 
             # ── validation ──────────────────────────────────────────────────
-            if val_loader is not None and (step + 1) % eval_every == 0:
-                val_batches_clamped = min(val_batches, len(val_loader))
-                _val_iter = iter(val_loader)
+            if val_subset_loader is not None and (step + 1) % eval_every == 0:
+                # The fixed stratified subset (build_latent_dataloaders): every
+                # check scores the same rows, every val volume and porosity bin.
+                _val_iter = iter(val_subset_loader)
                 agg = _run_eval(
-                    model, _val_iter, schedule, val_batches_clamped,
+                    model, _val_iter, schedule, len(val_subset_loader),
                     device, autocast_dtype, desc=f"Val step {step + 1}",
                     sample_posterior=sample_posterior,
                 )

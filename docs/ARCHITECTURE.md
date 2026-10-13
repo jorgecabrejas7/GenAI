@@ -179,6 +179,18 @@ arms of eval_v4's `assembly_modes` and neither is ever a production path. OOB
 survives in all three: the canvas edge is geometry, and `cond_dist6` carries the
 same fact, so removing it would change more than the neighbour content.
 
+### Periodic validation subset
+
+The periodic `val.loss` (every `eval_every` steps, `training.val_batches`
+batches) runs on a FIXED subset built once at startup by
+`build_latent_dataloaders`: `val_batches × batch_size` rows, an equal share per
+val volume, each volume's share spread over the porosity bins 0-1 %, 1-3 %,
+3-6 %, ≥ 6 % (full-patch φ), drawn with seed 0 (`latents.stratified_val_rows`,
+vault D58 / OQ-5). The first batches of the unshuffled val loader had all come
+from one volume (Na_01_1). The composition is logged and written to the run
+metadata (`val_subset_composition`). The full validation (`val_full`) is
+unchanged.
+
 ## Diffusion objective and the terminal step
 
 `DDPMSchedule` owns what the denoiser regresses. Two keys under

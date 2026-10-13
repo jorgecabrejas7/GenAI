@@ -144,7 +144,8 @@ def _prepare_data_and_vae(
 ) -> dict[str, Any]:
     """Build dataloaders, extract normalisation stats, and load the frozen VAE."""
     latents_root = _resolve_latents_root(cfg, repo_root)
-    train_loader, val_loader = build_latent_dataloaders(cfg, latents_root)
+    loaders = build_latent_dataloaders(cfg, latents_root)
+    train_loader, val_loader = loaders.train, loaders.val
     train_ds = train_loader.dataset
 
     vae = _load_vae_decoder(cfg, train_ds.metadata, repo_root, device)
@@ -166,6 +167,8 @@ def _prepare_data_and_vae(
         "latents_root": latents_root,
         "train_loader": train_loader,
         "val_loader":   val_loader,
+        "val_subset_loader": loaders.val_subset,
+        "val_subset_composition": loaders.val_subset_composition,
         "latent_scale": train_ds.latent_scale,   # scalar sigma_hat
         "val_phi":      val_loader.dataset.df["phi"].to_numpy(dtype=np.float64),
         "vae":          vae,
@@ -305,6 +308,7 @@ def run_ldm_experiment(
         "status": "running", "device": str(device),
         "vae_checkpoint_sha256":
             data["train_loader"].dataset.metadata["vae_checkpoint_sha256"],
+        "val_subset_composition": data["val_subset_composition"],
     })
 
     try:
@@ -312,6 +316,7 @@ def run_ldm_experiment(
             history = ldm_train_loop(
                 model, data["train_loader"], data["val_loader"],
                 optimizer, scaler, schedule,
+                val_subset_loader=data["val_subset_loader"],
                 cfg=cfg,
                 run_dir=run_ctx.run_dir,
                 tb_writer=tb_writer,
@@ -400,6 +405,7 @@ def resume_ldm_run(
             history = ldm_train_loop(
                 model, data["train_loader"], data["val_loader"],
                 optimizer, scaler, schedule,
+                val_subset_loader=data["val_subset_loader"],
                 cfg=cfg_resume,
                 run_dir=run_dir,
                 tb_writer=tb_writer,

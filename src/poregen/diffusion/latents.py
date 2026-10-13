@@ -79,12 +79,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from .conditioning import (
     DIST6_DIRS,
@@ -700,11 +700,84 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+#: Porosity bins of the periodic validation subset: 0-1 %, 1-3 %, 3-6 %, >= 6 %
+#: (the bins of scripts/analysis/downstream_utility.py and the r08 calibration
+#: probe), on the store's full-patch phi.
+VAL_POROSITY_BINS: tuple[float, ...] = (0.0, 0.01, 0.03, 0.06, float("inf"))
+#: Seed of the periodic validation subset; fixed so every check scores the
+#: same rows.
+VAL_SUBSET_SEED = 0
+
+
+def _fill(quota: int, capacity: list[int]) -> list[int]:
+    """Split ``quota`` as evenly as the groups' capacities allow (water-filling)."""
+    alloc = [0] * len(capacity)
+    open_ = [i for i, c in enumerate(capacity) if c > 0]
+    left = int(quota)
+    while left > 0 and open_:
+        share, extra = divmod(left, len(open_))
+        nxt = []
+        for k, i in enumerate(open_):
+            want = share + (1 if k < extra else 0)
+            take = min(want, capacity[i] - alloc[i])
+            alloc[i] += take
+            left -= take
+            if alloc[i] < capacity[i]:
+                nxt.append(i)
+        open_ = nxt
+    return alloc
+
+
+def stratified_val_rows(
+    volume_id: np.ndarray, phi: np.ndarray, n_rows: int,
+    seed: int = VAL_SUBSET_SEED,
+    bins: tuple[float, ...] = VAL_POROSITY_BINS,
+) -> tuple[np.ndarray, dict[str, dict[str, int]]]:
+    """A fixed validation subset: equal share per volume, spread over porosity bins.
+
+    ``n_rows`` is split equally over the volumes, and each volume's share
+    equally over the porosity bins it has rows in; a volume or bin with fewer
+    rows than its share gives the rest to the others (water-filling), so the
+    total is ``min(n_rows, len(phi))``.  Rows are drawn without replacement
+    with ``seed``.  Returns the sorted row indices and the composition
+    ``{volume_id: {bin label: n}}``.
+    """
+    volume_id = np.asarray(volume_id)
+    phi = np.asarray(phi, dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    labels = [f"{lo:g}-{hi:g}" for lo, hi in zip(bins[:-1], bins[1:])]
+    bin_of = np.clip(np.digitize(phi, bins[1:-1]), 0, len(labels) - 1)
+    vols = sorted(np.unique(volume_id).tolist())
+    rows_by = {v: [np.flatnonzero((volume_id == v) & (bin_of == b))
+                   for b in range(len(labels))] for v in vols}
+    vol_alloc = _fill(min(int(n_rows), len(phi)),
+                      [sum(len(r) for r in rows_by[v]) for v in vols])
+    picked: list[np.ndarray] = []
+    composition: dict[str, dict[str, int]] = {}
+    for v, quota in zip(vols, vol_alloc):
+        alloc = _fill(quota, [len(r) for r in rows_by[v]])
+        composition[str(v)] = {lab: int(a) for lab, a in zip(labels, alloc)}
+        for r, a in zip(rows_by[v], alloc):
+            if a:
+                picked.append(rng.choice(r, size=a, replace=False))
+    rows = np.sort(np.concatenate(picked)) if picked else np.zeros(0, np.int64)
+    return rows.astype(np.int64), composition
+
+
+class LatentLoaders(NamedTuple):
+    """The three loaders an LDM run uses, and what the val subset holds."""
+
+    train: DataLoader
+    val: DataLoader
+    val_subset: DataLoader
+    val_subset_composition: dict[str, dict[str, int]]
+
+
 def build_latent_dataloaders(
     cfg: dict[str, Any],
     latents_root: str | Path,
-) -> tuple[DataLoader, DataLoader]:
-    """Build train and val DataLoaders over :class:`LatentDataset`.
+) -> LatentLoaders:
+    """Build the train, val and periodic-val DataLoaders over :class:`LatentDataset`.
 
     The LDM always trains in normalised latent space (``normalize=True``);
     denormalisation happens only immediately before VAE decoding.
@@ -717,12 +790,16 @@ def build_latent_dataloaders(
     ask for the decoded auxiliary loss and be served batches without the
     label it scores against.
 
-    Returns
-    -------
-    (train_loader, val_loader)
+    The periodic validation (``training.val_batches`` batches every
+    ``eval_every`` steps) runs on ``val_subset``: a FIXED subset of
+    ``val_batches * batch_size`` rows, an equal share per val volume spread
+    over the porosity bins (:func:`stratified_val_rows`, vault D58 / OQ-5).
+    The first batches of the unshuffled val loader were all one volume.  The
+    full validation (``val``) is unchanged.
     """
     data_cfg    = cfg.get("data", {})
     batch_size  = int(cfg["training"]["batch_size"])
+    val_batches = int(cfg["training"].get("val_batches", 50))
     num_workers = int(data_cfg.get("num_workers", 4))
 
     decoded_cfg = (cfg.get("loss") or {}).get("decoded") or {}
@@ -748,6 +825,15 @@ def build_latent_dataloaders(
         kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", True))
         kwargs["prefetch_factor"]    = int(data_cfg.get("prefetch_factor", 2))
 
+    rows, composition = stratified_val_rows(
+        val_ds.df["volume_id"].to_numpy(), val_ds._phi, val_batches * batch_size)
+    logger.info(
+        "Periodic val subset: %d rows (%d batches of %d), seed %d, per volume "
+        "and porosity bin: %s", len(rows), val_batches, batch_size,
+        VAL_SUBSET_SEED, composition)
+
     train_loader = DataLoader(train_ds, shuffle=True,  drop_last=True,  **kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, drop_last=False, **kwargs)
-    return train_loader, val_loader
+    subset_loader = DataLoader(Subset(val_ds, rows.tolist()), shuffle=False,
+                               drop_last=False, **kwargs)
+    return LatentLoaders(train_loader, val_loader, subset_loader, composition)
