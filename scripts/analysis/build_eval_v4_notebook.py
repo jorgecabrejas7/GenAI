@@ -254,7 +254,30 @@ TILE = 64                 # one latent window = 64 voxels; the model sees 64^3 a
 LATENT_DOWN = 4           # 4 voxels per latent cell
 EDGE_VOX = 32             # "interior" = more than 32 voxels from every face
 POROSITY_GATE = 0.005     # |delivered - requested| below this passes
-SAMPLED_STD_REF = 1.863   # std of sampled train latents (mu + sigma*eps), in mu units
+def _sampled_std_ref():
+    """Mean per-channel std of the run store's RESCALED sampled train latents.
+
+    (mu + sigma*eps) / sigma_hat, ~1 by construction (Rombach et al. 2022 Sec. G);
+    measured from the store the campaign-18 manifests name, never a constant.
+    Returns (value or None, where it came from or why it is missing).
+    """
+    roots = sorted({(json.loads(m.read_text()).get("notes") or {}).get("latents_root")
+                    for m in (FINAL_ROOT / "sampler").glob("**/manifest.json")} - {None})
+    if not roots:
+        return None, f"no sampler manifest under {FINAL_ROOT} names its latent store"
+    root = Path(roots[0])
+    if not (root / "metadata.json").exists():
+        return None, f"the latent store {root} is not on this machine"
+    try:
+        from poregen.diffusion.latents import sampled_std_reference
+        ref = sampled_std_reference(root, "train", n_rows=4000)
+    except Exception as exc:                       # e.g. a store without sigma_hat
+        return None, f"could not measure the reference on {root}: {exc}"
+    return (float(np.mean(ref["sampled_std_per_channel"])),
+            f"{root}, train, 4000 rows, sigma_hat {ref['sigma_hat']:.5f}")
+SAMPLED_STD_REF, SAMPLED_STD_REF_SOURCE = _sampled_std_ref()
+print("latent std reference:", "NOT AVAILABLE" if SAMPLED_STD_REF is None
+      else f"{SAMPLED_STD_REF:.4f}", "-", SAMPLED_STD_REF_SOURCE)
 LABEL_NAMES = {0: "material", 1: "pore", 2: "air"}
 LABEL_COLORS = ["#bfbfbf", "#d81b1b", "#3366d9"]
 ASSESSMENT_ORDER = ["sampler", "porosity_global", "porosity_local", "cfg", "layup", "assembly",
@@ -1478,12 +1501,15 @@ if len(SM):
     md("""
 **Latent statistics (derived view).** `latents.npy` is the finished latent before decoding: 8 channels per 4³ block.
 During training the model saw latents sampled as μ + σ·ε from the VAE, whose per-channel standard deviation
-(averaged over the training store) is 1.863 in μ units. A generator that produces latents with the right spread is
+(averaged over the channels) is measured from the run's own latent store in the setup cell — about 1, because the store
+rescales by the std of exactly those latents. A generator that produces latents with the right spread is
 neither collapsed (too small) nor exploding (too large). The plot shows the per-channel std of each generated latent
 divided by the store reference; the training-time gate was 0.9–1.1 of the reference. Values in that band are good.
 """)
     code(r'''
-if len(SM) and SM["has_latents"].any():
+if SAMPLED_STD_REF is None:
+    unavailable("the latent std reference", SAMPLED_STD_REF_SOURCE)
+elif len(SM) and SM["has_latents"].any():
     rows = []
     for _, r in SM.iterrows():
         if not r["has_latents"]: continue
@@ -1491,7 +1517,7 @@ if len(SM) and SM["has_latents"].any():
         std = np.asarray(z, dtype=np.float32).reshape(z.shape[0], -1).std(axis=1)
         rows.append({"case": r["case"], "scale": r["scale"], "ddim": r["ddim_steps"], "seed": r["seed"], "std_ratio_all": float(std.mean() / SAMPLED_STD_REF), **{f"ch{i}": float(s) for i, s in enumerate(std)}})
     LZ = pd.DataFrame(rows); display(LZ.round(3))
-    fig = px.scatter(LZ, x="ddim", y="std_ratio_all", color="scale", hover_data=["case"], title="latent std / sampled-store reference (1.863)")
+    fig = px.scatter(LZ, x="ddim", y="std_ratio_all", color="scale", hover_data=["case"], title=f"latent std / sampled-store reference ({SAMPLED_STD_REF:.3f})")
     fig.add_hrect(y0=0.9, y1=1.1, fillcolor="green", opacity=0.1, line_width=0); fig.update_layout(height=350); fig.show()
 else:
     unavailable("latents.npy on sampler cases", "eval_v4 generate sampler --save-latents")
@@ -2673,7 +2699,7 @@ buckets and checked a few gates: porosity error, latent spread, air inside/outsi
 request pair (0.005 vs 0.05). The final line is step 130k. These are the numbers the "train longer?" discussion uses,
 and they are *not* the eval-v4 tables: fewer volumes, DDIM-50/200 only, one shape. They are shown so the trajectory is
 visible. The latent *std ratio* is the spread of the generated latent divided by the spread of sampled training latents
-(reference 1.863 in μ units); 1.0 is right, well below 1 is a collapsed generator.
+(the reference each diag entry measured from its store, else the setup cell's); 1.0 is right, well below 1 is a collapsed generator.
 """)
     code(r'''
 if not CONV_JSONL.exists():
@@ -2685,9 +2711,11 @@ else:
         except Exception: pass                      # a half-written last line while training
     rows = []
     for r in recs:
+        _ref = (r.get("std_reference") or {}).get("sampled_std_per_channel")
+        ref_r = float(np.mean(_ref)) if _ref else (SAMPLED_STD_REF or float("nan"))
         for var, V in r["variants"].items():
             o = V.get("overall") or {}
-            rows.append({"step": r["step"], "variant": var, "por_mae": o.get("por_mae"), "std_ratio": o.get("std_ratio"), "std_ratio_vs_sampled": (o.get("std_ratio") or 0) / SAMPLED_STD_REF, "air_mean": o.get("air_mean"), "x0_sat": o.get("x0_sat"), "degen": o.get("degen")})
+            rows.append({"step": r["step"], "variant": var, "por_mae": o.get("por_mae"), "std_ratio": o.get("std_ratio"), "std_ratio_vs_sampled": (o.get("std_ratio") or float("nan")) / ref_r, "air_mean": o.get("air_mean"), "x0_sat": o.get("x0_sat"), "degen": o.get("degen")})
     CV = pd.DataFrame(rows).sort_values(["variant", "step"])
     display(CV[CV["step"] == CV["step"].max()].round(5))
     fig = make_subplots(rows=1, cols=3, subplot_titles=["porosity MAE", "latent std / sampled reference", "mean air fraction"])
