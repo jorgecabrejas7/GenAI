@@ -2,12 +2,13 @@ experiment:
   name: r08
   variant: base
   description: >-
-    R08 — the production VAE for ldm06, on data/split_v3. Same trunk and
+    R08 — the production VAE for ldm06. The dataset comes from POREGEN_SPLIT
+    (it overrides data.dataset_root, split_v3 when unset). Same trunk and
     hyperparameters as the r07 point that produced the current latent store
     (r07/reduction-factor-16: z_channels 4, base 32, bs 128, lr 2e-4,
     beta 0.05, free_bits 0.1, disc_weight 0.05, compile off, early stopping
     patience 12 on val.total after 4500 warmup steps). Two things change:
-    the dataset is split_v3 (drilled holes removed, split by panel), and the
+    the dataset (split_v3 and later: drilled holes removed, split by panel), and the
     model is the 3-class variant — encoder input cat([xct, pore, air]),
     decoder emitting material/pore/air logits instead of a binary pore mask.
 
