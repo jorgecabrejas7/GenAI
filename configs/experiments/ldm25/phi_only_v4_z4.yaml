@@ -1,0 +1,18 @@
+experiment:
+  name: ldm25
+  variant: phi_only_v4_z4
+  description: >-
+    ldm25/phi_only on the split_v4 latent store of a z=4 r08 VAE. Two keys
+    and nothing else: model.z_channels 4 and data.latents_root
+    data/split_v4/latents_r08z4.
+
+# One file per z for the reason given in ldm06/split_v4_z4.yaml: nothing
+# overrides model.z_channels, and the chain picks z from the chosen VAE. The
+# VAE comes from POREGEN_VAE_CHECKPOINT, never from this file.
+extends: ldm25/phi_only
+
+overrides:
+  model:
+    z_channels: 4
+  data:
+    latents_root: data/split_v4/latents_r08z4

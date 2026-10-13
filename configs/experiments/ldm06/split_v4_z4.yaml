@@ -1,0 +1,26 @@
+experiment:
+  name: ldm06
+  variant: split_v4_z4
+  description: >-
+    ldm06/facedrop_from_start on the split_v4 latent store of a z=4 r08 VAE.
+    Two keys and nothing else: model.z_channels 4 and data.latents_root
+    data/split_v4/latents_r08z4.
+
+# WHY ONE FILE PER z (2026-10-13). POREGEN_SPLIT moves data.latents_root's split
+# directory and POREGEN_VAE_CHECKPOINT moves vae.checkpoint, but nothing moves
+# model.z_channels and train_ldm has no CLI override. The split_v4 VAE is not
+# chosen: rf-16 (z=4) or, if its texture fails, rf-8 (z=8). The chain reads z
+# from POREGEN_VAE_CHECKPOINT's resolved_config.yaml and runs
+# ldm06/split_v4_z<z>, so the denoiser width, the store and the VAE agree. The
+# store directory is build_latent_dataset.py's default name, latents_<exp>z<z>.
+#
+# THE VAE IS NOT NAMED HERE. vae.checkpoint is inherited from base (a split_v3
+# checkpoint) and MUST be redirected with POREGEN_VAE_CHECKPOINT; train_ldm
+# refuses to start when it disagrees with the store's recorded encoder.
+extends: ldm06/facedrop_from_start
+
+overrides:
+  model:
+    z_channels: 4
+  data:
+    latents_root: data/split_v4/latents_r08z4

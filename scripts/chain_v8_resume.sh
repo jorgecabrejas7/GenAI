@@ -19,8 +19,15 @@
 # their -ds<split> run names, so a resume past rf-8 still exports
 # POREGEN_VAE_CHECKPOINT and still cannot pick split_v3's r08-run-0004.
 #
-# Stages are NOT otherwise changed. Keep this file in step with the original
-# if the original is ever edited again.
+# THE LATENT WIDTH COMES FROM THE CHOSEN VAE (2026-10-13). The split_v4 VAE is
+# not chosen: rf-16 (z=4) or, if its texture fails, rf-8 (z=8). Past rf8 the
+# chain REFUSES TO START without POREGEN_VAE_CHECKPOINT, reads z_channels from
+# that run's resolved_config.yaml, builds the store as data/$SPLIT/latents_r08z<z>
+# and trains ldm06/split_v4_z<z> and ldm25/phi_only_v4_z<z>, whose z_channels
+# and latents_root match. Every later stage finds its LDM by -z<z>- in the run
+# name, so a run of the other width is never picked up.
+#
+# Stages are NOT otherwise changed.
 # THE WHOLE PAPER, REBUILT ON data/split_v4.  PREPARED — NOT LAUNCHED.
 #
 # Same architecture as split_v3 throughout. One thing is new and it is a
@@ -62,6 +69,11 @@ case " rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm
     *" $START_AT "*) ;;
     *) echo "START_AT must be one of: rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm25 c25 c24 c27 c14 rungs grey" >&2; exit 2 ;;
 esac
+# Past rf8 the VAE must be named: nothing below may guess it.
+if [ "$START_AT" != rf8 ] && [ -z "${POREGEN_VAE_CHECKPOINT:-}" ]; then
+    echo "START_AT=$START_AT needs POREGEN_VAE_CHECKPOINT=runs/vae/<chosen VAE>/best.ckpt" >&2
+    exit 2
+fi
 _reached=0
 at() {
     [ "$_reached" -eq 1 ] && return 0
@@ -69,9 +81,11 @@ at() {
     say "SKIP $1 (resuming at $START_AT)"
     return 1
 }
-#: Campaign directories and the store, defined up front so a later stage can
-#: use them when the stage that normally sets them was skipped.
-STORE="data/$SPLIT/latents_r08z8"
+#: Campaign directories, defined up front so a later stage can use them when
+#: the stage that normally sets them was skipped. The store is named once the
+#: VAE, and with it z, is known (after stage rf8).
+C22="$REPO/runs/campaigns/22-slicegan-baseline$SUF"
+C23="$REPO/runs/campaigns/23-ddpm3d-baseline$SUF"
 #: An LDM campaign's directory names the run it scores: run-0004's campaign 18
 #: keeps its original name, and every later one is <name>$SUF-run<NNNN>, so a
 #: retrained ldm06 never writes over the record of the first.
@@ -229,10 +243,24 @@ if at rf8; then
     say "VAE = $(basename "${VAE%/}")"
 
 fi
-[ -z "${VAE:-}" ] && VAE=$(ls -dt "$REPO"/runs/vae/r08-run-*-z8-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
-[ -z "$VAE" ] && { say "STOP NOTICE: resuming past rf-8 but no rf-8 run on $SPLIT exists"; exit 1; }
+# Resuming past rf8: the VAE is the one POREGEN_VAE_CHECKPOINT names (checked
+# at the top), never a glob.
+[ -z "${VAE:-}" ] && VAE=$(dirname "$POREGEN_VAE_CHECKPOINT")
+[ -e "${VAE%/}/best.ckpt" ] || { say "STOP NOTICE: ${VAE%/}/best.ckpt does not exist"; exit 1; }
+[ -e "${VAE%/}/resolved_config.yaml" ] || { say "STOP NOTICE: ${VAE%/}/resolved_config.yaml does not exist"; exit 1; }
 export POREGEN_VAE_CHECKPOINT="${VAE%/}/best.ckpt"
-say "VAE = $(basename "${VAE%/}") (POREGEN_VAE_CHECKPOINT set)"
+Z=$(python -c "import sys, yaml; print(int(yaml.safe_load(open(sys.argv[1]))['model']['z_channels']))" \
+    "${VAE%/}/resolved_config.yaml") || { say "STOP NOTICE: could not read z_channels of $VAE"; exit 1; }
+STORE="data/$SPLIT/latents_r08z$Z"
+LDM06_EXP="ldm06/split_v4_z$Z"
+LDM25_EXP="ldm25/phi_only_v4_z$Z"
+for exp in "$LDM06_EXP" "$LDM25_EXP"; do
+    [ -e "$REPO/configs/experiments/$exp.yaml" ] || {
+        say "STOP NOTICE: no config $exp for z=$Z — add one before running the chain"; exit 1; }
+done
+say "VAE = $(basename "${VAE%/}") (POREGEN_VAE_CHECKPOINT set), z=$Z, store $STORE, LDMs $LDM06_EXP / $LDM25_EXP"
+#: The latest run of an experiment on this split AT THIS z.
+latest_run() { ls -dt "$REPO"/runs/ldm/"$1"-run-*-z$Z-*-ds${SPLIT#split_}/ 2>/dev/null | head -1; }
 if at rf8checks; then
     # ── 1b. the r08 acceptance checks, exactly the split_v3 ones ───────────────
     # Read against docs/SPLIT_V3_GATES.md: r08-run-0004 scored val/test pore Dice
@@ -286,7 +314,6 @@ if [ "$START_AT" = vaecont ]; then
 fi
 if at store; then
     # ── 2. the latent store and its conditioning ───────────────────────────────
-    STORE="data/$SPLIT/latents_r08z8"
     # NEVER OVER AN EXISTING STORE. The LDM runs trained on it are bound to its
     # VAE weights, and a rebuild in place would destroy the latents they decode.
     # The old store is moved aside (or deleted) by hand, on the author's word.
@@ -318,13 +345,13 @@ if at store; then
         say "STOP NOTICE: the store has HOLES — $ALLOC of $APPAR bytes allocated"
         exit 1
     fi
-    # The SAMPLED std reference, before anything is scored against it. ldm06 trains
-    # with latent_mode sampled, so the target's per-channel std is
-    # sqrt(1 + (sigma_rms/per_channel_std)^2) — 1.863 on split_v3, NOT 1.0. Scoring
-    # against 1.0 charges the model for the posterior width it was trained on.
+    # The SAMPLED std reference, before anything is scored against it. The store
+    # rescales mu + sigma*eps by one scalar sigma_hat (Rombach et al. 2022 Sec.
+    # G), so it is ~1 by construction; far from 1 means the metadata and the
+    # latents disagree. (split_v3's per-channel rule gave 1.863; it is gone.)
     check "latent std reference" latent_std ok \
         python scripts/analysis/latent_std_reference.py \
-        --store "data/$SPLIT/latents_r08z8"
+        --store "$STORE"
 
 fi
 if at conditioning; then
@@ -356,19 +383,20 @@ fi
 if at ldm06; then
     # ── 3. the LDM, with the dropout from step 0 — no fine-tune stage ──────────
     tb tb-ldm "$REPO/runs/ldm" 6007
-    run_watched "ldm06 facedrop_from_start (130k)" ldm06 "16 h" \
-        python scripts/train_ldm.py run ldm06/facedrop_from_start
-    LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
-    [ -z "$LDM" ] && { say "STOP NOTICE: no ldm06 run on $SPLIT was found after training."; exit 1; }
+    run_watched "$LDM06_EXP (facedrop_from_start, z=$Z, 130k)" ldm06 "16 h" \
+        python scripts/train_ldm.py run "$LDM06_EXP"
+    LDM=$(latest_run ldm06)
+    [ -z "$LDM" ] && { say "STOP NOTICE: no ldm06 z=$Z run on $SPLIT was found after training."; exit 1; }
     say "LDM = $(basename "${LDM%/}")"
 
 fi
-[ -z "${LDM:-}" ] && LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "${LDM:-}" ] && LDM=$(latest_run ldm06)
 if at converge; then
     # ── 3b. the LDM convergence gates, the same ones run-0001 was read on ──────
-    # run-0001 scored por_mae 0.001119 (ema_ddim50), std ratio 1.8006 against the
-    # sampled reference 1.863, x0_sat 1.1e-07, degen 0.0, and a kill switch that
-    # separated 0.005 from 0.05 by 0.0442. degen and direction_ok are FATAL.
+    # run-0001 (split_v3) scored por_mae 0.001119 (ema_ddim50), x0_sat 1.1e-07,
+    # degen 0.0, and a kill switch that separated 0.005 from 0.05 by 0.0442. The
+    # diag REPORTS every cell and the kill switch (findings.md, diag_cells.json);
+    # only a reversed kill switch or a non-finite value is FATAL.
     # --ckpt is the diag's default, checkpoints/latest.ckpt: a bare "latest"
     # resolved to <run>/latest, which does not exist (stop at 20:30:53 Oct 4).
     say "LDM = $(basename "${LDM%/}")"
@@ -376,7 +404,7 @@ if at converge; then
         python scripts/diag_ldm_samples.py --run-dir "${LDM%/}"
 
 fi
-[ -z "${LDM:-}" ] && LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "${LDM:-}" ] && LDM=$(latest_run ldm06)
 [ -n "${LDM:-}" ] && C18=$(c18_dir "$LDM")
 if at c18; then
     # ── 4. the paper's campaigns, BY THE SPLIT_V3 PROCEDURE ────────────────────
@@ -411,7 +439,7 @@ if at baselines; then
     # ── 5. the three baselines, trained INTO the v4 directories ────────────────
     # train_slicegan.py and train_ddpm3d.py default --out to the split_v3 campaign
     # directories. Without --out they would OVERWRITE the split_v3 baselines.
-    C22="$REPO/runs/campaigns/22-slicegan-baseline$SUF"; link_floor "$C22"
+    link_floor "$C22"
     step "slicegan train" slicegan "11 h" \
         python scripts/train_slicegan.py --out "$C22/train"
     [ -e "$C22/train/latest.ckpt" ] || { say "STOP NOTICE: slicegan left no latest.ckpt"; exit 1; }
@@ -422,7 +450,7 @@ if at baselines; then
     step "slicegan report" slicegan_report "1 min" \
         python -m poregen.eval_v4.cli report --root "$C22"
 
-    C23="$REPO/runs/campaigns/23-ddpm3d-baseline$SUF"; link_floor "$C23"
+    link_floor "$C23"
     step "ddpm3d train" ddpm3d "24 h" \
         python scripts/train_ddpm3d.py --data-root "data/$SPLIT" --out "$C23/train"
     [ -e "$C23/train/latest.ckpt" ] || { say "STOP NOTICE: ddpm3d left no latest.ckpt"; exit 1; }
@@ -436,13 +464,13 @@ if at baselines; then
 
 fi
 if at ldm25; then
-    run_watched "ldm25 phi-only (40k)" ldm25 "19 h" \
-        python scripts/train_ldm.py run ldm25/phi_only
-    LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
-    [ -z "$LDM25" ] && { say "STOP NOTICE: no ldm25 run on $SPLIT was found after training."; exit 1; }
+    run_watched "$LDM25_EXP (phi-only, z=$Z, 40k)" ldm25 "19 h" \
+        python scripts/train_ldm.py run "$LDM25_EXP"
+    LDM25=$(latest_run ldm25)
+    [ -z "$LDM25" ] && { say "STOP NOTICE: no ldm25 z=$Z run on $SPLIT was found after training."; exit 1; }
 
 fi
-[ -z "${LDM25:-}" ] && LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "${LDM25:-}" ] && LDM25=$(latest_run ldm25)
 if at c25; then
     C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF-$(ldm_tag "$LDM25")"; link_floor "$C25"
     for A in porosity_global microstructure cfg; do
@@ -456,7 +484,7 @@ if at c25; then
         python -m poregen.eval_v4.cli report --root "$C25"
 
 fi
-[ -z "${LDM25:-}" ] && LDM25=$(ls -dt "$REPO"/runs/ldm/ldm25-run-*-ds${SPLIT#split_}/ 2>/dev/null | head -1)
+[ -z "${LDM25:-}" ] && LDM25=$(latest_run ldm25)
 if at c24; then
     # ── 6. the ablation ────────────────────────────────────────────────────────
     C24="$REPO/runs/campaigns/24-ablation$SUF-$(ldm_tag "$LDM")"; link_floor "$C24"
@@ -488,8 +516,15 @@ if at c27; then
 fi
 if at c14; then
     # ── 8. downstream utility ──────────────────────────────────────────────────
+    # Every source campaign is the v4 one of THIS z: without the four roots the
+    # script draws from its split_v3 defaults (12-eval-v4, 22, 23, 25).
+    [ -n "${LDM:-}" ] && [ -n "${LDM25:-}" ] || {
+        say "STOP NOTICE: c14 needs the ldm06 and ldm25 z=$Z runs on $SPLIT"; exit 1; }
+    C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF-$(ldm_tag "$LDM25")"
     step "c14 downstream" c14 "10 h" \
         python scripts/analysis/downstream_utility.py \
+        --campaign-root "$(c18_dir "$LDM")" --slicegan-root "$C22" \
+        --ddpm3d-root "$C23" --phi-only-root "$C25" \
         --out "$REPO/runs/campaigns/14-downstream-utility$SUF"
 
 fi
