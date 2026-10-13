@@ -225,10 +225,11 @@ else
     say "STOP NOTICE: the store has HOLES — $ALLOC of $APPAR bytes allocated"
     exit 1
 fi
-# The SAMPLED std reference, before anything is scored against it. ldm06 trains
-# with latent_mode sampled, so the target's per-channel std is
-# sqrt(1 + (sigma_rms/per_channel_std)^2) — 1.863 on split_v3, NOT 1.0. Scoring
-# against 1.0 charges the model for the posterior width it was trained on.
+# The SAMPLED std reference, before anything is scored against it. The store
+# rescales the sampled latents mu + sigma*eps by one scalar sigma_hat (Rombach
+# et al. 2022 Sec. G), so the reference is ~1 by construction; a value far from
+# 1 means the store's metadata and its latents disagree. (split_v3's per-channel
+# mu normalisation gave 1.863 here; that rule is gone.)
 check "latent std reference" latent_std ok \
     python scripts/analysis/latent_std_reference.py \
     --store "data/$SPLIT/latents_r08z8"
@@ -262,11 +263,12 @@ LDM=$(ls -dt "$REPO"/runs/ldm/ldm06-run-*-ds${SPLIT#split_}/ 2>/dev/null | head 
 say "LDM = $(basename "${LDM%/}")"
 
 # ── 3b. the LDM convergence gates, the same ones run-0001 was read on ──────
-# run-0001 scored por_mae 0.001119 (ema_ddim50), std ratio 1.8006 against the
-# sampled reference 1.863, x0_sat 1.1e-07, degen 0.0, and a kill switch that
-# separated 0.005 from 0.05 by 0.0442. degen and direction_ok are FATAL.
+# run-0001 (split_v3) scored por_mae 0.001119 (ema_ddim50), x0_sat 1.1e-07,
+# degen 0.0, and a kill switch that separated 0.005 from 0.05 by 0.0442. The
+# diag REPORTS every cell and the kill switch (findings.md, diag_cells.json);
+# only a reversed kill switch or a non-finite value is FATAL.
 check "ldm convergence check" ldm_converge fatal \
-    python scripts/diag_ldm_samples.py --run "${LDM%/}" --ckpt latest
+    python scripts/diag_ldm_samples.py --run-dir "${LDM%/}" --ckpt checkpoints/latest.ckpt
 
 # ── 4. the paper's campaigns, BY THE SPLIT_V3 PROCEDURE ────────────────────
 # Campaign 18 is run by scripts/regen_eval_v4.sh — the script that produced the

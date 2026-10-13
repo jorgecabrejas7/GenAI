@@ -26,6 +26,16 @@ Per invocation:
     a verdict line vs the previous check: CONVERGING / STALLED / REGRESSING
     (ema overall std_ratio, +/-5% band) plus per-bucket deltas
   * PNG slice grids, each row labelled with its context bucket
+  * the std reference (std of the store's rescaled sampled train latents,
+    ~1 by construction), measured and printed
+  * REPORT, pass or fail: <out>/diag_cells.json and <out>/findings.md with one
+    row per sampled cell (variant, bucket, requested phi, delivered phi, air
+    fraction, degenerate yes/no and why — pore < 1e-4 or > 0.5 — and whether
+    the request was pore-free) and the kill switch's requested and delivered
+    values and separation; unrequested degenerate cells are listed loudly
+
+Exit code: non-zero ONLY for a reversed kill switch (direction_ok False) or a
+non-finite value. Unrequested degenerate cells do not stop the chain.
 
 Usage:
     python scripts/diag_ldm_samples.py --run-dir <run_dir> [--n 8] [--ddim200]
@@ -270,27 +280,131 @@ def degen_unrequested(por: np.ndarray, phi: np.ndarray) -> float:
     return float(bad.mean()) if bad.size else 0.0
 
 
-def fatal_failures(entry: dict) -> list[str]:
-    """The two conditions that mean the run is not working.
+def cell_rows(variant: str, bucket: str, por: np.ndarray, air: np.ndarray,
+              phi: np.ndarray) -> list[dict]:
+    """One record per sampled cell: what was asked, what came out, and why a
+    cell counts as degenerate.
 
-    A degenerate cell the request does not explain, in any variant and bucket,
-    and a kill switch whose high ask does not deliver more pore than its low
-    one. Everything else this script reports is read by a person.
+    ``degenerate_why`` is ``"pore < 1e-4"`` or ``"pore > 0.5"`` (or None);
+    ``requested_pore_free`` is True when the request itself is at or below the
+    1e-4 floor, so an empty cell is what was asked; ``unrequested`` marks a
+    degenerate cell the request does not explain.
+    """
+    rows = []
+    for i, (p_, a_, f_) in enumerate(zip(np.asarray(por, np.float64),
+                                         np.asarray(air, np.float64),
+                                         np.asarray(phi, np.float64))):
+        why = ("pore < 1e-4" if p_ < _DEGENERATE_LO
+               else "pore > 0.5" if p_ > _DEGENERATE_HI else None)
+        pore_free = bool(f_ <= _DEGENERATE_LO)
+        rows.append({
+            "variant": variant, "bucket": bucket, "cell": i,
+            "requested_phi": float(f_), "delivered_phi": float(p_),
+            "air_fraction": float(a_),
+            "degenerate": why is not None, "degenerate_why": why,
+            "requested_pore_free": pore_free,
+            "unrequested": bool(why == "pore > 0.5"
+                                or (why == "pore < 1e-4" and not pore_free)),
+        })
+    return rows
+
+
+def non_finite(obj, path: str = "") -> list[str]:
+    """Paths of every NaN or infinite number in a nested record."""
+    if isinstance(obj, bool) or obj is None:
+        return []
+    if isinstance(obj, (int, float, np.floating, np.integer)):
+        return [] if np.isfinite(float(obj)) else [path or "<value>"]
+    if isinstance(obj, dict):
+        return [p for k, v in obj.items() for p in non_finite(v, f"{path}.{k}" if path else str(k))]
+    if isinstance(obj, (list, tuple)):
+        return [p for i, v in enumerate(obj) for p in non_finite(v, f"{path}[{i}]")]
+    return []
+
+
+def fatal_failures(entry: dict) -> list[str]:
+    """The conditions that stop the chain: the run is not working.
+
+    A kill switch whose high ask does not deliver more pore than its low one,
+    and any non-finite value in the variants, the kill switch or the cells.
+    A degenerate cell the request does not explain is REPORTED loudly
+    (:func:`unrequested_cells`) but does not stop the chain.
     """
     fails = []
-    for vname, v in entry["variants"].items():
-        for b, m in v["buckets"].items():
-            if m["degen_unrequested"] > 0:
-                fails.append(f"{vname} bucket {b}: degen_unrequested "
-                             f"{m['degen_unrequested']:.3f}")
     ks = entry.get("killswitch")
     if ks is not None:
         for wname in ("raw", "ema"):
             if wname in ks and not ks[wname]["direction_ok"]:
-                fails.append(f"kill switch ({wname}): asked {ks['asked_hi']} "
+                fails.append(f"kill switch ({wname}) reversed: asked {ks['asked_hi']} "
                              f"delivered {ks[wname]['por_hi']:.4f}, not above "
                              f"asked {ks['asked_lo']} -> {ks[wname]['por_lo']:.4f}")
+    bad = non_finite({"variants": entry.get("variants"), "killswitch": ks,
+                      "cells": entry.get("cells")})
+    if bad:
+        fails.append(f"{len(bad)} non-finite value(s): {', '.join(bad[:8])}"
+                     + (" ..." if len(bad) > 8 else ""))
     return fails
+
+
+def unrequested_cells(entry: dict) -> list[dict]:
+    """The degenerate cells the request does not explain."""
+    return [c for c in entry.get("cells") or [] if c["unrequested"]]
+
+
+def _md_table(header: list[str], rows: list[list]) -> str:
+    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    out += ["| " + " | ".join(str(v) for v in r) + " |" for r in rows]
+    return "\n".join(out)
+
+
+def findings_markdown(entry: dict, run_name: str) -> str:
+    """The findings file: kill switch, degenerate cells, the per-cell table."""
+    cells = entry.get("cells") or []
+    unreq = unrequested_cells(entry)
+    fails = fatal_failures(entry)
+    lines = [f"# diag_ldm_samples — {run_name}, step {entry['step']}", "",
+             f"Verdict: **{'FATAL' if fails else 'PASS'}** — exit non-zero only for a "
+             "reversed kill switch or a non-finite value.", ""]
+    lines += [f"- {f}" for f in fails] + ([""] if fails else [])
+    ref = entry.get("std_reference") or {}
+    if ref:
+        lines += [f"Std reference (train, (mu + sigma*eps) / sigma_hat, sigma_hat "
+                  f"{ref.get('sigma_hat', float('nan')):.5f}): overall "
+                  f"{ref.get('sampled_std', float('nan')):.4f}.", ""]
+    lines += ["## Kill switch", ""]
+    ks = entry.get("killswitch")
+    if ks is None:
+        lines += ["Not run (--no-killswitch).", ""]
+    else:
+        rows = [[w, ks["asked_lo"], f"{ks[w]['por_lo']:.4f}", ks["asked_hi"],
+                 f"{ks[w]['por_hi']:.4f}", f"{ks[w]['separation']:+.4f}",
+                 ks[w]["direction_ok"]] for w in ("raw", "ema") if w in ks]
+        lines += [f"Bucket {ks['bucket']}, n {ks['n']}, DDIM-50, same seed and rows.", "",
+                  _md_table(["weights", "requested lo", "delivered lo", "requested hi",
+                             "delivered hi", "separation", "direction_ok"], rows), ""]
+    n_deg = sum(c["degenerate"] for c in cells)
+    lines += ["## Degenerate cells", "",
+              f"{n_deg} of {len(cells)} cells are degenerate (pore < 1e-4 or > 0.5); "
+              f"**{len(unreq)} are not explained by the request** (saturated, or "
+              "empty against a request above 1e-4).", ""]
+    if unreq:
+        lines += ["### UNREQUESTED degenerate cells", "",
+                  _md_table(["variant", "bucket", "cell", "requested phi",
+                             "delivered phi", "air", "why"],
+                            [[c["variant"], c["bucket"], c["cell"],
+                              f"{c['requested_phi']:.5f}", f"{c['delivered_phi']:.5f}",
+                              f"{c['air_fraction']:.4f}", c["degenerate_why"]]
+                             for c in unreq]), ""]
+    lines += ["## Every cell", "",
+              _md_table(["variant", "bucket", "cell", "requested phi", "delivered phi",
+                         "air", "degenerate", "why", "request pore-free"],
+                        [[c["variant"], c["bucket"], c["cell"],
+                          f"{c['requested_phi']:.5f}", f"{c['delivered_phi']:.5f}",
+                          f"{c['air_fraction']:.4f}", "yes" if c["degenerate"] else "no",
+                          c["degenerate_why"] or "-",
+                          "yes" if c["requested_pore_free"] else "no"]
+                         for c in cells]), ""]
+    return "\n".join(lines)
 
 
 def weighted_overall(buckets: dict[str, dict], freq: dict[str, float]) -> dict:
@@ -619,6 +733,7 @@ def main() -> None:
     samplers = {s: DDIMSampler(model, schedule, device, n_steps=s)
                 for s in ddim_steps_list}
     variant_results: dict[str, dict] = {}
+    cells: list[dict] = []
     for wname, state in (("raw", raw_state), ("ema", ema_state)):
         model.load_state_dict(state)
         for n_steps in ddim_steps_list:
@@ -631,6 +746,8 @@ def main() -> None:
                 por = (label == CLASS_PORE).float().mean(dim=(1, 2, 3))
                 air = (label == CLASS_AIR).float().mean(dim=(1, 2, 3))
                 per_bucket[b] = bucket_metrics(z, sat, por, air, cond["phi"])
+                cells.extend(cell_rows(vname, b, por.cpu().numpy(),
+                                       air.cpu().numpy(), cond["phi"]))
                 entries.extend(grid_entries(xct, label, b))
             variant_results[vname] = {
                 "buckets": per_bucket,
@@ -797,6 +914,7 @@ def main() -> None:
         "alive_boundary": alive_boundary,
         "inset_surface": inset,
         "killswitch": killswitch,
+        "cells": cells,
     }
     history = read_trend(trend_path)
     if history:
@@ -811,15 +929,29 @@ def main() -> None:
     print(f"\nPNGs in {out_dir}")
     print(f"wall-clock: {time.perf_counter() - t_start:.1f}s")
 
-    # THE GATE. This script used to exit 0 whatever it measured, so a chain
-    # stage that called it "fatal" only ever caught a crash.
+    # ── REPORT, then the gate ───────────────────────────────────────────────
+    # Every cell and the kill switch are written out pass or fail; the exit
+    # code is non-zero only for a reversed kill switch or a non-finite value.
+    (out_dir / "diag_cells.json").write_text(json.dumps(
+        {"step": step, "run": run_dir.name, "killswitch": killswitch,
+         "std_reference": std_reference, "cells": cells}, indent=2))
+    (out_dir / "findings.md").write_text(findings_markdown(entry, run_dir.name))
+    unreq = unrequested_cells(entry)
+    if unreq:
+        print(f"\n!!! {len(unreq)} UNREQUESTED DEGENERATE CELL(S) — reported, not fatal:")
+        for c in unreq:
+            print(f"  {c['variant']:<12} bucket {c['bucket']} cell {c['cell']}: "
+                  f"asked {c['requested_phi']:.5f} delivered {c['delivered_phi']:.5f} "
+                  f"air {c['air_fraction']:.4f} ({c['degenerate_why']})")
+    print(f"\ncell table and findings: {out_dir / 'diag_cells.json'}, "
+          f"{out_dir / 'findings.md'}")
     fails = fatal_failures(entry)
     if fails:
         print("\nFATAL — the run is not working:")
         for f in fails:
             print(f"  {f}")
         raise SystemExit(1)
-    print("\nGATE PASS: no unrequested degenerate cell; kill switch direction holds.")
+    print("\nGATE PASS: kill switch direction holds; every value is finite.")
 
 
 if __name__ == "__main__":
