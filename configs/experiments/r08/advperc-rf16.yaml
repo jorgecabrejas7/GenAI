@@ -1,0 +1,35 @@
+experiment:
+  name: r08
+  variant: advperc-rf16
+  description: >-
+    Adversarial + perceptual rung rf-16 (z_channels=4): r08/rombach-rf16 with
+    a 3D patch discriminator on the whole 64³ grey patch instead of the 2D
+    multi-plane slice discriminator. Everything else is r08/rombach-rf16.
+
+# WHY (the author, 2026-10-14, vault D69): in run-0018 (r08/rombach-rf16) the
+# 2D slice discriminator learned only a constant after disc_start 4500 (score
+# real - fake 0.0001-0.0003, loss 0.250; probe at step 5000: same output for
+# real, reconstructed and noise slices). The 2D version also cannot see
+# whether the three planes agree in 3D, and the material is anisotropic. The
+# author asked for a 3D discriminator, the rest unchanged, and the whole
+# reduction-factor table with it (r08/advperc-rf{2,4,8,32,64} extend this).
+extends: r08/rombach-rf16
+
+overrides:
+  discriminator:
+    kind: volume3d
+  runtime:
+    run_name:
+      fields:
+        - {label: arch, path: model.name, transform: slug}
+        - {label: z, path: model.z_channels}
+        - {label: c, path: model.base_channels}
+        - {label: bs, path: data.batch_size}
+        - {label: lr, path: training.lr, transform: sci}
+        - {label: kl, path: loss.kl_reduction, transform: slug}
+        - {label: b, path: loss.kl_max_beta, transform: sci}
+        - {label: p, path: loss.perceptual_weight}
+        - {label: dw, path: discriminator.disc_weight}
+        - {label: ds, path: loss.disc_start}
+        - {label: d, path: discriminator.kind}
+        - {label: sched, path: training.scheduler}

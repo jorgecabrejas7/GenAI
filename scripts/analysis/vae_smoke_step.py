@@ -48,9 +48,11 @@ def synthetic_batch(bs: int, patch: int, device) -> dict:
 
 def main() -> int:
     from poregen.configuration import resolve_experiment
-    from poregen.experiments.train_vae import build_model
+    from poregen.experiments.train_vae import (
+        adversarial_schedule, build_discriminator, build_model, build_optimizer)
     from poregen.losses import build_vae_loss_fn
-    from poregen.training.engine import to_device_inputs
+    from poregen.training.device import get_autocast_dtype, make_scaler
+    from poregen.training.engine import train_step
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -71,9 +73,15 @@ def main() -> int:
     model = build_model(cfg, dev)
     # The trainer's own loss builder: a config with loss.perceptual_weight > 0
     # carries the frozen LPIPS network, and its activations are part of the
-    # step's peak. (The discriminator step is not part of this smoke test.)
+    # step's peak.
     loss_fn = build_vae_loss_fn(cfg, dev)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(cfg["training"]["lr"]))
+    opt = build_optimizer(cfg, model)
+    # The discriminator too, and the step is taken AT disc_start, so the
+    # adversarial path (generator term, adaptive weight, discriminator update)
+    # is inside the measured peak. Before this, a run learned its GAN-path
+    # memory only when it reached disc_start hours later.
+    disc, disc_opt, disc_weight = build_discriminator(cfg, dev)
+    sched = adversarial_schedule(cfg)
     patch = int(cfg["model"]["patch_size"])
     # Random input at the real shape and the real batch: the allocator does not
     # care what the numbers are, only how many.
@@ -88,26 +96,17 @@ def main() -> int:
 
     try:
         model.train()
-        # THROUGH THE TRAINER'S OWN INPUT CONTRACT. Each model declares which
-        # batch keys its forward() consumes — (xct, label) for the r08 3-class
-        # VAE, (xct, mask) for the rest — and to_device_inputs feeds exactly
-        # those. Calling model(xct) directly broke on the paper's own VAE: the
-        # v4 rebuild's first stage died on "forward() missing 1 required
-        # positional argument: 'label'", which is not a memory result.
-        # model_args, NOT args: `args` is the parsed command line, and reusing
-        # the name clobbered it — the step succeeded and then the FITS line
-        # raised on args.experiment.
-        _, model_args = to_device_inputs(model, batch, dev)
-        out = model(*model_args)
-        # The WHOLE cfg: compute_total_loss (inside loss_fn) does `cfg["loss"]` itself. Passing
-        # cfg["loss"] made it look up cfg["loss"]["loss"] and raise KeyError,
-        # so this smoke test reported "did not fit" for BOTH A and B without
-        # ever allocating anything — which skipped A for no reason and sent B
-        # to its fallback, and that fallback took the host out of memory.
-        losses = loss_fn(out, batch, 0)
-        losses["total"].backward()
-        opt.step()
-        opt.zero_grad(set_to_none=True)
+        # The trainer's own step: its input contract (each model declares the
+        # batch keys its forward() consumes), precision, gradient clipping and
+        # the adversarial path, so the peak is the training peak.
+        train_step(
+            model, batch, opt, make_scaler(dev), loss_fn,
+            step=sched["disc_start"], device=dev,
+            autocast_dtype=get_autocast_dtype(dev),
+            max_grad_norm=cfg["training"]["max_grad_norm"],
+            discriminator=disc, disc_optimizer=disc_opt, disc_weight=disc_weight,
+            **sched,
+        )
     except torch.cuda.OutOfMemoryError as exc:
         peak = torch.cuda.max_memory_allocated(dev) / 2**30
         print(f"OOM at batch {bs}: peak {peak:.1f} GiB before failing\n  {exc}")
@@ -124,7 +123,8 @@ def main() -> int:
     peak = torch.cuda.max_memory_allocated(dev) / 2**30
     total = torch.cuda.get_device_properties(dev).total_memory / 2**30
     n = sum(p.numel() for p in model.parameters())
-    print(f"{args.experiment}: one step at batch {bs} FITS")
+    print(f"{args.experiment}: one step at batch {bs} FITS"
+          + (f" (with {type(disc).__name__}, at step {sched['disc_start']})" if disc else ""))
     print(f"  parameters      {n/1e6:.2f} M")
     print(f"  peak allocated  {peak:.1f} GiB of {total:.0f} GiB")
     print(f"  headroom        {total - peak:.1f} GiB")

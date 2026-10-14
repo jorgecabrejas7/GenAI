@@ -550,6 +550,25 @@ discriminator stays our 2D multi-plane spectral-norm PatchGAN with LSGAN
 objectives (his is a BatchNorm `NLayerDiscriminator` with hinge loss and a
 `-mean(D(fake))` generator loss); reconstruction stays Charbonnier (≈ L1).
 
+### Adversarial + perceptual rungs with a 3D discriminator (`r08/advperc-rf*`, vault D69)
+
+`discriminator.kind` picks the discriminator: `slices2d` (default; one random
+axial, coronal and sagittal slice per sample, each scored alone) or `volume3d`
+(`PatchDiscriminator3D`: the same four spectral-norm layers as 3D convolutions,
+scoring the whole 64³ grey patch). Each discriminator's `prepare(vol)` turns
+the grey volume into its own input, so `train_step` is the same for both.
+`r08/advperc-rf16` is `r08/rombach-rf16` with `kind: volume3d` and nothing
+else changed; `advperc-rf{2,4,8,32,64}` extend it and change only
+`z_channels`. Why: in run-0018 (`rombach-rf16`) the 2D slice discriminator
+learned only a constant after `disc_start` (real−fake score 0.0001–0.0003,
+loss 0.250; a CPU probe at step 5000 gave the same output for real,
+reconstructed and noise slices), and a slice discriminator cannot see whether
+the three planes agree in 3D, which matters for a ply-structured material.
+`scripts/analysis/vae_smoke_step.py` now takes the trainer's own `train_step`
+at `disc_start`, so the measured peak includes the discriminator path:
+advperc-rf16 46.9 GiB, advperc-rf2 47.6 GiB at batch 128 (bf16 autocast, as
+in training).
+
 ## Experiment run structure
 
 Runs land in `runs/vae/<experiment>/<timestamp>-<run_index>/` (and `runs/ldm/…`

@@ -370,6 +370,7 @@ def build_discriminator(
 
         discriminator:
           enabled: true
+          kind: slices2d        # or volume3d (whole 64³ patch)
           in_channels: 1
           base_channels: 64
           lr: 2.0e-4
@@ -379,13 +380,16 @@ def build_discriminator(
     Returns (discriminator, disc_optimizer, disc_weight).  All are ``None``/0
     when the section is absent or ``enabled: false``.
     """
-    from poregen.models.discriminator import PatchDiscriminator2D
+    from poregen.models.discriminator import DISCRIMINATORS
 
     disc_cfg = cfg.get("discriminator", {})
     if not disc_cfg or not disc_cfg.get("enabled", True):
         return None, None, 0.0
 
-    disc = PatchDiscriminator2D(
+    kind = disc_cfg.get("kind", "slices2d")
+    if kind not in DISCRIMINATORS:
+        raise ValueError(f"discriminator.kind must be one of {sorted(DISCRIMINATORS)}, got {kind!r}")
+    disc = DISCRIMINATORS[kind](
         in_channels=disc_cfg.get("in_channels", 1),
         base_channels=disc_cfg.get("base_channels", 64),
     ).to(device)
@@ -399,8 +403,9 @@ def build_discriminator(
     disc_weight = float(disc_cfg.get("disc_weight", 0.01))
 
     logger.info(
-        "Discriminator enabled: PatchDiscriminator2D(in=%d, base=%d) | "
+        "Discriminator enabled: %s(in=%d, base=%d) | "
         "disc_weight=%.4f | disc_lr=%.2e",
+        type(disc).__name__,
         disc_cfg.get("in_channels", 1),
         disc_cfg.get("base_channels", 64),
         disc_weight,

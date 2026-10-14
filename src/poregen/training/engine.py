@@ -23,7 +23,6 @@ from poregen.models.vae.base import (
 )
 from poregen.models.discriminator import (
     adaptive_disc_weight,
-    extract_multiplane_slices,
     lsgan_gen_loss,
     lsgan_disc_loss,
 )
@@ -208,7 +207,7 @@ def train_step(
 
     Parameters
     ----------
-    discriminator : optional PatchDiscriminator2D
+    discriminator : optional PatchDiscriminator2D or PatchDiscriminator3D
         When provided (together with ``disc_optimizer``), runs one generator and
         one discriminator update per training step.  The discriminator operates
         in float32 (no AMP) for stability.
@@ -284,8 +283,10 @@ def train_step(
         else:
             fake_xct = output.xct_out
         # Cast from AMP dtype (fp16/bf16) to float32 — D runs in float32
-        _fake_slices = extract_multiplane_slices(fake_xct).float()   # (3B,1,64,64)
-        _real_slices = extract_multiplane_slices(xct).float()                  # (3B,1,64,64)
+        # The discriminator's own input: random multi-plane slices (2D) or the
+        # whole volume (3D). The names stay "slices" for both.
+        _fake_slices = discriminator.prepare(fake_xct).float()
+        _real_slices = discriminator.prepare(xct).float()
 
         # Generator wants D(fake) → 1; gradients flow through D back to the VAE
         d_fake_gen = discriminator(_fake_slices)
@@ -750,7 +751,7 @@ def train_loop(
     best_mode : str
         ``"min"`` or ``"max"`` comparison mode for *best_metric*.
     discriminator : nn.Module, optional
-        2D PatchGAN discriminator (e.g. ``PatchDiscriminator2D``).  When
+        Patch discriminator (``PatchDiscriminator2D`` on slices or ``PatchDiscriminator3D`` on the volume).  When
         provided, adversarial training is enabled: one generator and one
         discriminator update are performed per training step.  Logs
         ``disc_loss``, ``gen_adv_loss``, ``disc_acc_real``, ``disc_acc_fake``

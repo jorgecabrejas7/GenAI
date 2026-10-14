@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from poregen.configuration import resolve_experiment
+from poregen.models.discriminator import extract_multiplane_slices
 from poregen.experiments.train_vae import apply_transfer, build_latent_bank, build_optimizer
 from poregen.training.latent_bank import LatentBank
 
@@ -293,6 +294,9 @@ class TestRefinerFakeBranch:
             def __init__(self):
                 super().__init__()
                 self.p = torch.nn.Parameter(torch.zeros(1))
+
+            # The training step asks the discriminator for its own input.
+            prepare = staticmethod(extract_multiplane_slices)
 
             def forward(self, x):
                 seen.setdefault("first", x.detach().clone())

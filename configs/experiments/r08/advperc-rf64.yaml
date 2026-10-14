@@ -3,14 +3,14 @@ experiment:
   variant: advperc-rf64
   description: >-
     Adversarial + perceptual rung rf-64 (z_channels=1): the first-stage loss
-    of r08/rombach-rf16 (KL summed per sample at 1e-6, LPIPS vgg on slices at
-    1.0, adaptive GAN weight base 0.5 from step 4500) at reduction factor 64.
-    Only z_channels differs from r08/rombach-rf16.
+    of r08/advperc-rf16 (KL summed per sample at 1e-6, LPIPS vgg on slices at
+    1.0, adaptive GAN weight base 0.5 from step 4500, 3D patch discriminator) at reduction factor 64.
+    Only z_channels differs from r08/advperc-rf16.
 
 # WHY (the author, 2026-10-14): rf-16 with this loss is visually far better
 # than the r08 rungs, in the interior and in the air. The author asked for the
 # whole reduction-factor ablation table with it.
-extends: r08/rombach-rf16
+extends: r08/advperc-rf16
 
 overrides:
   model:
