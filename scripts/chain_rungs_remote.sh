@@ -108,7 +108,8 @@ for spec in $RUNGS; do
     say "$NAME = $(basename "${RUNG%/}")"
     if [ "$FAM" = r08_grey ]; then
         check "$NAME vae_val_l1 harness (L1, texture, sharpness)" "${T}_l1" \
-            python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" --split "$SPLIT" --n-batches 20
+            python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" --split "$SPLIT" --n-batches 20 \
+            --out "$S/check_${T}_l1.json"
         check "$NAME recon figure" "${T}_fig" \
             python scripts/analysis/vae_recon_figure.py --run "v4 $NAME=${RUNG%/}" --split "$SPLIT" \
             --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_$T"
@@ -119,7 +120,8 @@ for spec in $RUNGS; do
     check "$NAME calibration probe (dense panels)" "${T}_calib" \
         python scripts/analysis/r08_calibration_probe.py --run "${RUNG%/}"
     check "$NAME vae_val_l1 harness (L1, texture, sharpness)" "${T}_l1" \
-        python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" --split "$SPLIT" --n-batches 20
+        python scripts/analysis/vae_val_l1.py --run "${RUNG%/}" --split "$SPLIT" --n-batches 20 \
+            --out "$S/check_${T}_l1.json"
     check "$NAME recon figure" "${T}_fig" \
         python scripts/analysis/vae_recon_figure.py --run "v4 $NAME=${RUNG%/}" --split "$SPLIT" \
         --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_$T"
