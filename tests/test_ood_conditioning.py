@@ -217,6 +217,7 @@ FAKE_SHAPE = (192, 192, 192)
 
 
 _TRAIN_DIST = porosity_distribution(np.linspace(0.0, 0.107, 1000))
+_POR_LOG_STATS = (-4.5, 1.0)        # a store's por_standardisation (mean, std)
 
 
 def _write_ood(root, name, *, group, phi, pitch=19.6,
@@ -233,7 +234,8 @@ def _write_ood(root, name, *, group, phi, pitch=19.6,
         objective="v", cfg_rescale=0.0, requested_global_phi=phi,
         requested_layup=layup, requested_ply_thickness_vox=pitch,
         requested_material="full",
-        porosity_request=porosity_request_report(_TRAIN_DIST, global_phi=phi),
+        porosity_request=porosity_request_report(_TRAIN_DIST, global_phi=phi,
+                                                 por_log_stats=_POR_LOG_STATS),
         requested_field=None if field is None else FIELD_NPY,
         wall_time_s=1.0, peak_gpu_memory_bytes=1 << 30,
         notes={"group": group, "exploratory": True,
@@ -320,8 +322,9 @@ class TestReporter:
         for heading in ("stacking sequences", "ply pitch", "requested porosity",
                         "correlation length"):
             assert heading in text, heading
-        # The clamp must be visible in the table, not only in the prose.
-        assert "lifted" in text and "held" in text
+        # Where each request sits must be visible in the table, not only in
+        # the prose (there is no clamp: the request reaches the model as asked).
+        assert "outside training range" in text and "inside" in text
         assert "stated failure mode" in text
         assert (root / "ood_conditioning" / "figures"
                 / "porosity_extremes.png").exists()

@@ -158,19 +158,24 @@ def train_percentile(phi: float, dist: dict) -> float:
                  if np.any(q == phi) else np.interp(phi, q, lv))
 
 
-def porosity_request_report(dist: dict, global_phi=None, tile_field=None) -> dict:
+def porosity_request_report(dist: dict, global_phi=None, tile_field=None,
+                            por_log_stats: tuple[float, float] | None = None) -> dict:
     """Where a request sits against the train distribution.  Never alters it.
 
     A value outside ``[train min, train max]`` is flagged "outside training
-    range"; the global request also gets its train percentile.  Both the global
-    request and, when one is given, the per-tile field are reported.
+    range"; the global request also gets its train percentile and, given the
+    store's ``por_log_stats``, its ``cond_por``: the value the model is
+    conditioned on, in standard deviations of the train log-porosity.  Both
+    the global request and, when one is given, the per-tile field are reported.
     """
     lo, hi = float(dist["min"]), float(dist["max"])
     out: dict = {"train_min": lo, "train_max": hi, "global": None, "field": None}
     if global_phi is not None:
         g = float(global_phi)
         out["global"] = {"phi": g, "outside_training_range": not (lo <= g <= hi),
-                         "train_percentile": train_percentile(g, dist)}
+                         "train_percentile": train_percentile(g, dist),
+                         "cond_por": (float(porosity_to_cond(g, por_log_stats))
+                                      if por_log_stats is not None else None)}
     if tile_field is not None:
         f = np.asarray(tile_field, dtype=np.float64)
         outside = (f < lo) | (f > hi)

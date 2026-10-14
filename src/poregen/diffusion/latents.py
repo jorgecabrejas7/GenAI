@@ -716,6 +716,9 @@ def _fill(quota: int, capacity: list[int]) -> list[int]:
     left = int(quota)
     while left > 0 and open_:
         share, extra = divmod(left, len(open_))
+        # The remainder goes to the groups that hold least so far, so a second
+        # round cannot hand it to the same groups again (spread stays <= 1).
+        open_ = sorted(open_, key=lambda i: alloc[i])
         nxt = []
         for k, i in enumerate(open_):
             want = share + (1 if k < extra else 0)

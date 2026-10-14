@@ -432,7 +432,8 @@ class VolumeRunner:
         # The request reaches the model unaltered. Where it sits against the
         # train patch porosity is REPORTED, never corrected.
         por_report = porosity_request_report(
-            self.train_porosity, global_phi=spec.target_phi, tile_field=tile_field)
+            self.train_porosity, global_phi=spec.target_phi, tile_field=tile_field,
+            por_log_stats=self.por_log_stats)
         if por_report["outside_training_range"]:
             logger.warning(
                 "%s: porosity request outside the training range [%.4f, %.4f] "

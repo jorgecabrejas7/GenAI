@@ -29,7 +29,6 @@ import numpy as np
 from poregen.eval_v4 import field_stats as FS
 from poregen.eval_v4 import metrics as M
 from poregen.eval_v4 import stress_geometry as SG
-from poregen.diffusion.conditioning import porosity_to_cond
 from poregen.eval_v4.cases import (
     ASSEMBLY_OFFSETS,
     ASSEMBLY_REGION,
@@ -39,7 +38,6 @@ from poregen.eval_v4.cases import (
 )
 from poregen.eval_v4.io import TILE, Case, load_cases, repo_root, write_results
 from poregen.eval_v4.manifest import Manifest
-from poregen.paths import latents_root
 
 logger = logging.getLogger(__name__)
 
@@ -1661,18 +1659,6 @@ def measure_stress_geometry(root, repo) -> dict:
 #: The train-split (mean, std) of log(phi + 1e-3), read from the latent store's
 #: metadata so the reported conditioning value is the one the model actually
 #: received rather than a constant copied into source.
-def _por_log_stats(repo: Path) -> tuple[float, float] | None:
-    meta = latents_root("latents_r08z8", repo=repo) / "metadata.json"
-    if not meta.exists():
-        return None
-    try:
-        st = json.loads(meta.read_text())["conditioning"]["por_standardisation"]
-        return float(st["mean"]), float(st["std"])
-    except Exception as exc:                              # noqa: BLE001
-        logger.warning("could not read por_standardisation from %s: %s", meta, exc)
-        return None
-
-
 def _ply_hits(layup: dict) -> dict:
     """Per-ply agreement, per reader, as the table the report prints.
 
@@ -1710,7 +1696,6 @@ def measure_ood_conditioning(root, repo) -> dict:
     cases = load_cases(root, "ood_conditioning")
     if not cases:
         raise FileNotFoundError(f"no ood_conditioning volumes under {root}")
-    stats = _por_log_stats(Path(repo))
     rows = []
     for case in cases:
         m = case.manifest
@@ -1742,11 +1727,10 @@ def measure_ood_conditioning(root, repo) -> dict:
                 "train_range": ([m.porosity_request["train_min"],
                                  m.porosity_request["train_max"]]
                                 if m.porosity_request else None),
-                "cond_por": (float(porosity_to_cond(phi, stats))
-                             if stats else None),
+                "cond_por": g.get("cond_por"),
                 "cond_por_units": (
                     "standard deviations of log(phi + 1e-3) over the train split"
-                    if stats else None),
+                    if g.get("cond_por") is not None else None),
             }
 
         if group in ("sequence", "pitch"):
