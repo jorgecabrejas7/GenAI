@@ -4,7 +4,11 @@
 # rung checks on best.ckpt, then the next rung.
 #
 #     RUNGS="16 32 64" setsid nohup bash scripts/advperc_queue.sh &
+#     FAMILY=advperc-ldm RUNGS="16 32 64" setsid nohup bash scripts/advperc_queue.sh &
 #     touch runs/campaigns/STOP_ADVPERC     # halt cleanly before the next stage
+#
+# FAMILY (default advperc) picks the config family r08/<FAMILY>-rfN; every
+# file name below carries <FAMILY>-rfN, so families never overwrite each other.
 #
 # Everything is named advperc-rfN (logs chain_logs/advperc-rfN.log,
 # smoke_/check_/vmrate_ files, campaign-09 dirs r08_advperc-rfN-dsv4), so no
@@ -25,6 +29,7 @@ S="$REPO/runs/campaigns/chain_logs"
 LOG="$S/advperc_queue_$(hostname -s).log"
 STOP="$REPO/runs/campaigns/STOP_ADVPERC"
 RUNGS="${RUNGS:?set RUNGS, e.g. RUNGS=\"16 32 64\"}"
+FAMILY="${FAMILY:-advperc}"
 mkdir -p "$S"
 
 say() { printf '%s  ADVPERC %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
@@ -39,7 +44,7 @@ check() {
 }
 
 for N in $RUNGS; do
-    EXP="r08/advperc-rf$N"; T="advperc-rf$N"
+    EXP="r08/$FAMILY-rf$N"; T="$FAMILY-rf$N"
     gate "$T smoke"
     POREGEN_CUDA_MEM_FRACTION=0.8 choom -n 1000 -- \
         python scripts/analysis/vae_smoke_step.py --experiment "$EXP" > "$S/smoke_$T.log" 2>&1
@@ -77,4 +82,4 @@ for N in $RUNGS; do
         --split "$SPLIT" --out "runs/campaigns/09-r08-latent-sweep/figures/recon_v4_$T"
     say "$T DONE"
 done
-say "QUEUE COMPLETE ($RUNGS)"
+say "QUEUE COMPLETE ($FAMILY: $RUNGS)"
