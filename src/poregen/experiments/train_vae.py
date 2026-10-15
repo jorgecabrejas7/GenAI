@@ -394,11 +394,13 @@ def build_discriminator(
         base_channels=disc_cfg.get("base_channels", 64),
     ).to(device)
 
+    # AdamW with weight_decay 0 is Adam: the LDM recipe (betas 0.5/0.9, no
+    # decay) is reached through config, not a second optimiser class.
     disc_optimizer = torch.optim.AdamW(
         disc.parameters(),
         lr=float(disc_cfg.get("lr", 2e-4)),
         weight_decay=float(disc_cfg.get("weight_decay", 0.01)),
-        betas=(0.5, 0.999),   # standard GAN betas — lower β1 for stability
+        betas=tuple(float(b) for b in disc_cfg.get("betas", (0.5, 0.999))),
     )
     disc_weight = float(disc_cfg.get("disc_weight", 0.01))
 
@@ -428,6 +430,7 @@ def build_optimizer(
         params,
         lr=training_cfg["lr"],
         weight_decay=training_cfg["weight_decay"],
+        betas=tuple(float(b) for b in training_cfg.get("betas", (0.9, 0.999))),
     )
 
 
@@ -547,14 +550,21 @@ def _load_run_config(run_dir: Path) -> dict[str, Any]:
 
 
 def adversarial_schedule(cfg: dict[str, Any]) -> dict[str, Any]:
-    """``disc_adaptive`` / ``disc_start`` for ``train_loop``, from ``loss.*``.
+    """``disc_adaptive`` / ``disc_start`` (from ``loss.*``) and ``adv_loss``
+    (from ``discriminator.loss``) for ``train_loop``.
 
-    Defaults (false / 0) are the historical fixed-weight GAN from step 0.
+    Defaults (false / 0 / lsgan) are the historical fixed-weight LSGAN from step 0.
     """
+    from poregen.models.discriminator import ADV_LOSSES
+
     c = cfg["loss"]
+    adv_loss = cfg.get("discriminator", {}).get("loss", "lsgan")
+    if adv_loss not in ADV_LOSSES:
+        raise ValueError(f"discriminator.loss must be one of {sorted(ADV_LOSSES)}, got {adv_loss!r}")
     return {
         "disc_adaptive": bool(c.get("disc_adaptive", False)),
         "disc_start": int(c.get("disc_start", 0)),
+        "adv_loss": adv_loss,
     }
 
 

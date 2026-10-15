@@ -1,0 +1,72 @@
+experiment:
+  name: r08
+  variant: advperc-ldm-rf16
+  description: >-
+    Adversarial + perceptual rung rf-16 (z_channels=4) with the LDM
+    autoencoder's own training recipe (CompVis latent-diffusion
+    LPIPSWithDiscriminator + taming NLayerDiscriminator), 3D being the only
+    change: L1 + LPIPS on the [-1, 1] grey scale, KL summed at 1e-6, hinge
+    loss on a BatchNorm PatchGAN (nlayer3d), adaptive weight base 0.5,
+    Adam betas (0.5, 0.9) without weight decay for both networks at the lr
+    of their scaling rule. Our 3-class head and its losses stay.
+
+# WHY (the author, 2026-10-15, vault OQ-69): in r08/advperc-rf{16,8} (run-0019,
+# run-0024) the spectral-norm LSGAN 3D discriminator stayed at chance from
+# step 4500 to the end. The official code differs from ours in the
+# discriminator, its loss, both optimisers, the input range and disc_start.
+# The author: "only difference should be we do it in 3D, nothing else, we
+# want to test their approach on our data". Author's answers 2026-10-15: keep
+# the class head, disc_start 15000, lr by their rule, bf16 kept.
+#
+# Official values (latent-diffusion configs/autoencoder/autoencoder_kl_*.yaml,
+# ldm/modules/losses/contperceptual.py, ldm/models/autoencoder.py, main.py):
+#   rec = |x - x'| + 1.0 * LPIPS, images in [-1, 1]      -> l1 x 2.0 on our [0, 1] grey
+#   kl_weight 1e-6 on the per-sample KL sum               -> rombach_sum, 1e-6 (inherited)
+#   logvar: an nn.Parameter that is NOT in opt_ae, so it stays at its init 0
+#                                                          -> fixed 0 (inherited)
+#   disc: NLayerDiscriminator n_layers 3, ndf 64, BatchNorm, hinge,
+#         separate real / fake passes                     -> discriminator.kind nlayer3d, loss hinge
+#   adaptive weight ||g_nll|| / (||g_adv|| + 1e-4), clamp [0, 1e4], x 0.5
+#                                                          -> disc_adaptive, disc_weight 0.5 (inherited)
+#   disc_start 50001                                       -> 15000 (author: our early stops fire 12k-24k)
+#   Adam(betas 0.5, 0.9), no decay, AE and disc same lr   -> betas, weight_decay 0, lr below
+#   lr = base_lr 4.5e-6 x accumulate x ngpu x batch (scale_lr default True)
+#                                                          -> 4.5e-6 x 128 = 5.76e-4
+#   precision fp32                                         -> bf16 kept (author)
+extends: r08/rombach-rf16
+
+overrides:
+  loss:
+    xct_loss_type: l1
+    # |x - x'| on [-1, 1] is 2 x |x - x'| on our [0, 1] grey (xct / 255).
+    xct_weight: 2.0
+    disc_start: 15000
+  discriminator:
+    kind: nlayer3d
+    loss: hinge
+    base_channels: 64
+    lr: 5.76e-4
+    betas: [0.5, 0.9]
+    weight_decay: 0.0
+  training:
+    lr: 5.76e-4
+    betas: [0.5, 0.9]
+    weight_decay: 0.0
+    # Early stopping must not end a run before the discriminator starts.
+    early_stopping_warmup_steps: 15000
+  runtime:
+    run_name:
+      fields:
+        - {label: arch, path: model.name, transform: slug}
+        - {label: z, path: model.z_channels}
+        - {label: c, path: model.base_channels}
+        - {label: bs, path: data.batch_size}
+        - {label: lr, path: training.lr, transform: sci}
+        - {label: kl, path: loss.kl_reduction, transform: slug}
+        - {label: b, path: loss.kl_max_beta, transform: sci}
+        - {label: p, path: loss.perceptual_weight}
+        - {label: dw, path: discriminator.disc_weight}
+        - {label: ds, path: loss.disc_start}
+        - {label: d, path: discriminator.kind}
+        - {label: dl, path: discriminator.loss}
+        - {label: sched, path: training.scheduler}

@@ -569,6 +569,26 @@ at `disc_start`, so the measured peak includes the discriminator path:
 advperc-rf16 46.9 GiB, advperc-rf2 47.6 GiB at batch 128 (bf16 autocast, as
 in training).
 
+### The LDM autoencoder recipe in 3D (`r08/advperc-ldm-rf*`, vault OQ-69)
+
+Both 3D runs above (run-0019 rf-16, run-0024 rf-8) kept the spectral-norm
+LSGAN discriminator at chance from `disc_start` to the end (score 0.500 /
+0.500, loss 0.250). The author asked for the official recipe (CompVis
+latent-diffusion `LPIPSWithDiscriminator` + taming `NLayerDiscriminator`)
+with 3D as the only change. `discriminator.kind: nlayer3d`
+(`NLayerDiscriminator3D`) is that PatchGAN with Conv3d/BatchNorm3d, weights
+N(0, 0.02), no spectral norm, input `2x − 1`, and a logit per location;
+`discriminator.loss: hinge` is `hinge_d_loss` / `−mean(D(fake))`. A BatchNorm
+discriminator sets `joint_pass = False`, so `train_step` scores real and fake
+in separate forward passes, as the original does (the spectral-norm kinds keep
+one joint pass). `discriminator.betas` and `training.betas` set Adam's betas
+for the two optimisers (AdamW with `weight_decay: 0` is Adam). The rung config
+`r08/advperc-ldm-rf16` maps every official value; its header lists them. The
+author's choices (2026-10-15): class head kept, `disc_start` 15000 (with
+early-stopping warm-up 15000 so no run ends first), lr 5.76e-4 by the
+official scaling rule, bf16 kept. The official `logvar` is an `nn.Parameter`
+that is not in `opt_ae`, so it never trains; ours is fixed at 0, the same.
+
 ## Experiment run structure
 
 Runs land in `runs/vae/<experiment>/<timestamp>-<run_index>/` (and `runs/ldm/…`

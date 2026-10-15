@@ -1,0 +1,12 @@
+experiment:
+  name: r08
+  variant: advperc-ldm-rf4
+  description: >-
+    r08/advperc-ldm-rf16 (the LDM autoencoder recipe in 3D) at reduction
+    factor 4 (z_channels=16). Only z_channels differs.
+
+extends: r08/advperc-ldm-rf16
+
+overrides:
+  model:
+    z_channels: 16

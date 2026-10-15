@@ -197,7 +197,7 @@ def test_existing_configs_resolve_to_the_old_behaviour(experiment):
 
     cfg = resolve_experiment(experiment).cfg
     assert not {"kl_reduction", "perceptual_weight", "disc_adaptive", "disc_start"} & set(cfg["loss"])
-    assert adversarial_schedule(cfg) == {"disc_adaptive": False, "disc_start": 0}
+    assert adversarial_schedule(cfg) == {"disc_adaptive": False, "disc_start": 0, "adv_loss": "lsgan"}
     assert build_perceptual(cfg, torch.device("cpu")) is None
 
 
@@ -213,5 +213,5 @@ def test_rombach_config_resolves_to_the_recipe():
     assert c["perceptual_weight"] == 1.0 and c["perceptual_net"] == "vgg"
     assert c["perceptual_slices_per_axis"] == 4
     assert cfg["discriminator"]["disc_weight"] == 0.5
-    assert adversarial_schedule(cfg) == {"disc_adaptive": True, "disc_start": 4500}
+    assert adversarial_schedule(cfg) == {"disc_adaptive": True, "disc_start": 4500, "adv_loss": "lsgan"}
     assert cfg["model"]["z_channels"] == 4 and cfg["model"]["in_channels"] == 3

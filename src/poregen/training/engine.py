@@ -23,8 +23,7 @@ from poregen.models.vae.base import (
 )
 from poregen.models.discriminator import (
     adaptive_disc_weight,
-    lsgan_gen_loss,
-    lsgan_disc_loss,
+    ADV_LOSSES,
 )
 from poregen.metrics.seg import (
     multiclass_metrics, porosity_binned_mae, porosity_metrics, segmentation_metrics,
@@ -202,6 +201,7 @@ def train_step(
     adv_fake_latents: torch.Tensor | None = None,
     disc_adaptive: bool = False,
     disc_start: int = 0,
+    adv_loss: str = "lsgan",
 ) -> tuple[dict[str, Any], float, dict[str, Any], dict[str, float]]:
     """Single training step with AMP, optional gradient clipping, and scheduler.
 
@@ -232,6 +232,9 @@ def train_step(
         ``[0, 1e4]`` and detached. Needs ``losses["rec_total"]``, which
         ``compute_total_loss`` emits when ``loss.disc_adaptive`` is true.
         Logged as ``disc_lambda`` (the full multiplier, base weight included).
+    adv_loss : str
+        ``"lsgan"`` (default) or ``"hinge"`` (the LDM autoencoder's loss,
+        ``discriminator.loss``); see ``poregen.models.discriminator.ADV_LOSSES``.
     disc_start : int
         No adversarial term and no discriminator update before this step.
 
@@ -289,8 +292,9 @@ def train_step(
         _real_slices = discriminator.prepare(xct).float()
 
         # Generator wants D(fake) → 1; gradients flow through D back to the VAE
+        gen_loss_fn, _, _ = ADV_LOSSES[adv_loss]
         d_fake_gen = discriminator(_fake_slices)
-        _gen_adv_loss = lsgan_gen_loss(d_fake_gen)
+        _gen_adv_loss = gen_loss_fn(d_fake_gen)
 
         # Add to total BEFORE backward so generator gets adversarial signal
         if disc_adaptive:
@@ -395,29 +399,36 @@ def train_step(
         # Zero D grads (clears any accumulated from the generator backward)
         disc_optimizer.zero_grad(set_to_none=True)
 
-        # Real and fake go through ONE forward. Two forwards before one
-        # backward break under torch.compile: spectral norm's power iteration
-        # updates its u/v buffers in-place on the second forward, and AOT
-        # autograd saves the buffer itself (eager clones it), so the first
-        # forward's graph sees a version mismatch at backward. Safe to concat:
-        # the discriminator has no batch norm, scores are per-sample.
-        _n_real = _real_slices.shape[0]
-        d_all = discriminator(
-            torch.cat([_real_slices, _fake_slices.detach()], dim=0)
-        )                                                           # float32, with grad
-        d_real, d_fake = d_all[:_n_real], d_all[_n_real:]
+        _, disc_loss_fn, thr = ADV_LOSSES[adv_loss]
+        if discriminator.joint_pass:
+            # Real and fake go through ONE forward. Two forwards before one
+            # backward break under torch.compile: spectral norm's power iteration
+            # updates its u/v buffers in-place on the second forward, and AOT
+            # autograd saves the buffer itself (eager clones it), so the first
+            # forward's graph sees a version mismatch at backward. Safe to concat:
+            # this discriminator has no batch norm, scores are per-sample.
+            _n_real = _real_slices.shape[0]
+            d_all = discriminator(
+                torch.cat([_real_slices, _fake_slices.detach()], dim=0)
+            )                                                       # float32, with grad
+            d_real, d_fake = d_all[:_n_real], d_all[_n_real:]
+        else:
+            # BatchNorm discriminator (nlayer3d): separate passes, as the LDM
+            # autoencoder's LPIPSWithDiscriminator does, so each pass is
+            # normalised by its own batch statistics. No spectral norm, so the
+            # compile hazard above does not apply.
+            d_real = discriminator(_real_slices)
+            d_fake = discriminator(_fake_slices.detach())
 
-        disc_loss = lsgan_disc_loss(d_real, d_fake)
+        disc_loss = disc_loss_fn(d_real, d_fake)
         disc_loss.backward()
         disc_optimizer.step()
 
         disc_metrics = {
             "disc_loss":       float(disc_loss.item()),
-            "d_loss_real":     float(0.5 * (d_real - 1.0).pow(2).mean().item()),
-            "d_loss_fake":     float(0.5 * d_fake.pow(2).mean().item()),
             "gen_adv_loss":    float(_gen_adv_loss.item()),
-            "disc_acc_real":   float((d_real > 0.5).float().mean().item()),
-            "disc_acc_fake":   float((d_fake < 0.5).float().mean().item()),
+            "disc_acc_real":   float((d_real > thr).float().mean().item()),
+            "disc_acc_fake":   float((d_fake < thr).float().mean().item()),
             "disc_score_real": float(d_real.mean().item()),
             "disc_score_fake": float(d_fake.mean().item()),
             "disc_margin":     float((d_real - d_fake).mean().item()),
@@ -691,6 +702,7 @@ def train_loop(
     disc_weight: float = 0.01,
     disc_adaptive: bool = False,
     disc_start: int = 0,
+    adv_loss: str = "lsgan",
     resume_state: dict[str, Any] | None = None,
     latent_bank: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -966,6 +978,7 @@ def train_loop(
                 adv_fake_latents=_next_bank_batch(),
                 disc_adaptive=disc_adaptive,
                 disc_start=disc_start,
+                adv_loss=adv_loss,
             )
             _step_elapsed = time.perf_counter() - _step_t0
             step_time_ms  = _step_elapsed * 1000.0

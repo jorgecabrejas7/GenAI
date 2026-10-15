@@ -9,6 +9,14 @@ Two kinds, chosen by ``discriminator.kind`` in the config:
   agree in 3D, and the material is anisotropic (plies), so the adversarial
   rungs ``r08/advperc-rf*`` use the 3D one. Everything else about the
   adversarial term (LSGAN, spectral norm, adaptive weight) is the same.
+- ``nlayer3d`` (the author, 2026-10-15): the LDM autoencoder's own
+  discriminator (taming-transformers ``NLayerDiscriminator``, used by
+  latent-diffusion ``LPIPSWithDiscriminator``) with every 2D op made 3D and
+  nothing else changed: BatchNorm, no spectral norm, weights N(0, 0.02),
+  input in [-1, 1], a logit per patch location (no averaging), trained with
+  the hinge loss. Both 3D kinds above stayed at chance on our data (vault
+  OQ-69); the author asked to test the official recipe with 3D as the only
+  difference.
 
 Each discriminator has ``prepare(vol)``: it turns a ``(B, 1, D, H, W)`` grey
 volume into the discriminator's own input, so the training step does not need
@@ -52,6 +60,9 @@ class PatchDiscriminator2D(nn.Module):
     base_channels : int
         Feature-map width at the first layer; each subsequent layer doubles.
     """
+
+    # No norm layer, scores are per sample: real and fake may share one forward.
+    joint_pass = True
 
     def __init__(self, in_channels: int = 1, base_channels: int = 64) -> None:
         super().__init__()
@@ -99,6 +110,8 @@ class PatchDiscriminator3D(nn.Module):
     so it sees texture and its consistency across the three planes together.
     """
 
+    joint_pass = True
+
     def __init__(self, in_channels: int = 1, base_channels: int = 64) -> None:
         super().__init__()
         c = base_channels
@@ -123,7 +136,68 @@ class PatchDiscriminator3D(nn.Module):
         return vol
 
 
-DISCRIMINATORS = {"slices2d": PatchDiscriminator2D, "volume3d": PatchDiscriminator3D}
+def _rombach_weights_init(m: nn.Module) -> None:
+    """taming-transformers ``weights_init``: conv N(0, 0.02), BN weight N(1, 0.02), bias 0."""
+    name = m.__class__.__name__
+    if name.find("Conv") != -1:
+        nn.init.normal_(m.weight.data, 0.0, 0.02)
+    elif name.find("BatchNorm") != -1:
+        nn.init.normal_(m.weight.data, 1.0, 0.02)
+        nn.init.constant_(m.bias.data, 0)
+
+
+class NLayerDiscriminator3D(nn.Module):
+    """The LDM autoencoder's PatchGAN (taming ``NLayerDiscriminator``) in 3D.
+
+    Same layers as the original with ``n_layers=3``, ``ndf=64``,
+    ``use_actnorm=False``; Conv3d/BatchNorm3d replace Conv2d/BatchNorm2d::
+
+        Conv(1→64, 4, s2, p1)             + LeakyReLU(0.2)   →  32³
+        Conv(64→128, 4, s2, p1, no bias)  + BN + LeakyReLU   →  16³
+        Conv(128→256, 4, s2, p1, no bias) + BN + LeakyReLU   →   8³
+        Conv(256→512, 4, s1, p1, no bias) + BN + LeakyReLU   →   7³
+        Conv(512→1, 4, s1, p1)                               →   6³ logits
+
+    ``forward`` returns the logit MAP; the hinge loss averages it over every
+    location, as the original does. BatchNorm means real and fake must go
+    through separate forward passes (``joint_pass = False``), as in
+    ``LPIPSWithDiscriminator``.
+    """
+
+    joint_pass = False
+
+    def __init__(self, in_channels: int = 1, base_channels: int = 64, n_layers: int = 3) -> None:
+        super().__init__()
+        ndf, kw, padw = base_channels, 4, 1
+        seq: list[nn.Module] = [nn.Conv3d(in_channels, ndf, kw, stride=2, padding=padw),
+                                nn.LeakyReLU(0.2, True)]
+        mult = 1
+        for n in range(1, n_layers):
+            prev, mult = mult, min(2 ** n, 8)
+            seq += [nn.Conv3d(ndf * prev, ndf * mult, kw, stride=2, padding=padw, bias=False),
+                    nn.BatchNorm3d(ndf * mult), nn.LeakyReLU(0.2, True)]
+        prev, mult = mult, min(2 ** n_layers, 8)
+        seq += [nn.Conv3d(ndf * prev, ndf * mult, kw, stride=1, padding=padw, bias=False),
+                nn.BatchNorm3d(ndf * mult), nn.LeakyReLU(0.2, True),
+                nn.Conv3d(ndf * mult, 1, kw, stride=1, padding=padw)]
+        self.main = nn.Sequential(*seq)
+        self.apply(_rombach_weights_init)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, 1, D, H, W) in [-1, 1] → (B, 1, d, h, w) logit map."""
+        return self.main(x)
+
+    @staticmethod
+    def prepare(vol: torch.Tensor) -> torch.Tensor:
+        """Grey in [0, 1] (``xct / 255``) → [-1, 1], the range the original sees."""
+        return 2.0 * vol - 1.0
+
+
+DISCRIMINATORS = {
+    "slices2d": PatchDiscriminator2D,
+    "volume3d": PatchDiscriminator3D,
+    "nlayer3d": NLayerDiscriminator3D,
+}
 
 
 # ── multi-plane slice extraction ──────────────────────────────────────────────
@@ -179,6 +253,24 @@ def lsgan_disc_loss(d_real: torch.Tensor, d_fake: torch.Tensor) -> torch.Tensor:
     The discriminator wants to output 1 for real slices and 0 for fakes.
     """
     return 0.5 * ((d_real - 1.0).pow(2).mean() + d_fake.pow(2).mean())
+
+
+def hinge_disc_loss(d_real: torch.Tensor, d_fake: torch.Tensor) -> torch.Tensor:
+    """taming ``hinge_d_loss``: ``0.5 * (E[relu(1 − D(real))] + E[relu(1 + D(fake))])``,
+    the means over every patch location of every sample."""
+    return 0.5 * (torch.relu(1.0 - d_real).mean() + torch.relu(1.0 + d_fake).mean())
+
+
+def hinge_gen_loss(d_fake: torch.Tensor) -> torch.Tensor:
+    """LPIPSWithDiscriminator generator term: ``−E[D(fake)]``."""
+    return -d_fake.mean()
+
+
+# (gen loss, disc loss, decision threshold for the real/fake accuracy metrics)
+ADV_LOSSES = {
+    "lsgan": (lsgan_gen_loss, lsgan_disc_loss, 0.5),
+    "hinge": (hinge_gen_loss, hinge_disc_loss, 0.0),
+}
 
 
 # ── adaptive generator weight (Rombach et al. 2022) ───────────────────────────
