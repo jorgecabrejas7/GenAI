@@ -160,8 +160,55 @@ def fmt(v) -> str:
     return f"{v:.3g}" if (a >= 1e3 or a < 1e-3) and a != 0 else f"{v:.4f}"
 
 
-def tables(runs, out: Path) -> None:
-    lines = []
+def would_stop_at(val: list[dict], patience_steps: int, min_delta: float) -> int | None:
+    """The first step at which the trainer's early-stopping rule (val.total, min,
+    ``min_delta``, patience in steps) would fire if it had NO warm-up. The
+    author (2026-10-15) asked to watch whether 15000 steps is enough for the
+    model to converge at the new lr before the discriminator starts."""
+    best, best_step = None, None
+    for r in val:
+        v = r["total"]
+        if best is None or v < best - min_delta:
+            best, best_step = v, r["step"]
+        elif r["step"] - best_step >= patience_steps:
+            return int(r["step"])
+    return None
+
+
+def window_change(val: list[dict], key: str, last: int, gap: int = 3000, width: int = 1000) -> str:
+    """Median of ``key`` over the last ``width`` steps vs the same window ``gap``
+    steps earlier, as a % change. Negative = still improving (for losses)."""
+    now = [r[key] for r in val if last - width < r["step"] <= last and isinstance(r.get(key), (int, float))]
+    then = [r[key] for r in val if last - gap - width < r["step"] <= last - gap and isinstance(r.get(key), (int, float))]
+    if not now or not then or np.median(then) == 0:
+        return "–"
+    return f"{100.0 * (np.median(now) - np.median(then)) / abs(np.median(then)):+.1f} %"
+
+
+def convergence(runs, patience_steps: int, min_delta: float) -> list[str]:
+    keys = ["total", "xct_loss", "lpips", "dice_pore"]
+    lines = ["## Convergence before the discriminator\n",
+             f"Early-stop rule as in the trainer (val.total, min_delta {min_delta}, patience "
+             f"{patience_steps} steps) but with no warm-up: the step at which it would have "
+             "fired. Change = median of the last 1000 steps vs the 1000 steps ending 3000 "
+             "steps earlier (negative = still improving for losses, positive for Dice).\n",
+             "| run | last val step | best val.total (step) | steps since best | would stop at | "
+             + " | ".join(f"Δ {k}" for k in keys) + " |",
+             "|---" * (5 + len(keys)) + "|"]
+    for label, _, _, val in runs:
+        if not val:
+            continue
+        last = val[-1]["step"]
+        b = min(val, key=lambda r: r["total"])
+        stop = would_stop_at(val, patience_steps, min_delta)
+        lines.append(f"| {label} | {last} | {fmt(b['total'])} ({b['step']}) | {last - b['step']} | "
+                     f"{stop if stop is not None else 'not yet'} | "
+                     + " | ".join(window_change(val, k, last) for k in keys) + " |")
+    return lines + [""]
+
+
+def tables(runs, out: Path, patience_steps: int = 3000, min_delta: float = 1e-4) -> None:
+    lines = convergence(runs, patience_steps, min_delta)
     for label, run, train, val in runs:
         lines.append(f"## {label}\n\n`{run.relative_to(REPO)}`\n")
         last = max((r["step"] for r in train), default=0)
