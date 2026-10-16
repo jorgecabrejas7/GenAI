@@ -43,14 +43,24 @@ KINDS = ("low", "high", "air")
 TITLES = {"low": "almost no pores", "high": "very porous", "air": "with air"}
 
 
-def pick_rows(df) -> dict[str, int]:
-    """Dataset row of each patch kind (see the module docstring)."""
+def pick_rows(df, seed: int | None = None, pool: int = 200) -> dict[str, int]:
+    """Dataset row of each patch kind (see the module docstring).
+
+    ``seed=None`` takes the row nearest each target. With a seed, one of the
+    ``pool`` nearest rows is drawn at random, so a second figure shows other
+    patches of the same kinds.
+    """
+    rng = np.random.default_rng(seed)
+    def choose(dist):
+        if seed is None:
+            return int(dist.idxmin())
+        return int(rng.choice(dist.nsmallest(pool).index))
     solid = df[df["air_fraction"] == 0.0]
     out = {}
     for kind, q in (("low", 0.02), ("high", 0.99)):
         target = float(solid["porosity"].quantile(q))
-        out[kind] = int((solid["porosity"] - target).abs().idxmin())
-    out["air"] = int((df["air_fraction"] - 0.4).abs().idxmin())
+        out[kind] = choose((solid["porosity"] - target).abs())
+    out["air"] = choose((df["air_fraction"] - 0.4).abs())
     return out
 
 
@@ -64,6 +74,8 @@ def main() -> int:
     ap.add_argument("--run", action="append", required=True, help='"label=path[:ckpt]"')
     ap.add_argument("--split", default=default_split())
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="draw each patch from the 200 rows nearest its target (default: the nearest row)")
     a = ap.parse_args()
     from poregen.models.vae.base import decode_xct
     from poregen.training.engine import to_device_inputs
@@ -75,7 +87,7 @@ def main() -> int:
         run, ckpt = REPO / parts[0], (parts[1] if len(parts) > 1 else "best.ckpt")
         model, ds, _, _, _ = load_model_and_patches(run, a.split, 1, 1, None, ckpt)
         if picked is None:
-            picked = pick_rows(ds.df)
+            picked = pick_rows(ds.df, a.seed)
             for k in KINDS:
                 r = ds.df.iloc[picked[k]]
                 print(f"{k:<5} row {picked[k]}  {r['volume_id']}  z0 {r['z0']} y0 {r['y0']} x0 {r['x0']}"
