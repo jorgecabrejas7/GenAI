@@ -21,6 +21,10 @@ Writes <out>/table.md, table.csv and four figures:
   fig_porosity_bins.png   porosity MAE per true-porosity bin, val, off vs on
   fig_disc_state.png      discriminator loss and margin over training per rung
 
+Headline (2026-10-19, campaign 33 table.md): the disc phase RAISES (worsens) val grey L1
+on every rung (rf-32 0.0276 -> 0.0518) and raises val total on rf-2, rf-16, rf-32.
+The disc left chance only on rf-32 and rf-64.
+
 Usage:
     python scripts/analysis/advperc_ablation_report.py --out runs/campaigns/33-advperc-ldm/ablation \\
         --run "16=runs/vae/<run>" --run "8=runs/remote/.../<run>" ...
