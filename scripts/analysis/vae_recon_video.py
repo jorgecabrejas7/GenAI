@@ -6,9 +6,13 @@ scan on the left and one panel per ``--run`` to its right, upscaled with
 nearest neighbour and labelled. The video plays every slice of patch 1, then
 patch 2, and so on, with a title card line naming the patch (porosity, air
 fraction, volume). Grey only (``decode_xct``), on the raw scan scale.
+Slices that hold true pore voxels are shown ``--pore-hold`` frames each, so
+the video slows down where the pores are.
 
-Patches: the same eight split_v4 val rows as vae_recon_tiff_grid.py
-(``pick_rows``), so the video and the TIFF grids show the same places.
+Patches: by default the same eight split_v4 val rows as
+vae_recon_tiff_grid.py (``pick_rows``). ``--porous`` takes instead eight
+air-free rows at the high porosity quantiles ``POROUS_Q``, one per volume
+where the 200 nearest rows allow it.
 
 Usage:
     python scripts/analysis/vae_recon_video.py --out <dir>/name.mp4 \\
@@ -25,10 +29,13 @@ import numpy as np
 import torch
 
 from vae_val_l1 import load_model_and_patches  # same dir
+import vae_recon_tiff_grid  # same dir
 from vae_recon_tiff_grid import pick_rows  # same dir
+from poregen.dataset.loader import LABEL_PORE
 
 REPO = Path(__file__).resolve().parents[2]
 GAP, HEAD, FOOT = 8, 36, 30
+POROUS_Q = [0.9, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999, 1.0]
 
 
 def text(img: np.ndarray, s: str, x: int, y: int, size: float = 0.7) -> None:
@@ -42,6 +49,8 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--fps", type=int, default=8)
     ap.add_argument("--scale", type=int, default=4)
+    ap.add_argument("--porous", action="store_true", help="eight high-porosity patches")
+    ap.add_argument("--pore-hold", type=int, default=1, help="frames per slice with true pores")
     a = ap.parse_args()
     from poregen.models.vae.base import decode_xct
     from poregen.training.engine import to_device_inputs
@@ -53,7 +62,11 @@ def main() -> int:
         run, ckpt = REPO / parts[0], (parts[1] if len(parts) > 1 else "best.ckpt")
         model, ds, _, _, _ = load_model_and_patches(run, a.split, 1, 1, None, ckpt)
         if rows is None:
+            if a.porous:
+                vae_recon_tiff_grid.TARGETS = [("porosity", q) for q in POROUS_Q]
             df, rows = ds.df, pick_rows(ds.df)
+            pore = np.stack([ds[r]["label"].numpy().reshape(ds[r]["xct"].shape[-3:]) == LABEL_PORE
+                             for r in rows])
         items = [ds[r] for r in rows]
         batch = {k: torch.stack([it[k] for it in items]) for k in items[0] if torch.is_tensor(items[0][k])}
         torch.manual_seed(0)
@@ -88,7 +101,8 @@ def main() -> int:
                 fr[HEAD:HEAD + cell, x0:x0 + cell] = np.kron(vol_u8[i, z], np.ones((s, s), np.uint8))
                 text(fr, lab, x0 + 6, HEAD - 10)
             text(fr, f"{info}  z {z + 1}/{p}", 6, HEAD + cell + 22, 0.55)
-            writer.append_data(np.repeat(fr[..., None], 3, axis=2))
+            for _ in range(a.pore_hold if pore[i, z].any() else 1):
+                writer.append_data(np.repeat(fr[..., None], 3, axis=2))
     writer.close()
     print("wrote", out, f"{len(rows)} patches x {p} slices at {a.fps} fps, {w}x{h}")
     return 0
