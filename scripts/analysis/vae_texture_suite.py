@@ -51,6 +51,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vae_val_l1 import REPO, load_model_and_patches  # noqa: E402
+
+DEV = torch.device("cpu")  # set by --device
 from vae_texture_fidelity import interior_patches, shell_sums, summarise  # noqa: E402
 from poregen.dataset.loader import LABEL_PORE  # noqa: E402
 from poregen.eval_v4.microstructure import (  # noqa: E402
@@ -157,8 +159,8 @@ def suite(rec: list[np.ndarray], gt: list[np.ndarray], rec_pore, true_pore, feat
                    "floor": swd(G1, G2, dg[li], li)}
     del n1
     # C
-    fr = inception_features(central_slices(rec), torch.device("cpu")).reshape(len(rec), 3, -1)
-    fg = feats_gt if feats_gt is not None else inception_features(central_slices(gt), torch.device("cpu")).reshape(len(gt), 3, -1)
+    fr = inception_features(central_slices(rec), DEV).reshape(len(rec), 3, -1)
+    fg = feats_gt if feats_gt is not None else inception_features(central_slices(gt), DEV).reshape(len(gt), 3, -1)
     f = lambda F, ix: F[ix].reshape(-1, F.shape[-1])  # noqa: E731
     c = {"fid": {"value": (frechet_distance(f(fr, h1), f(fg, h2)) + frechet_distance(f(fr, h2), f(fg, h1))) / 2,
                  "floor": frechet_distance(f(fg, h1), f(fg, h2))},
@@ -176,19 +178,20 @@ def pairs_for(run: Path, ckpt: str, split: str, n_batches: int, batch_size: int)
     from poregen.models.vae.base import decode_xct
     from poregen.training.engine import to_device_inputs
     model, ds, idx, _, _ = load_model_and_patches(run, split, n_batches, batch_size, None, ckpt)
+    model = model.to(DEV)
     torch.manual_seed(0)
     keep = [i for i, _ in interior_patches(ds, idx)]
     rec, gt, rp, tp = [], [], [], []
     for s in range(0, len(keep), batch_size):
         rows = [ds[j] for j in keep[s:s + batch_size]]
         batch = {k: torch.stack([r[k] for r in rows]) for k in rows[0] if torch.is_tensor(rows[0][k])}
-        bdev, args = to_device_inputs(model, batch, torch.device("cpu"))
+        bdev, args = to_device_inputs(model, batch, DEV)
         with torch.no_grad():
             out = model(*args)
-        x = decode_xct(out.xct_out)[:, 0].numpy()
-        cls = out.class_logits.argmax(1).numpy()
+        x = decode_xct(out.xct_out)[:, 0].cpu().numpy()
+        cls = out.class_logits.argmax(1).cpu().numpy()
         for bi in range(len(rows)):
-            rec.append(x[bi].astype(np.float64)); gt.append(bdev["xct"][bi, 0].numpy().astype(np.float64))
+            rec.append(x[bi].astype(np.float64)); gt.append(bdev["xct"][bi, 0].cpu().numpy().astype(np.float64))
             rp.append(cls[bi] == LABEL_PORE); tp.append(rows[bi]["label"].numpy().reshape(x.shape[1:]) == LABEL_PORE)
     return rec, gt, rp, tp, keep
 
@@ -266,8 +269,13 @@ def main() -> int:
     ap.add_argument("--split", default="split_v4")
     ap.add_argument("--n-batches", type=int, default=20)
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--device", default="cpu", help="cpu or cuda (TF32 off)")
     ap.add_argument("--out", type=Path, default=REPO / "runs/campaigns/33-advperc-ldm/texture")
     a = ap.parse_args()
+    global DEV
+    DEV = torch.device(a.device)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     ab = lambda p: p if p.is_absolute() else REPO / p  # noqa: E731
     if a.validate:
         return validate(ab(a.ref_run), a.ckpt[0] if a.ckpt else "best.ckpt", a.split, a.n_batches, a.batch_size, a.out)
