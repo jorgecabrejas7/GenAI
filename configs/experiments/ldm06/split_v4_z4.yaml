@@ -4,7 +4,8 @@ experiment:
   description: >-
     ldm06/facedrop_from_start on the split_v4 latent store of a z=4 r08 VAE.
     Two keys and nothing else: model.z_channels 4 and data.latents_root
-    data/split_v4/latents_r08z4.
+    data/split_v4/latents_r08-run-0020-s25000z4 (author 2026-10-20: rf-16,
+    run-0020, step-25000 checkpoint; not best.ckpt, which is step 12659).
 
 # WHY ONE FILE PER z (2026-10-13). POREGEN_SPLIT moves data.latents_root's split
 # directory and POREGEN_VAE_CHECKPOINT moves vae.checkpoint, but nothing moves
@@ -23,4 +24,4 @@ overrides:
   model:
     z_channels: 4
   data:
-    latents_root: data/split_v4/latents_r08z4
+    latents_root: data/split_v4/latents_r08-run-0020-s25000z4
