@@ -8,10 +8,10 @@ This script puts the chosen steps next to a REAL 192³ crop from a val volume:
 the air-free crop whose porosity is nearest the sample target, searched on a
 64-voxel grid.
 
-Each frame is one z-slice: top row grey, bottom row grey with pores in red and
-air in blue. Panels are labelled with the step and the volume's porosity. The
-video steps through z, holding slices with pores in any panel ``--pore-hold``
-frames. The PNG is the three central planes (z, y, x) of every panel.
+The video and the PNG share one layout: one column per volume, one row per
+axis (z, y, x planes), grey with pores in red and air in blue. Frame i shows
+slice i along each row's axis, so the video spans every slice; the PNG is the
+central slice.
 
 Usage:
     python scripts/analysis/ldm_samples_video.py --run runs/ldm/<run> \\
@@ -81,8 +81,7 @@ def main() -> int:
     ap.add_argument("--steps", nargs="+", type=int, required=True)
     ap.add_argument("--split", default="split_v4")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--fps", type=int, default=10)
-    ap.add_argument("--pore-hold", type=int, default=2)
+    ap.add_argument("--fps", type=int, default=8)
     a = ap.parse_args()
     run = a.run if a.run.is_absolute() else REPO / a.run
     target = float(yaml.safe_load(open(run / "resolved_config.yaml"))["training"]["sample_global_por"])
@@ -97,41 +96,32 @@ def main() -> int:
     panels.insert(0, (f"{name}  phi {float((lab == PORE).mean()):.4f}", g, lab))
     print(json.dumps({"target": target, "panels": [p[0] for p in panels]}))
 
-    n = len(panels)
-    w = n * size + (n - 1) * GAP
-    w += (-w) % 16
-    h = 2 * (size + HEAD)
-    h += (-h) % 16
+    def frame(i: int) -> np.ndarray:
+        rows = []
+        for ax in range(3):
+            row = []
+            for _, g, lb in panels:
+                sl = [slice(None)] * 3
+                sl[ax] = i
+                row.append(overlay(g[tuple(sl)], lb[tuple(sl)]))
+                row.append(np.zeros((size, GAP, 3), np.uint8))
+            rows.append(np.concatenate(row[:-1], axis=1))
+            rows.append(np.zeros((GAP, rows[-1].shape[1], 3), np.uint8))
+        head = np.zeros((HEAD, rows[0].shape[1], 3), np.uint8)
+        for k, p in enumerate(panels):
+            text(head, p[0], k * (size + GAP) + 4, HEAD - 10, 0.42)
+        foot = np.zeros((HEAD, rows[0].shape[1], 3), np.uint8)
+        text(foot, f"slice {i + 1}/{size}  rows: z, y, x planes  target phi {target}  red pore, blue air", 4, 20, 0.42)
+        img = np.concatenate([head] + rows[:-1] + [foot], axis=0)
+        return np.pad(img, ((0, (-img.shape[0]) % 16), (0, (-img.shape[1]) % 16), (0, 0)))
+
     a.out.parent.mkdir(parents=True, exist_ok=True)
     writer = imageio.get_writer(a.out.with_suffix(".mp4"), fps=a.fps, codec="libx264", quality=9,
                                 pixelformat="yuv420p", macro_block_size=16)
-    for zi in range(size):
-        fr = np.zeros((h, w, 3), np.uint8)
-        for k, (lab_s, g, lb) in enumerate(panels):
-            x0 = k * (size + GAP)
-            fr[HEAD:HEAD + size, x0:x0 + size] = np.repeat(g[zi][..., None], 3, axis=-1)
-            fr[2 * HEAD + size:2 * HEAD + 2 * size, x0:x0 + size] = overlay(g[zi], lb[zi])
-            text(fr, lab_s, x0 + 4, HEAD - 10, 0.42)
-        text(fr, f"z {zi + 1}/{size}   target phi {target}   red = pore, blue = air", 4, HEAD + size + 20, 0.45)
-        hold = a.pore_hold if any((p[2][zi] == PORE).any() for p in panels) else 1
-        for _ in range(hold):
-            writer.append_data(fr)
+    for i in range(size):
+        writer.append_data(frame(i))
     writer.close()
-
-    rows = []
-    for ax in range(3):
-        row = []
-        for _, g, lb in panels:
-            sl = [slice(None)] * 3
-            sl[ax] = size // 2
-            row.append(overlay(g[tuple(sl)], lb[tuple(sl)]))
-            row.append(np.zeros((size, GAP, 3), np.uint8))
-        rows.append(np.concatenate(row[:-1], axis=1))
-        rows.append(np.zeros((GAP, rows[-1].shape[1], 3), np.uint8))
-    head = np.zeros((HEAD, rows[0].shape[1], 3), np.uint8)
-    for k, p in enumerate(panels):
-        text(head, p[0], k * (size + GAP) + 4, HEAD - 10, 0.42)
-    imageio.imwrite(a.out.with_suffix(".png"), np.concatenate([head] + rows[:-1], axis=0))
+    imageio.imwrite(a.out.with_suffix(".png"), frame(size // 2))
     print("wrote", a.out.with_suffix(".mp4"), a.out.with_suffix(".png"))
     return 0
 
