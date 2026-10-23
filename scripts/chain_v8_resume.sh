@@ -51,7 +51,8 @@
 # early-stopping criterion, not on the clock.
 set -uo pipefail
 REPO=/home/jorgecabrejas/Dev/GenAI
-S="/tmp/claude-1001/-home-jorgecabrejas-Dev-GenAI/ce0b3db0-2aa0-4a97-9bc4-7bb0db078739/scratchpad"
+S="$REPO/runs/campaigns/chain_logs/v8"
+mkdir -p "$S"
 LOG="$REPO/runs/campaigns/chain.log"
 STOP="$REPO/runs/campaigns/STOP_CHAIN"
 SPLIT="${POREGEN_SPLIT:-split_v4}"
@@ -65,6 +66,9 @@ cd "$REPO" || exit 1
 
 #: Resume point. Everything before it is skipped; everything from it runs.
 START_AT="${START_AT:-rf8}"
+#: Stages to leave out even past START_AT (2026-10-23: the comparison queue
+#: splits the stages between two machines, e.g. SKIP="baselines rungs grey").
+SKIP="${SKIP:-}"
 case " rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm25 c25 c24 c27 c14 rungs grey " in
     *" $START_AT "*) ;;
     *) echo "START_AT must be one of: rf8 rf8checks vaecont store conditioning ldm06 converge c18 baselines ldm25 c25 c24 c27 c14 rungs grey" >&2; exit 2 ;;
@@ -76,6 +80,7 @@ if [ "$START_AT" != rf8 ] && [ -z "${POREGEN_VAE_CHECKPOINT:-}" ]; then
 fi
 _reached=0
 at() {
+    case " $SKIP " in *" $1 "*) say "SKIP $1 (in SKIP)"; return 1 ;; esac
     [ "$_reached" -eq 1 ] && return 0
     if [ "$1" = "$START_AT" ]; then _reached=1; return 0; fi
     say "SKIP $1 (resuming at $START_AT)"
@@ -245,14 +250,17 @@ if at rf8; then
 fi
 # Resuming past rf8: the VAE is the one POREGEN_VAE_CHECKPOINT names (checked
 # at the top), never a glob.
+# The checkpoint is the one named, not best.ckpt: the advperc-ldm VAE is
+# run-0020 at step 25000 (vault D76), and its best.ckpt is step 12659.
 [ -z "${VAE:-}" ] && VAE=$(dirname "$POREGEN_VAE_CHECKPOINT")
-[ -e "${VAE%/}/best.ckpt" ] || { say "STOP NOTICE: ${VAE%/}/best.ckpt does not exist"; exit 1; }
+[ -e "$POREGEN_VAE_CHECKPOINT" ] || { say "STOP NOTICE: $POREGEN_VAE_CHECKPOINT does not exist"; exit 1; }
 [ -e "${VAE%/}/resolved_config.yaml" ] || { say "STOP NOTICE: ${VAE%/}/resolved_config.yaml does not exist"; exit 1; }
-export POREGEN_VAE_CHECKPOINT="${VAE%/}/best.ckpt"
 Z=$(python -c "import sys, yaml; print(int(yaml.safe_load(open(sys.argv[1]))['model']['z_channels']))" \
     "${VAE%/}/resolved_config.yaml") || { say "STOP NOTICE: could not read z_channels of $VAE"; exit 1; }
-STORE="data/$SPLIT/latents_r08z$Z"
 LDM06_EXP="ldm06/split_v4_z$Z"
+#: The store is the one the LDM config trains on, read from it, never rebuilt by name.
+STORE=$(python -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['overrides']['data']['latents_root'])" \
+    "$REPO/configs/experiments/$LDM06_EXP.yaml") || { say "STOP NOTICE: could not read latents_root of $LDM06_EXP"; exit 1; }
 LDM25_EXP="ldm25/phi_only_v4_z$Z"
 for exp in "$LDM06_EXP" "$LDM25_EXP"; do
     [ -e "$REPO/configs/experiments/$exp.yaml" ] || {
@@ -439,6 +447,14 @@ if at baselines; then
     # ── 5. the three baselines, trained INTO the v4 directories ────────────────
     # train_slicegan.py and train_ddpm3d.py default --out to the split_v3 campaign
     # directories. Without --out they would OVERWRITE the split_v3 baselines.
+    # The floor is cut here when no LDM campaign has cut it (a machine that runs
+    # only the baselines); it is the same split_v4 command as stage c18's.
+    if [ ! -e "$C18/real_floor" ]; then
+        mkdir -p "$C18"
+        step "real floor on $SPLIT (for the baselines)" real_floor "10 min" \
+            python -m poregen.eval_v4.cli real-floor --root "$C18" \
+            --shapes small large micro surface
+    fi
     link_floor "$C22"
     step "slicegan train" slicegan "11 h" \
         python scripts/train_slicegan.py --out "$C22/train"
