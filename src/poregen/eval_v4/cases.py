@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from functools import partial
+from functools import lru_cache, partial
 
 import numpy as np
 
@@ -1392,6 +1392,122 @@ def ablation_cases(repo=None) -> list[CaseSpec]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Campaign 36 - pore morphology: requests built from REAL coupons
+# ---------------------------------------------------------------------------
+
+#: Whole-coupon porosity bins, pore / non-air (author 2026-10-26).
+POP_BINS = ((0.0, 0.005), (0.005, 0.01), (0.01, 0.02), (0.02, 0.05), (0.05, 0.12))
+#: Held-out coupons that lend their GEOMETRY (air envelope, theta(z), specimen
+#: box) to the bin volumes: each has its specimen thickness under 192 voxels,
+#: so a 192-deep crop keeps air on both z faces. Two layups (A: Na, B: JI).
+POP_GEOMETRY = (
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_1_volume_eq_aligned",
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_08_1_volume_eq_aligned",
+    "MedidasDB__Juan_Ignacio_probetas_12_volume_eq_aligned",
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_2_volume_eq_aligned",
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_08_5_volume_eq_aligned",
+)
+#: Coupons generated whole as twins, one per bin 0-0.5 / 1-2 / 2-5 %.
+#: Na_01_1 (2.41 %) stands in for Na_09_5: 241 voxels deep, a 192 crop would
+#: drop a fifth of its thickness.
+TWIN_COUPONS = (
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_2_volume_eq_aligned",
+    "MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned",
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_1_volume_eq_aligned",
+)
+POP_DDIM = 50
+POP_DEPTH = 192
+
+
+@lru_cache(maxsize=4)
+def real_request(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -> dict:
+    """Everything a generation needs to copy one real coupon's layout.
+
+    The crop is ``POP_DEPTH`` deep, centred on the specimen's z extent, and
+    either the whole coupon in y/x snapped down to 64-voxel tiles (``yx`` None)
+    or a centred ``yx`` window. Returned: the crop, the voxel envelope
+    (``sample_mask``), the MATERIAL porosity per 64-tile (pore / envelope; a
+    tile with under 1 % envelope takes the crop mean), theta(z) read from the
+    orientation field the LDM was trained on, and the specimen box from the
+    same file's foreground extent, in crop coordinates.
+    """
+    import zarr  # noqa: PLC0415
+    root = Path(repo or repo_root()) / "data" / "split_v4"
+    rec = json.load(open(root / "orientation_field.json"))["volumes"][volume_id]
+    g = zarr.open(str(root / "volumes.zarr"), mode="r")[volume_id]
+    D, H, W = g["mask"].shape
+    ext = rec["extent_foreground"]
+    zc = (ext["z"][0] + ext["z"][1] + 1) // 2
+    z0 = int(min(max(zc - POP_DEPTH // 2, 0), D - POP_DEPTH))
+    if yx is None:
+        hs, ws = H // TILE * TILE, W // TILE * TILE
+    else:
+        hs, ws = yx
+    y0, x0 = (H - hs) // 2, (W - ws) // 2
+    sl = np.s_[z0:z0 + POP_DEPTH, y0:y0 + hs, x0:x0 + ws]
+    env = np.asarray(g["sample_mask"][sl]).astype(bool)
+    pore = np.asarray(g["mask"][sl]).astype(bool) & env
+    t = TILE
+    shp = (POP_DEPTH // t, t, hs // t, t, ws // t, t)
+    n_env = env.reshape(shp).sum(axis=(1, 3, 5)).astype(np.float64)
+    n_pore = pore.reshape(shp).sum(axis=(1, 3, 5)).astype(np.float64)
+    mean_phi = float(n_pore.sum() / max(n_env.sum(), 1.0))
+    field = np.where(n_env >= 0.01 * t ** 3, n_pore / np.maximum(n_env, 1.0), mean_phi)
+    theta = tuple(float(a) for a in np.asarray(rec["theta_deg"], np.float64)[z0:z0 + POP_DEPTH])
+    lo = (ext["z"][0] - z0, ext["y"][0] - y0, ext["x"][0] - x0)
+    hi = (ext["z"][1] + 1 - z0, ext["y"][1] + 1 - y0, ext["x"][1] + 1 - x0)
+    return {
+        "shape": (POP_DEPTH, hs, ws), "crop": [[z0, z0 + POP_DEPTH], [y0, y0 + hs], [x0, x0 + ws]],
+        "envelope": env, "field": field.astype(np.float32), "mean_phi": mean_phi,
+        "theta": theta, "box": (tuple(int(v) for v in lo), tuple(int(v) for v in hi)),
+    }
+
+
+def _fixed(arr: np.ndarray, *_):
+    return arr
+
+
+def pore_population_cases(repo=None) -> list[CaseSpec]:
+    """36a - five bins x five geometries: a uniform MATERIAL-porosity request at
+    each bin centre, inside the air envelope, theta(z) and specimen box of a
+    real held-out coupon (192 x 1024 x 1024 centred crop), so every volume has
+    air and its pores a distance to the surface."""
+    out = []
+    for lo, hi in POP_BINS:
+        tag = f"{lo * 100:g}-{hi * 100:g}"
+        for gi, vid in enumerate(POP_GEOMETRY):
+            r = real_request(vid, (1024, 1024), repo)
+            seed = 101 * (gi + 1)
+            out.append(CaseSpec(
+                name=f"bin{tag}_g{gi}_seed{seed}", assessment="pore_population",
+                volume_shape=r["shape"], seed=seed, layup=r["theta"], ply_thickness_vox=1.0,
+                target_phi=(lo + hi) / 2, ddim_steps=POP_DDIM,
+                material_fn=partial(_fixed, r["envelope"]), specimen_box=r["box"],
+                notes={"bin": f"{tag}%", "geometry_from": vid, "geometry_crop_zyx": r["crop"],
+                       "request": "uniform material phi at the bin centre"},
+            ))
+    return out
+
+
+def twin_cases(repo=None) -> list[CaseSpec]:
+    """36b - three whole coupons regenerated with their own air envelope,
+    per-tile material porosity, theta(z) and specimen box."""
+    out = []
+    for vid in TWIN_COUPONS:
+        r = real_request(vid, None, repo)
+        out.append(CaseSpec(
+            name="twin_" + vid.split("probetas_")[-1].replace("_volume_eq_aligned", ""),
+            assessment="twins", volume_shape=r["shape"], seed=101,
+            layup=r["theta"], ply_thickness_vox=1.0, ddim_steps=POP_DDIM,
+            field_fn=partial(_fixed, r["field"]), material_fn=partial(_fixed, r["envelope"]),
+            specimen_box=r["box"],
+            notes={"real_volume_id": vid, "real_crop_zyx": r["crop"], "real_mean_phi": r["mean_phi"],
+                   "request": "per-tile material phi, envelope, theta and box of the real coupon"},
+        ))
+    return out
+
+
 ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "sampler": sampler_cases,
     "porosity_global": porosity_global_cases,
@@ -1407,6 +1523,8 @@ ASSESSMENTS: dict[str, Callable[..., list[CaseSpec]]] = {
     "stress_geometry": stress_geometry_cases,
     "ood_conditioning": ood_conditioning_cases,
     "ablation": ablation_cases,
+    "pore_population": pore_population_cases,
+    "twins": twin_cases,
 }
 
 #: Assessments whose measure step also reads another assessment's volumes.
@@ -1432,6 +1550,11 @@ BORROWS = {
 #: sampling scripts — eval_v4 has no model for them — and are measured here so
 #: the baseline and ldm06 meet the same tables rather than two different ones.
 MEASURE_ONLY = ("field_stats", "slicegan", "ddpm3d")
+
+#: Generated by eval_v4 but measured OUTSIDE it: campaign 36's per-pore
+#: tables (scripts/analysis/pore_morphology.py) read these volumes; eval_v4's
+#: measure/report have nothing to say about them.
+GENERATE_ONLY = ("pore_population", "twins")
 
 
 def build_cases(assessment: str, repo=None) -> list[CaseSpec]:

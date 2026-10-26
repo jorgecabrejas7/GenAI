@@ -895,12 +895,13 @@ def test_every_assessment_has_cases_a_measurer_and_a_reporter():
     an assessment missing from the report. This is the check that would have
     caught it.
     """
-    from poregen.eval_v4.cases import ASSESSMENTS
+    from poregen.eval_v4.cases import ASSESSMENTS, GENERATE_ONLY
     from poregen.eval_v4.measure import MEASURERS
     from poregen.eval_v4.report import REPORTERS
 
-    assert not set(ASSESSMENTS) - set(MEASURERS), "assessment without a measurer"
-    assert not set(ASSESSMENTS) - set(REPORTERS), "assessment without a reporter"
+    scored = set(ASSESSMENTS) - set(GENERATE_ONLY)
+    assert not scored - set(MEASURERS), "assessment without a measurer"
+    assert not scored - set(REPORTERS), "assessment without a reporter"
 
 
 # --------------------------------------------------------------------------- #
