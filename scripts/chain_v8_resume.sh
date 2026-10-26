@@ -489,7 +489,9 @@ fi
 [ -z "${LDM25:-}" ] && LDM25=$(latest_run ldm25)
 if at c25; then
     C25="$REPO/runs/campaigns/25-ldm-phi-only$SUF-$(ldm_tag "$LDM25")"; link_floor "$C25"
-    for A in porosity_global microstructure cfg; do
+    # sampler too: c14 draws phi-only patches from sampler, porosity_global and
+    # microstructure, as the split_v3 campaign 25 had them (c14 stopped 2026-10-26).
+    for A in sampler porosity_global microstructure cfg; do
         step "c25 generate $A" "c25_gen_$A" "varies" \
             python -m poregen.eval_v4.cli generate "$A" --model "${LDM25%/}" \
             --ckpt 40000 --weights ema --out "$C25"
