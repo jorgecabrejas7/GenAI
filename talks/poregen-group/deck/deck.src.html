@@ -71,6 +71,11 @@ svg .ink { fill:var(--ink); } svg .serif { font-family:var(--serif); font-size:3
 .slide.visible .r.d3 { transition-delay:.36s; } .slide.visible .r.d4 { transition-delay:.48s; }
 .slide.visible .r.d5 { transition-delay:.6s; }  .slide.visible .r.d6 { transition-delay:.72s; }
 
+/* === NEW WORDS: every term is defined on the slide where it first appears === */
+.words { position:absolute; left:0; right:0; bottom:0; display:flex; gap:32px; border-top:1px solid var(--faint); padding-top:16px; }
+.words > div { flex:1; font:300 21px/1.35 var(--sans); color:var(--ink2); }
+.words b { display:block; font:500 18px var(--mono); color:var(--pore); margin-bottom:5px; letter-spacing:.02em; }
+.plain { font:300 26px/1.4 var(--sans); color:var(--ink2); margin:10px 0 30px; }
 /* === SPEAKER NOTES (hidden on slides; N shows the panel) === */
 aside.notes { display:none; }
 #notesPanel { position:fixed; left:0; right:0; bottom:0; max-height:42vh; overflow:auto; z-index:2000; display:none;
@@ -129,7 +134,7 @@ aside.notes { display:none; }
   <h2 class="t r">Why generate <i>porosity</i>?</h2>
   <p class="msg r d1">Pores control the strength of a composite part. Real scans are slow and few. We want many volumes with known pores.</p>
   <div class="body">
-    <svg viewBox="0 0 1728 440" width="1728" height="440" class="r d2">
+    <svg viewBox="0 0 1728 440" width="1500" height="382" class="r d2">
       <!-- coupon -->
       <g transform="translate(40,170)">
         <rect x="0" y="40" width="260" height="120" fill="none" stroke="#e8e6e1" stroke-width="2"/>
@@ -163,6 +168,7 @@ aside.notes { display:none; }
       <div class="card"><p>train pore-segmentation networks</p></div><div class="card"><p>test NDT methods on known pores</p></div>
       <div class="card"><p>build digital twins of coupons</p></div><div class="card"><p>ask "what if" for porosity and shape</p></div>
     </div>
+    <div class="words r d5"><div><b>XCT</b>X-ray computed tomography: a 3-D image of how much X-ray each point absorbs. Dark = low density = pore or air.</div><div><b>NDT</b>non-destructive testing: inspecting a part (e.g. by ultrasound) without cutting it.</div><div><b>digital twin</b>a virtual copy of a real part, used to predict how it behaves.</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. Porosity is the main manufacturing defect in these laminates and it lowers the mechanical properties. Every real volume costs a scan and a segmentation. A generator that gives many volumes, with the porosity we ask for and with labels, is useful for data, for testing methods and for "what if" questions.</p>
@@ -176,11 +182,12 @@ aside.notes { display:none; }
 <section class="slide" id="s3" data-init="morph" data-section="Diffusion">
   <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · the idea</div>
   <h2 class="t r">Destroy with noise, then <i>learn to undo it</i></h2>
-  <p class="msg r d1">Adding noise is easy and known. Removing it is learned. Generation = start from pure noise and remove it step by step.</p>
+  <p class="msg r d1">Adding noise needs no learning. Removing it is what a neural network learns. To make a new image, start from pure noise and remove it step by step.</p>
   <div class="body">
-    <canvas id="morphCv" width="384" height="384" style="position:absolute;left:672px;top:20px;width:620px;height:620px" class="vid"></canvas>
-    <div class="lbl" style="position:absolute;left:0;top:250px;width:600px;text-align:right"><span class="big amber" id="morphDir">→</span><br><span id="morphTxt">forward: add Gaussian noise</span></div>
-    <div class="lbl" style="position:absolute;left:1340px;top:270px" id="morphT">t = 0</div>
+    <canvas id="morphCv" width="384" height="384" style="position:absolute;left:672px;top:0;width:500px;height:500px" class="vid"></canvas>
+    <div class="lbl" style="position:absolute;left:0;top:190px;width:600px;text-align:right"><span class="big amber" id="morphDir">→</span><br><span id="morphTxt">forward: add Gaussian noise</span></div>
+    <div class="lbl" style="position:absolute;left:1220px;top:220px" id="morphT">t = 0</div>
+    <div class="words r d5"><div><b>Gaussian noise</b>random values from a bell curve, added independently to every pixel.</div><div><b>step t</b>how much noise has been added: t = 0 is the clean image, t = 1000 is pure noise.</div><div><b>diffusion model</b>a network trained to undo the noise one step at a time.</div></div>
   </div>
   <aside class="notes">
     <p>~40 s. Intuition first. Going right, we add a little Gaussian noise many times until nothing of the slice is left. This direction needs no learning. Going back, a network predicts what noise to remove at each step. If it can do that at every noise level, it can start from pure noise and end at a new, realistic image.</p>
@@ -193,17 +200,18 @@ aside.notes { display:none; }
      ========================================================= -->
 <section class="slide" id="s4" data-init="forward" data-section="Diffusion">
   <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · forward process</div>
-  <h2 class="t r">Forward process: a <i>closed form</i> for every t</h2>
-  <p class="msg r d1">We can jump to any noise level in one step. The schedule ᾱ<sub>t</sub> decides how fast the signal fades.</p>
+  <h2 class="t r">Adding noise: <i>one formula</i> for any step</h2>
+  <p class="msg r d1">We never add noise 1000 times. One formula gives the noisy image at any step t directly: keep a fraction of the image, fill the rest with noise.</p>
   <div class="body">
-    <div class="eq r d2" style="position:absolute;left:0;top:0">q(<i>x<sub>t</sub></i> | <i>x</i><sub>0</sub>) = N( √ᾱ<sub><i>t</i></sub> <i>x</i><sub>0</sub> , (1 − ᾱ<sub><i>t</i></sub>) <b>I</b> ) &nbsp;⇔&nbsp; <i>x<sub>t</sub></i> = √ᾱ<sub><i>t</i></sub> <i>x</i><sub>0</sub> + √(1 − ᾱ<sub><i>t</i></sub>) <i>ε</i>, &nbsp;<i>ε</i> ~ N(0, <b>I</b>)</div>
-    <div id="fwdGrid" class="r d3" style="position:absolute;left:0;top:96px;display:flex;gap:18px"></div>
-    <svg id="fwdPlot" class="r d4" viewBox="0 0 1728 330" width="1728" height="330" style="position:absolute;left:0;top:360px"></svg>
+    <div class="eq r d2" style="position:absolute;left:0;top:0"><i>x<sub>t</sub></i> = √ᾱ<sub><i>t</i></sub> · <i>x</i><sub>0</sub> + √(1 − ᾱ<sub><i>t</i></sub>) · <i>ε</i> &nbsp;&nbsp;<span class="lbl">clean image, scaled down, plus noise, scaled up</span></div>
+    <div id="fwdGrid" class="r d3" style="position:absolute;left:0;top:72px;display:flex;gap:18px"></div>
+    <svg id="fwdPlot" class="r d4" viewBox="0 0 1728 330" width="1257" height="240" style="position:absolute;left:0;top:285px"></svg>
+    <div class="words r d5"><div><b>x₀</b>the clean image.</div><div><b>ε</b>a pure-noise image of the same size.</div><div><b>x<sub>t</sub></b>the image after t steps of noise.</div><div><b>ᾱ<sub>t</sub></b>how much of the clean image is left: 1 at t = 0, 0 at t = 1000. Its shape over t is the noise schedule.</div><div><b>SNR</b>signal-to-noise ratio = ᾱ<sub>t</sub> ÷ (1 − ᾱ<sub>t</sub>): signal power over noise power.</div></div>
   </div>
   <aside class="notes">
-    <p>~70 s. Top: the closed form. The mean shrinks by √ᾱ<sub>t</sub>, the variance grows to 1 − ᾱ<sub>t</sub>. So we never simulate the chain during training: we draw t, draw ε, and build x<sub>t</sub> directly.</p>
-    <p>Bottom left: ᾱ<sub>t</sub> for the cosine schedule we use (Nichol &amp; Dhariwal style, s = 0.008, T = 1000). Bottom right: the signal-to-noise ratio SNR(t) = ᾱ<sub>t</sub> / (1 − ᾱ<sub>t</sub>) on a log scale. The marker moves with the highlighted panel. At t = T the SNR is exactly 0: the image is gone.</p>
-    <p class="src">Schedule: our model's configuration (cosine, T 1000, s 0.008). ᾱ<sub>T</sub> = 3.75·10⁻³³ was measured on this schedule (value recorded in the model configuration file). Panels are computed in the browser on a real slice.</p>
+    <p>~80 s. Define every symbol before using it. x₀ is the clean image, ε a noise image, x<sub>t</sub> the noisy image at step t. ᾱ<sub>t</sub> ("alpha bar") is the share of the clean image that is left; it falls from 1 to 0. The square roots keep the total brightness spread the same at every step.</p>
+    <p>Because this formula exists, training never simulates the chain: pick a random t, draw a noise image, build x<sub>t</sub> in one line. Top row: the same slice at six steps. Bottom left: ᾱ<sub>t</sub> for our schedule (a cosine curve). Bottom right: the signal-to-noise ratio on a log scale. At t = 1000 it is exactly 0: nothing of the image is left. The marker follows the highlighted panel.</p>
+    <p class="src">Schedule: our model's configuration (cosine, T 1000, s 0.008). ᾱ<sub>T</sub> = 3.75·10⁻³³ was measured on this schedule (value recorded in the model configuration file). Panels are computed in the browser on a real slice. Mathematically this is the Gaussian q(x<sub>t</sub> | x₀) = N(√ᾱ<sub>t</sub> x₀, (1 − ᾱ<sub>t</sub>) I) of Ho et al. 2020.</p>
   </aside>
 </section>
 
@@ -212,18 +220,19 @@ aside.notes { display:none; }
      ========================================================= -->
 <section class="slide" id="s5" data-init="reverse" data-section="Diffusion">
   <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · reverse process</div>
-  <h2 class="t r">Reverse process: a network <i>predicts the noise</i></h2>
-  <p class="msg r d1">Training is a regression: show the network a noised image and t, ask for the noise. One step back uses that prediction.</p>
+  <h2 class="t r">Removing noise: a network <i>guesses the noise</i></h2>
+  <p class="msg r d1">Training: show the network a noisy image and the step t; it must output the noise that was added. Generating: subtract a little of the guessed noise, again and again.</p>
   <div class="body">
-    <svg id="chainSvg" viewBox="0 0 1100 300" width="1100" height="300" class="r d2" style="position:absolute;left:0;top:30px"></svg>
-    <div class="eq r d3" style="position:absolute;left:0;top:380px">ℒ = 𝔼<sub><i>x</i>₀, <i>ε</i>, <i>t</i></sub> ‖ <i>ε</i> − <i>ε</i><sub><i>θ</i></sub>( √ᾱ<sub><i>t</i></sub> <i>x</i><sub>0</sub> + √(1−ᾱ<sub><i>t</i></sub>) <i>ε</i> , <i>t</i> ) ‖²</div>
-    <div class="lbl r d4" style="position:absolute;left:0;top:470px;width:1050px;line-height:1.6">Ho, Jain &amp; Abbeel — <b>Denoising Diffusion Probabilistic Models</b>, NeurIPS 2020</div>
-    <canvas id="revCv" width="384" height="384" class="vid r d3" style="position:absolute;left:1188px;top:0;width:540px;height:540px"></canvas>
-    <div class="lbl" style="position:absolute;left:1188px;top:560px" id="revT">t = 1000</div>
+    <svg id="chainSvg" viewBox="0 0 1100 300" width="1000" height="273" class="r d2" style="position:absolute;left:0;top:0"></svg>
+    <div class="eq r d3" style="position:absolute;left:0;top:300px;font-size:36px">loss = average of ( <i>ε</i> − <i>ε</i><sub><i>θ</i></sub>(<i>x<sub>t</sub></i>, <i>t</i>) )²</div>
+    <p class="lbl r d4" style="position:absolute;left:0;top:370px">Ho, Jain &amp; Abbeel — <b>Denoising Diffusion Probabilistic Models</b>, NeurIPS 2020</p>
+    <canvas id="revCv" width="384" height="384" class="vid r d3" style="position:absolute;left:1268px;top:0;width:460px;height:460px"></canvas>
+    <div class="lbl" style="position:absolute;left:1268px;top:472px" id="revT">t = 1000</div>
+    <div class="words r d5"><div><b>ε<sub>θ</sub></b>the neural network; θ are its weights. Input: x<sub>t</sub> and t. Output: its guess of the noise ε.</div><div><b>loss</b>the number training makes small: here the squared difference between the true and the guessed noise.</div><div><b>sampling</b>generating: start from pure noise x<sub>1000</sub> and apply the network step by step down to x₀.</div></div>
   </div>
   <aside class="notes">
-    <p>~60 s. The network ε<sub>θ</sub> sees x<sub>t</sub> and t and outputs a guess of the noise. The loss is a plain mean squared error. With the guess we can take one step from x<sub>t</sub> to x<sub>t−1</sub>; repeating from t = T to 0 gives a sample.</p>
-    <p>The animation on the right is only an illustration on a real slice (it uses the true noise, not a network). Our own model predicts v, not ε — slide 8 explains why.</p>
+    <p>~60 s. The network is called ε<sub>θ</sub> because it outputs a guess of ε, and θ are the weights we train. Training is ordinary supervised learning: we made the noisy image ourselves, so we know the right answer, the noise. The loss is the squared error between the true and the guessed noise.</p>
+    <p>To generate, start from pure noise. At each step, the network guesses the noise; we remove a small part of it and get a slightly cleaner image. After all steps we have a new image. The animation on the right only illustrates the idea on a real slice; it uses the true noise, not a network. Our model actually predicts a different quantity, v — slides 10 and 11 explain what and why.</p>
     <p class="src">Reference verified: Ho, Jain, Abbeel, NeurIPS 2020, arXiv:2006.11239.</p>
   </aside>
 </section>
@@ -233,24 +242,49 @@ aside.notes { display:none; }
      ========================================================= -->
 <section class="slide" id="s6" data-init="score" data-section="Diffusion">
   <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · why it works</div>
-  <h2 class="t r">Predicting the noise = <i>estimating the score</i></h2>
-  <p class="msg r d1">The noise points away from the data. Its negative, scaled, is the gradient of log-density: an arrow field that leads back to the data.</p>
+  <h2 class="t r">Why it works: images on a <i>probability landscape</i></h2>
+  <p class="msg r d1">Picture every possible image as a point. Real-looking images are rare: they sit on hills of high probability. Noise pushes an image downhill; the network learns the way back up.</p>
   <div class="body">
-    <canvas id="scoreCv" width="760" height="620" class="r d2" style="position:absolute;left:0;top:0;width:760px;height:620px"></canvas>
-    <div class="r d3" style="position:absolute;left:840px;top:10px;width:880px">
-      <div class="eq">∇<sub><i>x</i></sub> log <i>p<sub>t</sub></i>(<i>x<sub>t</sub></i>) ≈ − <i>ε</i><sub><i>θ</i></sub>(<i>x<sub>t</sub></i>, <i>t</i>) / √(1 − ᾱ<sub><i>t</i></sub>)</div>
-      <p class="lbl" style="margin:14px 0 40px">denoising score matching (Vincent 2011)</p>
-      <div class="eq">𝔼[<i>x</i><sub>0</sub> | <i>x<sub>t</sub></i>] = ( <i>x<sub>t</sub></i> + (1 − ᾱ<sub><i>t</i></sub>) ∇ log <i>p<sub>t</sub></i>(<i>x<sub>t</sub></i>) ) / √ᾱ<sub><i>t</i></sub></div>
-      <p class="lbl" style="margin:14px 0 40px">Tweedie's formula (Efron 2011): the best denoised guess</p>
-      <div class="eq">d<i>x</i> = [ <i>f</i>(<i>x</i>,<i>t</i>) − <i>g</i>(<i>t</i>)² ∇ log <i>p<sub>t</sub></i>(<i>x</i>) ] d<i>t</i> + <i>g</i>(<i>t</i>) d<i>w̄</i></div>
-      <p class="lbl" style="margin:14px 0 0">reverse-time SDE (Song et al., ICLR 2021): DDPM is one discretisation</p>
+    <canvas id="scoreCv" width="760" height="620" class="r d2" style="position:absolute;left:0;top:0;width:620px;height:506px"></canvas>
+    <div class="lbl" style="position:absolute;left:0;top:516px" id="scoreLbl">noise level σ = 0.10</div>
+    <div class="r d3" style="position:absolute;left:720px;top:0;width:1008px">
+      <ul class="pts">
+        <li>White rings: two hills — two kinds of realistic image (a toy example in 2-D).</li>
+        <li>Arrows: at every point, the direction that goes uphill. This arrow is called the <b style="color:var(--ink);font-weight:500">score</b>.</li>
+        <li>The noise added to an image points downhill. So the network's noise guess, turned around, <b style="color:var(--ink);font-weight:500">is</b> the score.</li>
+        <li>Amber dots: start anywhere, follow the arrows, end on a hill = a realistic sample.</li>
+      </ul>
     </div>
-    <div class="lbl" style="position:absolute;left:0;top:640px" id="scoreLbl">noise level σ = 0.10</div>
+    <div class="words r d5"><div><b>probability density p(x)</b>how likely an image x is. High on realistic images, near zero on random ones.</div><div><b>score ∇ log p(x)</b>the gradient of log p: the uphill direction at x, and how steep it is.</div><div><b>noise level σ</b>more noise smooths the landscape: arrows point roughly to the centre. Less noise: arrows point to each hill.</div></div>
   </div>
   <aside class="notes">
-    <p>~80 s. Left: a toy 2-D density with two modes (white contours). The arrows are its score, ∇ log p<sub>t</sub>, after adding noise of level σ. Small noise: arrows point sharply to each mode. Large noise: the field becomes smooth and points to the global centre. The amber particles follow the arrows from noise to data — that is sampling.</p>
-    <p>Right: the three links. (1) Denoising score matching: the noise a network predicts, divided by −√(1 − ᾱ<sub>t</sub>), is the score. (2) Tweedie: the score gives the posterior-mean clean image. (3) Song et al.: noising is an SDE, and its time reversal needs only the score; DDPM and DDIM are discretisations of it.</p>
-    <p class="src">References verified: Vincent, Neural Computation 23(7), 2011; Efron, JASA 106(496), 2011; Song et al., ICLR 2021, arXiv:2011.13456. The field is a toy Gaussian mixture computed in the browser.</p>
+    <p>~80 s. This is the key intuition for the ML side. Every image is a point in a very high-dimensional space. Real images occupy tiny regions with high probability. Adding noise moves a point away from those regions, so the noise vector points "downhill". A network trained to predict that noise therefore knows, at every point, which way is uphill — this is the score.</p>
+    <p>The animation: the arrows are the score of a toy 2-D landscape with two hills; σ is the amount of noise. With much noise the landscape is smooth and the arrows point to the centre; as σ falls, they point to each hill. The particles follow the arrows and end on the hills. That is exactly what sampling does in image space.</p>
+    <p class="src">Toy Gaussian mixture computed in the browser. The formal results are on the next slide.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     06b — THREE RESULTS BEHIND IT
+     ========================================================= -->
+<section class="slide" id="s6b" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · the theory in three lines</div>
+  <h2 class="t r">The theory in <i>three results</i></h2>
+  <p class="msg r d1">Each result in words first, then as an equation.</p>
+  <div class="body">
+    <div class="r d2" style="position:absolute;left:0;top:0;width:1728px">
+      <p class="plain" style="margin-top:0"><span class="amber">1 ·</span> A network that removes noise has learned the uphill direction (Vincent 2011).</p>
+      <div class="eq" style="margin-left:40px">score = ∇ log <i>p<sub>t</sub></i>(<i>x<sub>t</sub></i>) ≈ − <i>ε</i><sub><i>θ</i></sub>(<i>x<sub>t</sub></i>, <i>t</i>) / √(1 − ᾱ<sub><i>t</i></sub>)</div>
+      <p class="plain"><span class="amber">2 ·</span> The best guess of the clean image is the noisy image moved one step uphill (Tweedie's formula, Efron 2011).</p>
+      <div class="eq" style="margin-left:40px">best guess of <i>x</i><sub>0</sub> = ( <i>x<sub>t</sub></i> + (1 − ᾱ<sub><i>t</i></sub>) · score ) / √ᾱ<sub><i>t</i></sub></div>
+      <p class="plain"><span class="amber">3 ·</span> With infinitely small steps, adding noise is a continuous random motion. Running it backwards in time needs only the score (Song et al. 2021).</p>
+      <div class="eq" style="margin-left:40px">d<i>x</i> = [ <i>f</i>(<i>x</i>, <i>t</i>) − <i>g</i>(<i>t</i>)² · score ] d<i>t</i> + <i>g</i>(<i>t</i>) d<i>w̄</i></div>
+    </div>
+    <div class="words r d5"><div><b>gradient ∇</b>the vector of slopes: the direction in which a function grows fastest.</div><div><b>stochastic differential equation (SDE)</b>an equation for a motion with a random part: drift f and random kicks g·dw.</div><div><b>DDPM, DDIM</b>two recipes for taking the backward steps; next slide.</div></div>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Read the words, not the symbols. (1) Denoising and estimating the score are the same task: the noise guess, flipped and scaled, is the score. (2) Given a noisy image, the best estimate of the clean image is the noisy image plus a step along the score — this is how each step makes a clean-image guess. (3) Song et al. showed that the whole noising process is a stochastic differential equation, and its time reversal needs only the score. DDPM and DDIM are two ways to discretise that reverse equation.</p>
+    <p class="src">References verified: Vincent, Neural Computation 23(7), 2011; Efron, JASA 106(496), 2011; Song et al., ICLR 2021, arXiv:2011.13456. In result 3, f is the drift, g the noise strength and w̄ a backward-time Brownian motion.</p>
   </aside>
 </section>
 
@@ -258,44 +292,90 @@ aside.notes { display:none; }
      07 — SAMPLING AND GUIDANCE
      ========================================================= -->
 <section class="slide" id="s7" data-init="sampling" data-section="Diffusion">
-  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · sampling and guidance</div>
-  <h2 class="t r">Sampling in <i>50 steps</i>, steering with <i>guidance</i></h2>
-  <p class="msg r d1">DDIM follows the same trained model deterministically, with far fewer steps. Classifier-free guidance pushes the sample towards the condition.</p>
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · sampling</div>
+  <h2 class="t r">Sampling: <i>1000 noisy steps</i> or <i>50 clean ones</i></h2>
+  <p class="msg r d1">The same trained network can be used in two ways. DDPM takes 1000 small steps and adds fresh noise each time. DDIM adds none and takes big steps: 50 are enough.</p>
   <div class="body">
-    <canvas id="ddimCv" width="760" height="560" class="r d2" style="position:absolute;left:0;top:10px;width:760px;height:560px"></canvas>
-    <div class="legend r d2" style="position:absolute;left:0;top:590px"><span style="--c:var(--b2)">DDPM · 1000 stochastic steps</span><span style="--c:var(--pore)">DDIM · 50 deterministic steps</span></div>
-    <svg id="cfgSvg" viewBox="0 0 860 460" width="860" height="460" class="r d3" style="position:absolute;left:868px;top:0"></svg>
-    <div class="eq r d4" style="position:absolute;left:868px;top:480px">ε̂ = ε<sub>∅</sub> + <i>s</i> ( ε<sub>c</sub> − ε<sub>∅</sub> )</div>
-    <p class="lbl r d4" style="position:absolute;left:868px;top:550px;width:860px">one network, condition dropped at random in training (Ho &amp; Salimans 2021)</p>
+    <canvas id="ddimCv" width="760" height="560" class="r d2" style="position:absolute;left:0;top:0;width:680px;height:501px"></canvas>
+    <div class="r d3" style="position:absolute;left:760px;top:0;width:968px">
+      <div class="legend" style="flex-direction:column;gap:20px"><span style="--c:var(--b2)">DDPM — 1000 steps, random path</span><span style="--c:var(--pore)">DDIM — 50 steps, smooth path, same network</span></div>
+      <ul class="pts" style="margin-top:44px">
+        <li>Both end on the hills: realistic samples.</li>
+        <li>DDIM is deterministic: the same starting noise always gives the same image.</li>
+        <li>20× fewer network calls. We generate with DDIM, 50 steps.</li>
+      </ul>
+    </div>
+    <div class="words r d5"><div><b>DDPM</b>denoising diffusion probabilistic model (Ho et al. 2020): the original sampler, with fresh noise at each step.</div><div><b>DDIM</b>denoising diffusion implicit model (Song, Meng, Ermon 2021): no fresh noise, steps can be skipped.</div><div><b>deterministic</b>no randomness during the steps; only the starting noise is random.</div></div>
   </div>
   <aside class="notes">
-    <p>~60 s. Left: the same toy density. Grey paths: DDPM, many small noisy steps. Amber paths: DDIM, deterministic, 50 steps, same model. We generate with DDIM at 50 steps.</p>
-    <p>Right: classifier-free guidance. During training the condition (for us: porosity) is replaced by a "null" token at random. At sampling we run both, ε<sub>c</sub> and ε<sub>∅</sub>, and extrapolate with scale s. s = 1 is the plain conditional model; s &gt; 1 follows the condition more strongly. We will see this on our porosity later.</p>
-    <p class="src">References verified: Song, Meng, Ermon, DDIM, ICLR 2021, arXiv:2010.02502; Ho &amp; Salimans, Classifier-Free Diffusion Guidance, NeurIPS 2021 workshop, arXiv:2207.12598. Toy paths computed in the browser.</p>
+    <p>~50 s. Same toy landscape. Grey: DDPM paths, jittery because fresh noise is added at every one of 1000 steps. Amber: DDIM paths, smooth, 50 steps, using the same network. Both reach the hills. We sample with DDIM at 50 steps because it is 20 times cheaper and, for us, as good.</p>
+    <p class="src">References verified: Ho et al. NeurIPS 2020; Song, Meng, Ermon, ICLR 2021, arXiv:2010.02502. Toy paths computed in the browser. Operating point (DDIM-50): generation settings of the final model's evaluation.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     07g — GUIDANCE
+     ========================================================= -->
+<section class="slide" id="s7g" data-init="guidance" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · conditioning and guidance</div>
+  <h2 class="t r">Conditioning: telling the model <i>what to make</i></h2>
+  <p class="msg r d1">We give the network extra inputs, the condition — for us, the porosity we want. Guidance then pushes the result further towards that condition.</p>
+  <div class="body">
+    <svg id="cfgSvg" viewBox="0 0 860 460" width="860" height="460" class="r d2" style="position:absolute;left:0;top:0;width:820px;height:439px"></svg>
+    <div class="r d3" style="position:absolute;left:880px;top:0;width:848px">
+      <p class="plain" style="margin-top:0">In training, the condition is hidden at random: the network learns both "a coupon" and "a coupon with 2 % porosity".</p>
+      <p class="plain">At sampling we ask both questions and step beyond the conditional answer:</p>
+      <div class="eq">guided = unconditional + <i>s</i> × ( conditional − unconditional )</div>
+      <p class="lbl" style="margin-top:14px">Ho &amp; Salimans — Classifier-Free Diffusion Guidance, 2021</p>
+    </div>
+    <div class="words r d5"><div><b>condition</b>an extra input the output must follow: requested porosity, ply angles, specimen shape.</div><div><b>unconditional</b>the network’s answer when the condition is hidden (a learned "null" input).</div><div><b>guidance scale s</b>s = 1: the plain conditional answer. s > 1: follow the condition more strongly.</div></div>
+  </div>
+  <aside class="notes">
+    <p>~50 s. A model that only makes "some coupon" is not useful; we want to say what to make. The condition is fed as an extra input. Classifier-free guidance: during training the condition is sometimes replaced by a null token, so the same network can answer with and without it. At sampling we compute both answers and extrapolate along their difference with scale s. Later (slide 27) we show what s does to our porosity: asked for 0.02, s = 1 gives 0.0176 and s = 2 gives 0.0199.</p>
+    <p class="src">Reference verified: Ho &amp; Salimans, NeurIPS 2021 workshop, arXiv:2207.12598. Numbers: full evaluation of the final model, guidance cells (see slide 27 sources).</p>
   </aside>
 </section>
 
 <!-- =========================================================
      08 — v-PREDICTION AND ZERO TERMINAL SNR
      ========================================================= -->
-<section class="slide" id="s8" data-init="vpred" data-section="Diffusion">
-  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · parameterisation</div>
-  <h2 class="t r">We predict <i>v</i>, because ε breaks at the last step</h2>
-  <p class="msg r d1">Our schedule ends at zero SNR: at t = T the signal is fully removed, so training and sampling start from the same pure noise. There, ε cannot give back x₀ — v can.</p>
+<section class="slide" id="s8a" data-init="targets" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · what the network outputs</div>
+  <h2 class="t r">What should the network output? <i>Three choices</i></h2>
+  <p class="msg r d1">From a noisy image, a network can be trained to return the noise ε, the clean image x₀, or a mix of the two called v. With x<sub>t</sub>, any one of them gives back the other two.</p>
   <div class="body">
-    <svg id="vSvg" viewBox="0 0 640 600" width="640" height="600" class="r d2" style="position:absolute;left:0;top:0"></svg>
-    <div class="r d3" style="position:absolute;left:720px;top:0;width:1008px">
-      <div class="eq" style="font-size:36px">ε-prediction: &nbsp;<i>x̂</i><sub>0</sub> = ( <i>x<sub>t</sub></i> − √(1−ᾱ<sub><i>t</i></sub>) ε̂ ) / <span class="amber">√ᾱ<sub><i>t</i></sub></span></div>
-      <p class="lbl" style="margin:8px 0 34px">at t = T: √ᾱ<sub>T</sub> = 6·10⁻¹⁷ → the output is multiplied by 10¹⁶</p>
-      <div class="eq" style="font-size:36px">v-prediction: &nbsp;<i>v</i> = √ᾱ<sub><i>t</i></sub> ε − √(1−ᾱ<sub><i>t</i></sub>) <i>x</i><sub>0</sub> &nbsp;⇒&nbsp; <i>x̂</i><sub>0</sub> = √ᾱ<sub><i>t</i></sub> <i>x<sub>t</sub></i> − √(1−ᾱ<sub><i>t</i></sub>) <i>v̂</i></div>
-      <p class="lbl" style="margin:8px 0 34px">no division · at t = T the estimate of x₀ is just −v: a well-scaled target at every t</p>
-    </div>
-    <svg id="snrEnd" viewBox="0 0 1008 300" width="1008" height="300" class="r d4" style="position:absolute;left:720px;top:330px"></svg>
+    <div id="tgtRow" class="r d2" style="position:absolute;left:0;top:0;display:flex;gap:30px"></div>
+    <div class="eq r d3" style="position:absolute;left:0;top:432px;font-size:34px"><i>x<sub>t</sub></i> = <i>a</i> · <i>x</i><sub>0</sub> + <i>b</i> · <i>ε</i> &nbsp;&nbsp;&nbsp; <span class="amber"><i>v</i> = <i>a</i> · <i>ε</i> − <i>b</i> · <i>x</i><sub>0</sub></span> &nbsp;&nbsp;&nbsp; <span class="lbl">with <i>a</i> = √ᾱ<sub>t</sub>, <i>b</i> = √(1 − ᾱ<sub>t</sub>), <i>a</i>² + <i>b</i>² = 1</span></div>
+    <div class="lbl r d3" style="position:absolute;left:1240px;top:446px" id="tgtT">t = 0</div>
+    <div class="words r d5"><div><b>ε-prediction</b>output the noise. The original DDPM choice.</div><div><b>x₀-prediction</b>output the clean image directly.</div><div><b>v-prediction</b>output v: mostly noise at small t, mostly (minus) the image at large t (Salimans &amp; Ho 2022).</div></div>
   </div>
   <aside class="notes">
-    <p>~80 s. Left: the geometry. With √ᾱ = cos φ and √(1−ᾱ) = sin φ, x<sub>t</sub> is a rotation between data x₀ and noise ε. v is the velocity of that rotation, the tangent. ε-prediction asks for the noise; near t = T, x<sub>t</sub> is almost all noise, so ε is easy but tells nothing about x₀, and getting x₀ back divides by √ᾱ<sub>t</sub> → 0.</p>
-    <p>Our cosine schedule already reaches ᾱ<sub>T</sub> = 0 (zero terminal SNR): the last step is pure Gaussian noise, the same distribution sampling starts from — no train/sample mismatch. Lin et al. 2024 showed that common schedules do NOT reach zero (a signal leak) and fixed it; ours has no leak to close. But with ᾱ<sub>T</sub> = 0, ε-prediction is undefined at the first sampling step. v-prediction (Salimans &amp; Ho 2022) recovers x₀ with no division. That is our reason for v.</p>
-    <p>Bottom right: SNR near the end of the schedule, ours (amber) against the linear DDPM schedule (grey), which ends at a small but non-zero SNR.</p>
+    <p>~70 s. The panels show, for one real slice and the step t shown below, the noisy input x<sub>t</sub> and the three possible targets. Watch them as t grows: ε is always pure noise; x₀ is always the clean image; v changes — at small t it looks like the noise, at large t it looks like the negative of the image.</p>
+    <p>They carry the same information: x<sub>t</sub> = a·x₀ + b·ε and v = a·ε − b·x₀, so knowing x<sub>t</sub> and one of them gives the others. What differs is how easy each is to learn and how errors are amplified. That decides the choice — next slide.</p>
+    <p class="src">Images computed in the browser from a real slice with our schedule. Reference verified: Salimans &amp; Ho, ICLR 2022, arXiv:2202.00512 (introduces v).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     08 — WHY v
+     ========================================================= -->
+<section class="slide" id="s8" data-init="vpred" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · why we predict v</div>
+  <h2 class="t r">Why we predict <i>v</i></h2>
+  <p class="msg r d1">At the last step the input is pure noise. Guessing the noise there is trivial and says nothing about the image — and turning that guess into an image divides by zero. v asks for the image itself.</p>
+  <div class="body">
+    <svg id="vSvg" viewBox="0 0 640 600" width="560" height="525" class="r d2" style="position:absolute;left:0;top:0"></svg>
+    <div class="r d3" style="position:absolute;left:640px;top:0;width:1088px">
+      <p class="plain" style="margin-top:0;margin-bottom:16px"><b style="color:var(--ink);font-weight:500">From an ε guess:</b> image = ( x<sub>t</sub> − <i>b</i> · ε guess ) ÷ <span class="amber"><i>a</i></span>. At the last step <i>a</i> = 0 (exactly 6·10⁻¹⁷): any error is multiplied by 10¹⁶.</p>
+      <p class="plain" style="margin-bottom:16px"><b style="color:var(--ink);font-weight:500">From a v guess:</b> image = <i>a</i> · x<sub>t</sub> − <i>b</i> · v guess. No division. At the last step, image = −v guess.</p>
+      <p class="plain" style="margin:0"><b style="color:var(--ink);font-weight:500">Our schedule reaches zero signal at the last step.</b> Training then ends at pure noise, exactly where sampling starts. Many older schedules left a faint trace of the image there (Lin et al. 2024).</p>
+    </div>
+    <svg id="snrEnd" viewBox="0 0 1008 300" width="760" height="226" class="r d4" style="position:absolute;left:900px;top:330px"></svg>
+    <div class="words r d5"><div><b>a, b</b>the image and noise weights at step t: a = √ᾱ<sub>t</sub>, b = √(1 − ᾱ<sub>t</sub>). The arrow on the left turns from image to noise.</div><div><b>zero terminal SNR</b>at the final step the signal-to-noise ratio is exactly 0: nothing of the image is left.</div><div><b>signal leak</b>a schedule that ends with a little image left; training and sampling then start from different inputs.</div></div>
+  </div>
+  <aside class="notes">
+    <p>~80 s. Left: a and b behave like cos and sin of an angle, so x<sub>t</sub> rotates from the image (right) to the noise (up) as t grows; v is the direction of that rotation. Right: the problem with ε. To get an image from a noise guess we divide by a. Near the end a → 0, so errors explode; at the very last step it is a division by zero. With v there is no division, and at the last step the network must simply output the image (with a minus sign).</p>
+    <p>Zero terminal SNR: our cosine schedule removes the image completely at the last step. That is good — sampling starts from pure noise, so training should end there too. Lin et al. showed many schedules end with a small "signal leak"; ours has none. But zero signal is exactly where ε fails. That is why our model predicts v. Bottom right: the SNR over the last 10 % of steps, ours (amber, falls to 0) against the classic linear schedule (grey, stays above 0).</p>
     <p class="src">Values: ᾱ<sub>T</sub> = 3.75·10⁻³³ and √ᾱ<sub>T</sub> = 6.12·10⁻¹⁷, measured on our schedule and recorded in the model configuration. Linear schedule: β from 10⁻⁴ to 0.02 over 1000 steps (Ho et al. 2020), computed in the browser. References verified: Salimans &amp; Ho, ICLR 2022, arXiv:2202.00512; Lin et al., WACV 2024, arXiv:2305.08891.</p>
   </aside>
 </section>
@@ -306,9 +386,9 @@ aside.notes { display:none; }
 <section class="slide" id="s9" data-section="Diffusion">
   <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · latent space</div>
   <h2 class="t r">Diffuse in a <i>compressed latent</i>, not in voxels</h2>
-  <p class="msg r d1">An autoencoder compresses each 64³ patch 48×. The diffusion model works only in that small latent. In 3-D this is what makes it affordable.</p>
+  <p class="msg r d1">Diffusion on full 3-D volumes is too expensive. So we first train a network that compresses each 64³ patch 48 times, and run diffusion on the compressed version.</p>
   <div class="body">
-    <svg viewBox="0 0 1728 470" width="1728" height="560" class="r d2">
+    <svg viewBox="0 0 1728 470" width="1540" height="419" class="r d2">
       <defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8e6e1"/></marker></defs>
       <!-- voxel cube -->
       <g transform="translate(40,120)">
@@ -339,7 +419,8 @@ aside.notes { display:none; }
         <text x="0" y="290" class="ink">grey + 3-class labels</text><text x="0" y="318">material · pore · air</text>
       </g>
     </svg>
-    <p class="lbl r d3" style="position:absolute;left:0;top:600px">Rombach et al. — <b>High-Resolution Image Synthesis with Latent Diffusion Models</b>, CVPR 2022</p>
+    <p class="lbl r d3" style="position:absolute;left:0;top:440px">Rombach et al. — <b>High-Resolution Image Synthesis with Latent Diffusion Models</b>, CVPR 2022</p>
+    <div class="words r d5"><div><b>autoencoder</b>two networks trained together: an encoder E that compresses, a decoder D that rebuilds the input from the compressed code.</div><div><b>latent</b>the compressed code: here 4 numbers for each 4 × 4 × 4 block of voxels.</div><div><b>U-Net</b>the denoiser network type: it shrinks the input step by step, then grows it back, with shortcuts between equal sizes.</div><div><b>parameters</b>the trainable weights of a network (83 million here).</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. This is the idea of Rombach et al.: train an autoencoder once, then run diffusion on its latent. One 64³ patch has 3 × 64³ = 786 432 input values; its latent has 4 × 16³ = 16 384, a factor 48. That is the same factor as Stable Diffusion's autoencoder (512² × 3 → 64² × 4). Every denoising step works on the small latent; the decoder runs once at the end.</p>
@@ -353,7 +434,7 @@ aside.notes { display:none; }
 <section class="slide" id="s10" data-section="State of the art">
   <div class="hud tl">PoreGen</div><div class="hud tr">State of the art · machine learning</div>
   <h2 class="t r">The road to <i>modern diffusion</i></h2>
-  <p class="msg r d1">Each piece we use comes from one of these papers.</p>
+  <p class="msg r d1">Each idea of the last slides, with the paper that introduced it. Amber: used in our model.</p>
   <div class="body" id="timeline"></div>
   <aside class="notes">
     <p>~50 s. Read left to right. DDPM made diffusion work; the score-SDE view explained it; DDIM made it fast; guidance made it controllable; v-prediction fixed the parameterisation; latent diffusion made it cheap; EDM cleaned up the design space; MultiDiffusion showed how to fuse overlapping windows into large images, which is the idea behind our tiling; zero-SNR fixed the end of the schedule. Amber marks what our model uses directly.</p>
@@ -367,15 +448,15 @@ aside.notes { display:none; }
 <section class="slide" id="s11" data-section="State of the art">
   <div class="hud tl">PoreGen</div><div class="hud tr">State of the art · porous media</div>
   <h2 class="t r">Generating microstructures: <i>what is missing</i></h2>
-  <p class="msg r d1">Earlier models make realistic texture. None gives us all four things we need at once.</p>
+  <p class="msg r d1">Earlier generators make realistic texture. None gives us all four things we need at once.</p>
   <div class="body">
-    <div class="r d2" style="position:absolute;left:0;top:0;width:900px;display:grid;grid-template-columns:1fr;gap:18px">
-      <div class="card"><h3>3-D GAN · Mosser et al. 2017</h3><p>A 3-D generator trained on CT of rock; unconditional.</p></div>
-      <div class="card"><h3>SliceGAN · Kench &amp; Cooper 2021</h3><p>A 3-D generator trained from 2-D slices; unconditional.</p></div>
-      <div class="card"><h3>Diffusion for microstructures · 2023–2024</h3><p>2-D reconstruction (Düreth et al.), 2-D→3-D expansion (Lee &amp; Yun), 3-D porous media (Lyu &amp; Ren).</p></div>
-      <div class="card"><h3>Porosity-conditioned 3-D LDM · Naiff et al. 2026</h3><p>One porosity value as the condition; a field-controlled extension for large volumes is a 2026 preprint.</p></div>
+    <div class="r d2" style="position:absolute;left:0;top:0;width:940px;display:grid;grid-template-columns:1fr 1fr;gap:18px">
+      <div class="card"><h3>3-D GAN · Mosser et al. 2017</h3><p>A GAN trained on 3-D CT of rock. No control input.</p></div>
+      <div class="card"><h3>SliceGAN · Kench &amp; Cooper 2021</h3><p>A GAN that learns 3-D from 2-D images only. No control input.</p></div>
+      <div class="card"><h3>Diffusion for microstructures · 2023–2024</h3><p>2-D images (Düreth et al.), 2-D→3-D (Lee &amp; Yun), 3-D porous media (Lyu &amp; Ren).</p></div>
+      <div class="card"><h3>Porosity-conditioned 3-D LDM · Naiff et al. 2026</h3><p>One porosity value as the condition. A 2026 preprint adds a porosity map.</p></div>
     </div>
-    <div class="r d3" style="position:absolute;left:980px;top:0;width:748px">
+    <div class="r d3" style="position:absolute;left:1000px;top:0;width:728px">
       <p class="lbl" style="margin:0 0 22px">What we need, all at once</p>
       <ul class="pts">
         <li><b style="color:var(--ink);font-weight:500">Large volumes</b> — whole coupons, 1024 × 1024 × 192 and more</li>
@@ -384,6 +465,7 @@ aside.notes { display:none; }
         <li><b style="color:var(--ink);font-weight:500">Specimen geometry</b> — surfaces, holes, notches</li>
       </ul>
     </div>
+    <div class="words r d5"><div><b>GAN</b>generative adversarial network: a generator makes samples, a critic tries to tell them from real ones; both improve.</div><div><b>LDM</b>latent diffusion model: diffusion on compressed data, as on slide 12.</div><div><b>conditioned / unconditional</b>with / without an input that controls the output.</div></div>
   </div>
   <aside class="notes">
     <p>~60 s. GANs gave the first 3-D microstructures. SliceGAN removed the need for 3-D training data. Diffusion models have replaced GANs in quality, first in 2-D, then 3-D. The closest work to ours is Naiff et al. 2026: a latent diffusion model for 3-D porous media conditioned on porosity. Their 2026 preprint adds a porosity field for large volumes.</p>
@@ -398,23 +480,24 @@ aside.notes { display:none; }
 <section class="slide" id="s12" data-init="wipe" data-section="Data">
   <div class="hud tl">PoreGen</div><div class="hud tr">Data · coupons</div>
   <h2 class="t r">Our data: <i>81 coupons</i> at 25 µm</h2>
-  <p class="msg r d1">Each XCT volume is segmented into material, pore and air by a fixed reference pipeline. Those labels are what the model learns to produce.</p>
+  <p class="msg r d1">Each scan is a 3-D grey image. A fixed method labels every voxel as material, pore or air. The model learns to produce the grey image and these labels together.</p>
   <div class="body">
-    <div class="fig r d2" style="position:absolute;left:0;top:0;width:620px;height:620px" id="wipeFig">
-      <img src="media/data_seg.jpg" style="position:absolute;inset:0;width:620px;height:620px" class="vid" alt="">
-      <img src="media/data_grey.jpg" id="wipeTop" style="position:absolute;inset:0;width:620px;height:620px;clip-path:inset(0 0 0 0)" alt="">
+    <div class="fig r d2" style="position:absolute;left:0;top:0;width:500px;height:500px" id="wipeFig">
+      <img src="media/data_seg.jpg" style="position:absolute;inset:0;width:500px;height:500px" class="vid" alt="">
+      <img src="media/data_grey.jpg" id="wipeTop" style="position:absolute;inset:0;width:500px;height:500px;clip-path:inset(0 0 0 0)" alt="">
       <div id="wipeLine" style="position:absolute;top:0;bottom:0;width:2px;background:var(--pore);left:620px;box-shadow:0 0 14px var(--pore)"></div>
     </div>
-    <div class="r d3" style="position:absolute;left:700px;top:0;width:1028px">
-      <img src="media/data_xsec.jpg" style="width:1028px;height:137px" class="vid" alt="">
+    <div class="r d3" style="position:absolute;left:580px;top:0;width:1148px">
+      <img src="media/data_xsec.jpg" style="width:1148px;height:153px" class="vid" alt="">
       <p class="cap">through-thickness section: plies and the pores between them</p>
-      <div class="legend" style="margin-top:46px"><span style="--c:var(--mat)">material</span><span style="--c:var(--pore)">pore</span><span style="--c:var(--air)">air (outside, drilled holes)</span></div>
-      <ul class="pts" style="margin-top:46px">
-        <li>pores: local adaptive threshold (Sauvola) inside the specimen</li>
-        <li>air: outside the specimen mask, and the drilled holes</li>
-        <li>volumes are aligned so z is the through-thickness axis</li>
+      <div class="legend" style="margin-top:26px"><span style="--c:var(--mat)">material</span><span style="--c:var(--pore)">pore</span><span style="--c:var(--air)">air (outside, drilled holes)</span></div>
+      <ul class="pts" style="margin-top:26px">
+        <li>pore: darker than a threshold set by its own neighbourhood</li>
+        <li>air: outside the specimen, and the drilled holes</li>
+        <li>z is always the through-thickness direction</li>
       </ul>
     </div>
+    <div class="words r d5"><div><b>voxel</b>a 3-D pixel; here a cube 25 µm on a side.</div><div><b>segmentation</b>a label for every voxel: material, pore or air.</div><div><b>ply</b>one layer of parallel carbon fibres; a coupon stacks plies at different angles.</div><div><b>Sauvola threshold</b>a local threshold from the mean and spread of grey values around each voxel.</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. Left: a real slice; the line wipes from grey to labels. Right top: a section through the thickness, where the plies and the pore layers between plies are visible. These coupons come from several manufactured panels with different porosity levels.</p>
@@ -431,7 +514,8 @@ aside.notes { display:none; }
   <h2 class="t r">From volumes to patches, <i>split by panel</i></h2>
   <p class="msg r d1">A panel is one manufactured plate. All coupons of a panel go to the same set, so the model is tested on plates it never saw.</p>
   <div class="body">
-    <svg id="splitSvg" viewBox="0 0 1728 600" width="1728" height="600" class="r d2"></svg>
+    <svg id="splitSvg" viewBox="0 0 1728 600" width="1536" height="533" class="r d2"></svg>
+    <div class="words r d5"><div><b>panel</b>one manufactured plate; several coupons are cut from each.</div><div><b>patch</b>a 64 × 64 × 64-voxel cube: the unit the networks train on.</div><div><b>stride 32</b>a new patch starts every 32 voxels, so neighbouring patches overlap by half.</div><div><b>train / validation / test</b>learn on train, tune choices on validation, report on test only.</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. 18 panels: 12 for training, 3 for validation, 3 for test. Splitting by coupon would leak: coupons cut from the same plate share their porosity pattern. Each volume is cut into 64³ patches with a stride of 32 voxels. Patches that touch the drilled registration holes are removed (all coupons have three), because otherwise the holes would be the only interior air the model sees and it learns to draw air inside material.</p>
@@ -444,16 +528,39 @@ aside.notes { display:none; }
      ========================================================= -->
 <section class="slide" id="s14" data-section="Autoencoder">
   <div class="hud tl">PoreGen</div><div class="hud tr">Model · autoencoder</div>
-  <h2 class="t r">The autoencoder: <i>grey in, grey and labels out</i></h2>
-  <p class="msg r d1">The encoder sees grey, pore mask and air mask. The decoder returns grey and a 3-class segmentation. Four losses train it.</p>
+  <h2 class="t r">Our autoencoder: <i>grey in, grey and labels out</i></h2>
+  <p class="msg r d1">The encoder compresses grey image + pore map + air map into the latent. The decoder rebuilds the grey image and, for every voxel, a label.</p>
   <div class="body">
     <svg id="aeSvg" viewBox="0 0 1728 330" width="1728" height="330" class="r d2"></svg>
-    <svg id="lossSvg" viewBox="0 0 1728 300" width="1728" height="300" class="r d3" style="position:absolute;left:0;top:360px"></svg>
+        <div class="words r d5"><div><b>mask / map</b>a 0/1 image: 1 where there is a pore (or air), 0 elsewhere.</div><div><b>↓4, ↑4</b>each side shrinks 4× (64 → 16) in the encoder and grows back in the decoder.</div><div><b>μ, σ → z</b>the encoder gives a mean μ and a spread σ for each latent number; z is drawn from them (a variational autoencoder).</div><div><b>3-class segmentation</b>for each voxel, the probability of material, pore and air.</div></div>
   </div>
   <aside class="notes">
-    <p>~70 s. Top: data flow. Input 3 channels at 64³; the encoder downsamples twice (factor 4 per side) to a Gaussian posterior with 4 channels at 16³; the decoder has two heads: grey and three class logits.</p>
-    <p>Bottom: the losses over training. L1 on grey. LPIPS — a perceptual distance: compare deep-network features of 2-D slices instead of pixels; low LPIPS means the texture looks the same. Cross-entropy plus Dice on the classes — Dice = 2|A∩B| / (|A| + |B|), the overlap of two masks, 1 is perfect. A very small KL keeps the latent smooth. From step 15 000 a 3-D patch discriminator (hinge loss, adaptive weight) is added to sharpen texture. This is the Stable Diffusion autoencoder recipe, made 3-D.</p>
-    <p class="src">Recipe (decisions log and autoencoder configuration): L1 on the [−1, 1] grey scale, LPIPS weight 1.0 on 2-D slices, class cross-entropy and soft Dice weight 1.0 each, KL weight 10⁻⁶ summed, 3-D N-layer discriminator (3 layers, 64 filters, hinge), adaptive weight factor 0.5, discriminator start at step 15 000, Adam (0.5, 0.9), learning rate 5.76·10⁻⁴ at batch 128. The model used is the step-25 000 checkpoint. 0.76 M parameters (generation log). References verified: Zhang et al. (LPIPS) CVPR 2018; Isola et al. (PatchGAN) CVPR 2017; Rombach et al. CVPR 2022.</p>
+    <p>~50 s. Inputs: three 64³ maps — grey, pore mask, air mask. The encoder shrinks each side by 4 and outputs, for each of the 4 × 16³ latent numbers, a mean and a spread; the latent z is drawn from those (that is what makes it a variational autoencoder). The decoder grows z back to 64³ and has two heads: the grey image and three class probabilities per voxel.</p>
+    <p class="src">Architecture: autoencoder configuration (3 input channels, z = 4, base 32 channels, two down/up blocks, 3-class head); 0.76 M parameters (generation log). Model in use: step-25 000 checkpoint.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     14b — AUTOENCODER LOSSES
+     ========================================================= -->
+<section class="slide" id="s14b" data-section="Autoencoder">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Model · autoencoder training</div>
+  <h2 class="t r">Training the autoencoder: <i>five terms</i></h2>
+  <p class="msg r d1">Each term checks one thing. Their weighted sum is the loss that training makes small.</p>
+  <div class="body">
+    <div class="r d2" style="display:grid;grid-template-columns:300px 1fr 1fr;row-gap:14px;column-gap:30px;font:300 23px/1.35 var(--sans);color:var(--ink2)">
+      <div class="lbl">term</div><div class="lbl">what it measures</div><div class="lbl">why we need it</div>
+      <div style="color:var(--ink)">L1</div><div>mean absolute difference of grey values</div><div>grey levels come back right</div>
+      <div style="color:var(--ink)">LPIPS</div><div>difference of deep-network features on 2-D slices</div><div>texture looks right, not only the average</div>
+      <div style="color:var(--pore)">cross-entropy + Dice</div><div>how well predicted labels match true labels; Dice = overlap of two masks, 1 = perfect</div><div>correct material / pore / air labels</div>
+      <div style="color:var(--b2)">KL, weight 10⁻⁶</div><div>distance of the latent from a standard bell curve</div><div>keeps the latent smooth and well scaled for diffusion</div>
+      <div style="color:var(--air)">3-D discriminator</div><div>a critic network tries to tell real from rebuilt patches (from step 15 000)</div><div>sharper fine texture</div>
+    </div>
+    <svg id="lossSvg" viewBox="0 -30 1728 330" width="1600" height="306" class="r d3" style="position:absolute;left:0;top:360px"></svg>
+  </div>
+  <aside class="notes">
+    <p>~70 s. One line per term. L1 keeps the grey values. LPIPS — "learned perceptual image patch similarity" — compares slices through the eyes of an image-recognition network, so texture matters. Cross-entropy and Dice train the labels; Dice is 2 × overlap ÷ (size A + size B). KL keeps the latent close to a standard normal distribution, which suits diffusion; its weight is tiny. From step 15 000 a 3-D discriminator, a critic network, is added: the decoder is rewarded when the critic cannot tell its output from real patches. This is the Stable Diffusion autoencoder recipe, made 3-D. Bottom: when each term is on during training.</p>
+    <p class="src">Recipe (decisions log and autoencoder configuration): L1 on the [−1, 1] grey scale, LPIPS weight 1.0 on 2-D slices, class cross-entropy and soft Dice weight 1.0 each, KL weight 10⁻⁶ summed, 3-D N-layer discriminator (3 layers, 64 filters, hinge loss), adaptive weight factor 0.5, discriminator start at step 15 000, Adam (0.5, 0.9), learning rate 5.76·10⁻⁴ at batch 128. References verified: Zhang et al. (LPIPS) CVPR 2018; Isola et al. (patch discriminator) CVPR 2017; Rombach et al. CVPR 2022.</p>
   </aside>
 </section>
 
@@ -463,10 +570,11 @@ aside.notes { display:none; }
 <section class="slide" id="s15" data-section="Autoencoder">
   <div class="hud tl">PoreGen</div><div class="hud tr">Model · compression study</div>
   <h2 class="t r">How much can we compress? <i>f = 4, c = 4</i></h2>
-  <p class="msg r d1">Six latent sizes, same recipe. Below c = 4 the pores start to go; c = 4 gives 48×, the same as Stable Diffusion.</p>
+  <p class="msg r d1">We trained six autoencoders that keep fewer and fewer numbers. Below c = 4 the pores start to be lost; c = 4 compresses 48×, like Stable Diffusion.</p>
   <div class="body">
-    <svg id="vaePlot" viewBox="0 0 1100 620" width="1100" height="620" class="r d2"></svg>
-    <svg id="cubes" viewBox="0 0 560 620" width="560" height="620" class="r d3" style="position:absolute;left:1168px;top:0"></svg>
+    <svg id="vaePlot" viewBox="0 0 1100 620" width="890" height="502" class="r d2"></svg>
+    <svg id="cubes" viewBox="0 0 560 620" width="453" height="502" class="r d3" style="position:absolute;left:1000px;top:0"></svg>
+    <div class="words r d5"><div><b>f</b>how much each side shrinks: 64 → 16 voxels, f = 4.</div><div><b>c</b>how many numbers each latent cell keeps.</div><div><b>pore Dice</b>overlap of rebuilt and true pores: 2|A∩B| ÷ (|A| + |B|); 1 = perfect.</div><div><b>grey L1</b>mean absolute grey-value error (dashed, right axis).</div></div>
   </div>
   <aside class="notes">
     <p>~70 s. Naming as in Rombach et al.: f is the spatial reduction per side (64 → 16, f = 4), c the number of latent channels. We trained six autoencoders with c = 32, 16, 8, 4, 2, 1, all at f = 4. Left: pore Dice (amber) and grey L1 error (white) on the whole validation split. Pore Dice stays above 0.93 down to c = 4 and falls clearly at c = 2 and c = 1. c = 4 is the smallest latent that keeps pore Dice above 0.93 and air Dice above 0.99.</p>
@@ -481,9 +589,10 @@ aside.notes { display:none; }
 <section class="slide" id="s16" data-section="Diffusion model">
   <div class="hud tl">PoreGen</div><div class="hud tr">Model · denoiser</div>
   <h2 class="t r">What the denoiser <i>sees</i></h2>
-  <p class="msg r d1">Besides the noisy latent: maps that say where things are, and numbers that say how much. It outputs v for the patch.</p>
+  <p class="msg r d1">Besides the noisy latent, the network gets maps (what is where) and numbers (how much). Everything we can control enters here. It outputs v for the patch.</p>
   <div class="body">
-    <svg id="inputsSvg" viewBox="0 0 1728 640" width="1728" height="640" class="r d2"></svg>
+    <svg id="inputsSvg" viewBox="0 0 1728 600" width="1572" height="546" class="r d2"></svg>
+    <div class="words r d5"><div><b>channels</b>maps stacked as extra input layers, as red, green and blue are stacked in a photo.</div><div><b>injected by normalisation</b>numbers that scale and shift the network’s internal features at every layer.</div><div><b>ply orientation</b>fibre angle θ at each depth, given as cos 2θ and sin 2θ so 0° and 180° match.</div><div><b>material envelope</b>which latent cells are inside the specimen; the rest is air.</div></div>
   </div>
   <aside class="notes">
     <p>~70 s. Spatial inputs are concatenated as channels: the ply-orientation profile (cos 2θ, sin 2θ per depth), the material envelope (which cells are specimen and which are air), the six face neighbours' latents, a learned flag per neighbour (exists / unknown / outside), and each neighbour's own noise level. Scalars enter by adaptive group normalisation together with the timestep: the porosity request, the depth, and the distance from each of the six patch faces to the specimen surface.</p>
@@ -498,21 +607,22 @@ aside.notes { display:none; }
 <section class="slide" id="s17" data-init="faces" data-section="Diffusion model">
   <div class="hud tl">PoreGen</div><div class="hud tr">Model · neighbours</div>
   <h2 class="t r">Neighbours, and <i>dropping one face</i> at a time</h2>
-  <p class="msg r d1">At generation time a patch often has five known neighbours and one not yet made. Training must show that case, or the model invents a boundary.</p>
+  <p class="msg r d1">A large volume is made patch by patch. Each patch sees its six touching neighbours so the two sides continue each other. Training must show every case the generator meets.</p>
   <div class="body">
-    <svg id="faceSvg" viewBox="0 0 800 600" width="800" height="600" class="r d2"></svg>
+    <svg id="faceSvg" viewBox="0 0 800 600" width="667" height="500" class="r d2"></svg>
     <div class="r d3" style="position:absolute;left:880px;top:20px;width:848px">
       <div class="legend" style="flex-direction:column;gap:18px">
         <span style="--c:var(--pore)">exists — a neighbour latent is given (noised to its own level)</span>
         <span style="--c:var(--b3)">unknown — a neighbour exists but is not made yet</span>
         <span style="--c:var(--air)">outside — the specimen ends on this side</span>
       </div>
-      <ul class="pts" style="margin-top:60px">
+      <ul class="pts" style="margin-top:40px">
         <li>per face, p = 0.10: one face becomes unknown</li>
         <li>all six, p = 0.05: the null for guidance</li>
         <li>without per-face dropout: a pore-depleted band at chunk boundaries</li>
       </ul>
     </div>
+    <div class="words r d5"><div><b>neighbour</b>the latent of the patch touching one face; it tells the network what is on the other side.</div><div><b>dropout</b>hiding an input at random during training, so the network also learns to work without it.</div><div><b>the null for guidance</b>all six hidden: the "unconditional" answer of slide 9.</div></div>
   </div>
   <aside class="notes">
     <p>~60 s. The cube is one patch. Each face has one of three states. In training, each face independently becomes "unknown" with probability 0.10, and all six together with probability 0.05 (that is the "no neighbour" condition used by guidance).</p>
@@ -529,18 +639,19 @@ aside.notes { display:none; }
   <h2 class="t r">Large volumes: <i>tiles, chunks, order</i></h2>
   <p class="msg r d1">The volume is a grid of 64³ tiles. Groups of 3 × 3 × 3 tiles (chunks) are denoised together. Chunks follow each other; a finished chunk becomes a neighbour.</p>
   <div class="body">
-    <canvas id="chunkCv" width="620" height="620" class="vid r d2" style="position:absolute;left:0;top:0;width:620px;height:620px"></canvas>
-    <div class="r d3" style="position:absolute;left:700px;top:10px;width:1028px">
+    <canvas id="chunkCv" width="620" height="620" class="vid r d2" style="position:absolute;left:0;top:0;width:520px;height:520px"></canvas>
+    <div class="r d3" style="position:absolute;left:600px;top:0;width:1128px">
       <div class="legend" style="flex-direction:column;gap:18px">
         <span style="--c:var(--pore)">chunk being denoised now (all 50 steps)</span>
         <span style="--c:var(--mat)">finished chunks — "exists" for the next ones</span>
         <span style="--c:var(--b3)">not yet made — "unknown"</span>
         <span style="--c:var(--air)">canvas edge — "outside"</span>
       </div>
-      <p class="lbl" style="margin-top:60px">1024 × 1024 × 192 voxels = 16 × 16 × 3 tiles</p>
+      <p class="lbl" style="margin-top:36px">1024 × 1024 × 192 voxels = 16 × 16 × 3 tiles</p>
       <p class="lbl" style="margin-top:10px">one chunk = 192³ voxels, the unit the model was also sampled on in training</p>
       <p class="lbl" style="margin-top:10px">finished chunks are re-noised to the current step before they are shown as neighbours</p>
     </div>
+    <div class="words r d5"><div><b>tile</b>one 64³ block of the volume, one latent patch.</div><div><b>chunk</b>3 × 3 × 3 tiles denoised together through all 50 steps.</div><div><b>re-noised</b>a finished chunk is shown to the next one with noise matching the current step, as in training.</div></div>
   </div>
   <aside class="notes">
     <p>~60 s. Background: one real generated slice, 1024 × 1024 at mid-depth. The grid shows the 64-voxel tiles; thick lines are chunks of 3 × 3 tiles. The animation shows the order: the amber chunk is solved jointly through all 50 DDIM steps, then it is fixed and becomes a known neighbour for the following chunks. At each step of a new chunk, the finished neighbours are noised to that step's level, so the model always sees neighbours at a matching noise level.</p>
@@ -556,14 +667,15 @@ aside.notes { display:none; }
   <h2 class="t r">Blending: <i>overlap, weight, normalise</i></h2>
   <p class="msg r d1">Inside a chunk, 64³ windows overlap by half and their predictions are averaged with smooth weights. The decoder does the same with its 64³ passes.</p>
   <div class="body">
-    <svg id="blendSvg" viewBox="0 0 1060 620" width="1060" height="620" class="r d2"></svg>
+    <svg id="blendSvg" viewBox="0 0 1060 620" width="903" height="528" class="r d2"></svg>
     <div class="r d3" style="position:absolute;left:1130px;top:10px;width:598px">
       <div class="eq" style="font-size:34px"><i>w</i>(<i>i</i>) = sin²( π (<i>i</i> + ½) / 64 )</div>
       <p class="lbl" style="margin:10px 0 40px">strictly positive; lowest at window borders</p>
       <p class="lbl" style="margin:0 0 14px">decoder seam ratio on real volumes</p>
-      <svg id="decBars" viewBox="0 0 598 260" width="598" height="260"></svg>
-      <p class="lbl" style="margin-top:10px">seam ratio = grey change across a seam plane ÷ grey change between ordinary neighbouring slices. 1 = no visible seam.</p>
+      <svg id="decBars" viewBox="0 0 598 260" width="520" height="226"></svg>
+      
     </div>
+    <div class="words r d5"><div><b>window</b>the 64³ region the network sees in one call; windows start every 32 voxels.</div><div><b>weighted average</b>each window’s prediction counts more in its centre than at its edges.</div><div><b>seam ratio</b>grey change across a seam plane ÷ grey change between ordinary neighbouring slices. 1 = invisible seam.</div></div>
   </div>
   <aside class="notes">
     <p>~60 s. Left top: windows of 64 voxels placed every 32 voxels, each with a sin² weight. Left bottom: the weights summed; we divide by this sum, so the blend is a weighted average everywhere and no window border is a hard edge. The same scheme decodes the final latent: overlapping 64³ decoder passes, stride 32, blended.</p>
@@ -580,9 +692,10 @@ aside.notes { display:none; }
   <h2 class="t r">The chunk seam, and the <i>overlapped scheme</i></h2>
   <p class="msg r d1">Chunks placed edge to edge leave fewer pores on every chunk plane. Letting each chunk overlap the next by 64 voxels removes it.</p>
   <div class="body">
-    <svg id="schemeSvg" viewBox="0 0 560 620" width="560" height="620" class="r d2"></svg>
-    <svg id="profSvg" viewBox="0 0 640 620" width="640" height="620" class="r d3" style="position:absolute;left:600px;top:0"></svg>
-    <svg id="seamBars" viewBox="0 0 450 620" width="450" height="620" class="r d4" style="position:absolute;left:1278px;top:0"></svg>
+    <svg id="schemeSvg" viewBox="0 0 560 620" width="474" height="525" class="r d2"></svg>
+    <svg id="profSvg" viewBox="0 0 640 640" width="542" height="542" class="r d3" style="position:absolute;left:560px;top:0"></svg>
+    <svg id="seamBars" viewBox="0 0 450 620" width="381" height="525" class="r d4" style="position:absolute;left:1180px;top:0"></svg>
+    <div class="words r d5"><div><b>chunk plane</b>the boundary between two chunks that were denoised separately.</div><div><b>pore fraction ÷ mean</b>pores near the plane compared with the whole volume; 1 = no band.</div><div><b>pore seam ratio</b>the seam ratio of slide 23 on the pore map; 1 is the target.</div></div>
   </div>
   <aside class="notes">
     <p>~80 s. Left: the two schemes. Standard: chunk k+1 starts exactly where chunk k ends. Overlapped: chunk k+1 starts 64 voxels inside chunk k; the first 32 of those stay as chunk k made them, the last 32 are rewritten by chunk k+1, so the junction sits inside a region both chunks saw.</p>
@@ -601,6 +714,7 @@ aside.notes { display:none; }
   <p class="msg r d1">Two real crops of the same panel are not identical either. That distance is the floor. Every result is a ratio to it.</p>
   <div class="body">
     <svg id="floorSvg" viewBox="0 0 1728 600" width="1728" height="600" class="r d2"></svg>
+    <div class="words r d5"><div><b>d( , )</b>a distance between two sets of volumes, for one statistic. The four statistics are on slide 28.</div><div><b>floor</b>the distance between two real sets: the natural variation of real material.</div><div><b>crop</b>a sub-volume cut from a real scan.</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. A raw distance between generated and real means nothing alone: how far is "far"? So for every statistic we also compare two disjoint real crops from the same panel, at the same porosity. Ratio = distance(generated, real) / distance(real, real). Ratio 1: the generated set is as close to real as real is to itself — as close as the measurement can tell. Ratio 3: three times further than the natural variation.</p>
@@ -617,17 +731,18 @@ aside.notes { display:none; }
   <h2 class="t r">Porosity control: <i>you ask, it delivers</i></h2>
   <p class="msg r d1">Seven requested levels, three seeds, two step counts: all 42 volumes within ±0.005 of the request.</p>
   <div class="body">
-    <svg id="doseSvg" viewBox="0 0 760 640" width="760" height="640" class="r d2"></svg>
-    <div class="r d3" style="position:absolute;left:840px;top:0;width:888px">
-      <video class="vid" poster="media/sweep3d_poster.jpg" muted loop playsinline preload="auto" style="width:888px"><source src="media/sweep3d.webm" type="video/webm"><source src="media/sweep3d.mp4" type="video/mp4"></video>
-      <div style="display:flex;justify-content:space-around;width:888px" class="cap"><span>0.005</span><span>0.03</span><span>0.10</span></div>
-      <p class="lbl" style="margin-top:30px">requested porosity · all pores of each 192³ volume, rotating · brightness = pore length along the view</p>
-      <div style="display:flex;gap:70px;margin-top:50px">
+    <svg id="doseSvg" viewBox="0 0 760 640" width="600" height="505" class="r d2"></svg>
+    <div class="r d3" style="position:absolute;left:700px;top:0;width:1028px">
+      <video class="vid" poster="media/sweep3d_poster.jpg" muted loop playsinline preload="auto" style="width:1028px"><source src="media/sweep3d.webm" type="video/webm"><source src="media/sweep3d.mp4" type="video/mp4"></video>
+      <div style="display:flex;justify-content:space-around;width:1028px" class="cap"><span>0.005</span><span>0.03</span><span>0.10</span></div>
+      <p class="lbl" style="margin-top:8px">all pores of each 192³ volume, rotating · brightness = pore length along the view</p>
+      <div style="display:flex;gap:70px;margin-top:20px">
         <div><div class="big amber" id="vSlope">1.03</div><p class="lbl">slope</p></div>
         <div><div class="big amber" id="vR2">0.998</div><p class="lbl">R²</p></div>
         <div><div class="big amber" id="vGate">42 / 42</div><p class="lbl">within ±0.005</p></div>
       </div>
     </div>
+    <div class="words r d5"><div><b>porosity</b>pore voxels ÷ material voxels.</div><div><b>slope</b>of the fitted line; 1 = delivered rises one-to-one with the request.</div><div><b>R²</b>share of the variation the line explains; 1 = all of it.</div><div><b>DDIM-50 / 200</b>sampling with 50 or 200 steps.</div></div>
   </div>
   <aside class="notes">
     <p>~70 s. Left: requested against delivered porosity (pore voxels over material voxels), each dot one 192³ volume; the band is ±0.005 around the identity. The fit has slope 1.03 and R² 0.998, and every volume is inside the band. The model slightly under-delivers at low porosity (0.0037 for 0.005) and is close at the top.</p>
@@ -642,7 +757,7 @@ aside.notes { display:none; }
 <section class="slide" id="s23" data-section="Results">
   <div class="hud tl">PoreGen</div><div class="hud tr">Results · local control</div>
   <h2 class="t r">Local control: <i>where</i> the pores go</h2>
-  <p class="msg r d1">A porosity map, painted per 64³ tile, is followed at large scale. Fine checkerboards are followed at about half strength.</p>
+  <p class="msg r d1">We paint a porosity value on each 64³ tile and measure what each tile gets. Slope 1 would mean full contrast: large patterns get it, a fine checkerboard gets about half.</p>
   <div class="body">
     <div id="tilesBox" class="r d2" style="position:absolute;left:0;top:0;width:820px"></div>
     <div class="r d3" style="position:absolute;left:880px;top:0;width:848px">
@@ -664,7 +779,7 @@ aside.notes { display:none; }
 <section class="slide" id="s24" data-section="Results">
   <div class="hud tl">PoreGen</div><div class="hud tr">Results · how we compare texture</div>
   <h2 class="t r">Four ways to compare <i>microstructure</i></h2>
-  <p class="msg r d1">Each turns a volume into a curve or a distribution. The distance between real and generated is a Wasserstein-1 distance W₁, or FID.</p>
+  <p class="msg r d1">Each turns a volume into a curve or a distribution. To compare real with generated we take the distance between them: W₁ — the area between the two cumulative curves — or, for images, FID.</p>
   <div class="body" id="statsBox"></div>
   <aside class="notes">
     <p>~80 s. (1) Two-point correlation S₂(r): the probability that two points a distance r apart are both pore. It captures pore fraction, size and spacing at once. The plot shows real against generated at porosity 0.03. (2) Pore-size distribution: sizes of connected pores. (3) Ripley's K: for pore centres, how many other centres lie within r, compared with a random (Poisson) pattern; it measures clustering. (4) FID: the Fréchet distance between Inception-network features of 2-D slices, real against generated; it measures how the image looks.</p>
@@ -819,9 +934,9 @@ aside.notes { display:none; }
     <div class="r d1" style="position:absolute;left:0;top:0;width:820px">
       <p class="lbl" style="margin:0 0 26px">Limitations</p>
       <ul class="pts">
-        <li><b style="color:var(--ink);font-weight:500">Decoder blur.</b> Reconstructions keep about 3/4 of the real sharpness; FID stays 3× the floor.</li>
+        <li><b style="color:var(--ink);font-weight:500">Decoder blur.</b> Rebuilt patches keep about 3/4 of the real sharpness (fine-detail energy); FID stays 3× the floor.</li>
         <li><b style="color:var(--ink);font-weight:500">Chunk seam.</b> The standard sampler leaves 0.6–0.9 of the pores on chunk planes; the overlap removes it at extra cost.</li>
-        <li><b style="color:var(--ink);font-weight:500">Local field.</b> Delivered porosity decorrelates within about 50–60 voxels in-plane; real coupons stay correlated over hundreds.</li>
+        <li><b style="color:var(--ink);font-weight:500">Local field.</b> Generated porosity patches stay similar only over about 50–60 voxels in-plane; in real coupons, over hundreds (correlation length).</li>
       </ul>
     </div>
     <div class="r d2" style="position:absolute;left:908px;top:0;width:820px">
@@ -836,8 +951,8 @@ aside.notes { display:none; }
     </div>
   </div>
   <aside class="notes">
-    <p>~60 s. Three limits, all measured. Blur: the final autoencoder's reconstructions have 0.74 of the real sharpness on validation; this shows in FID. Seams: shown on slide 20. Local field: the correlation length of delivered local porosity is about 51–57 voxels in y and 48–60 in x, while real large crops stay correlated over 266 voxels in y and more than 960 in x.</p>
-    <p class="src">Sharpness ratio 0.735: autoencoder compression study, c = 4, whole validation split, last step. Seam ranges: slide 20 sources. Correlation lengths: full evaluation of the final model, field statistics (generated local-field and multi-chunk cases: L<sub>y</sub> 51 / 57, L<sub>x</sub> 48 / 60 voxels; real large crops: L<sub>y</sub> 266, L<sub>x</sub> &gt; 960 voxels).</p>
+    <p>~60 s. Three limits, all measured. Blur: the final autoencoder's reconstructions have 0.74 of the real sharpness on validation; this shows in FID. Seams: shown on slide 24. Local field: the correlation length of delivered local porosity is about 51–57 voxels in y and 48–60 in x, while real large crops stay correlated over 266 voxels in y and more than 960 in x.</p>
+    <p class="src">Sharpness ratio 0.735: autoencoder compression study, c = 4, whole validation split, last step. Seam ranges: slide 24 sources. Correlation lengths: full evaluation of the final model, field statistics (generated local-field and multi-chunk cases: L<sub>y</sub> 51 / 57, L<sub>x</sub> 48 / 60 voxels; real large crops: L<sub>y</sub> 266, L<sub>x</sub> &gt; 960 voxels).</p>
   </aside>
 </section>
 
@@ -953,7 +1068,7 @@ const INIT = {
   forward() {
     const ts = [0, 200, 400, 600, 800, 1000], grid = document.getElementById('fwdGrid'), N = 256, cvs = [];
     ts.forEach(t => { const w = document.createElement('div');
-      const c = document.createElement('canvas'); c.width = c.height = N; c.style.cssText = 'width:270px;height:220px;object-fit:cover;display:block;border:1px solid rgba(232,230,225,.14)';
+      const c = document.createElement('canvas'); c.width = c.height = N; c.style.cssText = 'width:260px;height:150px;object-fit:cover;display:block;border:1px solid rgba(232,230,225,.14)';
       const l = document.createElement('div'); l.className = 'lbl'; l.style.marginTop = '8px'; l.textContent = 't = ' + t;
       w.appendChild(c); w.appendChild(l); grid.appendChild(w); cvs.push([c, l]); });
     loadField('media/data_grey.jpg', N, (x0, eps) => ts.forEach((t, i) => { const g = cvs[i][0].getContext('2d'); drawXt(g, N, x0, eps, cosAbar(t), g.createImageData(N, N)); }));
@@ -1040,6 +1155,10 @@ const INIT = {
       mus.forEach(m => [1, 2].forEach(k => { const [cx, cy] = toPx(...m); g.beginPath(); g.arc(cx, cy, s0 * 160 * k, 0, 7); g.stroke(); }));
       [[P1, 'rgba(142,148,158,.55)', 1], [P2, '#ffb000', 3]].forEach(([PP, col, lw]) => PP.forEach(pp => { const k = Math.max(1, Math.floor(ph * (pp.length - 1)));
         g.strokeStyle = col; g.lineWidth = lw; g.beginPath(); g.moveTo(...pp[0]); for (let i = 1; i <= k; i++) g.lineTo(...pp[i]); g.stroke(); })); });
+  },
+
+  /* 07g — guidance arrows */
+  guidance() {
     const svg = document.getElementById('cfgSvg');
     el(svg, 'defs').innerHTML = ['#8e949e', '#e8e6e1', '#ffb000'].map((c, i) => `<marker id="ar${i}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('');
     const O = [90, 380];
@@ -1051,8 +1170,24 @@ const INIT = {
     const gl = el(svg, 'line', { x1: O[0], y1: O[1], x2: 470, y2: 100, stroke: '#ffb000', 'stroke-width': 3, 'marker-end': 'url(#ar2)' });
     const gt = el(svg, 'text', { x: 480, y: 100, style: 'fill:#ffb000' }, 'guided, s = 2');
     el(svg, 'line', { x1: 330, y1: 300, x2: 600, y2: 0, stroke: 'rgba(232,230,225,.2)', 'stroke-dasharray': '6 6' });
-    loop('s7b', ts => { const s = 1 + (Math.sin(ts / 1400) + 1) * 0.9, x = 330 + (400 - 330) * s, y = 300 + (200 - 300) * s;
+    loop('s7g', ts => { const s = 1 + (Math.sin(ts / 1400) + 1) * 0.9, x = 330 + (400 - 330) * s, y = 300 + (200 - 300) * s;
       gl.setAttribute('x2', x); gl.setAttribute('y2', y); gt.setAttribute('x', x + 10); gt.setAttribute('y', y); gt.textContent = 'guided, s = ' + s.toFixed(1); });
+  },
+
+  /* 08a — x_t and the three possible targets, computed live on a real slice */
+  targets() {
+    const row = document.getElementById('tgtRow'), N = 192, names = [['x<sub>t</sub> — network input', '#e8e6e1'], ['ε — noise', '#8e949e'], ['x₀ — clean image', '#e8e6e1'], ['v = a·ε − b·x₀', '#ffb000']], cvs = [];
+    names.forEach(([n, c]) => { const w = document.createElement('div'); const cv = document.createElement('canvas'); cv.width = cv.height = N;
+      cv.style.cssText = `width:380px;height:380px;display:block;border:2px solid ${c}`; const l = document.createElement('div'); l.className = 'lbl'; l.style.marginTop = '8px'; l.innerHTML = n;
+      w.appendChild(cv); w.appendChild(l); row.appendChild(w); cvs.push(cv.getContext('2d')); });
+    loadField('media/data_grey.jpg', N, (x0, eps) => { const imgs = cvs.map(g => g.createImageData(N, N));
+      const put = (k, f) => { const o = imgs[k].data; for (let i = 0; i < N * N; i++) { let q = (f(i) * 0.55 + 1) / 2; q = q < 0 ? 0 : q > 1 ? 1 : q; const gv = 20 + q * 215; o[4 * i] = gv; o[4 * i + 1] = gv; o[4 * i + 2] = gv + 4; o[4 * i + 3] = 255; } cvs[k].putImageData(imgs[k], 0, 0); };
+      put(1, i => eps[i]); put(2, i => x0[i] / 0.55);
+      let t0 = null;
+      loop('s8a', ts => { if (t0 === null) t0 = ts; const ph = ((ts - t0) % 9000) / 9000, tf = ph < 0.8 ? ph / 0.8 : 1;
+        const ab = cosAbar(tf * 1000), A = Math.sqrt(ab), B = Math.sqrt(1 - ab);
+        put(0, i => (A * x0[i] + B * eps[i] * 0.55) / 0.55); put(3, i => A * eps[i] - B * x0[i] / 0.55);
+        document.getElementById('tgtT').textContent = `t = ${Math.round(tf * 1000)}   ·   a = ${A.toFixed(2)}   b = ${B.toFixed(2)}`; }); });
   },
 
   /* 08 — the x0/eps circle and SNR at the end of the schedule */
@@ -1092,7 +1227,7 @@ const INIT = {
     let t0 = null;
     loop('s12', ts => { if (t0 === null) t0 = ts; const e = ((ts - t0) % 7000) / 7000;
       const q = e < 0.15 ? 0 : e < 0.5 ? (e - 0.15) / 0.35 : e < 0.65 ? 1 : e < 1 ? 1 - (e - 0.65) / 0.35 : 0;
-      const x = 620 * (1 - q); top.style.clipPath = `inset(0 ${620 - x}px 0 0)`; ln.style.left = x + 'px'; });
+      const x = 500 * (1 - q); top.style.clipPath = `inset(0 ${500 - x}px 0 0)`; ln.style.left = x + 'px'; });
   },
 
   /* 17 — a patch and its six faces, cycling through the cases */
@@ -1150,15 +1285,15 @@ function drawStatic() {
   /* 10 — timeline */
   const tl = document.getElementById('timeline');
   const items = [
-    ['2020', 'DDPM', 'Ho, Jain & Abbeel', 'noise-prediction training', 1],
-    ['2021', 'Score SDE', 'Song et al.', 'diffusion as an SDE; the score', 0],
-    ['2021', 'DDIM', 'Song, Meng & Ermon', 'deterministic, few steps', 1],
-    ['2021', 'Classifier-free guidance', 'Ho & Salimans', 'conditioning without a classifier', 1],
-    ['2022', 'v-prediction', 'Salimans & Ho', 'a well-scaled target', 1],
-    ['2022', 'Latent diffusion', 'Rombach et al.', 'diffuse in an autoencoder latent', 1],
-    ['2022', 'EDM', 'Karras et al.', 'the design space, cleaned up', 0],
-    ['2023', 'MultiDiffusion', 'Bar-Tal et al.', 'fuse overlapping windows', 1],
-    ['2024', 'Zero terminal SNR', 'Lin et al.', 'end the schedule at pure noise', 1]];
+    ['2020', 'DDPM', 'Ho, Jain & Abbeel', 'first diffusion model with high image quality', 1],
+    ['2021', 'Score SDE', 'Song et al.', 'explains why it works: continuous random motion, reversed', 0],
+    ['2021', 'DDIM', 'Song, Meng & Ermon', 'same network, 20× fewer steps', 1],
+    ['2021', 'Classifier-free guidance', 'Ho & Salimans', 'steer the output towards a condition', 1],
+    ['2022', 'v-prediction', 'Salimans & Ho', 'a safer quantity for the network to output', 1],
+    ['2022', 'Latent diffusion', 'Rombach et al.', 'diffusion on compressed images: cheap (Stable Diffusion)', 1],
+    ['2022', 'EDM', 'Karras et al.', 'one clean recipe for all the design choices', 0],
+    ['2023', 'MultiDiffusion', 'Bar-Tal et al.', 'images larger than the training size, by blending overlapping windows', 1],
+    ['2024', 'Zero terminal SNR', 'Lin et al.', 'make the last training step pure noise', 1]];
   const years = ['2020', '2021', '2022', '2023', '2024'];
   tl.innerHTML = `<div class="r d2" style="display:grid;grid-template-columns:repeat(5,1fr);gap:28px">${years.map(y => `<div>
       <div style="font:400 22px var(--mono);color:var(--mute);border-bottom:1px solid var(--faint);padding-bottom:12px;margin-bottom:18px">${y}</div>
@@ -1209,8 +1344,8 @@ function drawStatic() {
   [['#9a9893'], ['#ffb000'], ['#2f6bff']].forEach(([c], i) => el(ae, 'rect', { x: 1210 + i * 14, y: 160 + i * 14, width: 60, height: 60, fill: '#0b0d10', stroke: c, 'stroke-width': 2 }));
   el(ae, 'text', { x: 1310, y: 208, style: 'fill:#e8e6e1' }, '3-class segmentation');
   const ls = document.getElementById('lossSvg');
-  const LX = s => 440 + s / 25000 * 1260;
-  [[0, 'L1 on grey', '#e8e6e1', 0], [1, 'LPIPS perceptual (2-D slices)', '#e8e6e1', 0], [2, 'cross-entropy + Dice on classes', '#ffb000', 0], [3, 'KL to N(0, I), weight 10⁻⁶', '#8e949e', 0], [4, '3-D patch discriminator (hinge)', '#2f6bff', 15000]]
+  const LX = s => 440 + s / 25000 * 1260; el(ls, 'text', { x: 0, y: -6, style: 'fill:#c9c7c2' }, 'when each term is active');
+  [[0, 'L1', '#e8e6e1', 0], [1, 'LPIPS', '#e8e6e1', 0], [2, 'cross-entropy + Dice', '#ffb000', 0], [3, 'KL', '#8e949e', 0], [4, '3-D discriminator', '#2f6bff', 15000]]
     .forEach(([i, n, c, s0]) => { el(ls, 'text', { x: 0, y: 32 + i * 46, style: `fill:${c};font-size:19px` }, n);
       el(ls, 'rect', { x: LX(s0), y: 16 + i * 46, width: LX(25000) - LX(s0), height: 22, fill: c, 'fill-opacity': .35, stroke: c }); });
   el(ls, 'line', { x1: LX(0), x2: LX(25000), y1: 255, y2: 255, class: 'ax' });
@@ -1254,14 +1389,14 @@ function drawStatic() {
     .forEach(([n, c, col], i) => { const y = 80 + i * 66; el(ins, 'rect', { x: 0, y: y - 26, width: 560, height: 44, fill: 'rgba(232,230,225,.03)', stroke: 'rgba(232,230,225,.18)' });
       el(ins, 'text', { x: 16, y: y + 2, style: `fill:${col}` }, n); el(ins, 'text', { x: 545, y: y + 2, 'text-anchor': 'end', style: 'fill:#7d838c' }, c);
       el(ins, 'path', { d: `M565,${y - 4} C630,${y - 4} 630,320 682,320`, stroke: 'rgba(232,230,225,.35)', 'stroke-width': 1.5, fill: 'none' }); });
-  el(ins, 'text', { x: 0, y: 500 }, '= 127 input channels');
+  el(ins, 'text', { x: 0, y: 490 }, '= 127 input channels');
   el(ins, 'text', { x: 1130, y: 30, style: 'fill:#e8e6e1;font-size:22px' }, 'numbers — injected by normalisation');
   [['timestep t', '#e8e6e1'], ['porosity request (with a null for guidance)', '#ffb000'], ['depth in the specimen', '#e8e6e1'], ['distance from each of six faces to the surface', '#e8e6e1']]
     .forEach(([n, col], i) => { const y = 100 + i * 70; el(ins, 'rect', { x: 1130, y: y - 26, width: 598, height: 44, fill: 'rgba(232,230,225,.03)', stroke: 'rgba(232,230,225,.18)' });
       el(ins, 'text', { x: 1146, y: y + 2, style: `fill:${col}` }, n);
       el(ins, 'path', { d: `M1125,${y - 4} C1080,${y - 4} 1080,300 1038,300`, stroke: 'rgba(232,230,225,.35)', 'stroke-width': 1.5, fill: 'none' }); });
   el(ins, 'path', { d: 'M860,420 V500', stroke: '#ffb000', 'stroke-width': 2.5, 'marker-end': 'url(#a16)' });
-  el(ins, 'text', { x: 860, y: 540, 'text-anchor': 'middle', style: 'fill:#ffb000;font-size:22px' }, 'output: v̂  (4 × 16³)');
+  el(ins, 'text', { x: 860, y: 540, 'text-anchor': 'middle', style: 'fill:#ffb000;font-size:22px' }, 'output: predicted v  (4 × 16³)');
 
   /* 19 — blending weights and decoder seam bars */
   const bs = document.getElementById('blendSvg');
@@ -1361,10 +1496,10 @@ function drawStatic() {
   /* 24 — the four statistics */
   const sbx = document.getElementById('statsBox');
   sbx.innerHTML = `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:28px">${[
-    ['s2', 'Two-point correlation S₂(r)', 'P(two points r apart are both pore)'],
-    ['psd', 'Pore-size distribution', 'sizes of connected pores'],
-    ['rip', "Ripley's K(r)", 'pore centres within r, vs random'],
-    ['fid', 'FID on slices', 'distance of deep-image features']].map(([id, h, p], i) =>
+    ['s2', 'Two-point correlation S₂(r)', 'probability that two points r voxels apart are both pore: size and spacing'],
+    ['psd', 'Pore-size distribution', 'histogram of the sizes of connected pores'],
+    ['rip', "Ripley's K(r)", 'how many pore centres lie within r of a pore centre, against a random pattern: clustering'],
+    ['fid', 'FID on slices', 'Fréchet distance between the features an image-recognition network (Inception) extracts']].map(([id, h, p], i) =>
     `<div class="card r d${i + 2}" style="height:520px"><svg id="st_${id}" viewBox="0 0 360 300" width="100%"></svg><h3 style="margin-top:22px">${h}</h3><p>${p}</p></div>`).join('')}</div>`;
   const s2c = v('s2curve_0.03');
   if (s2c) { const s = document.getElementById('st_s2'); const mx = Math.max(...s2c.real, ...s2c.gen);

@@ -1,6 +1,6 @@
 # PoreGen — group-meeting deck
 
-A 32-slide, ~38-minute talk for a mixed ML and materials audience: diffusion from
+A 36-slide, ~37-minute talk (speaker-note estimates) for a mixed ML and materials audience: diffusion from
 scratch, the state of the art, our data, autoencoder, latent diffusion model,
 large-volume assembly, evaluation and results of the final model.
 
@@ -18,6 +18,7 @@ Keys: ← → Space navigate · N speaker notes · F fullscreen · E edit text.
 ## Rules the deck follows
 
 - No repository names on slides or in notes; experiments carry technical titles.
+- No term is used before it is explained: each slide carries a "new words" strip that defines every term it introduces.
 - Every on-slide number has its source in the speaker notes; the file and JSON
   path of each is in `deck/media/numbers.json`.
 - Autoencoder named as in Rombach et al.: f = 4, c = 4, 48x reduction.
