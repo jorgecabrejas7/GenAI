@@ -76,13 +76,17 @@ def write_video(name: str, frames, pingpong=True):
     frames = list(frames)
     if pingpong:
         frames = frames + frames[-2:0:-1]
-    w = imageio.get_writer(OUT / f"{name}.mp4", fps=FPS, codec="libx264", quality=6,
-                           pixelformat="yuv420p", macro_block_size=16)
-    for f in frames:
-        w.append_data(f)
-    w.close()
+    # WebM/VP9 first: open-source Chromium and some Firefox builds have no H.264
+    # decoder. MP4/H.264 stays as the fallback for players that lack VP9.
+    for ext, codec, params in (("webm", "libvpx-vp9", ["-b:v", "0", "-crf", "34", "-row-mt", "1", "-cpu-used", "4"]),
+                               ("mp4", "libx264", None)):
+        w = imageio.get_writer(OUT / f"{name}.{ext}", fps=FPS, codec=codec, pixelformat="yuv420p", macro_block_size=16,
+                               **({"output_params": params} if params else {"quality": 6}))
+        for f in frames:
+            w.append_data(f)
+        w.close()
     imageio.imwrite(OUT / f"{name}_poster.jpg", frames[len(frames) // 4], quality=88)
-    print(f"{name}.mp4  {len(frames)} frames  {frames[0].shape[1]}x{frames[0].shape[0]}")
+    print(f"{name}.webm/.mp4  {len(frames)} frames  {frames[0].shape[1]}x{frames[0].shape[0]}")
 
 
 def gen(assessment: str, case: str):

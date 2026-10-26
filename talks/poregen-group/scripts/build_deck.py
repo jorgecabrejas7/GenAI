@@ -33,5 +33,11 @@ for name in ("halves", "checkerboard"):
 src = (DECK / "deck.src.html").read_text()
 src = src.replace("/*INLINE:viewport-base.css*/", BASE_CSS.read_text())
 src = src.replace("/*NUMBERS*/{}", json.dumps(num, separators=(",", ":")))
+# Images that a canvas reads pixel by pixel are inlined: from a file:// page the
+# browser treats a linked image as cross-origin and blocks getImageData.
+import base64
+for name in ("title_slice.jpg", "data_grey.jpg", "large_grey.jpg"):
+    uri = "data:image/jpeg;base64," + base64.b64encode((MEDIA / name).read_bytes()).decode()
+    src = src.replace(f"'media/{name}'", f"'{uri}'")
 (DECK / "index.html").write_text(src)
 print(f"deck/index.html  {len(src) // 1024} KiB  {len(num)} numbers")
