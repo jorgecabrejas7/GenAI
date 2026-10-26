@@ -1,0 +1,1527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PoreGen</title>
+<!--
+  PoreGen — group-meeting deck. SOURCE file: scripts/build_deck.py injects the
+  numbers (media/numbers.json + profiles) and writes deck/index.html beside media/.
+  Keys: ← → / Space / PgUp PgDn navigate · N speaker notes · E edit text · F fullscreen.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/*INLINE:viewport-base.css*/
+
+/* ===========================================================
+   THEME — scanner light-box. One accent per meaning:
+   amber = pore / ours, blue = air, CT greys = material, white = real.
+   =========================================================== */
+:root {
+  --stage-bg:#050608; --slide-bg:#0b0d10;
+  --ink:#e8e6e1; --ink2:#c9c7c2; --mute:#7d838c; --faint:rgba(232,230,225,.14);
+  --pore:#ffb000; --air:#2f6bff; --mat:#9a9893; --real:#e8e6e1;
+  --b1:#cfd3da; --b2:#8e949e; --b3:#555b65;          /* baselines, light to dark */
+  --serif:'Instrument Serif', serif; --sans:'IBM Plex Sans', sans-serif; --mono:'IBM Plex Mono', monospace;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+* { box-sizing:border-box; }
+body { font-family:var(--sans); color:var(--ink); }
+.slide { background: radial-gradient(1400px 1000px at 70% 50%, #14181e 0%, #0b0d10 62%); }
+
+/* === CHROME: scanner readouts in the corners === */
+.hud { position:absolute; font:400 19px var(--mono); color:var(--mute); letter-spacing:.07em; text-transform:uppercase; }
+.hud.tl { left:96px; top:56px; } .hud.tr { right:96px; top:56px; text-align:right; }
+.hud.bl { left:96px; bottom:44px; } .hud.br { right:96px; bottom:44px; }
+
+/* === TYPE === */
+h2.t { position:absolute; left:96px; top:108px; margin:0; font:400 76px/1 var(--serif); letter-spacing:-.01em; max-width:1700px; }
+h2.t i { color:var(--pore); }
+.msg { position:absolute; left:98px; top:202px; width:1600px; margin:0; font:300 31px/1.35 var(--sans); color:var(--ink2); }
+.body { position:absolute; left:96px; right:96px; top:300px; bottom:96px; }
+.lbl { font:400 20px var(--mono); color:var(--mute); letter-spacing:.04em; }
+.lbl b { color:var(--ink); font-weight:500; }
+.big { font:400 64px/1 var(--serif); }
+.amber { color:var(--pore); } .blue { color:var(--air); } .muted { color:var(--mute); }
+.eq { font:400 40px/1.3 var(--serif); }
+.eq i { font-style:italic; }
+.eq .ov { text-decoration:overline; }
+.card { border:1px solid var(--faint); background:rgba(255,255,255,.02); padding:28px 32px; }
+.card h3 { margin:0 0 12px; font:500 26px var(--sans); }
+.card p { margin:0; font:300 24px/1.4 var(--sans); color:var(--ink2); }
+ul.pts { margin:0; padding:0; list-style:none; }
+ul.pts li { font:300 28px/1.45 var(--sans); color:var(--ink2); padding-left:30px; position:relative; margin-bottom:14px; }
+ul.pts li::before { content:''; position:absolute; left:0; top:17px; width:12px; height:2px; background:var(--pore); }
+video, .fig img { display:block; }
+.vid { border:1px solid var(--faint); background:#0b0d10; }
+.cap { font:400 19px var(--mono); color:var(--mute); margin-top:12px; letter-spacing:.03em; }
+.cap b { color:var(--ink); font-weight:500; }
+.legend { display:flex; gap:32px; font:400 20px var(--mono); color:var(--ink2); }
+.legend span::before { content:''; display:inline-block; width:16px; height:16px; margin-right:10px; vertical-align:-2px; background:var(--c); }
+svg text { font-family:var(--mono); fill:var(--mute); font-size:19px; }
+svg .ax { stroke:var(--mute); stroke-width:1.5; fill:none; }
+svg .grid { stroke:var(--faint); stroke-width:1; }
+svg .ink { fill:var(--ink); } svg .serif { font-family:var(--serif); font-size:30px; fill:var(--ink); }
+
+/* === REVEAL: staggered entrance on the active slide === */
+.r { opacity:0; transform:translateY(22px); transition:opacity .7s var(--ease), transform .7s var(--ease); }
+.slide.visible .r { opacity:1; transform:none; }
+.slide.visible .r.d1 { transition-delay:.12s; } .slide.visible .r.d2 { transition-delay:.24s; }
+.slide.visible .r.d3 { transition-delay:.36s; } .slide.visible .r.d4 { transition-delay:.48s; }
+.slide.visible .r.d5 { transition-delay:.6s; }  .slide.visible .r.d6 { transition-delay:.72s; }
+
+/* === SPEAKER NOTES (hidden on slides; N shows the panel) === */
+aside.notes { display:none; }
+#notesPanel { position:fixed; left:0; right:0; bottom:0; max-height:42vh; overflow:auto; z-index:2000; display:none;
+  background:rgba(8,9,12,.96); border-top:2px solid var(--pore); color:var(--ink); padding:18px 28px 22px;
+  font:400 17px/1.55 var(--sans); }
+#notesPanel.on { display:block; }
+#notesPanel h4 { margin:0 0 8px; font:500 15px var(--mono); color:var(--pore); letter-spacing:.06em; }
+#notesPanel p { margin:0 0 8px; } #notesPanel .src { color:#9aa1ab; font-size:15px; }
+.counter { position:fixed; right:16px; bottom:10px; z-index:1500; font:400 13px var(--mono); color:#555b65; }
+[contenteditable="true"] { outline:1px dashed rgba(255,176,0,.5); }
+
+/* ===========================================================
+   SLIDE-SPECIFIC LAYOUTS
+   =========================================================== */
+/* 01 title */
+#s1 .title { position:absolute; left:96px; top:270px; margin:0; font:400 200px/.88 var(--serif); letter-spacing:-.02em; }
+#s1 .title i { color:var(--pore); }
+#s1 .sub { position:absolute; left:100px; top:560px; width:760px; margin:0; font:300 36px/1.4 var(--sans); color:var(--ink2); }
+#s1 .legend { position:absolute; left:100px; top:780px; }
+#s1 .fig { position:absolute; left:1000px; top:150px; width:780px; height:780px; }
+#s1 .fig canvas, #s1 .fig img { position:absolute; inset:0; width:780px; height:780px; }
+#s1 .fig .seg { opacity:0; transition:opacity 1.2s; }
+#s1 .fig.show-seg .seg { opacity:.85; }
+.tick { position:absolute; background:var(--ink); opacity:.5; }
+#s1 .scale { position:absolute; left:1000px; top:950px; font:400 20px var(--mono); color:var(--mute); display:flex; align-items:center; gap:16px; }
+#s1 .scale i { display:block; width:152px; height:3px; background:var(--ink); }
+</style>
+</head>
+<body>
+<div class="deck-viewport"><main class="deck-stage" id="deckStage">
+
+<!-- =========================================================
+     01 — TITLE
+     ========================================================= -->
+<section class="slide" id="s1" data-init="title" data-section="">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Group meeting · 2026</div>
+  <h1 class="title r">Pore<i>Gen</i></h1>
+  <p class="sub r d1">Latent diffusion for 3-D X-ray CT of porous composites — generated already segmented.</p>
+  <div class="legend r d2"><span style="--c:var(--mat)">material</span><span style="--c:var(--pore)">pore</span><span style="--c:var(--air)">air</span></div>
+  <div class="hud bl" style="color:var(--ink)">Jorge Cabrejas</div>
+  <div class="fig" id="titleFig"><canvas id="titleCv" width="512" height="512"></canvas><img class="seg" src="media/title_seg.png" alt=""></div>
+  <div class="scale"><i></i>5 mm</div>
+  <div class="hud br"><span id="titleT">t = 1000</span> · <span id="titleSnr">SNR 0</span></div>
+  <aside class="notes">
+    <p>~40 s. The picture is a real XCT slice of one of our carbon-fibre coupons. The animation runs the diffusion process backwards: pure noise at t = 1000, clean image at t = 0. At the end the segmentation appears: grey is material, amber is pore, blue is air (here a drilled hole).</p>
+    <p>One sentence for the talk: we train a model that writes new volumes like this one, with the labels already attached.</p>
+    <p class="src">Image: real scan, panel Na_02 coupon 2, slice 110, with the reference segmentation (local Sauvola threshold, radius 30, k 0.125, minimum pore size 8). Scale bar: the drilled hole is about 200 voxels wide at 25 µm, i.e. 5 mm. The noise here is the closed-form forward process with a cosine schedule, computed in the browser; it is not a model output.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     02 — WHY GENERATE POROSITY
+     ========================================================= -->
+<section class="slide" id="s2" data-section="Motivation">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Motivation</div>
+  <h2 class="t r">Why generate <i>porosity</i>?</h2>
+  <p class="msg r d1">Pores control the strength of a composite part. Real scans are slow and few. We want many volumes with known pores.</p>
+  <div class="body">
+    <svg viewBox="0 0 1728 440" width="1728" height="440" class="r d2">
+      <!-- coupon -->
+      <g transform="translate(40,170)">
+        <rect x="0" y="40" width="260" height="120" fill="none" stroke="#e8e6e1" stroke-width="2"/>
+        <g stroke="#7d838c" stroke-width="1.5">
+          <line x1="0" y1="70" x2="260" y2="70"/><line x1="0" y1="100" x2="260" y2="100"/><line x1="0" y1="130" x2="260" y2="130"/></g>
+        <ellipse cx="80" cy="85" rx="10" ry="3" fill="#ffb000"/><ellipse cx="170" cy="115" rx="14" ry="3" fill="#ffb000"/><ellipse cx="210" cy="84" rx="7" ry="2.5" fill="#ffb000"/>
+        <text x="0" y="200">composite coupon</text>
+      </g>
+      <!-- arrow to scanner -->
+      <path d="M330,250 H450" stroke="#e8e6e1" stroke-width="2" marker-end="url(#ah)"/>
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8e6e1"/></marker></defs>
+      <!-- scanner -->
+      <g transform="translate(470,120)">
+        <circle cx="130" cy="130" r="120" fill="none" stroke="#e8e6e1" stroke-width="2"/>
+        <circle cx="130" cy="130" r="60" fill="none" stroke="#7d838c" stroke-width="1.5" stroke-dasharray="6 6"/>
+        <text x="40" y="300">X-ray CT · hours per coupon</text>
+      </g>
+      <path d="M760,250 H880" stroke="#e8e6e1" stroke-width="2" marker-end="url(#ah)"/>
+      <!-- volume -->
+      <g transform="translate(900,120)">
+        <path d="M0,60 L60,0 L280,0 L280,200 L220,260 L0,260 Z M0,60 L220,60 L280,0 M220,60 L220,260" fill="none" stroke="#e8e6e1" stroke-width="2"/>
+        <text x="0" y="300">3-D volume, 25 µm voxels</text>
+      </g>
+      <path d="M1200,250 H1320" stroke="#ffb000" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#ah)"/>
+      <g transform="translate(1340,120)">
+        <path d="M0,60 L60,0 L280,0 L280,200 L220,260 L0,260 Z M0,60 L220,60 L280,0 M220,60 L220,260" fill="rgba(255,176,0,.06)" stroke="#ffb000" stroke-width="2" stroke-dasharray="8 6"/>
+        <text x="0" y="300" style="fill:#ffb000">generated: any number, known pores</text>
+      </g>
+    </svg>
+    <div class="r d3" style="display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:10px">
+      <div class="card"><p>train pore-segmentation networks</p></div><div class="card"><p>test NDT methods on known pores</p></div>
+      <div class="card"><p>build digital twins of coupons</p></div><div class="card"><p>ask "what if" for porosity and shape</p></div>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~50 s. Porosity is the main manufacturing defect in these laminates and it lowers the mechanical properties. Every real volume costs a scan and a segmentation. A generator that gives many volumes, with the porosity we ask for and with labels, is useful for data, for testing methods and for "what if" questions.</p>
+    <p class="src">No numbers on this slide. "Hours per coupon" is a qualitative statement about a CT scan; do not quote a figure.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     03 — DESTROY WITH NOISE, THEN UNDO
+     ========================================================= -->
+<section class="slide" id="s3" data-init="morph" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · the idea</div>
+  <h2 class="t r">Destroy with noise, then <i>learn to undo it</i></h2>
+  <p class="msg r d1">Adding noise is easy and known. Removing it is learned. Generation = start from pure noise and remove it step by step.</p>
+  <div class="body">
+    <canvas id="morphCv" width="384" height="384" style="position:absolute;left:672px;top:20px;width:620px;height:620px" class="vid"></canvas>
+    <div class="lbl" style="position:absolute;left:0;top:250px;width:600px;text-align:right"><span class="big amber" id="morphDir">→</span><br><span id="morphTxt">forward: add Gaussian noise</span></div>
+    <div class="lbl" style="position:absolute;left:1340px;top:270px" id="morphT">t = 0</div>
+  </div>
+  <aside class="notes">
+    <p>~40 s. Intuition first. Going right, we add a little Gaussian noise many times until nothing of the slice is left. This direction needs no learning. Going back, a network predicts what noise to remove at each step. If it can do that at every noise level, it can start from pure noise and end at a new, realistic image.</p>
+    <p class="src">Animation: the closed-form forward process on a real slice (same scan as the title, another region), cosine schedule, computed in the browser.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     04 — FORWARD PROCESS AND SNR
+     ========================================================= -->
+<section class="slide" id="s4" data-init="forward" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · forward process</div>
+  <h2 class="t r">Forward process: a <i>closed form</i> for every t</h2>
+  <p class="msg r d1">We can jump to any noise level in one step. The schedule ᾱ<sub>t</sub> decides how fast the signal fades.</p>
+  <div class="body">
+    <div class="eq r d2" style="position:absolute;left:0;top:0">q(<i>x<sub>t</sub></i> | <i>x</i><sub>0</sub>) = N( √ᾱ<sub><i>t</i></sub> <i>x</i><sub>0</sub> , (1 − ᾱ<sub><i>t</i></sub>) <b>I</b> ) &nbsp;⇔&nbsp; <i>x<sub>t</sub></i> = √ᾱ<sub><i>t</i></sub> <i>x</i><sub>0</sub> + √(1 − ᾱ<sub><i>t</i></sub>) <i>ε</i>, &nbsp;<i>ε</i> ~ N(0, <b>I</b>)</div>
+    <div id="fwdGrid" class="r d3" style="position:absolute;left:0;top:96px;display:flex;gap:18px"></div>
+    <svg id="fwdPlot" class="r d4" viewBox="0 0 1728 330" width="1728" height="330" style="position:absolute;left:0;top:360px"></svg>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Top: the closed form. The mean shrinks by √ᾱ<sub>t</sub>, the variance grows to 1 − ᾱ<sub>t</sub>. So we never simulate the chain during training: we draw t, draw ε, and build x<sub>t</sub> directly.</p>
+    <p>Bottom left: ᾱ<sub>t</sub> for the cosine schedule we use (Nichol &amp; Dhariwal style, s = 0.008, T = 1000). Bottom right: the signal-to-noise ratio SNR(t) = ᾱ<sub>t</sub> / (1 − ᾱ<sub>t</sub>) on a log scale. The marker moves with the highlighted panel. At t = T the SNR is exactly 0: the image is gone.</p>
+    <p class="src">Schedule: our model's configuration (cosine, T 1000, s 0.008). ᾱ<sub>T</sub> = 3.75·10⁻³³ was measured on this schedule (value recorded in the model configuration file). Panels are computed in the browser on a real slice.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     05 — REVERSE PROCESS
+     ========================================================= -->
+<section class="slide" id="s5" data-init="reverse" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · reverse process</div>
+  <h2 class="t r">Reverse process: a network <i>predicts the noise</i></h2>
+  <p class="msg r d1">Training is a regression: show the network a noised image and t, ask for the noise. One step back uses that prediction.</p>
+  <div class="body">
+    <svg id="chainSvg" viewBox="0 0 1100 300" width="1100" height="300" class="r d2" style="position:absolute;left:0;top:30px"></svg>
+    <div class="eq r d3" style="position:absolute;left:0;top:380px">ℒ = 𝔼<sub><i>x</i>₀, <i>ε</i>, <i>t</i></sub> ‖ <i>ε</i> − <i>ε</i><sub><i>θ</i></sub>( √ᾱ<sub><i>t</i></sub> <i>x</i><sub>0</sub> + √(1−ᾱ<sub><i>t</i></sub>) <i>ε</i> , <i>t</i> ) ‖²</div>
+    <div class="lbl r d4" style="position:absolute;left:0;top:470px;width:1050px;line-height:1.6">Ho, Jain &amp; Abbeel — <b>Denoising Diffusion Probabilistic Models</b>, NeurIPS 2020</div>
+    <canvas id="revCv" width="384" height="384" class="vid r d3" style="position:absolute;left:1188px;top:0;width:540px;height:540px"></canvas>
+    <div class="lbl" style="position:absolute;left:1188px;top:560px" id="revT">t = 1000</div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. The network ε<sub>θ</sub> sees x<sub>t</sub> and t and outputs a guess of the noise. The loss is a plain mean squared error. With the guess we can take one step from x<sub>t</sub> to x<sub>t−1</sub>; repeating from t = T to 0 gives a sample.</p>
+    <p>The animation on the right is only an illustration on a real slice (it uses the true noise, not a network). Our own model predicts v, not ε — slide 8 explains why.</p>
+    <p class="src">Reference verified: Ho, Jain, Abbeel, NeurIPS 2020, arXiv:2006.11239.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     06 — NOISE PREDICTION = SCORE
+     ========================================================= -->
+<section class="slide" id="s6" data-init="score" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · why it works</div>
+  <h2 class="t r">Predicting the noise = <i>estimating the score</i></h2>
+  <p class="msg r d1">The noise points away from the data. Its negative, scaled, is the gradient of log-density: an arrow field that leads back to the data.</p>
+  <div class="body">
+    <canvas id="scoreCv" width="760" height="620" class="r d2" style="position:absolute;left:0;top:0;width:760px;height:620px"></canvas>
+    <div class="r d3" style="position:absolute;left:840px;top:10px;width:880px">
+      <div class="eq">∇<sub><i>x</i></sub> log <i>p<sub>t</sub></i>(<i>x<sub>t</sub></i>) ≈ − <i>ε</i><sub><i>θ</i></sub>(<i>x<sub>t</sub></i>, <i>t</i>) / √(1 − ᾱ<sub><i>t</i></sub>)</div>
+      <p class="lbl" style="margin:14px 0 40px">denoising score matching (Vincent 2011)</p>
+      <div class="eq">𝔼[<i>x</i><sub>0</sub> | <i>x<sub>t</sub></i>] = ( <i>x<sub>t</sub></i> + (1 − ᾱ<sub><i>t</i></sub>) ∇ log <i>p<sub>t</sub></i>(<i>x<sub>t</sub></i>) ) / √ᾱ<sub><i>t</i></sub></div>
+      <p class="lbl" style="margin:14px 0 40px">Tweedie's formula (Efron 2011): the best denoised guess</p>
+      <div class="eq">d<i>x</i> = [ <i>f</i>(<i>x</i>,<i>t</i>) − <i>g</i>(<i>t</i>)² ∇ log <i>p<sub>t</sub></i>(<i>x</i>) ] d<i>t</i> + <i>g</i>(<i>t</i>) d<i>w̄</i></div>
+      <p class="lbl" style="margin:14px 0 0">reverse-time SDE (Song et al., ICLR 2021): DDPM is one discretisation</p>
+    </div>
+    <div class="lbl" style="position:absolute;left:0;top:640px" id="scoreLbl">noise level σ = 0.10</div>
+  </div>
+  <aside class="notes">
+    <p>~80 s. Left: a toy 2-D density with two modes (white contours). The arrows are its score, ∇ log p<sub>t</sub>, after adding noise of level σ. Small noise: arrows point sharply to each mode. Large noise: the field becomes smooth and points to the global centre. The amber particles follow the arrows from noise to data — that is sampling.</p>
+    <p>Right: the three links. (1) Denoising score matching: the noise a network predicts, divided by −√(1 − ᾱ<sub>t</sub>), is the score. (2) Tweedie: the score gives the posterior-mean clean image. (3) Song et al.: noising is an SDE, and its time reversal needs only the score; DDPM and DDIM are discretisations of it.</p>
+    <p class="src">References verified: Vincent, Neural Computation 23(7), 2011; Efron, JASA 106(496), 2011; Song et al., ICLR 2021, arXiv:2011.13456. The field is a toy Gaussian mixture computed in the browser.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     07 — SAMPLING AND GUIDANCE
+     ========================================================= -->
+<section class="slide" id="s7" data-init="sampling" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · sampling and guidance</div>
+  <h2 class="t r">Sampling in <i>50 steps</i>, steering with <i>guidance</i></h2>
+  <p class="msg r d1">DDIM follows the same trained model deterministically, with far fewer steps. Classifier-free guidance pushes the sample towards the condition.</p>
+  <div class="body">
+    <canvas id="ddimCv" width="760" height="560" class="r d2" style="position:absolute;left:0;top:10px;width:760px;height:560px"></canvas>
+    <div class="legend r d2" style="position:absolute;left:0;top:590px"><span style="--c:var(--b2)">DDPM · 1000 stochastic steps</span><span style="--c:var(--pore)">DDIM · 50 deterministic steps</span></div>
+    <svg id="cfgSvg" viewBox="0 0 860 460" width="860" height="460" class="r d3" style="position:absolute;left:868px;top:0"></svg>
+    <div class="eq r d4" style="position:absolute;left:868px;top:480px">ε̂ = ε<sub>∅</sub> + <i>s</i> ( ε<sub>c</sub> − ε<sub>∅</sub> )</div>
+    <p class="lbl r d4" style="position:absolute;left:868px;top:550px;width:860px">one network, condition dropped at random in training (Ho &amp; Salimans 2021)</p>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Left: the same toy density. Grey paths: DDPM, many small noisy steps. Amber paths: DDIM, deterministic, 50 steps, same model. We generate with DDIM at 50 steps.</p>
+    <p>Right: classifier-free guidance. During training the condition (for us: porosity) is replaced by a "null" token at random. At sampling we run both, ε<sub>c</sub> and ε<sub>∅</sub>, and extrapolate with scale s. s = 1 is the plain conditional model; s &gt; 1 follows the condition more strongly. We will see this on our porosity later.</p>
+    <p class="src">References verified: Song, Meng, Ermon, DDIM, ICLR 2021, arXiv:2010.02502; Ho &amp; Salimans, Classifier-Free Diffusion Guidance, NeurIPS 2021 workshop, arXiv:2207.12598. Toy paths computed in the browser.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     08 — v-PREDICTION AND ZERO TERMINAL SNR
+     ========================================================= -->
+<section class="slide" id="s8" data-init="vpred" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · parameterisation</div>
+  <h2 class="t r">We predict <i>v</i>, because ε breaks at the last step</h2>
+  <p class="msg r d1">Our schedule ends at zero SNR: at t = T the signal is fully removed, so training and sampling start from the same pure noise. There, ε cannot give back x₀ — v can.</p>
+  <div class="body">
+    <svg id="vSvg" viewBox="0 0 640 600" width="640" height="600" class="r d2" style="position:absolute;left:0;top:0"></svg>
+    <div class="r d3" style="position:absolute;left:720px;top:0;width:1008px">
+      <div class="eq" style="font-size:36px">ε-prediction: &nbsp;<i>x̂</i><sub>0</sub> = ( <i>x<sub>t</sub></i> − √(1−ᾱ<sub><i>t</i></sub>) ε̂ ) / <span class="amber">√ᾱ<sub><i>t</i></sub></span></div>
+      <p class="lbl" style="margin:8px 0 34px">at t = T: √ᾱ<sub>T</sub> = 6·10⁻¹⁷ → the output is multiplied by 10¹⁶</p>
+      <div class="eq" style="font-size:36px">v-prediction: &nbsp;<i>v</i> = √ᾱ<sub><i>t</i></sub> ε − √(1−ᾱ<sub><i>t</i></sub>) <i>x</i><sub>0</sub> &nbsp;⇒&nbsp; <i>x̂</i><sub>0</sub> = √ᾱ<sub><i>t</i></sub> <i>x<sub>t</sub></i> − √(1−ᾱ<sub><i>t</i></sub>) <i>v̂</i></div>
+      <p class="lbl" style="margin:8px 0 34px">no division · at t = T the estimate of x₀ is just −v: a well-scaled target at every t</p>
+    </div>
+    <svg id="snrEnd" viewBox="0 0 1008 300" width="1008" height="300" class="r d4" style="position:absolute;left:720px;top:330px"></svg>
+  </div>
+  <aside class="notes">
+    <p>~80 s. Left: the geometry. With √ᾱ = cos φ and √(1−ᾱ) = sin φ, x<sub>t</sub> is a rotation between data x₀ and noise ε. v is the velocity of that rotation, the tangent. ε-prediction asks for the noise; near t = T, x<sub>t</sub> is almost all noise, so ε is easy but tells nothing about x₀, and getting x₀ back divides by √ᾱ<sub>t</sub> → 0.</p>
+    <p>Our cosine schedule already reaches ᾱ<sub>T</sub> = 0 (zero terminal SNR): the last step is pure Gaussian noise, the same distribution sampling starts from — no train/sample mismatch. Lin et al. 2024 showed that common schedules do NOT reach zero (a signal leak) and fixed it; ours has no leak to close. But with ᾱ<sub>T</sub> = 0, ε-prediction is undefined at the first sampling step. v-prediction (Salimans &amp; Ho 2022) recovers x₀ with no division. That is our reason for v.</p>
+    <p>Bottom right: SNR near the end of the schedule, ours (amber) against the linear DDPM schedule (grey), which ends at a small but non-zero SNR.</p>
+    <p class="src">Values: ᾱ<sub>T</sub> = 3.75·10⁻³³ and √ᾱ<sub>T</sub> = 6.12·10⁻¹⁷, measured on our schedule and recorded in the model configuration. Linear schedule: β from 10⁻⁴ to 0.02 over 1000 steps (Ho et al. 2020), computed in the browser. References verified: Salimans &amp; Ho, ICLR 2022, arXiv:2202.00512; Lin et al., WACV 2024, arXiv:2305.08891.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     09 — LATENT DIFFUSION
+     ========================================================= -->
+<section class="slide" id="s9" data-section="Diffusion">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Diffusion · latent space</div>
+  <h2 class="t r">Diffuse in a <i>compressed latent</i>, not in voxels</h2>
+  <p class="msg r d1">An autoencoder compresses each 64³ patch 48×. The diffusion model works only in that small latent. In 3-D this is what makes it affordable.</p>
+  <div class="body">
+    <svg viewBox="0 0 1728 470" width="1728" height="560" class="r d2">
+      <defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8e6e1"/></marker></defs>
+      <!-- voxel cube -->
+      <g transform="translate(40,120)">
+        <path d="M0,60 L60,0 L240,0 L240,180 L180,240 L0,240 Z M0,60 L180,60 L240,0 M180,60 L180,240" fill="rgba(232,230,225,.05)" stroke="#e8e6e1" stroke-width="2"/>
+        <text x="0" y="290" class="ink">3 × 64³ voxels</text><text x="0" y="318">grey · pore · air</text>
+      </g>
+      <path d="M320,240 H420" stroke="#e8e6e1" stroke-width="2" marker-end="url(#ah9)"/>
+      <g transform="translate(430,190)"><path d="M0,0 L110,30 L110,70 L0,100 Z" fill="none" stroke="#e8e6e1" stroke-width="2"/><text x="35" y="58" class="ink">E</text></g>
+      <path d="M560,240 H640" stroke="#e8e6e1" stroke-width="2" marker-end="url(#ah9)"/>
+      <!-- latent + diffusion loop -->
+      <g transform="translate(660,180)">
+        <path d="M0,15 L15,0 L75,0 L75,60 L60,75 L0,75 Z M0,15 L60,15 L75,0 M60,15 L60,75" fill="rgba(255,176,0,.15)" stroke="#ffb000" stroke-width="2"/>
+        <text x="-10" y="120" style="fill:#ffb000">4 × 16³</text>
+      </g>
+      <g transform="translate(790,110)">
+        <rect x="0" y="0" width="330" height="220" fill="none" stroke="#ffb000" stroke-width="2" stroke-dasharray="8 6"/>
+        <text x="20" y="40" style="fill:#ffb000">diffusion in latent space</text>
+        <text x="20" y="90" class="ink">noise → denoise × 50</text>
+        <text x="20" y="130">3-D U-Net, 83 M parameters</text>
+        <text x="20" y="170">+ conditioning</text>
+      </g>
+      <path d="M1126,240 H1180" stroke="#e8e6e1" stroke-width="2" marker-end="url(#ah9)"/>
+      <g transform="translate(1190,190)"><path d="M0,30 L110,0 L110,100 L0,70 Z" fill="none" stroke="#e8e6e1" stroke-width="2"/><text x="45" y="58" class="ink">D</text></g>
+      <path d="M1310,240 H1390" stroke="#e8e6e1" stroke-width="2" marker-end="url(#ah9)"/>
+      <g transform="translate(1400,120)">
+        <path d="M0,60 L60,0 L240,0 L240,180 L180,240 L0,240 Z M0,60 L180,60 L240,0 M180,60 L180,240" fill="rgba(232,230,225,.05)" stroke="#e8e6e1" stroke-width="2"/>
+        <rect x="30" y="100" width="40" height="8" fill="#ffb000"/><rect x="100" y="150" width="56" height="8" fill="#ffb000"/><rect x="60" y="200" width="30" height="8" fill="#ffb000"/>
+        <text x="0" y="290" class="ink">grey + 3-class labels</text><text x="0" y="318">material · pore · air</text>
+      </g>
+    </svg>
+    <p class="lbl r d3" style="position:absolute;left:0;top:600px">Rombach et al. — <b>High-Resolution Image Synthesis with Latent Diffusion Models</b>, CVPR 2022</p>
+  </div>
+  <aside class="notes">
+    <p>~50 s. This is the idea of Rombach et al.: train an autoencoder once, then run diffusion on its latent. One 64³ patch has 3 × 64³ = 786 432 input values; its latent has 4 × 16³ = 16 384, a factor 48. That is the same factor as Stable Diffusion's autoencoder (512² × 3 → 64² × 4). Every denoising step works on the small latent; the decoder runs once at the end.</p>
+    <p class="src">Our model: 3-D U-Net with 82.9 M parameters (generation log of the final model); latent 4 × 16³ (autoencoder configuration). Stable Diffusion factor: CompVis model card, "downsampling factor 8, H×W×3 → H/8×W/8×4". Reference verified: Rombach et al., CVPR 2022, arXiv:2112.10752.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     10 — THE ROAD TO MODERN DIFFUSION
+     ========================================================= -->
+<section class="slide" id="s10" data-section="State of the art">
+  <div class="hud tl">PoreGen</div><div class="hud tr">State of the art · machine learning</div>
+  <h2 class="t r">The road to <i>modern diffusion</i></h2>
+  <p class="msg r d1">Each piece we use comes from one of these papers.</p>
+  <div class="body" id="timeline"></div>
+  <aside class="notes">
+    <p>~50 s. Read left to right. DDPM made diffusion work; the score-SDE view explained it; DDIM made it fast; guidance made it controllable; v-prediction fixed the parameterisation; latent diffusion made it cheap; EDM cleaned up the design space; MultiDiffusion showed how to fuse overlapping windows into large images, which is the idea behind our tiling; zero-SNR fixed the end of the schedule. Amber marks what our model uses directly.</p>
+    <p class="src">All references verified (authors, venue, year): Ho et al. NeurIPS 2020; Song et al. ICLR 2021; Song, Meng, Ermon ICLR 2021; Ho &amp; Salimans NeurIPS workshop 2021 (arXiv 2022); Salimans &amp; Ho ICLR 2022; Rombach et al. CVPR 2022; Karras et al. NeurIPS 2022; Bar-Tal et al. ICML 2023; Lin et al. WACV 2024.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     11 — MICROSTRUCTURE GENERATION AND THE GAP
+     ========================================================= -->
+<section class="slide" id="s11" data-section="State of the art">
+  <div class="hud tl">PoreGen</div><div class="hud tr">State of the art · porous media</div>
+  <h2 class="t r">Generating microstructures: <i>what is missing</i></h2>
+  <p class="msg r d1">Earlier models make realistic texture. None gives us all four things we need at once.</p>
+  <div class="body">
+    <div class="r d2" style="position:absolute;left:0;top:0;width:900px;display:grid;grid-template-columns:1fr;gap:18px">
+      <div class="card"><h3>3-D GAN · Mosser et al. 2017</h3><p>A 3-D generator trained on CT of rock; unconditional.</p></div>
+      <div class="card"><h3>SliceGAN · Kench &amp; Cooper 2021</h3><p>A 3-D generator trained from 2-D slices; unconditional.</p></div>
+      <div class="card"><h3>Diffusion for microstructures · 2023–2024</h3><p>2-D reconstruction (Düreth et al.), 2-D→3-D expansion (Lee &amp; Yun), 3-D porous media (Lyu &amp; Ren).</p></div>
+      <div class="card"><h3>Porosity-conditioned 3-D LDM · Naiff et al. 2026</h3><p>One porosity value as the condition; a field-controlled extension for large volumes is a 2026 preprint.</p></div>
+    </div>
+    <div class="r d3" style="position:absolute;left:980px;top:0;width:748px">
+      <p class="lbl" style="margin:0 0 22px">What we need, all at once</p>
+      <ul class="pts">
+        <li><b style="color:var(--ink);font-weight:500">Large volumes</b> — whole coupons, 1024 × 1024 × 192 and more</li>
+        <li><b style="color:var(--ink);font-weight:500">Local control</b> — porosity where we ask, ply angles, shape</li>
+        <li><b style="color:var(--ink);font-weight:500">Already segmented</b> — grey and material/pore/air labels together</li>
+        <li><b style="color:var(--ink);font-weight:500">Specimen geometry</b> — surfaces, holes, notches</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. GANs gave the first 3-D microstructures. SliceGAN removed the need for 3-D training data. Diffusion models have replaced GANs in quality, first in 2-D, then 3-D. The closest work to ours is Naiff et al. 2026: a latent diffusion model for 3-D porous media conditioned on porosity. Their 2026 preprint adds a porosity field for large volumes.</p>
+    <p>Our target is the combination on the right. I do not claim that no other work has any one of them; the point is to have all four in one model, for composites, with labels.</p>
+    <p class="src">References verified: Mosser, Dubrule, Blunt, Phys. Rev. E 96, 043309 (2017); Kench &amp; Cooper, Nat. Mach. Intell. 3, 299–305 (2021); Düreth et al., Mater. Today Commun. 35, 105608 (2023); Lee &amp; Yun, npj Comput. Mater. 10 (2024); Lyu &amp; Ren, Sci. Rep. 14 (2024); Naiff et al., "Controlled latent diffusion models for 3D porous media reconstruction", Computers &amp; Geosciences 206, 106038 (2026); Naiff, Ramos, Wang, "Large-Scale Porous Media Generation Through Field-Controlled Latent Diffusion Models", SSRN preprint 2026, not peer reviewed. "1024 × 1024 × 192": the size of our standard large generated volume.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     12 — OUR COUPONS
+     ========================================================= -->
+<section class="slide" id="s12" data-init="wipe" data-section="Data">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Data · coupons</div>
+  <h2 class="t r">Our data: <i>81 coupons</i> at 25 µm</h2>
+  <p class="msg r d1">Each XCT volume is segmented into material, pore and air by a fixed reference pipeline. Those labels are what the model learns to produce.</p>
+  <div class="body">
+    <div class="fig r d2" style="position:absolute;left:0;top:0;width:620px;height:620px" id="wipeFig">
+      <img src="media/data_seg.jpg" style="position:absolute;inset:0;width:620px;height:620px" class="vid" alt="">
+      <img src="media/data_grey.jpg" id="wipeTop" style="position:absolute;inset:0;width:620px;height:620px;clip-path:inset(0 0 0 0)" alt="">
+      <div id="wipeLine" style="position:absolute;top:0;bottom:0;width:2px;background:var(--pore);left:620px;box-shadow:0 0 14px var(--pore)"></div>
+    </div>
+    <div class="r d3" style="position:absolute;left:700px;top:0;width:1028px">
+      <img src="media/data_xsec.jpg" style="width:1028px;height:137px" class="vid" alt="">
+      <p class="cap">through-thickness section: plies and the pores between them</p>
+      <div class="legend" style="margin-top:46px"><span style="--c:var(--mat)">material</span><span style="--c:var(--pore)">pore</span><span style="--c:var(--air)">air (outside, drilled holes)</span></div>
+      <ul class="pts" style="margin-top:46px">
+        <li>pores: local adaptive threshold (Sauvola) inside the specimen</li>
+        <li>air: outside the specimen mask, and the drilled holes</li>
+        <li>volumes are aligned so z is the through-thickness axis</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~50 s. Left: a real slice; the line wipes from grey to labels. Right top: a section through the thickness, where the plies and the pore layers between plies are visible. These coupons come from several manufactured panels with different porosity levels.</p>
+    <p>The labels are produced by one fixed reference segmentation, not by hand. The model learns to reproduce that segmentation, so its labels are only as good as the reference.</p>
+    <p class="src">81 volumes, 25.0 µm voxels: dataset build report. Segmentation settings: Sauvola radius 30, k 0.125, minimum pore size 8 voxels (the reference pipeline at the settings the dataset uses). Images: real scan Na_02 coupon 2 (slice 55, and a section at row 1500).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     13 — FROM VOLUMES TO PATCHES
+     ========================================================= -->
+<section class="slide" id="s13" data-section="Data">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Data · split</div>
+  <h2 class="t r">From volumes to patches, <i>split by panel</i></h2>
+  <p class="msg r d1">A panel is one manufactured plate. All coupons of a panel go to the same set, so the model is tested on plates it never saw.</p>
+  <div class="body">
+    <svg id="splitSvg" viewBox="0 0 1728 600" width="1728" height="600" class="r d2"></svg>
+  </div>
+  <aside class="notes">
+    <p>~50 s. 18 panels: 12 for training, 3 for validation, 3 for test. Splitting by coupon would leak: coupons cut from the same plate share their porosity pattern. Each volume is cut into 64³ patches with a stride of 32 voxels. Patches that touch the drilled registration holes are removed (all coupons have three), because otherwise the holes would be the only interior air the model sees and it learns to draw air inside material.</p>
+    <p class="src">All counts: dataset build report — 59 / 11 / 11 volumes; 12 / 3 / 3 panels; patches after hole removal 1 620 450 / 266 119 / 290 446 (total 2 177 015); removed for holes 90 976 / 14 627 / 15 765; mean patch porosity 0.0165 / 0.0107 / 0.0071.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     14 — THE AUTOENCODER
+     ========================================================= -->
+<section class="slide" id="s14" data-section="Autoencoder">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Model · autoencoder</div>
+  <h2 class="t r">The autoencoder: <i>grey in, grey and labels out</i></h2>
+  <p class="msg r d1">The encoder sees grey, pore mask and air mask. The decoder returns grey and a 3-class segmentation. Four losses train it.</p>
+  <div class="body">
+    <svg id="aeSvg" viewBox="0 0 1728 330" width="1728" height="330" class="r d2"></svg>
+    <svg id="lossSvg" viewBox="0 0 1728 300" width="1728" height="300" class="r d3" style="position:absolute;left:0;top:360px"></svg>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Top: data flow. Input 3 channels at 64³; the encoder downsamples twice (factor 4 per side) to a Gaussian posterior with 4 channels at 16³; the decoder has two heads: grey and three class logits.</p>
+    <p>Bottom: the losses over training. L1 on grey. LPIPS — a perceptual distance: compare deep-network features of 2-D slices instead of pixels; low LPIPS means the texture looks the same. Cross-entropy plus Dice on the classes — Dice = 2|A∩B| / (|A| + |B|), the overlap of two masks, 1 is perfect. A very small KL keeps the latent smooth. From step 15 000 a 3-D patch discriminator (hinge loss, adaptive weight) is added to sharpen texture. This is the Stable Diffusion autoencoder recipe, made 3-D.</p>
+    <p class="src">Recipe (decisions log and autoencoder configuration): L1 on the [−1, 1] grey scale, LPIPS weight 1.0 on 2-D slices, class cross-entropy and soft Dice weight 1.0 each, KL weight 10⁻⁶ summed, 3-D N-layer discriminator (3 layers, 64 filters, hinge), adaptive weight factor 0.5, discriminator start at step 15 000, Adam (0.5, 0.9), learning rate 5.76·10⁻⁴ at batch 128. The model used is the step-25 000 checkpoint. 0.76 M parameters (generation log). References verified: Zhang et al. (LPIPS) CVPR 2018; Isola et al. (PatchGAN) CVPR 2017; Rombach et al. CVPR 2022.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     15 — HOW MUCH CAN WE COMPRESS
+     ========================================================= -->
+<section class="slide" id="s15" data-section="Autoencoder">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Model · compression study</div>
+  <h2 class="t r">How much can we compress? <i>f = 4, c = 4</i></h2>
+  <p class="msg r d1">Six latent sizes, same recipe. Below c = 4 the pores start to go; c = 4 gives 48×, the same as Stable Diffusion.</p>
+  <div class="body">
+    <svg id="vaePlot" viewBox="0 0 1100 620" width="1100" height="620" class="r d2"></svg>
+    <svg id="cubes" viewBox="0 0 560 620" width="560" height="620" class="r d3" style="position:absolute;left:1168px;top:0"></svg>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Naming as in Rombach et al.: f is the spatial reduction per side (64 → 16, f = 4), c the number of latent channels. We trained six autoencoders with c = 32, 16, 8, 4, 2, 1, all at f = 4. Left: pore Dice (amber) and grey L1 error (white) on the whole validation split. Pore Dice stays above 0.93 down to c = 4 and falls clearly at c = 2 and c = 1. c = 4 is the smallest latent that keeps pore Dice above 0.93 and air Dice above 0.99.</p>
+    <p>Why put the masks in the input at all? They are computed from the grey level, so they add little new information — but they make the model output segmented volumes directly, which is the point of the work.</p>
+    <p class="src">Source: autoencoder compression study, final training recipe, whole validation split, last training step of each size (discriminator on). c = 4: pore Dice 0.934, air Dice 0.996, grey L1 0.0255, porosity error 0.0016. c = 2: pore Dice 0.868. One run per size. The model in use is the c = 4 autoencoder at a later checkpoint (step 25 000) than the one in this table. The decision to use c = 4 is recorded in the decisions log; the c = 8 latent was found to carry a large share of posterior noise on these labels.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     16 — WHAT THE DENOISER SEES
+     ========================================================= -->
+<section class="slide" id="s16" data-section="Diffusion model">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Model · denoiser</div>
+  <h2 class="t r">What the denoiser <i>sees</i></h2>
+  <p class="msg r d1">Besides the noisy latent: maps that say where things are, and numbers that say how much. It outputs v for the patch.</p>
+  <div class="body">
+    <svg id="inputsSvg" viewBox="0 0 1728 640" width="1728" height="640" class="r d2"></svg>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Spatial inputs are concatenated as channels: the ply-orientation profile (cos 2θ, sin 2θ per depth), the material envelope (which cells are specimen and which are air), the six face neighbours' latents, a learned flag per neighbour (exists / unknown / outside), and each neighbour's own noise level. Scalars enter by adaptive group normalisation together with the timestep: the porosity request, the depth, and the distance from each of the six patch faces to the specimen surface.</p>
+    <p>The porosity request is per patch, so a map of requests gives local control. Every input is always present; there are no switches.</p>
+    <p class="src">Channel count 4 + 2 + 1 + 24 + 48 + 48 = 127 (architecture document and generation log, in_ch = 127); 82.9 M parameters; 3-D U-Net base 128 channels, multipliers 1/2/4 (model configuration).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     17 — NEIGHBOURS AND PER-FACE DROPOUT
+     ========================================================= -->
+<section class="slide" id="s17" data-init="faces" data-section="Diffusion model">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Model · neighbours</div>
+  <h2 class="t r">Neighbours, and <i>dropping one face</i> at a time</h2>
+  <p class="msg r d1">At generation time a patch often has five known neighbours and one not yet made. Training must show that case, or the model invents a boundary.</p>
+  <div class="body">
+    <svg id="faceSvg" viewBox="0 0 800 600" width="800" height="600" class="r d2"></svg>
+    <div class="r d3" style="position:absolute;left:880px;top:20px;width:848px">
+      <div class="legend" style="flex-direction:column;gap:18px">
+        <span style="--c:var(--pore)">exists — a neighbour latent is given (noised to its own level)</span>
+        <span style="--c:var(--b3)">unknown — a neighbour exists but is not made yet</span>
+        <span style="--c:var(--air)">outside — the specimen ends on this side</span>
+      </div>
+      <ul class="pts" style="margin-top:60px">
+        <li>per face, p = 0.10: one face becomes unknown</li>
+        <li>all six, p = 0.05: the null for guidance</li>
+        <li>without per-face dropout: a pore-depleted band at chunk boundaries</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. The cube is one patch. Each face has one of three states. In training, each face independently becomes "unknown" with probability 0.10, and all six together with probability 0.05 (that is the "no neighbour" condition used by guidance).</p>
+    <p>Why: in an earlier version only all-or-nothing dropout existed, so training never showed "five known, one unknown". But that is exactly the frontier state when we build a volume chunk by chunk. The model then put a layer with too few pores along every chunk boundary. A matched fine-tune that differed only in this one setting removed the band; without it the band stayed. The final model is trained with per-face dropout from the start.</p>
+    <p class="src">Probabilities: decisions log and model configuration (per-face 0.10, all six 0.05). The matched-control result is from the earlier model, on the earlier dataset: trailing strip at 0.19 of the mean without per-face dropout, 1.03 with it, 0.19 for the control (per-face dropout matched control). Not re-measured on the final model.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     18 — TILES, CHUNKS AND ORDER
+     ========================================================= -->
+<section class="slide" id="s18" data-init="chunks" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · assembly</div>
+  <h2 class="t r">Large volumes: <i>tiles, chunks, order</i></h2>
+  <p class="msg r d1">The volume is a grid of 64³ tiles. Groups of 3 × 3 × 3 tiles (chunks) are denoised together. Chunks follow each other; a finished chunk becomes a neighbour.</p>
+  <div class="body">
+    <canvas id="chunkCv" width="620" height="620" class="vid r d2" style="position:absolute;left:0;top:0;width:620px;height:620px"></canvas>
+    <div class="r d3" style="position:absolute;left:700px;top:10px;width:1028px">
+      <div class="legend" style="flex-direction:column;gap:18px">
+        <span style="--c:var(--pore)">chunk being denoised now (all 50 steps)</span>
+        <span style="--c:var(--mat)">finished chunks — "exists" for the next ones</span>
+        <span style="--c:var(--b3)">not yet made — "unknown"</span>
+        <span style="--c:var(--air)">canvas edge — "outside"</span>
+      </div>
+      <p class="lbl" style="margin-top:60px">1024 × 1024 × 192 voxels = 16 × 16 × 3 tiles</p>
+      <p class="lbl" style="margin-top:10px">one chunk = 192³ voxels, the unit the model was also sampled on in training</p>
+      <p class="lbl" style="margin-top:10px">finished chunks are re-noised to the current step before they are shown as neighbours</p>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Background: one real generated slice, 1024 × 1024 at mid-depth. The grid shows the 64-voxel tiles; thick lines are chunks of 3 × 3 tiles. The animation shows the order: the amber chunk is solved jointly through all 50 DDIM steps, then it is fixed and becomes a known neighbour for the following chunks. At each step of a new chunk, the finished neighbours are noised to that step's level, so the model always sees neighbours at a matching noise level.</p>
+    <p class="src">Image: final model, large-volume generation, 1024 × 1024 × 192, DDIM-50, seed 101, slice 96. Chunk of 3 × 3 × 3 tiles, window stride 32 voxels: generation manifest. Re-noising of finished chunks: sampler design (architecture document).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     19 — BLENDING
+     ========================================================= -->
+<section class="slide" id="s19" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · blending</div>
+  <h2 class="t r">Blending: <i>overlap, weight, normalise</i></h2>
+  <p class="msg r d1">Inside a chunk, 64³ windows overlap by half and their predictions are averaged with smooth weights. The decoder does the same with its 64³ passes.</p>
+  <div class="body">
+    <svg id="blendSvg" viewBox="0 0 1060 620" width="1060" height="620" class="r d2"></svg>
+    <div class="r d3" style="position:absolute;left:1130px;top:10px;width:598px">
+      <div class="eq" style="font-size:34px"><i>w</i>(<i>i</i>) = sin²( π (<i>i</i> + ½) / 64 )</div>
+      <p class="lbl" style="margin:10px 0 40px">strictly positive; lowest at window borders</p>
+      <p class="lbl" style="margin:0 0 14px">decoder seam ratio on real volumes</p>
+      <svg id="decBars" viewBox="0 0 598 260" width="598" height="260"></svg>
+      <p class="lbl" style="margin-top:10px">seam ratio = grey change across a seam plane ÷ grey change between ordinary neighbouring slices. 1 = no visible seam.</p>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Left top: windows of 64 voxels placed every 32 voxels, each with a sin² weight. Left bottom: the weights summed; we divide by this sum, so the blend is a weighted average everywhere and no window border is a hard edge. The same scheme decodes the final latent: overlapping 64³ decoder passes, stride 32, blended.</p>
+    <p>Right: why the decode overlap matters. Decoding real latents tile by tile leaves visible seams (ratio 1.30); the overlapped decode gives 0.96, the same as the real volume itself (0.96). The seam ratio: the mean absolute grey change across a seam plane divided by the mean change between two ordinary neighbouring slices.</p>
+    <p class="src">Weights: sampler code (separable sin² weight with a half-cell offset). Seam ratios: tiled against overlapped decoding of real volumes, 3 real volumes — tiled 1.298, overlapped 0.964, real 0.963 (grey). This was measured with the earlier autoencoder, not the final one. Reference: Bar-Tal et al., MultiDiffusion, ICML 2023 (fusion of overlapping diffusion windows).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     20 — THE CHUNK SEAM AND THE OVERLAPPED SCHEME
+     ========================================================= -->
+<section class="slide" id="s20" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · chunk seams</div>
+  <h2 class="t r">The chunk seam, and the <i>overlapped scheme</i></h2>
+  <p class="msg r d1">Chunks placed edge to edge leave fewer pores on every chunk plane. Letting each chunk overlap the next by 64 voxels removes it.</p>
+  <div class="body">
+    <svg id="schemeSvg" viewBox="0 0 560 620" width="560" height="620" class="r d2"></svg>
+    <svg id="profSvg" viewBox="0 0 640 620" width="640" height="620" class="r d3" style="position:absolute;left:600px;top:0"></svg>
+    <svg id="seamBars" viewBox="0 0 450 620" width="450" height="620" class="r d4" style="position:absolute;left:1278px;top:0"></svg>
+  </div>
+  <aside class="notes">
+    <p>~80 s. Left: the two schemes. Standard: chunk k+1 starts exactly where chunk k ends. Overlapped: chunk k+1 starts 64 voxels inside chunk k; the first 32 of those stay as chunk k made them, the last 32 are rewritten by chunk k+1, so the junction sits inside a region both chunks saw.</p>
+    <p>Middle: pore fraction against the distance from a chunk plane, averaged over all chunk planes in y and x and divided by the volume mean. Standard chunking drops to about 0.6 at the plane; the overlapped curve stays near 1. Right: the per-axis pore seam ratio — pore activity across chunk planes ÷ inside the volume; 1 is the target. Standard: y 0.61–0.70, x 0.80–0.89. Overlapped: y 0.97–1.03, x 1.00–1.04.</p>
+    <p><b>Provisional:</b> the overlapped scheme is measured on 3 of 18 cases (three seeds, 1024 × 1024 × 192, DDIM-50); the full evaluation is running. The volume is one chunk deep in z, so there are no z chunk planes here. The overlap costs extra denoising (about 2× on an earlier model; not yet measured on the final one).</p>
+    <p class="src">Standard: full evaluation of the final model, large-volume cases, DDIM-50, seeds 101/202/303. Overlapped: overlapped chunk scheme on the final model, same three cases. Profiles: seed 101 of each, pore fraction per y and per x position, folded onto the distance from the 5 interior chunk planes of each axis, 4-voxel bins.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     21 — MEASURE REAL AGAINST REAL FIRST
+     ========================================================= -->
+<section class="slide" id="s21" data-section="Evaluation">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Evaluation · the floor</div>
+  <h2 class="t r">First, measure <i>real against real</i></h2>
+  <p class="msg r d1">Two real crops of the same panel are not identical either. That distance is the floor. Every result is a ratio to it.</p>
+  <div class="body">
+    <svg id="floorSvg" viewBox="0 0 1728 600" width="1728" height="600" class="r d2"></svg>
+  </div>
+  <aside class="notes">
+    <p>~50 s. A raw distance between generated and real means nothing alone: how far is "far"? So for every statistic we also compare two disjoint real crops from the same panel, at the same porosity. Ratio = distance(generated, real) / distance(real, real). Ratio 1: the generated set is as close to real as real is to itself — as close as the measurement can tell. Ratio 3: three times further than the natural variation.</p>
+    <p>Each porosity level is compared with real crops matched to that porosity, so a porosity difference is not read as a texture difference.</p>
+    <p class="src">Method: full evaluation of the final model, microstructure assessment (real-vs-real floor from two disjoint crops per panel of the test panels, matched porosity levels 0.01, 0.03, 0.06).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     22 — POROSITY CONTROL
+     ========================================================= -->
+<section class="slide" id="s22" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · porosity control</div>
+  <h2 class="t r">Porosity control: <i>you ask, it delivers</i></h2>
+  <p class="msg r d1">Seven requested levels, three seeds, two step counts: all 42 volumes within ±0.005 of the request.</p>
+  <div class="body">
+    <svg id="doseSvg" viewBox="0 0 760 640" width="760" height="640" class="r d2"></svg>
+    <div class="r d3" style="position:absolute;left:840px;top:0;width:888px">
+      <video class="vid" src="media/sweep3d.mp4" poster="media/sweep3d_poster.jpg" muted loop playsinline preload="auto" style="width:888px"></video>
+      <div style="display:flex;justify-content:space-around;width:888px" class="cap"><span>0.005</span><span>0.03</span><span>0.10</span></div>
+      <p class="lbl" style="margin-top:30px">requested porosity · all pores of each 192³ volume, rotating · brightness = pore length along the view</p>
+      <div style="display:flex;gap:70px;margin-top:50px">
+        <div><div class="big amber" id="vSlope">1.03</div><p class="lbl">slope</p></div>
+        <div><div class="big amber" id="vR2">0.998</div><p class="lbl">R²</p></div>
+        <div><div class="big amber" id="vGate">42 / 42</div><p class="lbl">within ±0.005</p></div>
+      </div>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Left: requested against delivered porosity (pore voxels over material voxels), each dot one 192³ volume; the band is ±0.005 around the identity. The fit has slope 1.03 and R² 0.998, and every volume is inside the band. The model slightly under-delivers at low porosity (0.0037 for 0.005) and is close at the top.</p>
+    <p>Right: all pores of three generated volumes, asked for 0.005, 0.03 and 0.10. Notice the pores sit in layers between plies, as in real coupons. A request above the dose-response range, 0.15, delivered 0.160 (not in the fit).</p>
+    <p class="src">Full evaluation of the final model, porosity control: OLS slope 1.030, intercept −0.0029, R² 0.998, n = 42 in-range volumes (7 levels × 3 seeds × DDIM-50 and DDIM-200), fraction within ±0.005 = 1.00. Level means: 0.005 → 0.0037; 0.10 → 0.1017. Request 0.15 → 0.1599 ± 0.0020. Video: seed 101, DDIM-50.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     23 — LOCAL POROSITY AND GUIDANCE
+     ========================================================= -->
+<section class="slide" id="s23" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · local control</div>
+  <h2 class="t r">Local control: <i>where</i> the pores go</h2>
+  <p class="msg r d1">A porosity map, painted per 64³ tile, is followed at large scale. Fine checkerboards are followed at about half strength.</p>
+  <div class="body">
+    <div id="tilesBox" class="r d2" style="position:absolute;left:0;top:0;width:820px"></div>
+    <div class="r d3" style="position:absolute;left:880px;top:0;width:848px">
+      <video class="vid" src="media/local_field.mp4" poster="media/local_field_poster.jpg" muted loop playsinline preload="auto" style="width:848px"></video>
+      <div style="display:flex;justify-content:space-around;width:848px" class="cap"><span>halves</span><span>checkerboard</span></div>
+      <svg id="cfgMini" viewBox="0 0 848 220" width="848" height="220" style="margin-top:24px"></svg>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Left: two requests, painted as 3 × 3 × 3 tiles of 64³ (values 0.01 and 0.05), and what was delivered in each tile (middle layer shown). "Halves": low on one side, high on the other — delivered slope 0.98, R² 0.87. "Checkerboard": alternating tiles — slope 0.47, R² 0.63; the contrast is followed but at half strength, because neighbouring tiles pull towards each other.</p>
+    <p>Right bottom: the guidance scale on the porosity condition. s = 1 gives 0.0176 for a request of 0.02; s = 2 gives 0.0199. Guidance is a free knob at sampling time.</p>
+    <p class="src">Full evaluation of the final model, local porosity: within-volume slope and R² after removing each volume's mean, mean over 6 cases per field (halves 0.980 / 0.871; checkerboard 0.466 / 0.628). Tile maps: seed 101, DDIM-50. Guidance: same evaluation, guidance cells, mean of 3 seeds: request 0.02 → 0.0176 (s 1), 0.0193 (s 1.5), 0.0199 (s 2); request 0.05 → 0.0477, 0.0515, 0.0522.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     24 — MICROSTRUCTURE STATISTICS, EXPLAINED
+     ========================================================= -->
+<section class="slide" id="s24" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · how we compare texture</div>
+  <h2 class="t r">Four ways to compare <i>microstructure</i></h2>
+  <p class="msg r d1">Each turns a volume into a curve or a distribution. The distance between real and generated is a Wasserstein-1 distance W₁, or FID.</p>
+  <div class="body" id="statsBox"></div>
+  <aside class="notes">
+    <p>~80 s. (1) Two-point correlation S₂(r): the probability that two points a distance r apart are both pore. It captures pore fraction, size and spacing at once. The plot shows real against generated at porosity 0.03. (2) Pore-size distribution: sizes of connected pores. (3) Ripley's K: for pore centres, how many other centres lie within r, compared with a random (Poisson) pattern; it measures clustering. (4) FID: the Fréchet distance between Inception-network features of 2-D slices, real against generated; it measures how the image looks.</p>
+    <p>W₁ — the Wasserstein-1 or "earth mover's" distance — is the area between the two cumulative distributions: how much mass must be moved, and how far, to turn one into the other.</p>
+    <p class="src">Curves: full evaluation of the final model, microstructure, level 0.03, S₂ for generated and matched real crops. References verified: Torquato, Random Heterogeneous Materials, Springer 2002 (S₂); Ripley, J. Appl. Probab. 13(2), 1976 (K function); Heusel et al., NeurIPS 2017 (FID).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     25 — MICROSTRUCTURE AGAINST THE FLOOR
+     ========================================================= -->
+<section class="slide" id="s25" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · microstructure</div>
+  <h2 class="t r">Microstructure: <i>1 to 3×</i> the real floor</h2>
+  <p class="msg r d1">At 3 % porosity two statistics reach the floor. Pore size and FID stay 2–3× above it at every level.</p>
+  <div class="body"><svg id="ratioSvg" viewBox="0 0 1728 640" width="1728" height="640" class="r d2"></svg></div>
+  <aside class="notes">
+    <p>~60 s. Bars: ratio to the real-vs-real floor; the line is 1. At 0.03, S₂ (0.90) and Ripley K (0.77) are at or below the floor. Pore size is about 2.2–2.3× at every level: the generated pores are not sized exactly like real ones. FID is 2.7–3.4×: slices look different, which matches the decoder blur we see.</p>
+    <p class="src">Full evaluation of the final model, microstructure ratios — 0.01: S₂ 2.42, pore size 2.28, Ripley 1.91, FID 2.74; 0.03: 0.90, 2.27, 0.77, 3.37; 0.06: 1.61, 2.22, 1.41, 2.88.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     26 — GEOMETRY AND LAYUP
+     ========================================================= -->
+<section class="slide" id="s26" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · shape and plies</div>
+  <h2 class="t r">Shape and plies: <i>drawn where we ask</i></h2>
+  <p class="msg r d1">The material map carves a notch, a hole or a sphere. The ply profile sets the fibre direction of each ply.</p>
+  <div class="body">
+    <div class="r d2" style="position:absolute;left:0;top:0;width:820px">
+      <video class="vid" src="media/geometry.mp4" poster="media/geometry_poster.jpg" muted loop playsinline preload="auto" style="width:820px"></video>
+      <p class="cap">notch + Ø 200-voxel hole · sphere · <b>air Dice 0.992</b></p>
+    </div>
+    <div class="r d3" style="position:absolute;left:880px;top:0;width:848px">
+      <video class="vid" src="media/layup.mp4" poster="media/layup_poster.jpg" muted loop playsinline preload="auto" style="width:848px"></video>
+      <p class="cap">layup A · layup C · circle = requested angle of the current ply</p>
+      <svg id="plySvg" viewBox="0 0 848 210" width="848" height="210" style="margin-top:6px"></svg>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~70 s. Left: two requested shapes, stepping through the depth. Air Dice 0.992 against the requested air: the hole and notch are where we asked. Right: two stacking sequences; the circle shows the requested ply angle at the current depth, and the elongated pores turn with it.</p>
+    <p>Bottom: requested angle per ply against the angle read back from the generated labels (pore-axis reader: the main direction of elongated pores in each ply). Median error 2.2° for layup A and 1.8° for C, against 4.2° for the same reader on real scans. A sequence with thin double plies (B16) is harder: 17.8°.</p>
+    <p class="src">Full evaluation of the final model — geometry: air Dice 0.992 (mean of 3 seeds; notch 64 voxels, hole 200 voxels). Layup, median absolute error, mean of 3 seeds: A 2.17° (pore-axis reader) / 6.67° (slice-spectrum reader); C 1.83° / 7.00°; B16 17.83° / 4.83°. Reader floor on 50 real plies: pore-axis 4.23°, slice-spectrum 8.23° (ply-angle reader accuracy on real scans). Plot: layup A, seed 101.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     27 — DOES THE MODEL USE EACH INPUT
+     ========================================================= -->
+<section class="slide" id="s27" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · conditioning test</div>
+  <h2 class="t r">Does the model <i>use</i> each input?</h2>
+  <p class="msg r d1">Swap one input for a valid value from somewhere else, keep everything else, and measure what changes.</p>
+  <div class="body"><svg id="ablSvg" viewBox="0 0 1728 640" width="1728" height="640" class="r d2"></svg></div>
+  <aside class="notes">
+    <p>~70 s. Four tests, one input each. Ply profile: give layup C while we score A. The error on A jumps from 2.2° to 54°, and C is read back at 2.5°: the plies follow the profile. Material map: replace the notch-and-hole map with "all material": air Dice drops from 0.99 to 0 — the model does not invent geometry. Porosity field: replace the painted field by one value with the same mean: the local fit collapses (R² 0.63 → 0.01 for checkerboard, 0.87 → 0.13 for halves). Position (depth and face distances) taken from another specimen: nothing changes (0.992 → 0.992) — the model barely uses it.</p>
+    <p class="src">One-input-at-a-time conditioning test on the final model, 3 seeds per arm, against the unablated full evaluation. Ply swap: pore-axis median error on the scored layup 53.7° (slice-spectrum 57.3°); fed layup read at 2.5° (6.7°). Material all-material: air Dice 0.000. Field replaced by its mean: local R² 0.012 (checkerboard), 0.126 (halves). Position swap: air Dice 0.992.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     28 — IS IT COPYING
+     ========================================================= -->
+<section class="slide" id="s28" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · copy detection</div>
+  <h2 class="t r">Is it <i>copying</i> the training set?</h2>
+  <p class="msg r d1">For each generated patch, find its nearest and second-nearest training patch. A copy sits on one of them and far from the rest.</p>
+  <div class="body">
+    <svg id="copyDiag" viewBox="0 0 700 600" width="700" height="600" class="r d2"></svg>
+    <svg id="copySvg" viewBox="0 0 960 600" width="960" height="600" class="r d3" style="position:absolute;left:768px;top:0"></svg>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Left: the test. d₁ is the distance to the nearest training patch, d₂ to the second nearest. A memorised patch has d₁ ≪ d₂, so the ratio d₁/d₂ is small; we flag a copy below 1/3. A fresh sample has a ratio near 1.</p>
+    <p>Right: generated patches against held-out real patches (which the model never saw, so they cannot be copies). Both sit near 1. None of 4 847 generated patches falls below 1/3, searched against all 222 976 training patches at stride 64 — the whole bank, not a sample.</p>
+    <p class="src">Full evaluation of the final model, copy detection, grey space: generated mean 0.994, 5th percentile 0.980, minimum 0.852; real held-out floor (decoded the same way) mean 0.991, 5th percentile 0.966, minimum 0.874; 0 of 4 847 below 0.333.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     29 — BASELINES, WHAT EACH ONE IS
+     ========================================================= -->
+<section class="slide" id="s29" data-section="Baselines">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Baselines · what they are</div>
+  <h2 class="t r">Three baselines, <i>three questions</i></h2>
+  <p class="msg r d1">Each one removes one idea of ours, so the comparison says what that idea buys.</p>
+  <div class="body" style="display:grid;grid-template-columns:repeat(3,1fr);gap:36px;align-items:start">
+    <div class="card r d2"><svg viewBox="0 0 480 220" width="100%" id="bSG"></svg><h3>SliceGAN</h3><p>A 3-D generator; 2-D critics judge its slices along x, y and z. Unconditional. <span class="amber">Question: does diffusion beat a GAN?</span></p></div>
+    <div class="card r d3"><svg viewBox="0 0 480 220" width="100%" id="bDD"></svg><h3>Pixel-space 3-D diffusion</h3><p>The same diffusion recipe run directly on voxels, no autoencoder. Unconditional. <span class="amber">Question: what does the latent buy?</span></p></div>
+    <div class="card r d4"><svg viewBox="0 0 480 220" width="100%" id="bPO"></svg><h3>Porosity-only latent diffusion</h3><p>Our autoencoder and denoiser, but one porosity value as the only condition. <span class="amber">Question: what do maps and neighbours buy?</span></p></div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. SliceGAN (Kench &amp; Cooper 2021): a 3-D generator trained against 2-D discriminators on slices of the three axes; it needs only 2-D data. Pixel-space diffusion: our diffusion recipe (v-prediction, zero terminal SNR) on voxels directly; it tests the latent. Porosity-only LDM: the published recipe of Naiff et al. — porosity as the single condition — on our autoencoder; it tests our extra conditioning. The first two are unconditional, so they enter only the request-free comparisons.</p>
+    <p class="src">Baselines as run on our data: SliceGAN 60 000 steps; pixel-space diffusion stopped by a 24 h cap at step 55 546, DDIM-200; porosity-only LDM on the final autoencoder's latents. Reference verified: Kench &amp; Cooper, Nat. Mach. Intell. 2021; Naiff et al., Computers &amp; Geosciences 206 (2026).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     30 — AGAINST BASELINES
+     ========================================================= -->
+<section class="slide" id="s30" data-section="Baselines">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Baselines · results</div>
+  <h2 class="t r">Against baselines: <i>control is where we win</i></h2>
+  <p class="msg r d1">Our model holds porosity on request. On texture the porosity-only model is as good or better; the GAN and pixel diffusion are worse.</p>
+  <div class="body"><svg id="baseSvg" viewBox="0 0 1728 660" width="1728" height="660" class="r d2"></svg></div>
+  <aside class="notes">
+    <p>~80 s. Four small plots, one per statistic, ratio to the real floor on a log axis; groups are the three porosity levels. Bars: ours (amber), porosity-only LDM, pixel diffusion, SliceGAN (greys). The unconditional baselines are compared at the nearest matched level.</p>
+    <p>Honest reading: the porosity-only model matches or beats ours on S₂, Ripley and FID at 0.01 and 0.03. SliceGAN and pixel diffusion are clearly worse on S₂ and pore size. Where our model wins is control: 42 of 42 volumes inside ±0.005 against 38 of 42 for porosity-only (it over-delivers at high porosity, slope 1.09), plus local maps, plies, shape and assembly, which no baseline offers.</p>
+    <p><b>These numbers will be updated</b> when the baseline runs on the final setup finish.</p>
+    <p class="src">Ratios to the same real floor (identical real-vs-real distances in all four evaluations). Ours: full evaluation of the final model. Porosity-only LDM baseline: porosity control slope 1.090, within ±0.005 0.905 (38/42). SliceGAN baseline on our data; pixel-space 3-D diffusion baseline. Values: see the speaker table in the source data.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     31 — REAL AGAINST GENERATED
+     ========================================================= -->
+<section class="slide" id="s31" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · side by side</div>
+  <h2 class="t r">Real or generated?</h2>
+  <p class="msg r d1">Left in each pair: a real coupon. Right: generated at the same porosity.</p>
+  <div class="body">
+    <div class="r d2" style="position:absolute;left:0;top:0;width:760px">
+      <video class="vid" src="media/pores3d.mp4" poster="media/pores3d_poster.jpg" muted loop playsinline preload="auto" style="width:760px"></video>
+      <div style="display:flex;justify-content:space-around;width:760px" class="cap"><span><b>real</b> · porosity 0.105</span><span><b>generated</b> · 0.104</span></div>
+    </div>
+    <div class="r d3" style="position:absolute;left:1100px;top:0;width:628px">
+      <div class="card" style="border-style:dashed;height:380px;display:flex;flex-direction:column;justify-content:center">
+        <h3 class="muted">Pore by pore</h3>
+        <p>Volume, sphericity, orientation and distance to the surface of every pore, real coupons against generated ones.</p>
+        <p class="lbl" style="margin-top:24px">results coming</p>
+      </div>
+    </div>
+    <div class="r d4" style="position:absolute;left:0;top:385px;width:1000px">
+      <video class="vid" src="media/real_vs_gen.mp4" poster="media/real_vs_gen_poster.jpg" muted loop playsinline preload="auto" style="width:1000px"></video>
+      <div style="display:flex;justify-content:space-around;width:1000px" class="cap"><span><b>real</b> grey</span><span><b>generated</b> grey</span><span><b>real</b> labels</span><span><b>generated</b> labels</span></div>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Top: all pores of a real 192³ crop (porosity 0.105) beside a generated volume asked for 0.10 (delivered 0.104), rotating. Both show pore layers between plies; generated pores are smoother and less fragmented. Bottom strip: slices of a real crop and a generated volume at 0.03, grey and labelled. The generated grey is visibly smoother — that is the decoder blur.</p>
+    <p>Right: placeholder for the pore-by-pore comparison against real coupons, which is running now.</p>
+    <p class="src">Real: scan Na_02 coupon 2, crop z 14–205, y 1900–2091, x 700–891, reference segmentation, porosity 0.1049. Generated: final model, porosity control, request 0.10, seed 101, DDIM-50, porosity 0.1036. Strip: real 128³ test crop at 0.03 (panel Na_05) and generated request 0.03, seed 101.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     32 — LIMITATIONS AND NEXT STEPS
+     ========================================================= -->
+<section class="slide" id="s32" data-section="Close">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Close</div>
+  <h2 class="t r">Limitations and <i>next steps</i></h2>
+  <div class="body" style="top:220px">
+    <div class="r d1" style="position:absolute;left:0;top:0;width:820px">
+      <p class="lbl" style="margin:0 0 26px">Limitations</p>
+      <ul class="pts">
+        <li><b style="color:var(--ink);font-weight:500">Decoder blur.</b> Reconstructions keep about 3/4 of the real sharpness; FID stays 3× the floor.</li>
+        <li><b style="color:var(--ink);font-weight:500">Chunk seam.</b> The standard sampler leaves 0.6–0.9 of the pores on chunk planes; the overlap removes it at extra cost.</li>
+        <li><b style="color:var(--ink);font-weight:500">Local field.</b> Delivered porosity decorrelates within about 50–60 voxels in-plane; real coupons stay correlated over hundreds.</li>
+      </ul>
+    </div>
+    <div class="r d2" style="position:absolute;left:908px;top:0;width:820px">
+      <p class="lbl" style="margin:0 0 26px">Next</p>
+      <ul class="pts">
+        <li>finish the overlapped-scheme evaluation; make it the default</li>
+        <li>pore-by-pore morphology against real coupons</li>
+        <li>baselines re-run on the final setup</li>
+        <li>a sharper decoder, without moving the latent space</li>
+      </ul>
+      <div class="big" style="margin-top:120px;font-size:96px">Questions<i class="amber">?</i></div>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Three limits, all measured. Blur: the final autoencoder's reconstructions have 0.74 of the real sharpness on validation; this shows in FID. Seams: shown on slide 20. Local field: the correlation length of delivered local porosity is about 51–57 voxels in y and 48–60 in x, while real large crops stay correlated over 266 voxels in y and more than 960 in x.</p>
+    <p class="src">Sharpness ratio 0.735: autoencoder compression study, c = 4, whole validation split, last step. Seam ranges: slide 20 sources. Correlation lengths: full evaluation of the final model, field statistics (generated local-field and multi-chunk cases: L<sub>y</sub> 51 / 57, L<sub>x</sub> 48 / 60 voxels; real large crops: L<sub>y</sub> 266, L<sub>x</sub> &gt; 960 voxels).</p>
+  </aside>
+</section>
+
+</main></div>
+
+<div id="notesPanel"></div>
+<div class="counter" id="counter"></div>
+
+<script>
+/* ===========================================================
+   DATA — injected by scripts/build_deck.py from media/numbers.json
+   =========================================================== */
+const NUM = /*NUMBERS*/{};
+const v = k => (NUM[k] || {}).value;
+
+/* ===========================================================
+   SVG + CANVAS HELPERS
+   =========================================================== */
+const NS = 'http://www.w3.org/2000/svg';
+function el(parent, tag, attrs = {}, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, val] of Object.entries(attrs)) e.setAttribute(k, val);
+  if (text !== undefined) e.textContent = text;
+  parent.appendChild(e); return e;
+}
+/* Axes in a box (x0,y0,w,h); returns scale functions. opts: x:[a,b], y:[a,b], logx, logy, xt, yt, xl, yl */
+function axes(svg, o) {
+  const tx = o.logx ? Math.log10 : (a => a), ty = o.logy ? Math.log10 : (a => a);
+  const X = a => o.x0 + (tx(a) - tx(o.x[0])) / (tx(o.x[1]) - tx(o.x[0])) * o.w;
+  const Y = a => o.y0 + o.h - (ty(a) - ty(o.y[0])) / (ty(o.y[1]) - ty(o.y[0])) * o.h;
+  (o.yt || []).forEach(t => { el(svg, 'line', { x1: o.x0, x2: o.x0 + o.w, y1: Y(t), y2: Y(t), class: 'grid' });
+    el(svg, 'text', { x: o.x0 - 12, y: Y(t) + 6, 'text-anchor': 'end' }, o.yf ? o.yf(t) : t); });
+  (o.xt || []).forEach(t => { el(svg, 'line', { x1: X(t), x2: X(t), y1: o.y0 + o.h, y2: o.y0 + o.h + 8, class: 'ax' });
+    el(svg, 'text', { x: X(t), y: o.y0 + o.h + 32, 'text-anchor': 'middle' }, o.xf ? o.xf(t) : t); });
+  el(svg, 'path', { d: `M${o.x0},${o.y0} V${o.y0 + o.h} H${o.x0 + o.w}`, class: 'ax' });
+  if (o.xl) el(svg, 'text', { x: o.x0 + o.w / 2, y: o.y0 + o.h + 66, 'text-anchor': 'middle', style: 'fill:#c9c7c2' }, o.xl);
+  if (o.yl) el(svg, 'text', { x: o.x0 - 70, y: o.y0 + o.h / 2, 'text-anchor': 'middle', transform: `rotate(-90 ${o.x0 - 70} ${o.y0 + o.h / 2})`, style: 'fill:#c9c7c2' }, o.yl);
+  return { X, Y };
+}
+const line = (pts) => 'M' + pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L');
+const cosAbar = t => Math.pow(Math.cos(((t / 1000) + 0.008) / 1.008 * Math.PI / 2), 2) / Math.pow(Math.cos(0.008 / 1.008 * Math.PI / 2), 2);
+function gauss() { const u = Math.random() || 1e-9, w = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * w); }
+
+/* Load an image into a Float32 array in [-1,1] at N×N, plus a fixed noise field */
+function loadField(src, N, cb) {
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas'); c.width = c.height = N;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0, N, N);
+    const d = g.getImageData(0, 0, N, N).data, x0 = new Float32Array(N * N), eps = new Float32Array(N * N);
+    for (let i = 0; i < N * N; i++) { x0[i] = d[4 * i] / 127.5 - 1; eps[i] = gauss(); }
+    cb(x0, eps);
+  };
+  img.src = src;
+}
+/* Draw x_t = sqrt(abar) x0 + sqrt(1-abar) eps on a canvas in CT greys */
+function drawXt(ctx, N, x0, eps, abar, img) {
+  const a = Math.sqrt(abar), s = Math.sqrt(1 - abar), o = img.data;
+  for (let i = 0; i < N * N; i++) {
+    let q = (a * x0[i] + s * eps[i] * 0.55 + 1) / 2; q = q < 0 ? 0 : q > 1 ? 1 : q;
+    const gv = 20 + q * 215; o[4 * i] = gv; o[4 * i + 1] = gv; o[4 * i + 2] = gv + 4; o[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+/* Run fn(time) on every animation frame while the slide is active */
+const LOOPS = {};
+function loop(id, fn) { LOOPS[id] = fn; }
+
+/* ===========================================================
+   SLIDE INITIALISERS (run once, when a slide is first shown)
+   =========================================================== */
+const INIT = {
+  /* 01 — title: noise to clean, then the segmentation */
+  title(s) {
+    const fig = document.getElementById('titleFig');
+    [[-30,0,20,2],[790,0,20,2],[-30,778,20,2],[790,778,20,2],[0,-30,2,20],[778,-30,2,20],[0,790,2,20],[778,790,2,20]]
+      .forEach(([l,t,w,h]) => { const d = document.createElement('div'); d.className = 'tick'; Object.assign(d.style, {left:l+'px',top:t+'px',width:w+'px',height:h+'px'}); fig.appendChild(d); });
+    const cv = document.getElementById('titleCv'), ctx = cv.getContext('2d'), N = 512, img = ctx.createImageData(N, N);
+    loadField('media/title_slice.jpg', N, (x0, eps) => {
+      let t0 = null;
+      loop('s1', ts => {
+        if (t0 === null) t0 = ts;
+        const e = (ts - t0) % 9000, p = Math.min(Math.max((e - 500) / 4200, 0), 1), tf = 1 - p;
+        const ab = cosAbar(tf * 1000); drawXt(ctx, N, x0, eps, ab, img);
+        const t = Math.round(tf * 1000);
+        document.getElementById('titleT').textContent = 't = ' + t;
+        document.getElementById('titleSnr').textContent = 'SNR ' + (t === 0 ? '∞' : (ab / (1 - ab)).toFixed(ab < .01 ? 3 : 1));
+        fig.classList.toggle('show-seg', t === 0 && e > 5200);
+      });
+    });
+  },
+
+  /* 03 — forward then reverse on a real slice */
+  morph() {
+    const cv = document.getElementById('morphCv'), ctx = cv.getContext('2d'), N = 384, img = ctx.createImageData(N, N);
+    loadField('media/data_grey.jpg', N, (x0, eps) => {
+      let t0 = null;
+      loop('s3', ts => {
+        if (t0 === null) t0 = ts;
+        const e = (ts - t0) % 9000;
+        let tf, fwd;
+        if (e < 1000) { tf = 0; fwd = true; } else if (e < 4200) { tf = (e - 1000) / 3200; fwd = true; }
+        else if (e < 5000) { tf = 1; fwd = false; } else if (e < 8200) { tf = 1 - (e - 5000) / 3200; fwd = false; } else { tf = 0; fwd = false; }
+        drawXt(ctx, N, x0, eps, cosAbar(tf * 1000), img);
+        document.getElementById('morphT').textContent = 't = ' + Math.round(tf * 1000);
+        document.getElementById('morphDir').textContent = fwd ? '→' : '←';
+        document.getElementById('morphTxt').textContent = fwd ? 'forward: add Gaussian noise (known)' : 'reverse: remove noise (learned)';
+      });
+    });
+  },
+
+  /* 04 — grid over t and the schedule plots */
+  forward() {
+    const ts = [0, 200, 400, 600, 800, 1000], grid = document.getElementById('fwdGrid'), N = 256, cvs = [];
+    ts.forEach(t => { const w = document.createElement('div');
+      const c = document.createElement('canvas'); c.width = c.height = N; c.style.cssText = 'width:270px;height:220px;object-fit:cover;display:block;border:1px solid rgba(232,230,225,.14)';
+      const l = document.createElement('div'); l.className = 'lbl'; l.style.marginTop = '8px'; l.textContent = 't = ' + t;
+      w.appendChild(c); w.appendChild(l); grid.appendChild(w); cvs.push([c, l]); });
+    loadField('media/data_grey.jpg', N, (x0, eps) => ts.forEach((t, i) => { const g = cvs[i][0].getContext('2d'); drawXt(g, N, x0, eps, cosAbar(t), g.createImageData(N, N)); }));
+    const svg = document.getElementById('fwdPlot');
+    const A = axes(svg, { x0: 90, y0: 10, w: 700, h: 230, x: [0, 1000], y: [0, 1], xt: [0, 250, 500, 750, 1000], yt: [0, 0.5, 1], xl: 'timestep t', yl: 'ᾱ_t' });
+    const pts = []; for (let t = 0; t <= 1000; t += 5) pts.push([A.X(t), A.Y(cosAbar(t))]);
+    el(svg, 'path', { d: line(pts), stroke: '#ffb000', 'stroke-width': 3, fill: 'none' });
+    const B = axes(svg, { x0: 1000, y0: 10, w: 700, h: 230, x: [0, 1000], y: [1e-6, 1e4], logy: true, xt: [0, 250, 500, 750, 1000], yt: [1e-6, 1e-3, 1, 1e3], yf: t => t >= 1 ? t : '1e' + Math.round(Math.log10(t)), xl: 'timestep t', yl: 'SNR (log)' });
+    const p2 = []; for (let t = 1; t <= 999; t += 3) { const ab = cosAbar(t); p2.push([B.X(t), B.Y(Math.max(ab / (1 - ab), 1e-6))]); }
+    el(svg, 'path', { d: line(p2), stroke: '#ffb000', 'stroke-width': 3, fill: 'none' });
+    el(svg, 'text', { x: 1700, y: 228, 'text-anchor': 'end' }, 'SNR(T) = 0');
+    const m1 = el(svg, 'line', { y1: 10, y2: 240, stroke: '#e8e6e1', 'stroke-dasharray': '4 5' }), m2 = el(svg, 'line', { y1: 10, y2: 240, stroke: '#e8e6e1', 'stroke-dasharray': '4 5' });
+    let t0 = null;
+    loop('s4', tt => { if (t0 === null) t0 = tt; const i = Math.floor(((tt - t0) / 1300) % ts.length);
+      cvs.forEach(([c, l], j) => { c.style.borderColor = j === i ? '#ffb000' : 'rgba(232,230,225,.14)'; l.style.color = j === i ? '#ffb000' : ''; });
+      m1.setAttribute('x1', A.X(ts[i])); m1.setAttribute('x2', A.X(ts[i])); m2.setAttribute('x1', B.X(Math.min(Math.max(ts[i], 1), 999))); m2.setAttribute('x2', B.X(Math.min(Math.max(ts[i], 1), 999))); });
+  },
+
+  /* 05 — chain diagram and reverse animation */
+  reverse() {
+    const svg = document.getElementById('chainSvg');
+    const lab = ['x_T', 'x_t', 'x_t−1', 'x_0'], xs = [40, 330, 620, 910];
+    el(svg, 'defs').innerHTML = '<marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8e6e1"/></marker>';
+    xs.forEach((x, i) => { el(svg, 'rect', { x, y: 60, width: 150, height: 110, fill: 'rgba(232,230,225,.05)', stroke: i === 3 ? '#ffb000' : '#e8e6e1', 'stroke-width': 2 });
+      el(svg, 'text', { x: x + 75, y: 125, 'text-anchor': 'middle', class: 'serif' }, lab[i]); });
+    el(svg, 'text', { x: 260, y: 122, 'text-anchor': 'middle', class: 'serif' }, '…');
+    el(svg, 'text', { x: 845, y: 122, 'text-anchor': 'middle', class: 'serif' }, '…');
+    el(svg, 'path', { d: 'M480,115 H612', stroke: '#e8e6e1', 'stroke-width': 2, 'marker-end': 'url(#ah5)' });
+    el(svg, 'rect', { x: 470, y: 200, width: 150, height: 60, fill: 'none', stroke: '#ffb000', 'stroke-width': 2 });
+    el(svg, 'text', { x: 545, y: 238, 'text-anchor': 'middle', style: 'fill:#ffb000' }, 'ε_θ(x_t, t)');
+    el(svg, 'path', { d: 'M545,200 V128', stroke: '#ffb000', 'stroke-width': 2, 'marker-end': 'url(#ah5)' });
+    el(svg, 'text', { x: 40, y: 30 }, 'pure noise'); el(svg, 'text', { x: 910, y: 30 }, 'sample');
+    const cv = document.getElementById('revCv'), ctx = cv.getContext('2d'), N = 384, img = ctx.createImageData(N, N);
+    loadField('media/data_grey.jpg', N, (x0, eps) => { let t0 = null;
+      loop('s5', ts => { if (t0 === null) t0 = ts; const e = (ts - t0) % 7000, p = Math.min(Math.max((e - 400) / 4800, 0), 1), tf = 1 - p;
+        drawXt(ctx, N, x0, eps, cosAbar(tf * 1000), img); document.getElementById('revT').textContent = 't = ' + Math.round(tf * 1000); }); });
+  },
+
+  /* 06 — toy score field with particles */
+  score() {
+    const cv = document.getElementById('scoreCv'), g = cv.getContext('2d'), W = 760, H = 620;
+    const mus = [[-1.1, 0.6], [1.0, -0.5]], s0 = 0.28;
+    const P = [...Array(160)].map(() => [gauss() * 1.6, gauss() * 1.6]);
+    const toPx = (x, y) => [W / 2 + x * 170, H / 2 - y * 170];
+    function score(x, y, sig) { const v2 = s0 * s0 + sig * sig; let num = [0, 0], den = 0;
+      mus.forEach(m => { const dx = x - m[0], dy = y - m[1], w = Math.exp(-(dx * dx + dy * dy) / (2 * v2)); den += w; num[0] += -w * dx / v2; num[1] += -w * dy / v2; });
+      return [num[0] / (den + 1e-12), num[1] / (den + 1e-12)]; }
+    let t0 = null;
+    loop('s6', ts => { if (t0 === null) t0 = ts; const ph = ((ts - t0) % 10000) / 10000;
+      const sig = ph < 0.5 ? 1.5 * Math.pow(1 - ph * 2, 2) + 0.05 : 0.05; if (ph > 0.995) P.forEach(p => { p[0] = gauss() * 1.6; p[1] = gauss() * 1.6; });
+      g.clearRect(0, 0, W, H);
+      g.strokeStyle = 'rgba(232,230,225,.35)'; g.lineWidth = 1.2;
+      mus.forEach(m => [1, 2].forEach(k => { const [cx, cy] = toPx(m[0], m[1]); g.beginPath(); g.arc(cx, cy, s0 * 170 * k, 0, 7); g.stroke(); }));
+      g.strokeStyle = 'rgba(201,199,194,.75)'; g.lineWidth = 1.5;
+      for (let x = -2; x <= 2.01; x += 0.25) for (let y = -1.7; y <= 1.71; y += 0.25) {
+        const [sx, sy] = score(x, y, sig); const n = Math.hypot(sx, sy) + 1e-9, L = Math.min(18, 6 + n * 3);
+        const [px, py] = toPx(x, y); const ux = sx / n, uy = -sy / n;
+        g.beginPath(); g.moveTo(px, py); g.lineTo(px + ux * L, py + uy * L); g.stroke();
+        g.beginPath(); g.arc(px + ux * L, py + uy * L, 1.8, 0, 7); g.fillStyle = 'rgba(201,199,194,.75)'; g.fill(); }
+      g.fillStyle = '#ffb000';
+      P.forEach(p => { const [sx, sy] = score(p[0], p[1], sig); const st = 0.004 * (s0 * s0 + sig * sig) * 6;
+        p[0] += st * sx + Math.sqrt(2 * st) * gauss() * 0.15; p[1] += st * sy + Math.sqrt(2 * st) * gauss() * 0.15;
+        const [px, py] = toPx(p[0], p[1]); g.beginPath(); g.arc(px, py, 3.2, 0, 7); g.fill(); });
+      document.getElementById('scoreLbl').textContent = 'noise level σ = ' + sig.toFixed(2) + (ph < 0.5 ? '  (decreasing)' : '');
+    });
+  },
+
+  /* 07 — DDPM vs DDIM toy paths, and the guidance arrows */
+  sampling() {
+    const cv = document.getElementById('ddimCv'), g = cv.getContext('2d'), W = 760, H = 560;
+    const mus = [[-1.1, 0.6], [1.0, -0.5]], s0 = 0.28, toPx = (x, y) => [W / 2 + x * 160, H / 2 - y * 160];
+    const sc = (x, y, sig) => { const v2 = s0 * s0 + sig * sig; let n0 = 0, n1 = 0, d = 0;
+      mus.forEach(m => { const dx = x - m[0], dy = y - m[1], w = Math.exp(-(dx * dx + dy * dy) / (2 * v2)); d += w; n0 += -w * dx / v2; n1 += -w * dy / v2; }); return [n0 / (d + 1e-12), n1 / (d + 1e-12)]; };
+    const starts = [...Array(8)].map(() => [gauss() * 1.4, gauss() * 1.2]);
+    const sigs = n => [...Array(n + 1)].map((_, i) => 1.6 * Math.pow(1 - i / n, 1.6) + 0.02);
+    function path(st, n, stoch) { const ss = sigs(n), p = [...st], out = [toPx(...p)];
+      for (let i = 0; i < n; i++) { const a = ss[i], b = ss[i + 1], [sx, sy] = sc(p[0], p[1], a), d = (a * a - b * b);
+        if (stoch) { p[0] += d * sx + Math.sqrt(d) * gauss(); p[1] += d * sy + Math.sqrt(d) * gauss(); }
+        else { p[0] += 0.5 * d * sx; p[1] += 0.5 * d * sy; } out.push(toPx(...p)); } return out; }
+    const P1 = starts.map(s => path(s, 1000, true)), P2 = starts.map(s => path(s, 50, false));
+    let t0 = null;
+    loop('s7', ts => { if (t0 === null) t0 = ts; const ph = Math.min(((ts - t0) % 8000) / 6000, 1);
+      g.clearRect(0, 0, W, H); g.strokeStyle = 'rgba(232,230,225,.35)';
+      mus.forEach(m => [1, 2].forEach(k => { const [cx, cy] = toPx(...m); g.beginPath(); g.arc(cx, cy, s0 * 160 * k, 0, 7); g.stroke(); }));
+      [[P1, 'rgba(142,148,158,.55)', 1], [P2, '#ffb000', 3]].forEach(([PP, col, lw]) => PP.forEach(pp => { const k = Math.max(1, Math.floor(ph * (pp.length - 1)));
+        g.strokeStyle = col; g.lineWidth = lw; g.beginPath(); g.moveTo(...pp[0]); for (let i = 1; i <= k; i++) g.lineTo(...pp[i]); g.stroke(); })); });
+    const svg = document.getElementById('cfgSvg');
+    el(svg, 'defs').innerHTML = ['#8e949e', '#e8e6e1', '#ffb000'].map((c, i) => `<marker id="ar${i}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('');
+    const O = [90, 380];
+    el(svg, 'circle', { cx: O[0], cy: O[1], r: 7, fill: '#e8e6e1' }); el(svg, 'text', { x: O[0] - 10, y: O[1] + 40 }, 'x_t');
+    el(svg, 'line', { x1: O[0], y1: O[1], x2: 330, y2: 300, stroke: '#8e949e', 'stroke-width': 3, 'marker-end': 'url(#ar0)' });
+    el(svg, 'text', { x: 340, y: 310 }, 'unconditional ε_∅');
+    el(svg, 'line', { x1: O[0], y1: O[1], x2: 400, y2: 200, stroke: '#e8e6e1', 'stroke-width': 3, 'marker-end': 'url(#ar1)' });
+    el(svg, 'text', { x: 410, y: 200, style: 'fill:#e8e6e1' }, 'conditional ε_c   (s = 1)');
+    const gl = el(svg, 'line', { x1: O[0], y1: O[1], x2: 470, y2: 100, stroke: '#ffb000', 'stroke-width': 3, 'marker-end': 'url(#ar2)' });
+    const gt = el(svg, 'text', { x: 480, y: 100, style: 'fill:#ffb000' }, 'guided, s = 2');
+    el(svg, 'line', { x1: 330, y1: 300, x2: 600, y2: 0, stroke: 'rgba(232,230,225,.2)', 'stroke-dasharray': '6 6' });
+    loop('s7b', ts => { const s = 1 + (Math.sin(ts / 1400) + 1) * 0.9, x = 330 + (400 - 330) * s, y = 300 + (200 - 300) * s;
+      gl.setAttribute('x2', x); gl.setAttribute('y2', y); gt.setAttribute('x', x + 10); gt.setAttribute('y', y); gt.textContent = 'guided, s = ' + s.toFixed(1); });
+  },
+
+  /* 08 — the x0/eps circle and SNR at the end of the schedule */
+  vpred() {
+    const svg = document.getElementById('vSvg'), C = [300, 330], R = 230;
+    el(svg, 'defs').innerHTML = ['#e8e6e1', '#ffb000', '#8e949e'].map((c, i) => `<marker id="av${i}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('');
+    el(svg, 'path', { d: `M${C[0] + R},${C[1]} A${R},${R} 0 0 0 ${C[0]},${C[1] - R}`, stroke: 'rgba(232,230,225,.3)', 'stroke-width': 2, fill: 'none' });
+    el(svg, 'line', { x1: C[0], y1: C[1], x2: C[0] + R, y2: C[1], stroke: '#e8e6e1', 'stroke-width': 2.5, 'marker-end': 'url(#av0)' });
+    el(svg, 'text', { x: C[0] + R + 10, y: C[1] + 8, class: 'serif' }, 'x₀');
+    el(svg, 'line', { x1: C[0], y1: C[1], x2: C[0], y2: C[1] - R, stroke: '#8e949e', 'stroke-width': 2.5, 'marker-end': 'url(#av2)' });
+    el(svg, 'text', { x: C[0] - 12, y: C[1] - R - 16, class: 'serif' }, 'ε');
+    const xt = el(svg, 'line', { x1: C[0], y1: C[1], stroke: '#e8e6e1', 'stroke-width': 3, 'marker-end': 'url(#av0)' });
+    const xtl = el(svg, 'text', { class: 'serif' }, 'x_t');
+    const vv = el(svg, 'line', { stroke: '#ffb000', 'stroke-width': 3.5, 'marker-end': 'url(#av1)' });
+    const vl = el(svg, 'text', { class: 'serif', style: 'fill:#ffb000' }, 'v');
+    const phl = el(svg, 'text', { x: 30, y: 590 }, '');
+    loop('s8', ts => { const phi = (Math.sin(ts / 1800) + 1) / 2 * (Math.PI / 2 - 0.08) + 0.04;
+      const px = C[0] + R * Math.cos(phi), py = C[1] - R * Math.sin(phi);
+      xt.setAttribute('x2', px); xt.setAttribute('y2', py); xtl.setAttribute('x', px + 12); xtl.setAttribute('y', py - 6);
+      const tx = -Math.sin(phi), ty = Math.cos(phi), L = 120;
+      vv.setAttribute('x1', px); vv.setAttribute('y1', py); vv.setAttribute('x2', px + tx * L); vv.setAttribute('y2', py - ty * L);
+      vl.setAttribute('x', px + tx * L - 10); vl.setAttribute('y', py - ty * L - 12);
+      phl.textContent = `√ᾱ = cos φ = ${Math.cos(phi).toFixed(2)}   √(1−ᾱ) = sin φ = ${Math.sin(phi).toFixed(2)}`; });
+    const s2 = document.getElementById('snrEnd');
+    const A = axes(s2, { x0: 100, y0: 10, w: 860, h: 200, x: [900, 1000], y: [1e-8, 1e-1], logy: true, xt: [900, 925, 950, 975, 1000], yt: [1e-8, 1e-6, 1e-4, 1e-2], yf: t => '1e' + Math.round(Math.log10(t)), xl: 'timestep t (last 10 %)', yl: 'SNR' });
+    let ab = 1; const lin = [], cos = [];
+    for (let t = 1; t <= 1000; t++) { ab *= 1 - (1e-4 + (0.02 - 1e-4) * (t - 1) / 999); if (t >= 900) lin.push([A.X(t), A.Y(Math.max(ab / (1 - ab), 1e-8))]); }
+    for (let t = 900; t <= 999; t++) { const a = cosAbar(t); cos.push([A.X(t), A.Y(Math.max(a / (1 - a), 1e-8))]); }
+    el(s2, 'path', { d: line(lin), stroke: '#8e949e', 'stroke-width': 3, fill: 'none' });
+    el(s2, 'path', { d: line(cos), stroke: '#ffb000', 'stroke-width': 3, fill: 'none' });
+    el(s2, 'text', { x: 110, y: A.Y(4.1e-5) + 30, style: 'fill:#8e949e' }, 'linear DDPM: SNR(T) ≈ 4·10⁻⁵');
+    el(s2, 'text', { x: 960, y: 200, 'text-anchor': 'end', style: 'fill:#ffb000' }, 'ours: → 0');
+  },
+  /* 12 — wipe from grey to labels and back */
+  wipe() {
+    const top = document.getElementById('wipeTop'), ln = document.getElementById('wipeLine');
+    let t0 = null;
+    loop('s12', ts => { if (t0 === null) t0 = ts; const e = ((ts - t0) % 7000) / 7000;
+      const q = e < 0.15 ? 0 : e < 0.5 ? (e - 0.15) / 0.35 : e < 0.65 ? 1 : e < 1 ? 1 - (e - 0.65) / 0.35 : 0;
+      const x = 620 * (1 - q); top.style.clipPath = `inset(0 ${620 - x}px 0 0)`; ln.style.left = x + 'px'; });
+  },
+
+  /* 17 — a patch and its six faces, cycling through the cases */
+  faces() {
+    const svg = document.getElementById('faceSvg'), C = { exists: '#ffb000', unknown: '#555b65', outside: '#2f6bff' };
+    el(svg, 'rect', { x: 300, y: 200, width: 200, height: 200, fill: 'rgba(232,230,225,.06)', stroke: '#e8e6e1', 'stroke-width': 2.5 });
+    el(svg, 'text', { x: 400, y: 308, 'text-anchor': 'middle', class: 'serif' }, 'patch');
+    const pos = { 'y−': [300, 70, 200, 110], 'y+': [300, 420, 200, 110], 'x−': [170, 200, 110, 200], 'x+': [520, 200, 110, 200], 'z−': [560, 40, 90, 90], 'z+': [670, 40, 90, 90] };
+    const R = {};
+    Object.entries(pos).forEach(([k, [x, y, w, h]]) => { R[k] = el(svg, 'rect', { x, y, width: w, height: h, 'fill-opacity': .35, 'stroke-width': 2 });
+      el(svg, 'text', { x: x + w / 2, y: y + h / 2 + 7, 'text-anchor': 'middle', style: 'fill:#e8e6e1' }, k); });
+    el(svg, 'text', { x: 560, y: 160 }, 'above / below');
+    const cap = el(svg, 'text', { x: 0, y: 580, style: 'fill:#e8e6e1;font-size:24px' }, '');
+    const E = 'exists', U = 'unknown', O = 'outside', keys = Object.keys(pos);
+    const cases = [
+      ['training, all neighbours given', [E, E, E, E, E, E]],
+      ['training, per-face dropout: one face unknown', [E, E, E, U, E, E]],
+      ['training, all six dropped: the guidance null', [U, U, U, U, U, U]],
+      ['generation, chunk frontier: five known, one not yet made', [E, E, E, U, E, E]],
+      ['generation, specimen surface: one face outside', [E, E, O, E, U, E]]];
+    let t0 = null;
+    loop('s17', ts => { if (t0 === null) t0 = ts; const [c, st] = cases[Math.floor(((ts - t0) / 2600) % cases.length)];
+      keys.forEach((k, i) => { R[k].setAttribute('fill', C[st[i]]); R[k].setAttribute('stroke', C[st[i]]); }); cap.textContent = c; });
+  },
+
+  /* 18 — chunk order over a generated slice */
+  chunks() {
+    const cv = document.getElementById('chunkCv'), g = cv.getContext('2d'), S = 620, T = S / 16, img = new Image();
+    const order = []; for (let cy = 0; cy < 6; cy++) for (let cx = 0; cx < 6; cx++) order.push([cx, cy]);
+    const noise = document.createElement('canvas'); noise.width = noise.height = 155; const nctx = noise.getContext('2d'), nd = nctx.createImageData(155, 155);
+    for (let i = 0; i < nd.data.length; i += 4) { const q = 60 + Math.random() * 140; nd.data[i] = nd.data[i + 1] = nd.data[i + 2] = q; nd.data[i + 3] = 255; } nctx.putImageData(nd, 0, 0);
+    img.onload = () => { let t0 = null;
+      loop('s18', ts => { if (t0 === null) t0 = ts; const per = 700, k = ((ts - t0) / per) % (order.length + 4), cur = Math.floor(k), f = k - cur;
+        g.fillStyle = '#0b0d10'; g.fillRect(0, 0, S, S);
+        order.forEach(([cx, cy], i) => { const x = cx * 3 * T, y = cy * 3 * T, w = Math.min(3 * T, S - x), h = Math.min(3 * T, S - y);
+          if (i < cur) { g.drawImage(img, x / S * img.width, y / S * img.height, w / S * img.width, h / S * img.height, x, y, w, h); g.fillStyle = 'rgba(11,13,16,.25)'; g.fillRect(x, y, w, h); }
+          else if (i === cur) { g.globalAlpha = 1; g.drawImage(noise, 0, 0, 155 * w / (3 * T), 155 * h / (3 * T), x, y, w, h); g.globalAlpha = f;
+            g.drawImage(img, x / S * img.width, y / S * img.height, w / S * img.width, h / S * img.height, x, y, w, h); g.globalAlpha = 1;
+            g.fillStyle = 'rgba(255,176,0,.12)'; g.fillRect(x, y, w, h); }
+          else { g.fillStyle = 'rgba(85,91,101,.35)'; g.fillRect(x, y, w, h); } });
+        g.strokeStyle = 'rgba(232,230,225,.18)'; g.lineWidth = 1;
+        for (let i = 1; i < 16; i++) { g.beginPath(); g.moveTo(i * T, 0); g.lineTo(i * T, S); g.moveTo(0, i * T); g.lineTo(S, i * T); g.stroke(); }
+        g.strokeStyle = 'rgba(232,230,225,.6)'; g.lineWidth = 2;
+        for (let i = 1; i < 6; i++) { g.beginPath(); g.moveTo(i * 3 * T, 0); g.lineTo(i * 3 * T, S); g.moveTo(0, i * 3 * T); g.lineTo(S, i * 3 * T); g.stroke(); }
+        if (cur < order.length) { const [cx, cy] = order[cur]; g.strokeStyle = '#ffb000'; g.lineWidth = 4; g.strokeRect(cx * 3 * T + 2, cy * 3 * T + 2, Math.min(3 * T, S - cx * 3 * T) - 4, Math.min(3 * T, S - cy * 3 * T) - 4); }
+        g.strokeStyle = '#2f6bff'; g.lineWidth = 6; g.strokeRect(3, 3, S - 6, S - 6); }); };
+    img.src = 'media/large_grey.jpg';
+  },
+};
+
+/* ===========================================================
+   STATIC FIGURES (drawn once at load from NUM)
+   =========================================================== */
+function drawStatic() {
+  /* 10 — timeline */
+  const tl = document.getElementById('timeline');
+  const items = [
+    ['2020', 'DDPM', 'Ho, Jain & Abbeel', 'noise-prediction training', 1],
+    ['2021', 'Score SDE', 'Song et al.', 'diffusion as an SDE; the score', 0],
+    ['2021', 'DDIM', 'Song, Meng & Ermon', 'deterministic, few steps', 1],
+    ['2021', 'Classifier-free guidance', 'Ho & Salimans', 'conditioning without a classifier', 1],
+    ['2022', 'v-prediction', 'Salimans & Ho', 'a well-scaled target', 1],
+    ['2022', 'Latent diffusion', 'Rombach et al.', 'diffuse in an autoencoder latent', 1],
+    ['2022', 'EDM', 'Karras et al.', 'the design space, cleaned up', 0],
+    ['2023', 'MultiDiffusion', 'Bar-Tal et al.', 'fuse overlapping windows', 1],
+    ['2024', 'Zero terminal SNR', 'Lin et al.', 'end the schedule at pure noise', 1]];
+  const years = ['2020', '2021', '2022', '2023', '2024'];
+  tl.innerHTML = `<div class="r d2" style="display:grid;grid-template-columns:repeat(5,1fr);gap:28px">${years.map(y => `<div>
+      <div style="font:400 22px var(--mono);color:var(--mute);border-bottom:1px solid var(--faint);padding-bottom:12px;margin-bottom:18px">${y}</div>
+      ${items.filter(it => it[0] === y).map(it => `<div style="border-left:3px solid ${it[4] ? 'var(--pore)' : 'var(--b3)'};padding:6px 0 6px 16px;margin-bottom:22px">
+        <div style="font:400 32px/1.1 var(--serif);color:var(--ink)">${it[1]}</div>
+        <div style="font:400 17px var(--mono);color:var(--mute);margin-top:6px">${it[2]}</div>
+        <div style="font:300 21px/1.35 var(--sans);color:var(--ink2);margin-top:6px">${it[3]}</div></div>`).join('')}</div>`).join('')}</div>
+    <p class="lbl r d3" style="margin-top:20px"><span class="amber">▌</span> used in our model</p>`;
+
+  /* 13 — panel split and patch counts */
+  const sp = document.getElementById('splitSvg');
+  const sets = [['train', 12, '#ffb000', '59 volumes', '1 620 450 patches'], ['validation', 3, '#e8e6e1', '11 volumes', '266 119 patches'], ['test', 3, '#2f6bff', '11 volumes', '290 446 patches']];
+  let col = 0;
+  sets.forEach(([name, n, c, vols, pats], k) => {
+    for (let i = 0; i < n; i++) { const x = (col % 6) * 105, y = Math.floor(col / 6) * 105; el(sp, 'rect', { x: x + 10, y: y + 20, width: 88, height: 88, fill: c, 'fill-opacity': .18, stroke: c, 'stroke-width': 2 }); col++; }
+    el(sp, 'rect', { x: 0, y: 400 + k * 60, width: 18, height: 18, fill: c });
+    el(sp, 'text', { x: 34, y: 416 + k * 60, style: 'fill:#e8e6e1;font-size:22px' }, `${name}: ${n} panels · ${vols} · ${pats}`);
+  });
+  el(sp, 'text', { x: 10, y: 360 }, '18 manufactured panels (one square = one panel)');
+  el(sp, 'path', { d: 'M700,170 H820', stroke: '#e8e6e1', 'stroke-width': 2 }); el(sp, 'path', { d: 'M810,162 L822,170 L810,178', fill: 'none', stroke: '#e8e6e1', 'stroke-width': 2 });
+  for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) el(sp, 'rect', { x: 880 + i * 52, y: 40 + j * 52, width: 104, height: 104, fill: 'none', stroke: (i + j) % 2 ? 'rgba(232,230,225,.35)' : 'rgba(255,176,0,.6)', 'stroke-width': 1.5 });
+  el(sp, 'text', { x: 880, y: 400, style: 'fill:#e8e6e1;font-size:22px' }, '64³ patches every 32 voxels');
+  el(sp, 'text', { x: 880, y: 440, style: 'font-size:20px' }, 'patches touching drilled holes removed');
+  el(sp, 'text', { x: 880, y: 520, style: 'fill:#ffb000;font-family:var(--serif);font-size:56px' }, '2 177 015');
+  el(sp, 'text', { x: 880, y: 556, style: 'font-size:20px' }, 'patches in total');
+
+  /* 14 — autoencoder data flow and loss timeline */
+  const ae = document.getElementById('aeSvg');
+  el(ae, 'defs').innerHTML = '<marker id="a14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8e6e1"/></marker>';
+  [['grey', '#9a9893'], ['pore mask', '#ffb000'], ['air mask', '#2f6bff']].forEach(([n, c], i) => {
+    el(ae, 'rect', { x: 0 + i * 18, y: 40 + i * 18, width: 170, height: 170, fill: '#0b0d10', stroke: c, 'stroke-width': 2 });
+    el(ae, 'text', { x: 210, y: 90 + i * 40, style: `fill:${c}` }, n); });
+  el(ae, 'text', { x: 0, y: 290 }, 'input 3 × 64³');
+  el(ae, 'path', { d: 'M360,140 H420', stroke: '#e8e6e1', 'stroke-width': 2, 'marker-end': 'url(#a14)' });
+  el(ae, 'path', { d: 'M430,50 L640,100 L640,180 L430,230 Z', fill: 'none', stroke: '#e8e6e1', 'stroke-width': 2 });
+  el(ae, 'text', { x: 470, y: 146, style: 'fill:#e8e6e1' }, 'encoder ↓4');
+  el(ae, 'path', { d: 'M650,140 H710', stroke: '#e8e6e1', 'stroke-width': 2, 'marker-end': 'url(#a14)' });
+  el(ae, 'rect', { x: 720, y: 95, width: 90, height: 90, fill: 'rgba(255,176,0,.15)', stroke: '#ffb000', 'stroke-width': 2 });
+  el(ae, 'text', { x: 765, y: 80, 'text-anchor': 'middle', style: 'fill:#ffb000' }, 'μ, σ → z');
+  el(ae, 'text', { x: 765, y: 225, 'text-anchor': 'middle', style: 'fill:#ffb000' }, '4 × 16³');
+  el(ae, 'path', { d: 'M820,140 H880', stroke: '#e8e6e1', 'stroke-width': 2, 'marker-end': 'url(#a14)' });
+  el(ae, 'path', { d: 'M890,100 L1100,50 L1100,230 L890,180 Z', fill: 'none', stroke: '#e8e6e1', 'stroke-width': 2 });
+  el(ae, 'text', { x: 925, y: 146, style: 'fill:#e8e6e1' }, 'decoder ↑4');
+  el(ae, 'path', { d: 'M1110,100 H1200', stroke: '#e8e6e1', 'stroke-width': 2, 'marker-end': 'url(#a14)' });
+  el(ae, 'path', { d: 'M1110,180 H1200', stroke: '#e8e6e1', 'stroke-width': 2, 'marker-end': 'url(#a14)' });
+  el(ae, 'rect', { x: 1210, y: 70, width: 60, height: 60, fill: '#0b0d10', stroke: '#9a9893', 'stroke-width': 2 });
+  el(ae, 'text', { x: 1290, y: 108, style: 'fill:#e8e6e1' }, 'grey');
+  [['#9a9893'], ['#ffb000'], ['#2f6bff']].forEach(([c], i) => el(ae, 'rect', { x: 1210 + i * 14, y: 160 + i * 14, width: 60, height: 60, fill: '#0b0d10', stroke: c, 'stroke-width': 2 }));
+  el(ae, 'text', { x: 1310, y: 208, style: 'fill:#e8e6e1' }, '3-class segmentation');
+  const ls = document.getElementById('lossSvg');
+  const LX = s => 440 + s / 25000 * 1260;
+  [[0, 'L1 on grey', '#e8e6e1', 0], [1, 'LPIPS perceptual (2-D slices)', '#e8e6e1', 0], [2, 'cross-entropy + Dice on classes', '#ffb000', 0], [3, 'KL to N(0, I), weight 10⁻⁶', '#8e949e', 0], [4, '3-D patch discriminator (hinge)', '#2f6bff', 15000]]
+    .forEach(([i, n, c, s0]) => { el(ls, 'text', { x: 0, y: 32 + i * 46, style: `fill:${c};font-size:19px` }, n);
+      el(ls, 'rect', { x: LX(s0), y: 16 + i * 46, width: LX(25000) - LX(s0), height: 22, fill: c, 'fill-opacity': .35, stroke: c }); });
+  el(ls, 'line', { x1: LX(0), x2: LX(25000), y1: 255, y2: 255, class: 'ax' });
+  [0, 5000, 10000, 15000, 20000, 25000].forEach(s => { el(ls, 'line', { x1: LX(s), x2: LX(s), y1: 255, y2: 263, class: 'ax' }); el(ls, 'text', { x: LX(s), y: 288, 'text-anchor': 'middle' }, s / 1000 + 'k'); });
+  el(ls, 'text', { x: 0, y: 288 }, 'training step');
+
+  /* 15 — compression study */
+  const vr = v('vae_rungs') || [], vp = document.getElementById('vaePlot');
+  const cs = [32, 16, 8, 4, 2, 1];
+  const A = axes(vp, { x0: 110, y0: 20, w: 860, h: 470, x: [40, 0.8], y: [0.8, 1.0], logx: true, xt: cs, yt: [0.8, 0.85, 0.9, 0.95, 1.0], xl: 'latent channels c   (f = 4, 16³ cells)', yl: 'pore Dice (validation)' });
+  const B = { Y: g => 20 + 470 - (g - 0.0) / 0.06 * 470 };
+  el(vp, 'line', { x1: 970, x2: 970, y1: 20, y2: 490, class: 'ax' });
+  [0, 0.02, 0.04, 0.06].forEach(t => el(vp, 'text', { x: 982, y: B.Y(t) + 6 }, t));
+  el(vp, 'text', { x: 1060, y: 255, 'text-anchor': 'middle', transform: 'rotate(90 1060 255)', style: 'fill:#c9c7c2' }, 'grey L1 error');
+  const pd = vr.map(r => [A.X(r.c), A.Y(r.pore_dice)]), gl = vr.map(r => [A.X(r.c), B.Y(r.grey_l1)]);
+  el(vp, 'path', { d: line(gl), stroke: '#e8e6e1', 'stroke-width': 2.5, fill: 'none', 'stroke-dasharray': '7 6' });
+  el(vp, 'path', { d: line(pd), stroke: '#ffb000', 'stroke-width': 3.5, fill: 'none' });
+  vr.forEach(r => { el(vp, 'circle', { cx: A.X(r.c), cy: A.Y(r.pore_dice), r: r.c === 4 ? 11 : 6, fill: r.c === 4 ? '#ffb000' : '#0b0d10', stroke: '#ffb000', 'stroke-width': 3 });
+    el(vp, 'circle', { cx: A.X(r.c), cy: B.Y(r.grey_l1), r: 5, fill: '#e8e6e1' }); });
+  const r4 = vr.find(r => r.c === 4); if (r4) el(vp, 'text', { x: A.X(4) - 18, y: A.Y(r4.pore_dice) + 40, 'text-anchor': 'end', style: 'fill:#ffb000' }, `c = 4: Dice ${r4.pore_dice.toFixed(3)}`);
+  el(vp, 'text', { x: 120, y: 608 }, '— pore Dice   - - grey L1     one run per size, whole validation split');
+  const cu = document.getElementById('cubes');
+  const cube = (x, y, s, d, stroke, fill) => el(cu, 'path', { d: `M${x},${y + d} L${x + d},${y} L${x + s + d},${y} L${x + s + d},${y + s} L${x + s},${y + s + d} L${x},${y + s + d} Z M${x},${y + d} L${x + s},${y + d} L${x + s + d},${y} M${x + s},${y + d} L${x + s},${y + s + d}`, fill, stroke, 'stroke-width': 2 });
+  for (let i = 2; i >= 0; i--) cube(20 + i * 16, 40 + i * 16, 200, 60, '#e8e6e1', '#0b0d10');
+  el(cu, 'text', { x: 20, y: 380, style: 'fill:#e8e6e1;font-size:22px' }, '3 × 64³ = 786 432');
+  for (let i = 3; i >= 0; i--) cube(380 + i * 8, 120 + i * 8, 50, 15, '#ffb000', '#0b0d10');
+  el(cu, 'text', { x: 340, y: 380, style: 'fill:#ffb000;font-size:22px' }, '4 × 16³ = 16 384');
+  el(cu, 'text', { x: 20, y: 470, style: 'fill:#ffb000;font-family:var(--serif);font-size:72px' }, '48×');
+  el(cu, 'text', { x: 20, y: 510 }, 'fewer values · same as Stable Diffusion');
+  el(cu, 'text', { x: 20, y: 540 }, '(512² × 3 → 64² × 4)');
+
+  /* 16 — what the denoiser sees */
+  const ins = document.getElementById('inputsSvg');
+  el(ins, 'defs').innerHTML = '<marker id="a16" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8e6e1"/></marker>';
+  el(ins, 'rect', { x: 690, y: 230, width: 340, height: 180, fill: 'rgba(255,176,0,.08)', stroke: '#ffb000', 'stroke-width': 2 });
+  el(ins, 'text', { x: 860, y: 300, 'text-anchor': 'middle', style: 'fill:#ffb000;font-family:var(--serif);font-size:34px' }, '3-D U-Net');
+  el(ins, 'text', { x: 860, y: 340, 'text-anchor': 'middle' }, '83 M parameters');
+  el(ins, 'text', { x: 860, y: 372, 'text-anchor': 'middle' }, 'latent 16³ cells');
+  el(ins, 'text', { x: 0, y: 30, style: 'fill:#e8e6e1;font-size:22px' }, 'maps — concatenated as channels');
+  [['noisy latent z_t', '4', '#ffb000'], ['ply orientation (cos 2θ, sin 2θ)', '2', '#e8e6e1'], ['material envelope', '1', '#e8e6e1'], ['six neighbour latents', '24', '#e8e6e1'], ['neighbour state: exists / unknown / outside', '48', '#e8e6e1'], ['neighbour noise level', '48', '#e8e6e1']]
+    .forEach(([n, c, col], i) => { const y = 80 + i * 66; el(ins, 'rect', { x: 0, y: y - 26, width: 560, height: 44, fill: 'rgba(232,230,225,.03)', stroke: 'rgba(232,230,225,.18)' });
+      el(ins, 'text', { x: 16, y: y + 2, style: `fill:${col}` }, n); el(ins, 'text', { x: 545, y: y + 2, 'text-anchor': 'end', style: 'fill:#7d838c' }, c);
+      el(ins, 'path', { d: `M565,${y - 4} C630,${y - 4} 630,320 682,320`, stroke: 'rgba(232,230,225,.35)', 'stroke-width': 1.5, fill: 'none' }); });
+  el(ins, 'text', { x: 0, y: 500 }, '= 127 input channels');
+  el(ins, 'text', { x: 1130, y: 30, style: 'fill:#e8e6e1;font-size:22px' }, 'numbers — injected by normalisation');
+  [['timestep t', '#e8e6e1'], ['porosity request (with a null for guidance)', '#ffb000'], ['depth in the specimen', '#e8e6e1'], ['distance from each of six faces to the surface', '#e8e6e1']]
+    .forEach(([n, col], i) => { const y = 100 + i * 70; el(ins, 'rect', { x: 1130, y: y - 26, width: 598, height: 44, fill: 'rgba(232,230,225,.03)', stroke: 'rgba(232,230,225,.18)' });
+      el(ins, 'text', { x: 1146, y: y + 2, style: `fill:${col}` }, n);
+      el(ins, 'path', { d: `M1125,${y - 4} C1080,${y - 4} 1080,300 1038,300`, stroke: 'rgba(232,230,225,.35)', 'stroke-width': 1.5, fill: 'none' }); });
+  el(ins, 'path', { d: 'M860,420 V500', stroke: '#ffb000', 'stroke-width': 2.5, 'marker-end': 'url(#a16)' });
+  el(ins, 'text', { x: 860, y: 540, 'text-anchor': 'middle', style: 'fill:#ffb000;font-size:22px' }, 'output: v̂  (4 × 16³)');
+
+  /* 19 — blending weights and decoder seam bars */
+  const bs = document.getElementById('blendSvg');
+  const BX = i => 60 + i * 2.4, w1 = i => Math.pow(Math.sin(Math.PI * (i + 0.5) / 64), 2);
+  el(bs, 'text', { x: 60, y: 30, style: 'fill:#e8e6e1' }, 'windows of 64 voxels, every 32 voxels');
+  const colsW = ['#ffb000', '#e8e6e1', '#ffb000', '#e8e6e1', '#ffb000', '#e8e6e1', '#ffb000'];
+  for (let k = 0; k < 7; k++) { const pts = []; for (let i = 0; i < 64; i++) pts.push([BX(k * 32 + i), 250 - w1(i) * 180]);
+    el(bs, 'path', { d: line(pts), stroke: colsW[k], 'stroke-width': 2.5, fill: 'none', 'stroke-opacity': .9 }); }
+  el(bs, 'line', { x1: BX(0), x2: BX(256), y1: 250, y2: 250, class: 'ax' });
+  el(bs, 'text', { x: 60, y: 330, style: 'fill:#e8e6e1' }, 'sum of weights, then divide by it');
+  const sum = []; for (let x = 0; x < 256; x++) { let s = 0; for (let k = 0; k < 7; k++) { const i = x - k * 32; if (i >= 0 && i < 64) s += w1(i); } sum.push([BX(x), 560 - s * 180]); }
+  el(bs, 'path', { d: line(sum), stroke: '#8e949e', 'stroke-width': 2.5, fill: 'none' });
+  el(bs, 'line', { x1: BX(32), x2: BX(224), y1: 560 - 180, y2: 560 - 180, stroke: '#ffb000', 'stroke-dasharray': '6 6' });
+  el(bs, 'text', { x: BX(226), y: 560 - 186, style: 'fill:#ffb000' }, '= 1 inside');
+  el(bs, 'line', { x1: BX(0), x2: BX(256), y1: 560, y2: 560, class: 'ax' });
+  el(bs, 'text', { x: BX(0), y: 594 }, '0'); el(bs, 'text', { x: BX(256), y: 594, 'text-anchor': 'end' }, '256 voxels');
+  const db = document.getElementById('decBars');
+  [['tiled decode', 1.298, '#8e949e'], ['overlapped decode', 0.964, '#ffb000'], ['real volume', 0.963, '#e8e6e1']].forEach(([n, val, c], i) => {
+    const y = 20 + i * 76; el(db, 'rect', { x: 230, y, width: val * 230, height: 40, fill: c, 'fill-opacity': .8 });
+    el(db, 'text', { x: 0, y: y + 28, style: 'fill:#c9c7c2' }, n); el(db, 'text', { x: 240 + val * 230, y: y + 28 }, val.toFixed(2)); });
+  el(db, 'line', { x1: 460, x2: 460, y1: 10, y2: 250, stroke: '#e8e6e1', 'stroke-dasharray': '4 5' });
+
+  /* 20 — schemes, profiles, per-axis seam bars */
+  const sc = document.getElementById('schemeSvg');
+  el(sc, 'text', { x: 0, y: 30, style: 'fill:#e8e6e1' }, 'standard');
+  el(sc, 'rect', { x: 0, y: 50, width: 240, height: 160, fill: 'rgba(154,152,147,.25)', stroke: '#9a9893', 'stroke-width': 2 });
+  el(sc, 'rect', { x: 240, y: 50, width: 240, height: 160, fill: 'rgba(255,176,0,.12)', stroke: '#ffb000', 'stroke-width': 2 });
+  el(sc, 'rect', { x: 230, y: 50, width: 20, height: 160, fill: '#0b0d10', 'fill-opacity': .7 });
+  el(sc, 'text', { x: 20, y: 140 }, 'chunk k'); el(sc, 'text', { x: 300, y: 140, style: 'fill:#ffb000' }, 'chunk k+1');
+  el(sc, 'text', { x: 140, y: 240 }, 'band: fewer pores on the plane');
+  el(sc, 'text', { x: 0, y: 320, style: 'fill:#e8e6e1' }, 'overlapped');
+  el(sc, 'rect', { x: 0, y: 340, width: 240, height: 160, fill: 'rgba(154,152,147,.25)', stroke: '#9a9893', 'stroke-width': 2 });
+  el(sc, 'rect', { x: 176, y: 340, width: 300, height: 160, fill: 'rgba(255,176,0,.12)', stroke: '#ffb000', 'stroke-width': 2, 'stroke-dasharray': '7 5' });
+  el(sc, 'rect', { x: 176, y: 340, width: 32, height: 160, fill: '#9a9893', 'fill-opacity': .45 });
+  el(sc, 'rect', { x: 208, y: 340, width: 32, height: 160, fill: '#ffb000', 'fill-opacity': .45 });
+  el(sc, 'text', { x: 150, y: 532 }, '64-voxel overlap:'); el(sc, 'text', { x: 150, y: 560 }, 'first 32 kept from chunk k,'); el(sc, 'text', { x: 150, y: 588 }, 'last 32 rewritten by chunk k+1');
+  const prof = document.getElementById('profSvg');
+  const PA = axes(prof, { x0: 90, y0: 20, w: 520, h: 460, x: [-96, 96], y: [0.4, 1.2], xt: [-96, -48, 0, 48, 96], yt: [0.4, 0.6, 0.8, 1.0, 1.2], xl: 'distance from the chunk plane (voxels)', yl: 'pore fraction ÷ mean' });
+  el(prof, 'line', { x1: PA.X(0), x2: PA.X(0), y1: 20, y2: 480, stroke: 'rgba(232,230,225,.45)', 'stroke-dasharray': '4 6' });
+  el(prof, 'line', { x1: PA.X(-96), x2: PA.X(96), y1: PA.Y(1), y2: PA.Y(1), stroke: 'rgba(232,230,225,.45)', 'stroke-dasharray': '4 6' });
+  [['seam_production_prof', '#8e949e'], ['seam_overlapped_prof', '#ffb000']].forEach(([k, c]) => { const p = v(k); if (!p) return;
+    el(prof, 'path', { d: line(p.map((q, i) => [PA.X(-96 + i * 4 + 2), PA.Y(q)])), stroke: c, 'stroke-width': 3, fill: 'none' }); });
+  el(prof, 'text', { x: 100, y: 590, style: 'fill:#8e949e' }, '— standard'); el(prof, 'text', { x: 300, y: 590, style: 'fill:#ffb000' }, '— overlapped');
+  el(prof, 'text', { x: 100, y: 616 }, 'all chunk planes in y and x · seed 101');
+  const sb = document.getElementById('seamBars'), prod = v('seam_production') || [], ovl = v('seam_overlapped') || [];
+  const SY = val => 480 - val / 1.2 * 440;
+  [0.25, 0.5, 0.75, 1.0].forEach(t => { el(sb, 'line', { x1: 60, x2: 440, y1: SY(t), y2: SY(t), class: 'grid' }); el(sb, 'text', { x: 54, y: SY(t) + 6, 'text-anchor': 'end' }, t); });
+  el(sb, 'line', { x1: 50, x2: 440, y1: SY(1), y2: SY(1), stroke: '#e8e6e1', 'stroke-dasharray': '6 5' });
+  [['y', 90], ['x', 270]].forEach(([ax, x0]) => {
+    [[prod, '#8e949e', 0], [ovl, '#ffb000', 80]].forEach(([arr, c, dx]) => { if (!arr.length) return;
+      const vals = arr.map(r => r[ax]), mn = Math.min(...vals), mx = Math.max(...vals), mean = vals.reduce((a, b) => a + b) / vals.length;
+      el(sb, 'rect', { x: x0 + dx, y: SY(mean), width: 64, height: 480 - SY(mean), fill: c, 'fill-opacity': .8 });
+      el(sb, 'line', { x1: x0 + dx + 32, x2: x0 + dx + 32, y1: SY(mn), y2: SY(mx), stroke: '#e8e6e1', 'stroke-width': 2 });
+      el(sb, 'text', { x: x0 + dx + 32, y: SY(mx) - 10, 'text-anchor': 'middle', style: 'font-size:16px' }, mn.toFixed(2) + '–' + mx.toFixed(2)); });
+    el(sb, 'text', { x: x0 + 72, y: 512, 'text-anchor': 'middle', style: 'fill:#e8e6e1' }, ax + ' planes'); });
+  el(sb, 'text', { x: 50, y: 560 }, 'pore seam ratio · 3 seeds'); el(sb, 'text', { x: 50, y: 590, style: 'fill:#ffb000' }, 'overlapped: 3 of 18 cases');
+
+  /* 21 — the floor */
+  const fl = document.getElementById('floorSvg');
+  const vol = (x, y, c, t) => { el(fl, 'rect', { x, y, width: 180, height: 180, fill: 'rgba(232,230,225,.04)', stroke: c, 'stroke-width': 2 }); el(fl, 'text', { x: x + 90, y: y + 220, 'text-anchor': 'middle', style: `fill:${c}` }, t); };
+  vol(0, 40, '#e8e6e1', 'real crop A'); vol(500, 40, '#e8e6e1', 'real crop B (same panel)');
+  vol(0, 330, '#ffb000', 'generated'); vol(500, 330, '#e8e6e1', 'real crop B');
+  el(fl, 'line', { x1: 200, x2: 480, y1: 130, y2: 130, stroke: '#e8e6e1', 'stroke-width': 2, 'stroke-dasharray': '6 5' }); el(fl, 'text', { x: 340, y: 115, 'text-anchor': 'middle' }, 'd(real, real)');
+  el(fl, 'line', { x1: 200, x2: 480, y1: 420, y2: 420, stroke: '#ffb000', 'stroke-width': 2, 'stroke-dasharray': '6 5' }); el(fl, 'text', { x: 340, y: 405, 'text-anchor': 'middle', style: 'fill:#ffb000' }, 'd(generated, real)');
+  el(fl, 'text', { x: 900, y: 230, style: 'fill:#e8e6e1;font-family:var(--serif);font-size:56px' }, 'ratio = d(gen, real) / d(real, real)');
+  [['1', 'as close to real as real is to itself', '#ffb000'], ['< 1', 'closer than two real crops (within noise)', '#e8e6e1'], ['3', 'three times the natural variation', '#8e949e']].forEach(([a, b, c], i) => {
+    el(fl, 'text', { x: 900, y: 330 + i * 60, style: `fill:${c};font-size:30px` }, a); el(fl, 'text', { x: 990, y: 330 + i * 60, style: 'font-size:22px;fill:#c9c7c2' }, b); });
+
+  /* 22 — dose response */
+  const ds = document.getElementById('doseSvg'), pts = v('dose_points') || [];
+  const D = axes(ds, { x0: 110, y0: 20, w: 600, h: 500, x: [0, 0.11], y: [0, 0.11], xt: [0, 0.02, 0.04, 0.06, 0.08, 0.1], yt: [0, 0.02, 0.04, 0.06, 0.08, 0.1], xl: 'requested porosity', yl: 'delivered porosity' });
+  const band = [[0, 0.005], [0.11, 0.115], [0.11, 0.105], [0, -0.005]].map(([a, b]) => [D.X(a), D.Y(Math.max(b, 0))]);
+  el(ds, 'path', { d: line(band) + ' Z', fill: 'rgba(255,176,0,.12)', stroke: 'none' });
+  el(ds, 'line', { x1: D.X(0), y1: D.Y(0), x2: D.X(0.11), y2: D.Y(0.11), stroke: '#e8e6e1', 'stroke-dasharray': '6 6' });
+  pts.filter(p => p[0] <= 0.1).forEach((p, i) => el(ds, 'circle', { cx: D.X(p[0]) + ((i % 6) - 2.5) * 3, cy: D.Y(p[1]), r: 6, fill: p[2] === 50 ? '#ffb000' : '#0b0d10', stroke: '#ffb000', 'stroke-width': 2 }));
+  el(ds, 'text', { x: 120, y: 620 }, '● DDIM-50   ○ DDIM-200   band = ±0.005');
+  const sl = v('dose_slope'), r2 = v('dose_r2'), gf = v('dose_gate_frac'), dn = v('dose_n');
+  if (sl) document.getElementById('vSlope').textContent = sl.toFixed(2);
+  if (r2) document.getElementById('vR2').textContent = r2.toFixed(3);
+  if (gf !== undefined && dn) document.getElementById('vGate').textContent = `${Math.round(gf * dn)} / ${dn}`;
+
+  /* 23 — tiles requested vs delivered, and guidance */
+  const tb = document.getElementById('tilesBox');
+  const cell = val => { const q = Math.min(Math.max(val / 0.06, 0), 1); return `rgb(${Math.round(11 + q * 244)},${Math.round(13 + q * 163)},${Math.round(16 - q * 16)})`; };
+  tb.innerHTML = [['halves', 'halves_tiles'], ['checkerboard', 'checkerboard_tiles']].map(([n, k]) => { const t = v(k); if (!t) return '';
+    const g = (m) => `<div style="display:grid;grid-template-columns:repeat(3,76px);gap:4px">${m.flat().map(x => `<div style="height:76px;background:${cell(x)};display:flex;align-items:flex-end;justify-content:flex-end;padding:5px;font:400 15px var(--mono);color:${x > 0.025 ? '#0b0d10' : '#c9c7c2'}">${x.toFixed(3)}</div>`).join('')}</div>`;
+    return `<p class="lbl" style="margin:0 0 10px">${n}</p><div style="display:flex;gap:50px;align-items:center;margin-bottom:26px">${g(t[0])}<span class="big muted">→</span>${g(t[1])}</div>`; }).join('') +
+    `<p class="lbl">requested (left) → delivered (right), pore fraction per 64³ tile, middle layer</p>`;
+  const cm = document.getElementById('cfgMini'), cf = v('cfg_por') || [];
+  const G = axes(cm, { x0: 110, y0: 10, w: 560, h: 140, x: [0.9, 2.1], y: [0.015, 0.055], xt: [1, 1.5, 2], yt: [0.02, 0.05], xl: 'guidance scale s (porosity)', yl: '' });
+  [0.02, 0.05].forEach(tg => { el(cm, 'line', { x1: G.X(0.9), x2: G.X(2.1), y1: G.Y(tg), y2: G.Y(tg), stroke: '#e8e6e1', 'stroke-dasharray': '5 6' });
+    const r = cf.filter(q => q[1] === tg).sort((a, b) => a[0] - b[0]);
+    el(cm, 'path', { d: line(r.map(q => [G.X(q[0]), G.Y(q[2])])), stroke: '#ffb000', 'stroke-width': 2.5, fill: 'none' });
+    r.forEach(q => el(cm, 'circle', { cx: G.X(q[0]), cy: G.Y(q[2]), r: 6, fill: '#ffb000' })); });
+  el(cm, 'text', { x: 690, y: G.Y(0.02) + 6 }, 'asked 0.02'); el(cm, 'text', { x: 690, y: G.Y(0.05) + 6 }, 'asked 0.05');
+
+  /* 24 — the four statistics */
+  const sbx = document.getElementById('statsBox');
+  sbx.innerHTML = `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:28px">${[
+    ['s2', 'Two-point correlation S₂(r)', 'P(two points r apart are both pore)'],
+    ['psd', 'Pore-size distribution', 'sizes of connected pores'],
+    ['rip', "Ripley's K(r)", 'pore centres within r, vs random'],
+    ['fid', 'FID on slices', 'distance of deep-image features']].map(([id, h, p], i) =>
+    `<div class="card r d${i + 2}" style="height:520px"><svg id="st_${id}" viewBox="0 0 360 300" width="100%"></svg><h3 style="margin-top:22px">${h}</h3><p>${p}</p></div>`).join('')}</div>`;
+  const s2c = v('s2curve_0.03');
+  if (s2c) { const s = document.getElementById('st_s2'); const mx = Math.max(...s2c.real, ...s2c.gen);
+    const S = axes(s, { x0: 60, y0: 10, w: 280, h: 220, x: [0, 48], y: [0, mx * 1.05], xt: [0, 24, 48], yt: [], xl: 'r (voxels)' });
+    el(s, 'path', { d: line(s2c.r.map((r, i) => [S.X(r), S.Y(s2c.real[i])])), stroke: '#e8e6e1', 'stroke-width': 3, fill: 'none' });
+    el(s, 'path', { d: line(s2c.r.map((r, i) => [S.X(r), S.Y(s2c.gen[i])])), stroke: '#ffb000', 'stroke-width': 3, fill: 'none', 'stroke-dasharray': '7 5' });
+    el(s, 'text', { x: 200, y: 40, style: 'fill:#e8e6e1' }, 'real'); el(s, 'text', { x: 200, y: 66, style: 'fill:#ffb000' }, 'generated'); }
+  const ps = document.getElementById('st_psd');
+  [[0.6, 1], [0.3, 0.6], [0.8, 0.85], [0.45, 0.5], [0.7, 0.28], [0.25, 0.3], [0.5, 0.75]].forEach(([x, y], i) => el(ps, 'ellipse', { cx: 40 + x * 300, cy: y * 220, rx: 6 + (i * 37 % 26), ry: 4 + (i * 13 % 10), fill: '#ffb000', 'fill-opacity': .85 }));
+  const rp = document.getElementById('st_rip');
+  [[150, 120], [175, 135], [160, 100], [250, 200], [90, 210], [270, 60], [140, 150]].forEach(([x, y]) => el(rp, 'circle', { cx: x, cy: y, r: 6, fill: '#ffb000' }));
+  el(rp, 'circle', { cx: 160, cy: 125, r: 60, fill: 'none', stroke: '#e8e6e1', 'stroke-dasharray': '5 5' }); el(rp, 'text', { x: 225, y: 125 }, 'r');
+  const fd = document.getElementById('st_fid');
+  el(fd, 'ellipse', { cx: 140, cy: 130, rx: 90, ry: 55, fill: 'rgba(232,230,225,.12)', stroke: '#e8e6e1', 'stroke-width': 2 });
+  el(fd, 'ellipse', { cx: 210, cy: 150, rx: 80, ry: 60, fill: 'rgba(255,176,0,.12)', stroke: '#ffb000', 'stroke-width': 2, transform: 'rotate(-15 210 150)' });
+  el(fd, 'text', { x: 60, y: 260 }, 'real vs generated features');
+
+  /* 25 — ratio bars */
+  const rs = document.getElementById('ratioSvg'), stats = [['s2_w1', 'S₂'], ['psd_w1', 'pore size'], ['ripley_log_ratio', 'Ripley K'], ['fid', 'FID']], lv = ['0.01', '0.03', '0.06'];
+  const RY = val => 520 - val / 4 * 480;
+  [0, 1, 2, 3, 4].forEach(t => { el(rs, 'line', { x1: 80, x2: 1700, y1: RY(t), y2: RY(t), class: 'grid' }); el(rs, 'text', { x: 66, y: RY(t) + 6, 'text-anchor': 'end' }, t); });
+  stats.forEach(([k, n], si) => { const gx = 120 + si * 400;
+    lv.forEach((l, li) => { const val = v(`micro_${l}_${k}`); if (val === undefined) return; const x = gx + li * 110;
+      el(rs, 'rect', { x, y: RY(val), width: 84, height: 520 - RY(val), fill: '#ffb000', 'fill-opacity': [1, .7, .45][li] });
+      el(rs, 'text', { x: x + 42, y: RY(val) - 10, 'text-anchor': 'middle', style: 'fill:#e8e6e1' }, val.toFixed(2));
+      el(rs, 'text', { x: x + 42, y: 550, 'text-anchor': 'middle' }, 'φ ' + l); });
+    el(rs, 'text', { x: gx + 152, y: 600, 'text-anchor': 'middle', style: 'fill:#e8e6e1;font-size:24px' }, n); });
+  el(rs, 'line', { x1: 80, x2: 1700, y1: RY(1), y2: RY(1), stroke: '#e8e6e1', 'stroke-width': 2, 'stroke-dasharray': '8 6' });
+  el(rs, 'text', { x: 1700, y: RY(1) - 12, 'text-anchor': 'end', style: 'fill:#e8e6e1' }, 'real floor = 1');
+
+  /* 26 — requested vs read ply angles, layup A */
+  const pl = document.getElementById('plySvg'), rq = v('layup_A_requested_deg') || [], rc = v('layup_A_recovered_pore_axes_seed101') || [];
+  const PY = d => 170 - d / 180 * 150;
+  el(pl, 'line', { x1: 60, x2: 840, y1: 170, y2: 170, class: 'ax' });
+  [0, 90, 180].forEach(d => el(pl, 'text', { x: 50, y: PY(d) + 6, 'text-anchor': 'end' }, d + '°'));
+  rq.forEach((d, i) => { const x = 90 + i * 76; el(pl, 'line', { x1: x - 24, x2: x + 24, y1: PY(d), y2: PY(d), stroke: '#e8e6e1', 'stroke-width': 3 });
+    const r = rc[i] !== undefined ? (Math.abs(rc[i] - d) > 90 ? rc[i] - 180 * Math.sign(rc[i] - d) : rc[i]) : null;
+    if (r !== null) el(pl, 'circle', { cx: x, cy: PY(r), r: 7, fill: '#ffb000' }); });
+  el(pl, 'text', { x: 60, y: 202 }, 'ply 1 → 10 · — requested · ● read from the generated labels (layup A)');
+
+  /* 27 — ablation rows */
+  const ab = document.getElementById('ablSvg');
+  const rows = [
+    ['ply profile', 'feed layup C, score layup A', 'angle error on A', `${(v('layup_A_pore_axes_median') || 0).toFixed(1)}°`, `${(v('abl_ply_swap_scored_pore_axes') || 0).toFixed(0)}°`, `C read at ${(v('abl_ply_swap_fed_pore_axes') || 0).toFixed(1)}°`, 'used'],
+    ['material map', 'notch + hole → all material', 'air Dice', (v('geom_air_dice') || 0).toFixed(3), (v('abl_material_full_air_dice') || 0).toFixed(3), 'no invented geometry', 'used'],
+    ['porosity field', 'map → its mean value', 'local R²', (v('local_checkerboard_r2') || 0).toFixed(2), (v('abl_field_global_checkerboard_r2') || 0).toFixed(2), `checkerboard; halves ${(v('local_halves_r2') || 0).toFixed(2)} → ${(v('abl_field_global_halves_r2') || 0).toFixed(2)}`, 'used'],
+    ['position', 'depth + face distances, other specimen', 'air Dice', (v('geom_air_dice') || 0).toFixed(3), (v('abl_position_swap_air_dice') || 0).toFixed(3), 'no change', 'barely used']];
+  ['input', 'what we change', 'measure', 'normal', 'swapped', '', ''].forEach((h, i) => el(ab, 'text', { x: [0, 250, 830, 1110, 1290, 1420, 1590][i], y: 30 }, h));
+  rows.forEach((r, i) => { const y = 110 + i * 130, used = r[6] === 'used';
+    el(ab, 'line', { x1: 0, x2: 1728, y1: y - 55, y2: y - 55, class: 'grid' });
+    el(ab, 'text', { x: 0, y, style: 'fill:#e8e6e1;font-family:var(--serif);font-size:34px' }, r[0]);
+    el(ab, 'text', { x: 250, y, style: 'fill:#c9c7c2;font-size:20px' }, r[1]); el(ab, 'text', { x: 830, y, style: 'font-size:20px' }, r[2]);
+    el(ab, 'text', { x: 1110, y, style: 'fill:#e8e6e1;font-size:28px' }, r[3]);
+    el(ab, 'text', { x: 1220, y, style: 'fill:#7d838c;font-size:28px' }, '→');
+    el(ab, 'text', { x: 1290, y, style: `fill:${used ? '#ffb000' : '#e8e6e1'};font-size:28px` }, r[4]);
+    el(ab, 'text', { x: 1250, y: y + 34, style: 'font-size:17px' }, r[5]);
+    el(ab, 'text', { x: 1590, y, style: `fill:${used ? '#ffb000' : '#7d838c'};font-size:20px` }, r[6]); });
+
+  /* 28 — copy detection */
+  const cd = document.getElementById('copyDiag');
+  el(cd, 'circle', { cx: 150, cy: 300, r: 10, fill: '#ffb000' }); el(cd, 'text', { x: 110, y: 340, style: 'fill:#ffb000' }, 'generated');
+  el(cd, 'circle', { cx: 380, cy: 200, r: 9, fill: '#e8e6e1' }); el(cd, 'circle', { cx: 420, cy: 430, r: 9, fill: '#e8e6e1' });
+  [[560, 120], [600, 300], [520, 520], [640, 460], [300, 540]].forEach(([x, y]) => el(cd, 'circle', { cx: x, cy: y, r: 6, fill: '#555b65' }));
+  el(cd, 'line', { x1: 150, y1: 300, x2: 380, y2: 200, stroke: '#e8e6e1', 'stroke-width': 2 }); el(cd, 'text', { x: 250, y: 230 }, 'd₁');
+  el(cd, 'line', { x1: 150, y1: 300, x2: 420, y2: 430, stroke: '#e8e6e1', 'stroke-width': 2, 'stroke-dasharray': '6 5' }); el(cd, 'text', { x: 270, y: 400 }, 'd₂');
+  el(cd, 'text', { x: 0, y: 40, style: 'fill:#e8e6e1;font-family:var(--serif);font-size:40px' }, 'ratio = d₁ / d₂');
+  el(cd, 'text', { x: 0, y: 80 }, 'copy: ratio < 1/3 · fresh sample: ≈ 1');
+  el(cd, 'text', { x: 380, y: 180 }, 'training patches');
+  const cp = document.getElementById('copySvg'), mg = (v('mem_generated') || {}).grey || {}, mr = (v('mem_real_floor') || {}).grey || {};
+  const CX = val => 160 + val * 760;
+  el(cp, 'rect', { x: CX(0), y: 40, width: CX(1 / 3) - CX(0), height: 420, fill: 'rgba(47,107,255,.10)' });
+  el(cp, 'text', { x: CX(0) + 10, y: 70, style: 'fill:#2f6bff' }, 'copy zone');
+  [0, 0.25, 0.5, 0.75, 1].forEach(t => { el(cp, 'line', { x1: CX(t), x2: CX(t), y1: 40, y2: 470, class: 'grid' }); el(cp, 'text', { x: CX(t), y: 500, 'text-anchor': 'middle' }, t); });
+  el(cp, 'text', { x: CX(0.5), y: 540, 'text-anchor': 'middle', style: 'fill:#c9c7c2' }, 'nearest / second-nearest distance');
+  [['generated', mg, '#ffb000', 170], ['real, held out', mr, '#e8e6e1', 340]].forEach(([n, m, c, y]) => {
+    const lo = m.ratio_min, p5 = m.ratio_p5, md = m.ratio_median ?? m.ratio_mean;
+    el(cp, 'text', { x: 0, y: y + 8, style: `fill:${c}` }, n);
+    if (lo !== undefined) { el(cp, 'line', { x1: CX(lo), x2: CX(1), y1: y, y2: y, stroke: c, 'stroke-width': 2 });
+      el(cp, 'rect', { x: CX(p5), y: y - 22, width: CX(1) - CX(p5), height: 44, fill: c, 'fill-opacity': .35, stroke: c });
+      el(cp, 'line', { x1: CX(md), x2: CX(md), y1: y - 22, y2: y + 22, stroke: c, 'stroke-width': 4 });
+      el(cp, 'text', { x: CX(lo), y: y + 50, 'text-anchor': 'middle', style: 'font-size:16px' }, 'min ' + lo.toFixed(2)); } });
+  el(cp, 'text', { x: 160, y: 590, style: 'fill:#ffb000;font-size:24px' }, `${((v('mem_generated') || {}).grey || {}).n_memorised ?? '?'} of ${(v('mem_n_patches') || 0).toLocaleString('en').replace(/,/g, ' ')} generated patches in the copy zone`);
+
+  /* 29 — baseline mini diagrams */
+  const mini = (id, draw) => draw(document.getElementById(id));
+  mini('bSG', s => { el(s, 'rect', { x: 20, y: 40, width: 140, height: 140, fill: 'none', stroke: '#e8e6e1', 'stroke-width': 2 }); el(s, 'text', { x: 30, y: 30 }, 'G: noise → 3-D');
+    ['x', 'y', 'z'].forEach((a, i) => { el(s, 'rect', { x: 230 + i * 80, y: 70, width: 60, height: 60, fill: 'rgba(232,230,225,.06)', stroke: '#8e949e', 'stroke-width': 2 }); el(s, 'text', { x: 252 + i * 80, y: 160 }, a);
+      el(s, 'path', { d: `M165,110 L${228 + i * 80},100`, stroke: 'rgba(232,230,225,.3)' }); }); el(s, 'text', { x: 230, y: 200 }, '2-D critics on slices'); });
+  mini('bDD', s => { el(s, 'rect', { x: 20, y: 40, width: 140, height: 140, fill: 'none', stroke: '#e8e6e1', 'stroke-width': 2 }); el(s, 'text', { x: 30, y: 30 }, 'voxels 64³');
+    el(s, 'rect', { x: 210, y: 50, width: 260, height: 120, fill: 'none', stroke: '#8e949e', 'stroke-width': 2, 'stroke-dasharray': '7 5' }); el(s, 'text', { x: 225, y: 100 }, 'diffusion on voxels'); el(s, 'text', { x: 225, y: 140 }, 'no encoder or decoder');
+    el(s, 'path', { d: 'M165,110 H205', stroke: '#e8e6e1', 'stroke-width': 2 }); });
+  mini('bPO', s => { el(s, 'rect', { x: 20, y: 70, width: 70, height: 70, fill: 'rgba(255,176,0,.15)', stroke: '#ffb000', 'stroke-width': 2 }); el(s, 'text', { x: 20, y: 50 }, 'our latent');
+    el(s, 'rect', { x: 150, y: 50, width: 160, height: 120, fill: 'none', stroke: '#8e949e', 'stroke-width': 2 }); el(s, 'text', { x: 170, y: 115 }, 'denoiser');
+    el(s, 'text', { x: 340, y: 90, style: 'fill:#ffb000' }, 'φ only'); el(s, 'text', { x: 340, y: 130, style: 'text-decoration:line-through' }, 'maps'); el(s, 'text', { x: 340, y: 165, style: 'text-decoration:line-through' }, 'neighbours');
+    el(s, 'path', { d: 'M95,105 H145', stroke: '#e8e6e1', 'stroke-width': 2 }); });
+
+  /* 30 — baselines small multiples (log ratio axis) */
+  const bsv = document.getElementById('baseSvg');
+  const models = [['ours', 'micro', '#ffb000'], ['porosity-only LDM', 'base_phi_only', '#cfd3da'], ['pixel diffusion', 'base_ddpm3d', '#8e949e'], ['SliceGAN', 'base_slicegan', '#555b65']];
+  const key = (m, l, k) => m === 'micro' ? `micro_${l}_${k}` : `${m}_${l}_${k}`;
+  const LY = val => 470 - (Math.log10(val) + 1) / (Math.log10(20) + 1) * 430;
+  stats.forEach(([k, n], si) => { const gx = 70 + si * 420;
+    [0.1, 1, 10].forEach(t => { el(bsv, 'line', Object.assign({ x1: gx, x2: gx + 370, y1: LY(t), y2: LY(t) }, t === 1 ? { stroke: '#e8e6e1', 'stroke-dasharray': '6 5' } : { class: 'grid' })); if (si === 0) el(bsv, 'text', { x: gx - 10, y: LY(t) + 6, 'text-anchor': 'end' }, t); });
+    lv.forEach((l, li) => { models.forEach(([mn, mk, c], mi) => { const val = v(key(mk, l, k)); if (!val) return; const x = gx + 10 + li * 122 + mi * 26;
+      el(bsv, 'rect', { x, y: Math.min(LY(val), LY(1)), width: 22, height: Math.abs(LY(val) - LY(1)) || 2, fill: c }); });
+      el(bsv, 'text', { x: gx + 10 + li * 122 + 52, y: 500, 'text-anchor': 'middle' }, 'φ ' + l); });
+    el(bsv, 'text', { x: gx + 185, y: 545, 'text-anchor': 'middle', style: 'fill:#e8e6e1;font-size:24px' }, n); });
+  models.forEach(([n, , c], i) => { el(bsv, 'rect', { x: 70 + i * 300, y: 590, width: 18, height: 18, fill: c }); el(bsv, 'text', { x: 98 + i * 300, y: 606, style: 'fill:#c9c7c2' }, n); });
+  el(bsv, 'text', { x: 70, y: 645, style: 'fill:#ffb000' }, `in-band volumes: ours 42/42 · φ-only ${Math.round((v('base_phi_only_gate_frac') || 0) * 42)}/42`);
+}
+
+/* ===========================================================
+   DECK CONTROLLER — fixed stage, navigation, notes, videos, edit
+   =========================================================== */
+class Deck {
+  constructor() {
+    this.slides = [...document.querySelectorAll('.slide')];
+    this.stage = document.getElementById('deckStage');
+    this.i = Math.max(0, Math.min(this.slides.length - 1, (parseInt(location.hash.slice(1)) || 1) - 1));
+    this.done = new Set();
+    this.slides.forEach((s, k) => { if (k > 0) { const n = document.createElement('div'); n.className = 'hud br'; n.textContent = String(k + 1).padStart(2, '0') + ' / ' + this.slides.length; if (!s.querySelector('.hud.br')) s.appendChild(n); }
+      if (!s.querySelector('.hud.bl')) { const b = document.createElement('div'); b.className = 'hud bl'; b.textContent = 'Group meeting'; s.appendChild(b); } });
+    const fit = () => { const f = Math.min(innerWidth / 1920, innerHeight / 1080);
+      this.stage.style.transform = `translate(${(innerWidth - 1920 * f) / 2}px, ${(innerHeight - 1080 * f) / 2}px) scale(${f})`; };
+    fit(); addEventListener('resize', fit);
+    addEventListener('keydown', e => { if (e.target.isContentEditable) return;
+      if (['ArrowRight', 'ArrowDown', ' ', 'PageDown'].includes(e.key)) { e.preventDefault(); this.go(this.i + 1); }
+      else if (['ArrowLeft', 'ArrowUp', 'PageUp'].includes(e.key)) { e.preventDefault(); this.go(this.i - 1); }
+      else if (e.key === 'Home') this.go(0); else if (e.key === 'End') this.go(this.slides.length - 1);
+      else if (e.key === 'n' || e.key === 'N') document.getElementById('notesPanel').classList.toggle('on');
+      else if (e.key === 'f' || e.key === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+      else if (e.key === 'e' || e.key === 'E') this.toggleEdit(); });
+    let tx = null; addEventListener('touchstart', e => tx = e.touches[0].clientX);
+    addEventListener('touchend', e => { if (tx === null) return; const d = e.changedTouches[0].clientX - tx; if (Math.abs(d) > 50) this.go(this.i + (d < 0 ? 1 : -1)); tx = null; });
+    const tick = ts => { const id = this.slides[this.i].id; Object.entries(LOOPS).forEach(([k, fn]) => { if (k === id || k.startsWith(id + 'b')) fn(ts); }); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+    this.go(this.i);
+  }
+  go(n) {
+    n = Math.max(0, Math.min(this.slides.length - 1, n)); this.i = n;
+    this.slides.forEach((s, k) => { const on = k === n; s.classList.toggle('active', on); s.classList.toggle('visible', on);
+      s.querySelectorAll('video').forEach(vd => { if (on) { vd.currentTime = 0; vd.play().catch(() => {}); } else vd.pause(); }); });
+    const s = this.slides[n], init = s.dataset.init;
+    if (init && !this.done.has(s.id) && INIT[init]) { INIT[init](s); this.done.add(s.id); }
+    const notes = s.querySelector('aside.notes');
+    document.getElementById('notesPanel').innerHTML = `<h4>${String(n + 1).padStart(2, '0')} · ${s.querySelector('h1,h2')?.textContent || ''}</h4>` + (notes ? notes.innerHTML : '');
+    document.getElementById('counter').textContent = `${n + 1} / ${this.slides.length} · N notes`;
+    history.replaceState(null, '', '#' + (n + 1));
+  }
+  toggleEdit() {
+    const on = document.body.dataset.edit !== '1'; document.body.dataset.edit = on ? '1' : '';
+    document.querySelectorAll('.slide h1, .slide h2, .slide p, .slide li, .slide .card h3').forEach(x => x.contentEditable = on);
+    if (!on) try { localStorage.setItem('poregen-deck-edits', JSON.stringify([...document.querySelectorAll('.slide')].map(s => s.innerHTML.length))); } catch (e) {}
+  }
+}
+drawStatic();
+new Deck();
+</script>
+</body>
+</html>
