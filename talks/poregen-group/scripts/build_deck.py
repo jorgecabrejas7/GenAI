@@ -13,7 +13,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parents[1]
 DECK, MEDIA = HERE / "deck", HERE / "deck" / "media"
-BASE_CSS = Path.home() / ".claude/plugins/cache/frontend-slides/frontend-slides/2.1.0/skills/frontend-slides/viewport-base.css"
+BASE_CSS = DECK / "viewport-base.css"                              # frontend-slides fixed-stage base, vendored
 
 num = json.loads((MEDIA / "numbers.json").read_text())
 for name in ("seam_production", "seam_overlapped"):
