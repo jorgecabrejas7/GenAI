@@ -76,7 +76,7 @@ def write_video(name: str, frames, pingpong=True):
     frames = list(frames)
     if pingpong:
         frames = frames + frames[-2:0:-1]
-    w = imageio.get_writer(OUT / f"{name}.mp4", fps=FPS, codec="libx264", quality=8,
+    w = imageio.get_writer(OUT / f"{name}.mp4", fps=FPS, codec="libx264", quality=6,
                            pixelformat="yuv420p", macro_block_size=16)
     for f in frames:
         w.append_data(f)
@@ -178,14 +178,6 @@ def sweep3d():
 
 
 # === generated volumes ======================================================
-def porosity_sweep():
-    """xy slices stepping through z for five requested porosities, one seed, DDIM-50."""
-    vols = [gen("porosity_global", f"target{t}_ddim50_seed101") for t in ("0.005", "0.01", "0.03", "0.07", "0.1")]
-    lo, hi = np.percentile(vols[2][0][vols[2][1] == 0], [0.5, 99.8])  # one grey scale for all panels, from the 0.03 volume
-    gs = [np.clip((v.astype(np.float32) - lo) / (hi - lo), 0, 1) for v, _ in vols]
-    write_video("por_sweep", (row([overlay(g[z], l[z]) for g, (_, l) in zip(gs, vols)], 384) for z in range(192)))
-
-
 def local_field():
     """Requested field (3x3x3 tiles) beside the delivered pore fraction per tile, and a rotating projection."""
     labs = []
@@ -250,27 +242,22 @@ def real_vs_gen():
 
 
 def large_volume():
-    """One xy slice of a 1024×1024×192 generated volume (mid-depth)."""
-    v, l = gen("sampler", "1024_ddim50_seed101")
+    """One xy slice of a 1024×1024×192 generated volume (mid-depth), grey only."""
+    v, _ = gen("sampler", "1024_ddim50_seed101")
     g = stretch(v[96])
-    Image.fromarray(overlay(g, l[96])).save(OUT / "large_slice.jpg", quality=86)
     Image.fromarray(overlay(g, None)).save(OUT / "large_grey.jpg", quality=86)
 
 
 def seam_maps():
-    """Pore fraction per (y, x) column, production chunking against the overlapped scheme."""
+    """Pore fraction per y and per x position, production chunking against the overlapped scheme."""
     for name, root in (("seam_production", FINAL / "sampler"), ("seam_overlapped", A2S / "sampler")):
         lab = tifffile.imread(root / "volumes/1024_ddim50_seed101/label.tif")
-        m = ndimage.gaussian_filter((lab == 1).mean(0).astype(np.float32), 3)
-        m = np.clip(m / np.percentile(m, 99.5), 0, 1)
-        rgb = BG.astype(np.float32) * (1 - m[..., None]) + PORE * m[..., None]
-        Image.fromarray(rgb.astype(np.uint8)).resize((768, 768), Image.LANCZOS).save(OUT / f"{name}.png")
         prof_y, prof_x = (lab == 1).mean((0, 2)), (lab == 1).mean((0, 1))
         np.save(OUT / f"{name}_profiles.npy", np.stack([prof_y, prof_x]))
         print(name, "mean phi", float((lab == 1).mean()))
 
 
-JOBS = {f.__name__: f for f in (title, data_slice, data_xsec, pores3d, sweep3d, porosity_sweep, local_field,
+JOBS = {f.__name__: f for f in (title, data_slice, data_xsec, pores3d, sweep3d, local_field,
                                 geometry, layup, real_vs_gen, large_volume, seam_maps)}
 
 if __name__ == "__main__":
