@@ -1408,11 +1408,16 @@ POP_GEOMETRY = (
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_2_volume_eq_aligned",
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_08_5_volume_eq_aligned",
 )
-#: Coupons generated whole as twins, one per bin 0-0.5 / 1-2 / 2-5 %.
+#: One twin per porosity bin (author 2026-10-27), whole-coupon porosity from
+#: campaign 36's real tables: a held-out TEST coupon where the bin has one;
+#: 5-12 % has only training coupons (Na_02), so Na_02_4 (8.70 %, nearest the
+#: bin centre). Na_05_2 was already generated when the list grew to five.
 TWIN_COUPONS = (
-    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_2_volume_eq_aligned",
-    "MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned",
-    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_1_volume_eq_aligned",
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_2_volume_eq_aligned",  # 0-0.5, 0.10 %
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_1_volume_eq_aligned",  # 0.5-1, 0.88 %
+    "MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned",                                    # 1-2, 1.01 %
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_5_volume_eq_aligned",  # 2-5, 2.62 %
+    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_4_volume_eq_aligned",  # 5-12, 8.70 % (train)
 )
 POP_DDIM = 50
 POP_DEPTH = 192
