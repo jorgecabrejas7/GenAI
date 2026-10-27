@@ -36,8 +36,27 @@ from scipy.stats import wasserstein_distance  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 C36 = REPO / "runs/campaigns/36-pore-morphology"
-PROPS = ("r_eq_um", "sphericity_corr", "sphericity", "cov_elongation", "cov_flatness",
-         "cov_anisotropy", "cov_phi_deg", "inertia_phi_deg", "dist_surface_um")
+#: Every per-pore property of pore_morphology.py except the identifiers, the
+#: in-plane barycentre (a position in the crop, not a property of the pore)
+#: and the two flags (reported as fractions). Eigenvector components are
+#: compared as |v| because their sign is arbitrary.
+PROPS = (
+    "n_voxels", "volume_um3", "r_eq_um", "area_um2", "sphericity", "area_corr_um2",
+    "sphericity_corr", "bary_z_um", "dist_surface_um",
+    "inertia_Ixx_um2", "inertia_Iyy_um2", "inertia_Izz_um2",
+    "inertia_Ixy_um2", "inertia_Ixz_um2", "inertia_Iyz_um2",
+    *[f"{src}_eig{k}_um2" for src in ("inertia", "cov") for k in (1, 2, 3)],
+    *[f"{src}_vec{k}_{c}" for src in ("inertia", "cov") for k in (1, 2, 3) for c in "xyz"],
+    *[f"{src}_{d}" for src in ("cov", "inertia")
+      for d in ("anisotropy", "elongation", "flatness", "elongation_avg", "flatness_avg",
+                "phi_deg", "theta_deg")],
+)
+FLAGS = ("touches_air", "touches_edge")
+#: The split_v4 segmentation's min_size_filtering is 8 (data/split_v4/labels.json;
+#: the smallest real 26-connected pore over the 81 coupons is 9 voxels). A
+#: generated pore under 8 voxels is outside the training distribution
+#: (author 2026-10-27: quantify it as a model error; the threshold is 8).
+MIN_REAL = 8
 BINS = ("0-0.5%", "0.5-1%", "1-2%", "2-5%", "5-12%")
 SAMPLE = 200_000
 VOXEL_MM3 = 0.025 ** 3
@@ -66,18 +85,33 @@ def load(sub: str) -> pd.DataFrame:
 
 
 def pores(row, min_vox: int) -> pd.DataFrame:
-    df = pd.read_parquet(Path(row["dir"]) / f"{row['name']}.parquet", columns=["n_voxels", *PROPS])
+    df = pd.read_parquet(Path(row["dir"]) / f"{row['name']}.parquet", columns=[*PROPS, *FLAGS])
+    for c in df.columns:
+        if "_vec" in c:
+            df[c] = df[c].abs()
     return df[df.n_voxels >= min_vox]
 
 
-def sample(a: np.ndarray, rng) -> np.ndarray:
-    a = a[np.isfinite(a)]
-    return a if len(a) <= SAMPLE else rng.choice(a, SAMPLE, replace=False)
+def sample(a: np.ndarray, rng, n: int = SAMPLE) -> np.ndarray:
+    a = a[np.isfinite(a)].astype(np.float64)
+    return a if len(a) <= n else rng.choice(a, n, replace=False)
+
+
+def small_pore_error(row) -> dict:
+    """Pores below the real segmentation's minimum: count, share of pores and
+    share of pore volume. 0 for every real coupon by construction."""
+    n = pd.read_parquet(Path(row["dir"]) / f"{row['name']}.parquet", columns=["n_voxels"]).n_voxels
+    small = n < MIN_REAL
+    return {"small_pores": int(small.sum()),
+            "small_pore_share": float(small.mean()) if len(n) else np.nan,
+            "small_pore_volume_share": float(n[small].sum() / n.sum()) if n.sum() else np.nan}
 
 
 def volume_stats(row, df) -> dict:
     out = {"name": row["name"], "porosity": row["porosity"], "n_pores_kept": len(df),
-           "pores_per_mm3": len(df) / (row["nonair_voxels"] * VOXEL_MM3)}
+           "pores_per_mm3": len(df) / (row["nonair_voxels"] * VOXEL_MM3),
+           **{f"share_{f}": float(df[f].mean()) if len(df) else np.nan for f in FLAGS},
+           **small_pore_error(row)}
     for p in PROPS:
         out[f"median_{p}"] = float(np.nanmedian(df[p])) if len(df) else np.nan
     return out
@@ -106,14 +140,19 @@ def main() -> int:
         rpores = {r["name"]: pores(r, a.min_voxels) for _, r in rb.iterrows()}
         pooled = pd.concat(rpores.values())
         iqr = {p: float(np.subtract(*np.nanpercentile(pooled[p], [75, 25]))) or 1.0 for p in PROPS}
-        ref = {p: sample(pooled[p].to_numpy(), rng) for p in PROPS}
+        # Each coupon contributes an equal-size subsample, drawn once; the
+        # pooled reference and every leave-one-coupon-out reference are
+        # concatenations of these, so no coupon's pore count dominates the
+        # pool and the floor costs no re-read.
+        per = max(SAMPLE // len(rpores), 2000)
+        csamp = {k: {p: sample(v[p].to_numpy(), rng, per) for p in PROPS} for k, v in rpores.items()}
+        ref = {p: np.concatenate([c[p] for c in csamp.values()]) for p in PROPS}
 
         def dist(df, exclude=None):
             res = {}
             for p in PROPS:
                 if exclude is not None and len(rpores) > 1:
-                    rest = pd.concat([v for k, v in rpores.items() if k != exclude])[p].to_numpy()
-                    r_ = sample(rest, rng)
+                    r_ = np.concatenate([c[p] for k, c in csamp.items() if k != exclude])
                 else:
                     r_ = ref[p]
                 x = sample(df[p].to_numpy(), rng)
@@ -137,7 +176,9 @@ def main() -> int:
                 gen_hist.setdefault(s, []).append(df)
 
         # figure: pooled histograms per property
-        fig, axs = plt.subplots(3, 3, figsize=(13, 10))
+        nc = 8
+        nr = -(-len(PROPS) // nc)
+        fig, axs = plt.subplots(nr, nc, figsize=(3 * nc, 2.4 * nr))
         for ax, p in zip(axs.ravel(), PROPS):
             lo, hi = np.nanpercentile(pooled[p], [0.5, 99.5])
             bins_ = np.linspace(lo, hi, 50)
@@ -147,7 +188,8 @@ def main() -> int:
                 if s in gen_hist:
                     ax.hist(pd.concat(gen_hist[s])[p].clip(lo, hi), bins_, density=True,
                             histtype="step", lw=1.5, color=c, label=f"{s} ({len(gen_hist[s])} vols)")
-            ax.set_title(p, fontsize=10)
+            ax.set_title(p, fontsize=8)
+            ax.tick_params(labelsize=6)
         axs[0, 0].legend(fontsize=8)
         fig.suptitle(f"bin {b}, pores >= {a.min_voxels} voxels")
         fig.tight_layout()
@@ -165,8 +207,12 @@ def main() -> int:
         md.append("## Real floor range (min-max over real coupons)\n")
         rr = dd[dd.source == "real"].groupby("bin")[list(PROPS)].agg(["min", "max"]).round(3)
         md.append(rr.pipe(md_table) + "\n")
+    md.append(f"## Model error: pores under {MIN_REAL} voxels (all pores counted, median over volumes)\n")
+    md.append(pv.groupby(["bin", "source"])[["small_pores", "small_pore_share", "small_pore_volume_share"]]
+              .median().round(4).pipe(md_table) + "\n")
     md.append("## Population per volume (median over volumes)\n")
-    cols = ["porosity", "pores_per_mm3", "n_pores_kept", *[f"median_{p}" for p in PROPS]]
+    cols = ["porosity", "pores_per_mm3", "n_pores_kept", *[f"share_{f}" for f in FLAGS],
+            *[f"median_{p}" for p in PROPS]]
     md.append(pv.groupby(["bin", "source"])[cols].median().round(4).pipe(md_table) + "\n")
     (out / "tables.md").write_text("\n".join(md))
     print("wrote", out)
