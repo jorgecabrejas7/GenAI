@@ -76,7 +76,7 @@ import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import REPO, write_findings, write_json  # noqa: E402
+from _common import REPO, _jsonable, write_findings, write_json  # noqa: E402
 from poregen.paths import data_root
 
 sys.path.insert(0, str(REPO / "src"))
@@ -1353,14 +1353,35 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Device {device}; scoring on {len(test_loader.dataset)} real test patches.",
           flush=True)
 
+    # Each finished run is appended to runs_partial.jsonl at once and a rerun
+    # skips the (arm, seed) pairs found there: on 2026-10-27 the last arm's
+    # missing prerequisite killed the process after 15 runs and 17 h, and every
+    # run was lost because results were only written at the very end.
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    partial = out_dir / "runs_partial.jsonl"
+    finished = {}
+    if partial.exists():
+        for line in partial.read_text().splitlines():
+            r = json.loads(line)
+            finished[(r["arm"], r["seed"])] = r
     runs = []
     for arm in arms:
         for seed in budget.seeds:
+            if (arm.name, seed) in finished:
+                print(f"\n=== {arm.name}  seed {seed} === (kept from {partial.name})", flush=True)
+                runs.append(finished[(arm.name, seed)])
+                continue
             print(f"\n=== {arm.name}  seed {seed} ===", flush=True)
-            runs.append(train_and_score(
+            run = train_and_score(
                 arm, budget, seed, plans[(arm.name, seed)], real_train,
                 pools.get(arm.pool), test_loader, device, args.num_workers,
-            ))
+            )
+            runs.append(run)
+            with open(partial, "a") as fh:
+                fh.write(json.dumps(_jsonable(run)) + "\n")
+            print(f"    {arm.name} seed {seed}: " + ", ".join(
+                f"{k} {run['metrics'][k]:.4f}" for k in HEADLINE_KEYS if k in run["metrics"]), flush=True)
 
     results = {
         "question": "Is the ldm06 synthetic data useful, not merely realistic?",
@@ -1375,8 +1396,6 @@ def main(argv: list[str] | None = None) -> int:
         "aggregate": aggregate(runs),
     }
     results["caveats"] = build_caveats(results)
-
-    out_dir = Path(args.out)
 
     # MERGE, never clobber. Running a subset of the arms — which is the whole
     # point of --arms — used to overwrite results.json with only those arms,
