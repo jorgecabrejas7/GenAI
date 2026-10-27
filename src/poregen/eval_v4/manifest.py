@@ -104,7 +104,10 @@ class Manifest:
     # -- the request -------------------------------------------------------
     requested_global_phi: float | None = None
     requested_field: str | None = None
-    requested_layup: tuple[int, ...] | None = None
+    #: Ply angles in degrees. Float, and NaN allowed: campaign 36 requests a real
+    #: coupon's theta(z) one value per voxel row (ply_thickness_vox 1), NaN in
+    #: the air rows exactly as the training orientation field has it.
+    requested_layup: tuple[float, ...] | None = None
     requested_ply_thickness_vox: float | None = None
     requested_material: str | None = None
     #: Where the porosity request sits against the train patch porosity of the
@@ -142,7 +145,7 @@ class Manifest:
         if self.region_shape is not None:
             set_(self, "region_shape", _triple(self.region_shape, "region_shape"))
         if self.requested_layup is not None:
-            set_(self, "requested_layup", tuple(int(a) for a in self.requested_layup))
+            set_(self, "requested_layup", tuple(float(a) for a in self.requested_layup))
         self.validate()
 
     @classmethod
