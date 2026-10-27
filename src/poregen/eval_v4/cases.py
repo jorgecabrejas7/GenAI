@@ -1408,42 +1408,57 @@ POP_GEOMETRY = (
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_2_volume_eq_aligned",
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_08_5_volume_eq_aligned",
 )
-#: One twin per porosity bin (author 2026-10-27), whole-coupon porosity from
-#: campaign 36's real tables: a held-out TEST coupon where the bin has one;
-#: 5-12 % has only training coupons (Na_02), so Na_02_4 (8.70 %, nearest the
-#: bin centre). Na_05_2 was already generated when the list grew to five.
-TWIN_COUPONS = (
-    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_2_volume_eq_aligned",  # 0-0.5, 0.10 %
-    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_1_volume_eq_aligned",  # 0.5-1, 0.88 %
-    "MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned",                                    # 1-2, 1.01 %
-    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_5_volume_eq_aligned",  # 2-5, 2.62 %
-    "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_4_volume_eq_aligned",  # 5-12, 8.70 % (train)
-)
+#: Twins: FIVE real coupons per porosity bin, each regenerated whole (author
+#: 2026-10-27: every generated volume is a real volume's twin, compared with
+#: that volume). Whole-coupon porosity from campaign 36's real tables. Order
+#: within a bin: held-out first (test, then val), then train nearest the bin
+#: centre; the first of each bin is wave 1 (generated first, both samplers).
+#: 5-12 % holds only training coupons (Na_02).
+TWIN_COUPONS = {
+    "0-0.5%": ("MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_2_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_1_volume_eq_aligned",
+               "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_3_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_2_volume_eq_aligned",
+               "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_4_volume_eq_aligned"),
+    "0.5-1%": ("MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_1_volume_eq_aligned", "MedidasDB__Juan_Ignacio_probetas_12_volume_eq_aligned",
+               "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_2_volume_eq_aligned", "MedidasDB__Airbus_Panel_Pegaso_probetas_1_31_volumen_eq_aligned",
+               "MedidasDB__Airbus_Panel_Pegaso_probetas_1_32_volumen_eq_aligned"),
+    "1-2%": ("MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_3_volume_eq_aligned",
+             "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_4_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_07_1_volume_eq_aligned",
+             "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_10_5_volume_eq_aligned"),
+    "2-5%": ("MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_09_5_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_5_volume_eq_aligned",
+             "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_01_1_volume_eq_aligned", "MedidasDB__Airbus_Panel_Pegaso_probetas_1_28_volumen_eq_aligned",
+             "MedidasDB__Airbus_Panel_Pegaso_probetas_1_27_volumen_eq_aligned"),
+    "5-12%": ("MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_4_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_3_volume_eq_aligned",
+              "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_1_volume_eq_aligned", "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_2_volume_eq_aligned",
+              "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_02_5_volume_eq_aligned"),
+}
+
+
+def twin_name(volume_id: str) -> str:
+    short = volume_id.split("probetas_")[-1]
+    for suffix in ("_volume_eq_aligned", "_volumen_eq_aligned"):
+        short = short.replace(suffix, "")
+    return "twin_" + short
+
+
 POP_DDIM = 50
 POP_DEPTH = 192
 
 
-@lru_cache(maxsize=4)
-def real_request(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -> dict:
-    """Everything a generation needs to copy one real coupon's layout.
+def real_meta(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -> dict:
+    """The cheap part of a real-coupon request: canvas shape, real region,
+    theta(z) and specimen box, from the orientation record and the array shape.
 
     ``yx`` None (twins): the WHOLE coupon array, air included, padded with air
     up to the next 64-voxel tile on each axis (author 2026-10-27: the full
-    coupon, not a crop). ``yx`` given (bin volumes): a ``POP_DEPTH``-deep crop
-    centred on the specimen's z extent and a centred ``yx`` window.
-
-    Returned: the canvas shape, the real region it holds (``crop``, in coupon
-    coordinates; the canvas starts at its origin), the voxel envelope
-    (``sample_mask``; padding is air), the MATERIAL porosity per 64-tile
-    (pore / envelope; a tile under 1 % envelope takes the mean), theta(z) from
-    the orientation field the LDM was trained on (NaN in padding rows, as in
-    air rows) and the specimen box from its foreground extent.
+    coupon, not a crop). ``yx`` given (window volumes): a ``POP_DEPTH``-deep
+    crop centred on the specimen's z extent and a centred ``yx`` window. The
+    canvas starts at the region's origin; theta is NaN in padding rows, as in
+    air rows of the training orientation field.
     """
     import zarr  # noqa: PLC0415
     root = Path(repo or repo_root()) / "data" / "split_v4"
     rec = json.load(open(root / "orientation_field.json"))["volumes"][volume_id]
-    g = zarr.open(str(root / "volumes.zarr"), mode="r")[volume_id]
-    D, H, W = g["mask"].shape
+    D, H, W = zarr.open(str(root / "volumes.zarr"), mode="r")[volume_id]["mask"].shape
     ext = rec["extent_foreground"]
     if yx is None:
         z0 = y0 = x0 = 0
@@ -1455,11 +1470,31 @@ def real_request(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -
         rd, (rh, rw) = POP_DEPTH, yx
         y0, x0 = (H - rh) // 2, (W - rw) // 2
         shape = (rd, rh, rw)
-    sl = np.s_[z0:z0 + rd, y0:y0 + rh, x0:x0 + rw]
+    th = np.full(shape[0], np.nan)
+    th[:rd] = np.asarray(rec["theta_deg"], np.float64)[z0:z0 + rd]
+    lo = (ext["z"][0] - z0, ext["y"][0] - y0, ext["x"][0] - x0)
+    hi = (ext["z"][1] + 1 - z0, ext["y"][1] + 1 - y0, ext["x"][1] + 1 - x0)
+    return {
+        "shape": shape, "crop": [[z0, z0 + rd], [y0, y0 + rh], [x0, x0 + rw]],
+        "theta": tuple(float(a) for a in th),
+        "box": (tuple(int(v) for v in lo), tuple(int(v) for v in hi)),
+    }
+
+
+@lru_cache(maxsize=1)
+def real_arrays(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -> dict:
+    """The heavy part, read only when a case is generated: the voxel envelope
+    (``sample_mask``; padding is air) and the MATERIAL porosity per 64-tile
+    (pore / envelope; a tile under 1 % envelope takes the mean)."""
+    import zarr  # noqa: PLC0415
+    m = real_meta(volume_id, yx, repo)
+    g = zarr.open(str(Path(repo or repo_root()) / "data" / "split_v4" / "volumes.zarr"), mode="r")[volume_id]
+    (z0, z1), (y0, y1), (x0, x1) = m["crop"]
+    shape = m["shape"]
     env = np.zeros(shape, bool)
     pore = np.zeros(shape, bool)
-    env[:rd, :rh, :rw] = np.asarray(g["sample_mask"][sl]).astype(bool)
-    pore[:rd, :rh, :rw] = np.asarray(g["mask"][sl]).astype(bool)
+    env[:z1 - z0, :y1 - y0, :x1 - x0] = np.asarray(g["sample_mask"][z0:z1, y0:y1, x0:x1]).astype(bool)
+    pore[:z1 - z0, :y1 - y0, :x1 - x0] = np.asarray(g["mask"][z0:z1, y0:y1, x0:x1]).astype(bool)
     pore &= env
     t = TILE
     shp = (shape[0] // t, t, shape[1] // t, t, shape[2] // t, t)
@@ -1467,20 +1502,15 @@ def real_request(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -
     n_pore = pore.reshape(shp).sum(axis=(1, 3, 5)).astype(np.float64)
     mean_phi = float(n_pore.sum() / max(n_env.sum(), 1.0))
     field = np.where(n_env >= 0.01 * t ** 3, n_pore / np.maximum(n_env, 1.0), mean_phi)
-    th = np.full(shape[0], np.nan)
-    th[:rd] = np.asarray(rec["theta_deg"], np.float64)[z0:z0 + rd]
-    lo = (ext["z"][0] - z0, ext["y"][0] - y0, ext["x"][0] - x0)
-    hi = (ext["z"][1] + 1 - z0, ext["y"][1] + 1 - y0, ext["x"][1] + 1 - x0)
-    return {
-        "shape": shape, "crop": [[z0, z0 + rd], [y0, y0 + rh], [x0, x0 + rw]],
-        "envelope": env, "field": field.astype(np.float32), "mean_phi": mean_phi,
-        "theta": tuple(float(a) for a in th),
-        "box": (tuple(int(v) for v in lo), tuple(int(v) for v in hi)),
-    }
+    return {"envelope": env, "field": field.astype(np.float32), "mean_phi": mean_phi}
 
 
-def _fixed(arr: np.ndarray, *_):
-    return arr
+def _real_envelope(volume_id, yx, shape):
+    return real_arrays(volume_id, yx)["envelope"]
+
+
+def _real_field(volume_id, yx, grid, seed):
+    return real_arrays(volume_id, yx)["field"]
 
 
 def pore_population_cases(repo=None) -> list[CaseSpec]:
@@ -1492,13 +1522,13 @@ def pore_population_cases(repo=None) -> list[CaseSpec]:
     for lo, hi in POP_BINS:
         tag = f"{lo * 100:g}-{hi * 100:g}"
         for gi, vid in enumerate(POP_GEOMETRY):
-            r = real_request(vid, (1024, 1024), repo)
+            r = real_meta(vid, (1024, 1024), repo)
             seed = 101 * (gi + 1)
             out.append(CaseSpec(
                 name=f"bin{tag}_g{gi}_seed{seed}", assessment="pore_population",
                 volume_shape=r["shape"], seed=seed, layup=r["theta"], ply_thickness_vox=1.0,
                 target_phi=(lo + hi) / 2, ddim_steps=POP_DDIM,
-                material_fn=partial(_fixed, r["envelope"]), specimen_box=r["box"],
+                material_fn=partial(_real_envelope, vid, (1024, 1024)), specimen_box=r["box"],
                 notes={"bin": f"{tag}%", "geometry_from": vid, "geometry_crop_zyx": r["crop"],
                        "request": "uniform material phi at the bin centre"},
             ))
@@ -1506,22 +1536,23 @@ def pore_population_cases(repo=None) -> list[CaseSpec]:
 
 
 def twin_cases(repo=None) -> list[CaseSpec]:
-    """36b - three whole coupons, air included, padded with air to the tile
-    grid, regenerated with their own envelope, per-tile material porosity,
-    theta(z) and specimen box. Measure the twin on ``real_crop_zyx``'s extent
-    (the padding cut off), against the real coupon itself."""
+    """36b - five real coupons per porosity bin, each regenerated whole: its
+    own size, air, material envelope, per-tile material porosity, theta(z) and
+    specimen box, padded with air to the tile grid. Measured on
+    ``real_crop_zyx``'s extent (the padding cut off) against the coupon."""
     out = []
-    for vid in TWIN_COUPONS:
-        r = real_request(vid, None, repo)
-        out.append(CaseSpec(
-            name="twin_" + vid.split("probetas_")[-1].replace("_volume_eq_aligned", ""),
-            assessment="twins", volume_shape=r["shape"], seed=101,
-            layup=r["theta"], ply_thickness_vox=1.0, ddim_steps=POP_DDIM,
-            field_fn=partial(_fixed, r["field"]), material_fn=partial(_fixed, r["envelope"]),
-            specimen_box=r["box"],
-            notes={"real_volume_id": vid, "real_crop_zyx": r["crop"], "real_mean_phi": r["mean_phi"],
-                   "request": "per-tile material phi, envelope, theta and box of the real coupon"},
-        ))
+    for b, vids in TWIN_COUPONS.items():
+        for vid in vids:
+            r = real_meta(vid, None, repo)
+            out.append(CaseSpec(
+                name=twin_name(vid),
+                assessment="twins", volume_shape=r["shape"], seed=101,
+                layup=r["theta"], ply_thickness_vox=1.0, ddim_steps=POP_DDIM,
+                field_fn=partial(_real_field, vid, None), material_fn=partial(_real_envelope, vid, None),
+                specimen_box=r["box"],
+                notes={"real_volume_id": vid, "real_crop_zyx": r["crop"], "bin": b,
+                       "request": "per-tile material phi, envelope, theta and box of the real coupon"},
+            ))
     return out
 
 
