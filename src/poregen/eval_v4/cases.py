@@ -1409,8 +1409,6 @@ POP_GEOMETRY = (
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_08_5_volume_eq_aligned",
 )
 #: Coupons generated whole as twins, one per bin 0-0.5 / 1-2 / 2-5 %.
-#: Na_01_1 (2.41 %) stands in for Na_09_5: 241 voxels deep, a 192 crop would
-#: drop a fifth of its thickness.
 TWIN_COUPONS = (
     "MedidasDB__Fabricacion_Nacho_05_Probetas_Nacho_2025_probetas_Na_05_2_volume_eq_aligned",
     "MedidasDB__Juan_Ignacio_probetas_8_volume_eq_aligned",
@@ -1424,13 +1422,17 @@ POP_DEPTH = 192
 def real_request(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -> dict:
     """Everything a generation needs to copy one real coupon's layout.
 
-    The crop is ``POP_DEPTH`` deep, centred on the specimen's z extent, and
-    either the whole coupon in y/x snapped down to 64-voxel tiles (``yx`` None)
-    or a centred ``yx`` window. Returned: the crop, the voxel envelope
-    (``sample_mask``), the MATERIAL porosity per 64-tile (pore / envelope; a
-    tile with under 1 % envelope takes the crop mean), theta(z) read from the
-    orientation field the LDM was trained on, and the specimen box from the
-    same file's foreground extent, in crop coordinates.
+    ``yx`` None (twins): the WHOLE coupon array, air included, padded with air
+    up to the next 64-voxel tile on each axis (author 2026-10-27: the full
+    coupon, not a crop). ``yx`` given (bin volumes): a ``POP_DEPTH``-deep crop
+    centred on the specimen's z extent and a centred ``yx`` window.
+
+    Returned: the canvas shape, the real region it holds (``crop``, in coupon
+    coordinates; the canvas starts at its origin), the voxel envelope
+    (``sample_mask``; padding is air), the MATERIAL porosity per 64-tile
+    (pore / envelope; a tile under 1 % envelope takes the mean), theta(z) from
+    the orientation field the LDM was trained on (NaN in padding rows, as in
+    air rows) and the specimen box from its foreground extent.
     """
     import zarr  # noqa: PLC0415
     root = Path(repo or repo_root()) / "data" / "split_v4"
@@ -1438,29 +1440,37 @@ def real_request(volume_id: str, yx: tuple[int, int] | None = None, repo=None) -
     g = zarr.open(str(root / "volumes.zarr"), mode="r")[volume_id]
     D, H, W = g["mask"].shape
     ext = rec["extent_foreground"]
-    zc = (ext["z"][0] + ext["z"][1] + 1) // 2
-    z0 = int(min(max(zc - POP_DEPTH // 2, 0), D - POP_DEPTH))
     if yx is None:
-        hs, ws = H // TILE * TILE, W // TILE * TILE
+        z0 = y0 = x0 = 0
+        rd, rh, rw = D, H, W
+        shape = tuple(-(-n // TILE) * TILE for n in (D, H, W))
     else:
-        hs, ws = yx
-    y0, x0 = (H - hs) // 2, (W - ws) // 2
-    sl = np.s_[z0:z0 + POP_DEPTH, y0:y0 + hs, x0:x0 + ws]
-    env = np.asarray(g["sample_mask"][sl]).astype(bool)
-    pore = np.asarray(g["mask"][sl]).astype(bool) & env
+        zc = (ext["z"][0] + ext["z"][1] + 1) // 2
+        z0 = int(min(max(zc - POP_DEPTH // 2, 0), D - POP_DEPTH))
+        rd, (rh, rw) = POP_DEPTH, yx
+        y0, x0 = (H - rh) // 2, (W - rw) // 2
+        shape = (rd, rh, rw)
+    sl = np.s_[z0:z0 + rd, y0:y0 + rh, x0:x0 + rw]
+    env = np.zeros(shape, bool)
+    pore = np.zeros(shape, bool)
+    env[:rd, :rh, :rw] = np.asarray(g["sample_mask"][sl]).astype(bool)
+    pore[:rd, :rh, :rw] = np.asarray(g["mask"][sl]).astype(bool)
+    pore &= env
     t = TILE
-    shp = (POP_DEPTH // t, t, hs // t, t, ws // t, t)
+    shp = (shape[0] // t, t, shape[1] // t, t, shape[2] // t, t)
     n_env = env.reshape(shp).sum(axis=(1, 3, 5)).astype(np.float64)
     n_pore = pore.reshape(shp).sum(axis=(1, 3, 5)).astype(np.float64)
     mean_phi = float(n_pore.sum() / max(n_env.sum(), 1.0))
     field = np.where(n_env >= 0.01 * t ** 3, n_pore / np.maximum(n_env, 1.0), mean_phi)
-    theta = tuple(float(a) for a in np.asarray(rec["theta_deg"], np.float64)[z0:z0 + POP_DEPTH])
+    th = np.full(shape[0], np.nan)
+    th[:rd] = np.asarray(rec["theta_deg"], np.float64)[z0:z0 + rd]
     lo = (ext["z"][0] - z0, ext["y"][0] - y0, ext["x"][0] - x0)
     hi = (ext["z"][1] + 1 - z0, ext["y"][1] + 1 - y0, ext["x"][1] + 1 - x0)
     return {
-        "shape": (POP_DEPTH, hs, ws), "crop": [[z0, z0 + POP_DEPTH], [y0, y0 + hs], [x0, x0 + ws]],
+        "shape": shape, "crop": [[z0, z0 + rd], [y0, y0 + rh], [x0, x0 + rw]],
         "envelope": env, "field": field.astype(np.float32), "mean_phi": mean_phi,
-        "theta": theta, "box": (tuple(int(v) for v in lo), tuple(int(v) for v in hi)),
+        "theta": tuple(float(a) for a in th),
+        "box": (tuple(int(v) for v in lo), tuple(int(v) for v in hi)),
     }
 
 
@@ -1491,8 +1501,10 @@ def pore_population_cases(repo=None) -> list[CaseSpec]:
 
 
 def twin_cases(repo=None) -> list[CaseSpec]:
-    """36b - three whole coupons regenerated with their own air envelope,
-    per-tile material porosity, theta(z) and specimen box."""
+    """36b - three whole coupons, air included, padded with air to the tile
+    grid, regenerated with their own envelope, per-tile material porosity,
+    theta(z) and specimen box. Measure the twin on ``real_crop_zyx``'s extent
+    (the padding cut off), against the real coupon itself."""
     out = []
     for vid in TWIN_COUPONS:
         r = real_request(vid, None, repo)

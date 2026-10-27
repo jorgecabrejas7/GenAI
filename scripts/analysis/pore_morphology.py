@@ -101,8 +101,11 @@ def generated(root: Path, out: Path) -> None:
             continue
         t0 = time.time()
         m = json.load(open(d / "manifest.json"))
-        df, s = measure(tifffile.imread(d / "label.tif"), VOXEL_UM)
         notes = m.get("notes", {})
+        label = tifffile.imread(d / "label.tif")
+        if "real_crop_zyx" in notes:  # twins: cut the air padding off
+            label = label[tuple(slice(0, hi - lo) for lo, hi in notes["real_crop_zyx"])]
+        df, s = measure(label, VOXEL_UM)
         s.update(source="generated", case=d.name, seed=m.get("seed"),
                  requested_phi=m.get("requested_global_phi"),
                  chunk_overlap=m.get("chunk_overlap", notes.get("chunk_overlap")),
