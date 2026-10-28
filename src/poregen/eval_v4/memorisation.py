@@ -1084,7 +1084,15 @@ def memorisation(
     coarse_bucketed: list[str] = []
     for case in cases:
         m = case.manifest
-        m.require(("requested_global_phi",), "memorisation")
+        # A field request (campaign 36's twins) has no global phi; its level is
+        # the mean of the requested per-tile field, recorded as such.
+        if m.requested_global_phi is not None:
+            req_phi, phi_source = float(m.requested_global_phi), "global"
+        else:
+            field = case.requested_field()
+            if field is None:
+                m.require(("requested_global_phi",), "memorisation")
+            req_phi, phi_source = float(field.mean()), "field mean"
         origins = patch_origins(case.material_voxels())
         win = window_states(m)
         census = win.census()
@@ -1105,11 +1113,12 @@ def memorisation(
         q_latent.append(train.normalise_latents(mu))
         q_grey.append(grey_patches(case.xct, origins))
         case_of += [m.case] * len(origins)
-        phi_of += [float(m.requested_global_phi)] * len(origins)
+        phi_of += [req_phi] * len(origins)
         bucket_of += buckets
         per_case[m.case] = {
             "n_patches": len(origins),
-            "requested_phi": float(m.requested_global_phi),
+            "requested_phi": req_phi,
+            "requested_phi_source": phi_source,
             "assessment": m.assessment,
             "volume_shape": list(m.volume_shape),
             "ddim_steps": m.ddim_steps,

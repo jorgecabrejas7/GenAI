@@ -80,9 +80,11 @@ class CaseSpec:
     #: ``chunk_overlap_pinned`` (None = the whole overlap) is how much of the
     #: strip is held fixed while the successor denoises; a shorter pin frees
     #: the predecessor's own depleted rim for the successor to redraw.
-    chunk_overlap: int = 0
+    #: None = the sampler's default, a2s on every multi-chunk volume (author
+    #: 2026-10-28). 0 asks for the unoverlapped partition explicitly.
+    chunk_overlap: int | None = None
     chunk_overlap_pinned: int | None = None
-    chunk_overlap_write: str = "blend"
+    chunk_overlap_write: str | None = None
     #: Arm (f): for windows whose neighbour set is MIXED (some faces solved,
     #: the face toward the next chunk not), predict with the neighbour arm
     #: dropped. One model call, so it costs production time.

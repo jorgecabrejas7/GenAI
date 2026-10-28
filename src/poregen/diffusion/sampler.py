@@ -105,6 +105,8 @@ ABLATABLE = ("orient", "depth_dist6")
 #: chunk's prediction outright, which is what isolates whether that prediction
 #: is any less depleted than the one it replaces.
 OVERLAP_WRITES = ("blend", "pin", "successor")
+#: The a2s chunk-overlap scheme, the default for every multi-chunk volume.
+A2S_OVERLAP, A2S_PINNED, A2S_WRITE = 64, 32, "successor"
 
 # The decode blend window must never be exactly zero: a volume's own outer face
 # is covered by a single decode window, and a zero weight there would leave the
@@ -822,9 +824,9 @@ class VolumeGenerator:
         por_log_stats: tuple[float, float] | None = None,
         theta_deg: np.ndarray | None = None,
         chunk_tiles: tuple[int, int, int] = (3, 3, 3),
-        chunk_overlap: int = 0,
+        chunk_overlap: int | None = None,
         chunk_overlap_pinned: int | None = None,
-        chunk_overlap_write: str = "blend",
+        chunk_overlap_write: str | None = None,
         drop_neighbours_when_mixed: bool = False,
         window_stride: int = 32,
         decode_stride: int = 32,
@@ -854,6 +856,25 @@ class VolumeGenerator:
         self.por_log_stats = por_log_stats
         self.theta_deg     = None if theta_deg is None else np.asarray(theta_deg)
         self.chunk_tiles   = tuple(int(c) for c in chunk_tiles)
+        # DEFAULT = a2s (author 2026-10-28: "from now on use always a2s sampler
+        # for volumes larger than a chunk"): 64-voxel overlap, 32 pinned, the
+        # free part written from the successor's own prediction. It clears the
+        # chunk-plane pore band (campaign 35: per-axis seam 0.61-0.89 -> 0.96-1.04)
+        # at 2-2.6x the generation time. A volume of one chunk has no successor,
+        # so the setting changes nothing there; a chunk of one tile cannot hold a
+        # 64-voxel overlap and stays unoverlapped. Pass chunk_overlap=0 for the
+        # unoverlapped partition explicitly.
+        if chunk_overlap is None:
+            if min(self.chunk_tiles) * patch_size > A2S_OVERLAP:
+                chunk_overlap = A2S_OVERLAP
+                if chunk_overlap_pinned is None:
+                    chunk_overlap_pinned = A2S_PINNED
+                if chunk_overlap_write is None:
+                    chunk_overlap_write = A2S_WRITE
+            else:
+                chunk_overlap = 0
+        if chunk_overlap_write is None:
+            chunk_overlap_write = "blend"
         self.chunk_overlap = int(chunk_overlap)
         #: How much of the overlap is held at the predecessor's value while the
         #: successor denoises.  None = all of it.  A SHORTER pin leaves the
@@ -1631,6 +1652,16 @@ class VolumeGenerator:
         # logit, so the conversion is clamp-and-scale.  A sigmoid here would
         # squash every volume into [0.5, 0.731] and destroy its contrast.
         xct_u8 = np.round(np.clip(xct, 0.0, 1.0) * 255.0).astype(np.uint8)
+        # Air is ONE grey value in a real scan (author 2026-10-28): the decoder
+        # leaves noisy patches in some air regions, which give a synthetic
+        # volume away. Every voxel labelled air takes the mean grey of the
+        # air voxels of this volume. The float ``xct`` (seam diagnostics) is
+        # left as decoded.
+        air = label == 2
+        air_grey = int(np.round(xct_u8[air].mean())) if air.any() else None
+        if air_grey is not None:
+            xct_u8[air] = air_grey
+        del air
 
         # ── seam diagnostics ─────────────────────────────────────────────────
         # Measured on the decoder's own continuous output: the grey level, and
@@ -1690,6 +1721,7 @@ class VolumeGenerator:
             "conditioned_porosity": conditioned_por,
             "actual_label_porosity": actual_por,
             "actual_label_air": actual_air,
+            "air_grey_value": air_grey,
             **seam_stats,
         }
         extra: tuple = ()

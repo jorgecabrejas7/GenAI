@@ -50,15 +50,19 @@ tensorboard --logdir runs/vae/
 
 ## Known pre-existing test failures
 
-Exactly these five tests fail. **Everything else must pass.**
+Exactly these six tests fail. **Everything else must pass.**
 
 ```
+tests/test_decoder_finetune.py::TestRefinerFakeBranch::test_the_fake_branch_comes_from_the_bank_not_the_reconstruction
 tests/test_losses_smoke.py::TestLossesSmoke::test_all_components_present
 tests/test_latent_metrics.py::test_active_units_counts_collapsed_channels
 tests/test_recon_metrics.py::test_run_eval_logs_sharpness_on_post_sigmoid_xct
 tests/test_recon_metrics.py::test_run_eval_aggregates_active_units_across_eval_window
 tests/test_recon_metrics.py::test_train_loop_runs_final_full_eval_for_val_and_test
 ```
+
+The decoder_finetune one was found on 2026-10-28; it fails identically with the
+working tree stashed, so it predates that day's sampler change. Not yet diagnosed.
 
 **Fixed 2026-09-17.** Six tests in `tests/test_downstream_utility.py` had been
 failing since the augmentation arms were added (`63cfe0b`) to a test file last

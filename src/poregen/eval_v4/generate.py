@@ -482,9 +482,9 @@ class VolumeRunner:
                 # A sampler setting that changes the result must be in the
                 # manifest, or a trial volume is indistinguishable from a
                 # production one.
-                "chunk_overlap": spec.chunk_overlap,
-                "chunk_overlap_pinned": spec.chunk_overlap_pinned,
-                "chunk_overlap_write": spec.chunk_overlap_write,
+                "chunk_overlap": generator.chunk_overlap,  # as resolved: None in the case means a2s
+                "chunk_overlap_pinned": generator.chunk_overlap_pinned,  # as resolved: None in the case means a2s
+                "chunk_overlap_write": generator.chunk_overlap_write,  # as resolved: None in the case means a2s
                 "drop_neighbours_when_mixed": spec.drop_neighbours_when_mixed,
                 "reference_latents": reference_note,
                 "request_offset": list(spec.request_offset),
