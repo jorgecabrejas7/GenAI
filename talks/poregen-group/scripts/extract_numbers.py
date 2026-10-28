@@ -162,6 +162,30 @@ for line in VAE_TABLE.read_text().split("## B.")[0].splitlines():
                      "pore_dice": on(cells[6]), "air_dice": on(cells[7]), "phi_mae": on(cells[8])})
 put("vae_rungs", rows, f"{VAE_TABLE.relative_to(ROOT)}#table A, ON column (whole val split, last step)")
 
+# --- whole coupons and their twins (render_twins.py) ------------------------
+C36 = CAMP / "36-pore-morphology" / "compare"
+TW = Path(__file__).resolve().parents[1] / "build" / "twins" / "twins.json"
+tw = load(TW)
+NOTES = {"8": "other material", "Na_02_4": "training set"}
+twins, ratios = [], []
+for c in ("Na_05_2", "Na_09_1", "8", "Na_09_5", "Na_02_4"):
+    d = tw[c]
+    wa = load(C36 / c / "twin_a2s_manifest.json")["wall_time_s"]
+    wp = load(C36 / c / "twin_production_manifest.json")["wall_time_s"]
+    ratios.append(wa / wp)
+    twins.append({"phi_real": d["phi_real"], "phi_twin": d["phi_twin_a2s"], "phi_twin_standard": d["phi_twin_production"],
+                  "air_grey": d["air_a2s"]["value"], "video": d["video"]["name"], "phases": d["video"]["phase_start_s"],
+                  "note": NOTES.get(c, ""), "wall_h": wa / 3600})
+put("twins", twins, f"{TW.relative_to(ROOT)} (render_twins.py: porosity = pore / (pore + material) from compare/<coupon>/*_label.tif; "
+    "air_grey = round(mean grey over the twin's air)); wall_h from compare/<coupon>/twin_a2s_manifest.json#wall_time_s")
+put("a2s_time_ratio", ratios, "runs/campaigns/36-pore-morphology/compare/<coupon>/twin_{a2s,production}_manifest.json#wall_time_s, a2s / production")
+sm = tw["seam"]
+SPAN = (1152, 2304)                                    # 1152 voxels in the middle of the coupon, 6 joins
+put("seam_twin", {"span": SPAN, **{k: sm[k]["profile_y"][SPAN[0]:SPAN[1]] for k in ("real", "production", "a2s")},
+                  "fold": {k: sm[k]["fold"] for k in ("real", "production", "a2s")},
+                  "at_join": {k: sm[k]["fold_at_join_pm2"] for k in ("real", "production", "a2s")}},
+    f"{TW.relative_to(ROOT)}#seam ({sm['coupon']}; {sm['how']})")
+
 OUT.parent.mkdir(parents=True, exist_ok=True)
 OUT.write_text(json.dumps(numbers, indent=1, default=float))
 print(f"{len(numbers)} numbers -> {OUT}")

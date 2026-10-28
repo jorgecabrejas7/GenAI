@@ -246,8 +246,8 @@ def real_vs_gen():
 
 
 def large_volume():
-    """One xy slice of a 1024×1024×192 generated volume (mid-depth), grey only."""
-    v, _ = gen("sampler", "1024_ddim50_seed101")
+    """One xy slice of a 1024×1024×192 volume from the overlapped sampler (mid-depth), grey only."""
+    v = tifffile.imread(A2S / "sampler/volumes/1024_ddim50_seed101/volume.tif")
     g = stretch(v[96])
     Image.fromarray(overlay(g, None)).save(OUT / "large_grey.jpg", quality=86)
 

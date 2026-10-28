@@ -1,12 +1,13 @@
 # PoreGen — group-meeting deck
 
-A 36-slide, ~37-minute talk (speaker-note estimates) for a mixed ML and materials audience: diffusion from
+A 41-slide, ~42-minute talk (speaker-note estimates) for a mixed ML and materials audience: diffusion from
 scratch, the state of the art, our data, autoencoder, latent diffusion model,
 large-volume assembly, evaluation and results of the final model.
 
 ## Build
 
 ```bash
+python talks/poregen-group/scripts/render_twins.py      # coupon twins: air fix, porosity, videos, seam profile (CPU, lazy reads)
 python talks/poregen-group/scripts/extract_numbers.py   # numbers + sources -> deck/media/numbers.json
 python talks/poregen-group/scripts/render_media.py      # images and videos -> deck/media/ (~10 min, CPU)
 python talks/poregen-group/scripts/build_deck.py        # -> deck/index.html
@@ -29,3 +30,4 @@ Keys: ← → Space navigate · N speaker notes · F fullscreen · E edit text.
   baseline and autoencoder-study campaign folders under `runs/campaigns/`
   (paths at the top of `scripts/extract_numbers.py` and `scripts/render_media.py`).
 - One real scan and its reference segmentation from `raw_data/MedidasDB/`.
+- Five real coupons and their twins (standard and overlapped sampler) from the pore-morphology campaign's `compare/` folders (read only).

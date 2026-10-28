@@ -90,6 +90,18 @@ aside.notes { display:none; }
 /* ===========================================================
    SLIDE-SPECIFIC LAYOUTS
    =========================================================== */
+/* step / definition lists that highlight in time with a diagram */
+.ptwc-row { display:grid; grid-template-columns:150px 1fr; gap:18px; padding:16px 0 16px 18px; border-left:3px solid transparent; transition:border-color .3s, opacity .3s; opacity:.45; }
+.ptwc-row.on { border-left-color:var(--pore); opacity:1; }
+.ptwc-row .n { font:500 26px var(--mono); color:var(--pore); }
+.ptwc-row .sz { font:400 20px var(--mono); color:var(--ink); margin-bottom:4px; }
+.ptwc-row .tx { font:300 23px/1.35 var(--sans); color:var(--ink2); }
+#sA2S .ptwc-row { grid-template-columns:34px 1fr; padding:8px 0 8px 14px; }
+#sA2S .ptwc-row .tx { font-size:19px; line-height:1.3; }
+#sA2S .ptwc-row .sz { font-size:18px; margin-bottom:2px; }
+.tab { font:400 20px var(--mono); color:var(--ink2); background:transparent; border:1px solid var(--faint); padding:8px 16px; cursor:pointer; }
+.tab.on { color:var(--ink); border-color:var(--pore); background:rgba(255,176,0,.10); }
+.tab small { font-size:15px; color:var(--mute); }
 /* 01 title */
 #s1 .title { position:absolute; left:96px; top:270px; margin:0; font:400 200px/.88 var(--serif); letter-spacing:-.02em; }
 #s1 .title i { color:var(--pore); }
@@ -232,7 +244,7 @@ aside.notes { display:none; }
   </div>
   <aside class="notes">
     <p>~60 s. The network is called ε<sub>θ</sub> because it outputs a guess of ε, and θ are the weights we train. Training is ordinary supervised learning: we made the noisy image ourselves, so we know the right answer, the noise. The loss is the squared error between the true and the guessed noise.</p>
-    <p>To generate, start from pure noise. At each step, the network guesses the noise; we remove a small part of it and get a slightly cleaner image. After all steps we have a new image. The animation on the right only illustrates the idea on a real slice; it uses the true noise, not a network. Our model actually predicts a different quantity, v — slides 10 and 11 explain what and why.</p>
+    <p>To generate, start from pure noise. At each step, the network guesses the noise; we remove a small part of it and get a slightly cleaner image. After all steps we have a new image. The animation on the right only illustrates the idea on a real slice; it uses the true noise, not a network. Our model actually predicts a different quantity, v — slides <span class="sref" data-to="s8a"></span> and <span class="sref" data-to="s8"></span> explain what and why.</p>
     <p class="src">Reference verified: Ho, Jain, Abbeel, NeurIPS 2020, arXiv:2006.11239.</p>
   </aside>
 </section>
@@ -331,8 +343,8 @@ aside.notes { display:none; }
     <div class="words r d5"><div><b>condition</b>an extra input the output must follow: requested porosity, ply angles, specimen shape.</div><div><b>unconditional</b>the network’s answer when the condition is hidden (a learned "null" input).</div><div><b>guidance scale s</b>s = 1: the plain conditional answer. s > 1: follow the condition more strongly.</div></div>
   </div>
   <aside class="notes">
-    <p>~50 s. A model that only makes "some coupon" is not useful; we want to say what to make. The condition is fed as an extra input. Classifier-free guidance: during training the condition is sometimes replaced by a null token, so the same network can answer with and without it. At sampling we compute both answers and extrapolate along their difference with scale s. Later (slide 27) we show what s does to our porosity: asked for 0.02, s = 1 gives 0.0176 and s = 2 gives 0.0199.</p>
-    <p class="src">Reference verified: Ho &amp; Salimans, NeurIPS 2021 workshop, arXiv:2207.12598. Numbers: full evaluation of the final model, guidance cells (see slide 27 sources).</p>
+    <p>~50 s. A model that only makes "some coupon" is not useful; we want to say what to make. The condition is fed as an extra input. Classifier-free guidance: during training the condition is sometimes replaced by a null token, so the same network can answer with and without it. At sampling we compute both answers and extrapolate along their difference with scale s. Later (slide <span class="sref" data-to="s23"></span>) we show what s does to our porosity: asked for 0.02, s = 1 gives 0.0176 and s = 2 gives 0.0199.</p>
+    <p class="src">Reference verified: Ho &amp; Salimans, NeurIPS 2021 workshop, arXiv:2207.12598. Numbers: full evaluation of the final model, guidance cells (see slide <span class="sref" data-to="s23"></span> sources).</p>
   </aside>
 </section>
 
@@ -465,7 +477,7 @@ aside.notes { display:none; }
         <li><b style="color:var(--ink);font-weight:500">Specimen geometry</b> — surfaces, holes, notches</li>
       </ul>
     </div>
-    <div class="words r d5"><div><b>GAN</b>generative adversarial network: a generator makes samples, a critic tries to tell them from real ones; both improve.</div><div><b>LDM</b>latent diffusion model: diffusion on compressed data, as on slide 12.</div><div><b>conditioned / unconditional</b>with / without an input that controls the output.</div></div>
+    <div class="words r d5"><div><b>GAN</b>generative adversarial network: a generator makes samples, a critic tries to tell them from real ones; both improve.</div><div><b>LDM</b>latent diffusion model: diffusion on compressed data, as on slide <span class="sref" data-to="s9"></span>.</div><div><b>conditioned / unconditional</b>with / without an input that controls the output.</div></div>
   </div>
   <aside class="notes">
     <p>~60 s. GANs gave the first 3-D microstructures. SliceGAN removed the need for 3-D training data. Diffusion models have replaced GANs in quality, first in 2-D, then 3-D. The closest work to ours is Naiff et al. 2026: a latent diffusion model for 3-D porous media conditioned on porosity. Their 2026 preprint adds a porosity field for large volumes.</p>
@@ -622,7 +634,7 @@ aside.notes { display:none; }
         <li>without per-face dropout: a pore-depleted band at chunk boundaries</li>
       </ul>
     </div>
-    <div class="words r d5"><div><b>neighbour</b>the latent of the patch touching one face; it tells the network what is on the other side.</div><div><b>dropout</b>hiding an input at random during training, so the network also learns to work without it.</div><div><b>the null for guidance</b>all six hidden: the "unconditional" answer of slide 9.</div></div>
+    <div class="words r d5"><div><b>neighbour</b>the latent of the patch touching one face; it tells the network what is on the other side.</div><div><b>dropout</b>hiding an input at random during training, so the network also learns to work without it.</div><div><b>the null for guidance</b>all six hidden: the "unconditional" answer of slide <span class="sref" data-to="s7g"></span>.</div></div>
   </div>
   <aside class="notes">
     <p>~60 s. The cube is one patch. Each face has one of three states. In training, each face independently becomes "unknown" with probability 0.10, and all six together with probability 0.05 (that is the "no neighbour" condition used by guidance).</p>
@@ -632,30 +644,68 @@ aside.notes { display:none; }
 </section>
 
 <!-- =========================================================
+     18a — PATCH, TILE, WINDOW, CHUNK
+     ========================================================= -->
+<section class="slide" id="sPT" data-init="ptwc" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · four words</div>
+  <h2 class="t r">Patch, tile, window, <i>chunk</i></h2>
+  <p class="msg r d1">The network always works on cubes of 64 × 64 × 64 voxels. These four words say how we use those cubes: to train, and to build a volume larger than one cube.</p>
+  <div class="body">
+    <svg id="ptwcSvg" viewBox="0 0 600 600" width="560" height="560" class="r d2"></svg>
+    <div id="ptwcRows" class="r d3" style="position:absolute;left:660px;top:0;width:1068px"></div>
+    <div class="words r d5"><div><b>voxel</b>one 3-D pixel of the scan; here 25 µm per side, so 64 voxels = 1.6 mm.</div><div><b>stride</b>the distance from one start to the next. Stride 32 with size 64 means each cube overlaps the next by half.</div><div><b>latent block</b>the compressed form of one 64³ cube: 16³ cells × 4 numbers.</div></div>
+  </div>
+  <aside class="notes">
+    <p>~50 s. One size, four uses. A patch is a training example: a 64³ cube cut from a real scan, a new one every 32 voxels. A tile is a cell of the grid of a new volume, every 64 voxels without overlap: one porosity request and one latent block per tile. A window is one call of the network during generation: windows are also 64³, but they start every 32 voxels, so each one overlaps its neighbours by half, and their predictions are averaged. A chunk is 3 × 3 × 3 tiles, 192³ voxels, that go through all 50 denoising steps together; then the next chunk starts.</p>
+    <p>The animation cycles through the four. Patch: a cube moving over a real scan. Tile: the grid of a generated slice. Window: windows stepping by 32 inside one chunk. Chunk: the chunk outline, then the next chunk.</p>
+    <p class="src">Patch size 64 and stride 32: dataset build report. Tile = latent patch 64³ → 16³ × 4: autoencoder configuration (f = 4, c = 4). Window stride 32 and chunk of 3 × 3 × 3 tiles: generation manifest (window_stride 32, chunk_tiles 3, 3, 3). 125 windows per chunk: windows of 16 cells every 8 cells over a 48-cell chunk give 5 per axis (sampler code, window origins). Images: real scan Na_02 coupon 2, slice 55; generated slice of the final model, 1024 × 1024 × 192, seed 101.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     18b — HOW A LARGE VOLUME IS GENERATED
+     ========================================================= -->
+<section class="slide" id="sGEN" data-init="genflow" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · the whole process</div>
+  <h2 class="t r">How a large volume is <i>generated</i></h2>
+  <p class="msg r d1">Noise is put on the whole compressed volume. Then one chunk at a time goes through 50 denoising steps. At the end, the decoder turns the result into grey values and labels.</p>
+  <div class="body">
+    <svg id="genSvg" viewBox="0 0 1728 560" width="1728" height="560" class="r d2"></svg>
+    <div class="words r d5"><div><b>latent canvas</b>the whole volume in compressed form: ¼ of the size per side, 4 numbers per cell.</div><div><b>neighbours</b>the six touching cubes; finished ones are shown, not-yet-made ones are marked "unknown".</div><div><b>DDIM step</b>one move from a noisier to a less noisy state, using the prediction (slide <span class="sref" data-to="s7"></span>).</div></div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Left to right. (1) We say what we want as maps: where the specimen is and where air is, the ply angle at every depth, and a porosity value for every tile. (2) Random noise fills the latent canvas, the compressed volume. (3) The chunks are taken in order: depth, then y, then x. (4) Inside the chunk, each of the up to 125 windows is given its noisy latent, its maps, and its six neighbours, and the network predicts v. (5) The predictions are averaged with the window weights, and one DDIM step makes the chunk a little less noisy. Steps 4 and 5 repeat 50 times. (6) The finished chunk is written to the canvas and becomes a neighbour for the next chunks. When every chunk is done, the decoder runs over the canvas in overlapping 64³ passes and gives grey values and labels.</p>
+    <p>Scale: one whole coupon, 3 904 × 1 984 × 256 voxels, is 900 chunks with the overlapped sampler, and took 4.3 h on one GPU.</p>
+    <p class="src">Order of chunks (depth, y, x), window count and re-noising of finished chunks: sampler code. Chunk count: chunks of 48 latent cells advancing by 32 (overlap 16 cells = 64 voxels) over 64 × 976 × 496 cells give 2 × 30 × 15 = 900. Time: generation record of the twin of coupon Na_09_5, wall time 15 613 s, volume 256 × 3 904 × 1 984, DDIM-50.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
      18 — TILES, CHUNKS AND ORDER
      ========================================================= -->
 <section class="slide" id="s18" data-init="chunks" data-section="Large volumes">
   <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · assembly</div>
   <h2 class="t r">Large volumes: <i>tiles, chunks, order</i></h2>
-  <p class="msg r d1">The volume is a grid of 64³ tiles. Groups of 3 × 3 × 3 tiles (chunks) are denoised together. Chunks follow each other; a finished chunk becomes a neighbour.</p>
+  <p class="msg r d1">The volume is a grid of 64³ tiles. Groups of 3 × 3 × 3 tiles (chunks) are denoised together. Each chunk starts two tiles after the one before, so they overlap by one tile. A finished chunk becomes a neighbour.</p>
   <div class="body">
     <canvas id="chunkCv" width="620" height="620" class="vid r d2" style="position:absolute;left:0;top:0;width:520px;height:520px"></canvas>
     <div class="r d3" style="position:absolute;left:600px;top:0;width:1128px">
       <div class="legend" style="flex-direction:column;gap:18px">
         <span style="--c:var(--pore)">chunk being denoised now (all 50 steps)</span>
         <span style="--c:var(--mat)">finished chunks — "exists" for the next ones</span>
+        <span style="--c:var(--ink)">overlap with finished chunks — see the next slides</span>
         <span style="--c:var(--b3)">not yet made — "unknown"</span>
         <span style="--c:var(--air)">canvas edge — "outside"</span>
       </div>
       <p class="lbl" style="margin-top:36px">1024 × 1024 × 192 voxels = 16 × 16 × 3 tiles</p>
-      <p class="lbl" style="margin-top:10px">one chunk = 192³ voxels, the unit the model was also sampled on in training</p>
+      <p class="lbl" style="margin-top:10px">one chunk = 192³ voxels; a new chunk every 128 voxels</p>
       <p class="lbl" style="margin-top:10px">finished chunks are re-noised to the current step before they are shown as neighbours</p>
     </div>
     <div class="words r d5"><div><b>tile</b>one 64³ block of the volume, one latent patch.</div><div><b>chunk</b>3 × 3 × 3 tiles denoised together through all 50 steps.</div><div><b>re-noised</b>a finished chunk is shown to the next one with noise matching the current step, as in training.</div></div>
   </div>
   <aside class="notes">
-    <p>~60 s. Background: one real generated slice, 1024 × 1024 at mid-depth. The grid shows the 64-voxel tiles; thick lines are chunks of 3 × 3 tiles. The animation shows the order: the amber chunk is solved jointly through all 50 DDIM steps, then it is fixed and becomes a known neighbour for the following chunks. At each step of a new chunk, the finished neighbours are noised to that step's level, so the model always sees neighbours at a matching noise level.</p>
-    <p class="src">Image: final model, large-volume generation, 1024 × 1024 × 192, DDIM-50, seed 101, slice 96. Chunk of 3 × 3 × 3 tiles, window stride 32 voxels: generation manifest. Re-noising of finished chunks: sampler design (architecture document).</p>
+    <p>~50 s. Background: one generated slice, 1024 × 1024 at mid-depth, made with the overlapped sampler. The thin grid shows the 64-voxel tiles. The animation shows the order: the amber chunk of 3 × 3 tiles is solved through all 50 DDIM steps, then it is fixed and becomes a known neighbour for the next chunks. Each chunk starts two tiles (128 voxels) after the previous one, so it shares one tile with it (outlined); the next slides explain what happens there. At each step of a new chunk, the finished neighbours are noised to that step's level, so the model always sees neighbours at a matching noise level.</p>
+    <p class="src">Image: final model, overlapped sampler, 1024 × 1024 × 192, DDIM-50, seed 101, slice 96. Chunk of 3 × 3 × 3 tiles, overlap 64 voxels, window stride 32 voxels: sampler defaults and generation manifest. On 16 tiles a chunk starts at tiles 0, 2, …, 14 (the last one is 2 tiles wide). Re-noising of finished chunks: sampler design (architecture document).</p>
   </aside>
 </section>
 
@@ -685,23 +735,64 @@ aside.notes { display:none; }
 </section>
 
 <!-- =========================================================
+     19b — THE OVERLAPPED SAMPLER
+     ========================================================= -->
+<section class="slide" id="sA2S" data-init="a2s" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · the sampler we use</div>
+  <h2 class="t r">The overlapped sampler: <i>keep, see, redraw</i></h2>
+  <p class="msg r d1">The last voxels of a chunk are made while the next chunk does not exist yet. They get too few pores. In the sampler we use, the next chunk starts 64 voxels earlier and draws those voxels again.</p>
+  <div class="body">
+    <svg id="a2sSvg" viewBox="0 0 1060 560" width="1000" height="528" class="r d2"></svg>
+    <div id="a2sRows" class="r d3" style="position:absolute;left:1080px;top:0;width:648px"></div>
+    <div class="words r d5"><div><b>rim</b>the last voxels of a chunk, next to a face that was "unknown" when they were made.</div><div><b>kept</b>at every step, reset to the previous chunk's result with the noise of that step; the network sees it but does not change it.</div><div><b>band</b>a thin layer with fewer pores along every chunk join.</div></div>
+  </div>
+  <aside class="notes">
+    <p>~80 s. One axis through two chunks; the dots are pores (schematic). First: the standard way. Chunk k+1 starts where chunk k ends. The rim of chunk k was made with that face unknown, and it has fewer pores: a band at every join.</p>
+    <p>The overlapped sampler. Chunk k+1 starts 64 voxels before chunk k ends, so each chunk moves on by 128 voxels, not 192. The 64 shared voxels have two parts. The first 32 are kept: at every one of the 50 steps they are reset to chunk k's finished result, noised to the level of that step (the RePaint idea). The windows of chunk k+1 see them as context, so the new chunk continues chunk k. The last 32 are chunk k's rim; they are free, and chunk k+1 draws them again, now with known material on both sides. At the end the kept 32 are exactly chunk k's, the redrawn 32 are chunk k+1's.</p>
+    <p>Why only 32: the other 32 are the poor rim. If they were kept too, they would steer the new chunk at every step to copy the band. Cost: 2.6–2.7 times the time of the standard sampler on five whole coupons. This is the sampler we use for every volume larger than one chunk.</p>
+    <p class="src">Overlap 64, kept 32, free part written from the new chunk's prediction: sampler code (default settings) and the generation records of the twins. Time ratios, overlapped ÷ standard, same coupon and seed: 2.61, 2.56, 2.72, 2.65, 2.69 (generation records, wall time). RePaint: Lugmayr et al., CVPR 2022.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
      20 — THE CHUNK SEAM AND THE OVERLAPPED SCHEME
      ========================================================= -->
 <section class="slide" id="s20" data-section="Large volumes">
   <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · chunk seams</div>
-  <h2 class="t r">The chunk seam, and the <i>overlapped scheme</i></h2>
-  <p class="msg r d1">Chunks placed edge to edge leave fewer pores on every chunk plane. Letting each chunk overlap the next by 64 voxels removes it.</p>
+  <h2 class="t r">The overlapped sampler <i>removes the band</i></h2>
+  <p class="msg r d1">Generated volumes of 1024 × 1024 × 192 voxels, made both ways. Standard chunks leave fewer pores at every join; overlapped chunks do not.</p>
   <div class="body">
-    <svg id="schemeSvg" viewBox="0 0 560 620" width="474" height="525" class="r d2"></svg>
-    <svg id="profSvg" viewBox="0 0 640 640" width="542" height="542" class="r d3" style="position:absolute;left:560px;top:0"></svg>
-    <svg id="seamBars" viewBox="0 0 450 620" width="381" height="525" class="r d4" style="position:absolute;left:1180px;top:0"></svg>
-    <div class="words r d5"><div><b>chunk plane</b>the boundary between two chunks that were denoised separately.</div><div><b>pore fraction ÷ mean</b>pores near the plane compared with the whole volume; 1 = no band.</div><div><b>pore seam ratio</b>the seam ratio of slide 23 on the pore map; 1 is the target.</div></div>
+    <svg id="profSvg" viewBox="0 0 640 640" width="542" height="542" class="r d2" style="position:absolute;left:40px;top:0"></svg>
+    <svg id="seamBars" viewBox="0 0 450 620" width="381" height="525" class="r d3" style="position:absolute;left:700px;top:0"></svg>
+    <div class="r d4" style="position:absolute;left:1180px;top:20px;width:548px">
+      <p class="lbl" style="margin:0 0 8px">time, overlapped ÷ standard</p>
+      <div class="big amber" id="a2sCost">2.6–2.7×</div>
+      <p class="plain">five whole coupons, same seed. Each chunk moves on by 128 voxels instead of 192, so there are about twice as many chunks.</p>
+    </div>
+    <div class="words r d5"><div><b>chunk plane</b>the boundary between two chunks that were denoised separately.</div><div><b>pore fraction ÷ mean</b>pores near the plane compared with the whole volume; 1 = no band.</div><div><b>pore seam ratio</b>the seam ratio of slide <span class="sref" data-to="s19"></span> on the pore map; 1 is the target.</div></div>
   </div>
   <aside class="notes">
-    <p>~80 s. Left: the two schemes. Standard: chunk k+1 starts exactly where chunk k ends. Overlapped: chunk k+1 starts 64 voxels inside chunk k; the first 32 of those stay as chunk k made them, the last 32 are rewritten by chunk k+1, so the junction sits inside a region both chunks saw.</p>
-    <p>Middle: pore fraction against the distance from a chunk plane, averaged over all chunk planes in y and x and divided by the volume mean. Standard chunking drops to about 0.6 at the plane; the overlapped curve stays near 1. Right: the per-axis pore seam ratio — pore activity across chunk planes ÷ inside the volume; 1 is the target. Standard: y 0.61–0.70, x 0.80–0.89. Overlapped: y 0.97–1.03, x 1.00–1.04.</p>
-    <p><b>Provisional:</b> the overlapped scheme is measured on 3 of 18 cases (three seeds, 1024 × 1024 × 192, DDIM-50); the full evaluation is running. The volume is one chunk deep in z, so there are no z chunk planes here. The overlap costs extra denoising (about 2× on an earlier model; not yet measured on the final one).</p>
-    <p class="src">Standard: full evaluation of the final model, large-volume cases, DDIM-50, seeds 101/202/303. Overlapped: overlapped chunk scheme on the final model, same three cases. Profiles: seed 101 of each, pore fraction per y and per x position, folded onto the distance from the 5 interior chunk planes of each axis, 4-voxel bins.</p>
+    <p>~50 s. Left: pore fraction against the distance from a chunk plane, averaged over all chunk planes in y and x and divided by the volume mean. Standard chunking drops to about 0.6 at the plane; the overlapped curve stays near 1. Middle: the per-axis pore seam ratio — pore activity across chunk planes ÷ inside the volume; 1 is the target. Standard: y 0.61–0.70, x 0.80–0.89. Overlapped: y 0.97–1.03, x 1.00–1.04.</p>
+    <p>Right: the cost. With the overlap, the five whole coupons of the next slides took 2.56 to 2.72 times as long as with standard chunks.</p>
+    <p><b>Still running:</b> the overlapped sampler is measured on 3 of the 18 evaluation cases (three seeds, 1024 × 1024 × 192, DDIM-50). The volume is one chunk deep in z, so there are no z chunk planes here.</p>
+    <p class="src">Standard: full evaluation of the final model, large-volume cases, DDIM-50, seeds 101/202/303. Overlapped: overlapped chunk scheme on the final model, same three cases. Profiles: seed 101 of each, pore fraction per y and per x position, folded onto the distance from the 5 interior chunk planes of each axis, 4-voxel bins. Time ratios: generation records of the five twins (wall time, overlapped ÷ standard): 2.61, 2.56, 2.72, 2.65, 2.69.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
+     20b — THE BAND ON A WHOLE COUPON
+     ========================================================= -->
+<section class="slide" id="sSEAM" data-section="Large volumes">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Large volumes · a whole coupon</div>
+  <h2 class="t r">The same on a <i>whole coupon</i></h2>
+  <p class="msg r d1">One real coupon (2.62 % porosity), generated twice from its maps. Each line is the pore fraction at each position along the coupon. Ticks: joins of the standard chunks, every 192 voxels.</p>
+  <div class="body">
+    <svg id="twinSeam" viewBox="0 0 1728 600" width="1728" height="600" class="r d2"></svg>
+  </div>
+  <aside class="notes">
+    <p>~40 s. Each line: for every position along the coupon, the pores ÷ the material in that cross-section. The real scan has no structure at the ticks. The standard sampler drops at every tick: these are the chunk joins. The overlapped sampler has no drops. The band is only a few voxels wide, so it is hard to see in an image; the profile shows it clearly.</p>
+    <p>Right: the same lines folded onto the distance from the nearest join, all joins in y and x, divided by the local mean. At the join (±2 voxels): real 1.01, standard 0.84, overlapped 0.99. All lines are averaged over 4 voxels: both generated twins carry a small pore pattern that repeats every 4 voxels, the size of one latent cell, and the average removes it exactly.</p>
+    <p class="src">Coupon Na_09_5 (test set), real scan and its two generated twins (final model, DDIM-50, seed 101, the coupon's own envelope, ply angles and per-tile porosity). Profiles: pore ÷ non-air voxels per y position, whole coupon, 4-voxel moving average; folded values over every interior 192-voxel join in y and x, each profile ÷ its mean over ±96 voxels (render_twins.py, seam job). Twin porosities: 2.56 % (standard), 2.49 % (overlapped).</p>
   </aside>
 </section>
 
@@ -714,7 +805,7 @@ aside.notes { display:none; }
   <p class="msg r d1">Two real crops of the same panel are not identical either. That distance is the floor. Every result is a ratio to it.</p>
   <div class="body">
     <svg id="floorSvg" viewBox="0 0 1728 600" width="1728" height="600" class="r d2"></svg>
-    <div class="words r d5"><div><b>d( , )</b>a distance between two sets of volumes, for one statistic. The four statistics are on slide 28.</div><div><b>floor</b>the distance between two real sets: the natural variation of real material.</div><div><b>crop</b>a sub-volume cut from a real scan.</div></div>
+    <div class="words r d5"><div><b>d( , )</b>a distance between two sets of volumes, for one statistic. The four statistics are on slide <span class="sref" data-to="s24"></span>.</div><div><b>floor</b>the distance between two real sets: the natural variation of real material.</div><div><b>crop</b>a sub-volume cut from a real scan.</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. A raw distance between generated and real means nothing alone: how far is "far"? So for every statistic we also compare two disjoint real crops from the same panel, at the same porosity. Ratio = distance(generated, real) / distance(real, real). Ratio 1: the generated set is as close to real as real is to itself — as close as the measurement can tell. Ratio 3: three times further than the natural variation.</p>
@@ -925,6 +1016,30 @@ aside.notes { display:none; }
 </section>
 
 <!-- =========================================================
+     31b — A REAL COUPON AND ITS GENERATED TWIN
+     ========================================================= -->
+<section class="slide" id="sTWIN" data-init="twins" data-section="Results">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Results · whole coupons</div>
+  <h2 class="t r">A real coupon and its <i>generated twin</i></h2>
+  <p class="msg r d1">The generator got the coupon's shape and air, its ply angles, and its porosity per 1.6 mm cube. It did not get the pores: it drew every pore itself.</p>
+  <div class="body" style="top:296px">
+    <div id="twinTabs" class="r d2" style="position:absolute;left:0;top:0;display:flex;gap:12px"></div>
+    <p id="twinPhase" class="lbl r d2" style="position:absolute;right:0;top:8px;margin:0;text-align:right"></p>
+    <div class="r d3" style="position:absolute;left:0;top:62px;width:1680px">
+      <div style="position:relative;height:30px"><span class="lbl" style="position:absolute;left:0;color:var(--ink)">Real scan</span><span class="lbl" style="position:absolute;left:864px;color:var(--pore)">Generated (overlapped chunks)</span></div>
+      <video id="twinVid" class="vid" muted loop playsinline preload="auto" width="1680" height="512" style="width:1680px;height:512px;border:0"></video>
+      <p id="twinPlanes" class="lbl" style="position:absolute;left:0;top:500px;margin:0;width:1680px"></p>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~90 s. Five real coupons, chosen one per porosity range; four are from the held-out test panels, the 8.7 % one is from training because no held-out coupon has that much porosity. Coupon "1.01 %" is a different material system. Keys 1–5 or the buttons change the coupon.</p>
+    <p>Each video, left real, right generated, the same slice in both, the same grey scale 0–255. First the whole coupon: top, the slice at the current depth (the long side is y); right, a cut along the depth at the centre of the window; below, another cut along the depth. Second, the same with labels: pores amber, air blue; at this size a pixel is coloured as pore if any voxel under it is a pore, so small pores stay visible in both columns alike. Third, a 512 × 512 window at full resolution (outlined on the whole view), where the real coupon has the most pores. The sweep slows down at depths with many pores.</p>
+    <p>What to look for: the same outer shape and air (given), the same ply directions (given), pores in the same places and amounts (only the amount per 1.6 mm cube was given). The generated grey is smoother: decoder blur.</p>
+    <p class="src">Real scans and labels: dataset volumes (reference segmentation). Twins: final model, overlapped sampler, DDIM-50, seed 101, conditioned on the coupon's envelope, ply angles and per-tile porosity. Porosity = pore ÷ (pore + material) voxels, whole coupon, from the label files (render_twins.py). Air in the generated grey: every voxel the twin's label calls air set to one value, the mean grey over air, per volume (values in the build record; labels unchanged).</p>
+  </aside>
+</section>
+
+<!-- =========================================================
      32 — LIMITATIONS AND NEXT STEPS
      ========================================================= -->
 <section class="slide" id="s32" data-section="Close">
@@ -935,14 +1050,14 @@ aside.notes { display:none; }
       <p class="lbl" style="margin:0 0 26px">Limitations</p>
       <ul class="pts">
         <li><b style="color:var(--ink);font-weight:500">Decoder blur.</b> Rebuilt patches keep about 3/4 of the real sharpness (fine-detail energy); FID stays 3× the floor.</li>
-        <li><b style="color:var(--ink);font-weight:500">Chunk seam.</b> The standard sampler leaves 0.6–0.9 of the pores on chunk planes; the overlap removes it at extra cost.</li>
+        <li><b style="color:var(--ink);font-weight:500">Chunk seam.</b> Standard chunks leave 0.6–0.9 of the pores at the joins. The overlapped sampler we use removes the band, but takes 2.6–2.7× the time.</li>
         <li><b style="color:var(--ink);font-weight:500">Local field.</b> Generated porosity patches stay similar only over about 50–60 voxels in-plane; in real coupons, over hundreds (correlation length).</li>
       </ul>
     </div>
     <div class="r d2" style="position:absolute;left:908px;top:0;width:820px">
       <p class="lbl" style="margin:0 0 26px">Next</p>
       <ul class="pts">
-        <li>finish the overlapped-scheme evaluation; make it the default</li>
+        <li>finish the full evaluation with the overlapped sampler</li>
         <li>pore-by-pore morphology against real coupons</li>
         <li>baselines re-run on the final setup</li>
         <li>a sharper decoder, without moving the latent space</li>
@@ -951,8 +1066,8 @@ aside.notes { display:none; }
     </div>
   </div>
   <aside class="notes">
-    <p>~60 s. Three limits, all measured. Blur: the final autoencoder's reconstructions have 0.74 of the real sharpness on validation; this shows in FID. Seams: shown on slide 24. Local field: the correlation length of delivered local porosity is about 51–57 voxels in y and 48–60 in x, while real large crops stay correlated over 266 voxels in y and more than 960 in x.</p>
-    <p class="src">Sharpness ratio 0.735: autoencoder compression study, c = 4, whole validation split, last step. Seam ranges: slide 24 sources. Correlation lengths: full evaluation of the final model, field statistics (generated local-field and multi-chunk cases: L<sub>y</sub> 51 / 57, L<sub>x</sub> 48 / 60 voxels; real large crops: L<sub>y</sub> 266, L<sub>x</sub> &gt; 960 voxels).</p>
+    <p>~60 s. Three limits, all measured. Blur: the final autoencoder's reconstructions have 0.74 of the real sharpness on validation; this shows in FID. Seams: shown on the seam slides. Local field: the correlation length of delivered local porosity is about 51–57 voxels in y and 48–60 in x, while real large crops stay correlated over 266 voxels in y and more than 960 in x.</p>
+    <p class="src">Sharpness ratio 0.735: autoencoder compression study, c = 4, whole validation split, last step. Seam ranges: slide <span class="sref" data-to="s20"></span> sources. Correlation lengths: full evaluation of the final model, field statistics (generated local-field and multi-chunk cases: L<sub>y</sub> 51 / 57, L<sub>x</sub> 48 / 60 voxels; real large crops: L<sub>y</sub> 266, L<sub>x</sub> &gt; 960 voxels).</p>
   </aside>
 </section>
 
@@ -1253,26 +1368,175 @@ const INIT = {
       keys.forEach((k, i) => { R[k].setAttribute('fill', C[st[i]]); R[k].setAttribute('stroke', C[st[i]]); }); cap.textContent = c; });
   },
 
+  /* 18a — patch, tile, window, chunk: one diagram, four phases */
+  ptwc() {
+    const svg = document.getElementById('ptwcSvg'), K = 1.5, O = 12, P = 6250;   /* 1.5 px per voxel, 6.25 s per phase */
+    const X = vx => O + vx * K;
+    const defs = el(svg, 'defs'); const cp = el(defs, 'clipPath', { id: 'ptwcClip' }); el(cp, 'rect', { x: O, y: O, width: 384 * K, height: 384 * K });
+    const g = el(svg, 'g', { 'clip-path': 'url(#ptwcClip)' });
+    const real = el(g, 'image', { href: 'media/data_grey.jpg', x: O, y: O, width: 1024 * K, height: 1024 * K, preserveAspectRatio: 'none' });
+    const gen = el(g, 'image', { href: 'media/large_grey.jpg', x: O, y: O, width: 1024 * K, height: 1024 * K, preserveAspectRatio: 'none' });
+    const grid = el(svg, 'g');
+    for (let i = 1; i < 6; i++) { el(grid, 'line', { x1: X(i * 64), x2: X(i * 64), y1: X(0), y2: X(384), stroke: 'rgba(232,230,225,.45)', 'stroke-width': 1 });
+      el(grid, 'line', { y1: X(i * 64), y2: X(i * 64), x1: X(0), x2: X(384), stroke: 'rgba(232,230,225,.45)', 'stroke-width': 1 }); }
+    el(svg, 'rect', { x: O, y: O, width: 384 * K, height: 384 * K, fill: 'none', stroke: 'rgba(232,230,225,.3)' });
+    const tile = el(svg, 'rect', { width: 64 * K, height: 64 * K, fill: 'rgba(255,176,0,.25)', stroke: '#ffb000', 'stroke-width': 3 });
+    const chunk = el(svg, 'rect', { x: X(0), y: X(0), width: 192 * K, height: 192 * K, fill: 'rgba(255,176,0,.10)', stroke: '#ffb000', 'stroke-width': 4 });
+    const next = el(svg, 'rect', { x: X(128), y: X(0), width: 192 * K, height: 192 * K, fill: 'none', stroke: '#e8e6e1', 'stroke-width': 3, 'stroke-dasharray': '10 7' });
+    const ghost = el(svg, 'rect', { width: 64 * K, height: 64 * K, fill: 'none', stroke: 'rgba(232,230,225,.7)', 'stroke-width': 2, 'stroke-dasharray': '5 5' });
+    const cube = el(svg, 'rect', { width: 64 * K, height: 64 * K, fill: 'rgba(255,176,0,.18)', stroke: '#ffb000', 'stroke-width': 3 });
+    const rows = [
+      ['patch', '64³ voxels, every 32', 'training', 'A cube cut from a real scan. The network learns from 1.6 million of them.'],
+      ['tile', '64³ voxels, every 64', 'generation', 'The grid of the new volume. One porosity request and one latent block per tile.'],
+      ['window', '64³ voxels, every 32', 'each step', 'One call of the network. Windows overlap by half; their predictions are averaged.'],
+      ['chunk', '3 × 3 × 3 tiles = 192³', 'generation', 'Up to 125 windows that go through all 50 steps together. Then the next chunk.']];
+    const box = document.getElementById('ptwcRows');
+    box.innerHTML = rows.map(r => `<div class="ptwc-row"><div class="n">${r[0]}</div><div><div class="sz">${r[1]} · ${r[2]}</div><div class="tx">${r[3]}</div></div></div>`).join('');
+    const R = [...box.children];
+    let t0 = null;
+    loop('sPT', ts => { if (t0 === null) t0 = ts;
+      const T = (ts - t0) % (4 * P), ph = Math.floor(T / P), k = Math.floor((T % P) / 250) % 25, i = k % 5, j = Math.floor(k / 5);
+      R.forEach((r, n) => r.classList.toggle('on', n === ph));
+      real.style.opacity = ph === 0 ? 1 : 0; gen.style.opacity = ph === 0 ? 0 : 1;
+      grid.style.opacity = ph === 0 ? 0 : ph === 1 ? 1 : .35;
+      tile.style.display = ph === 1 ? '' : 'none'; chunk.style.display = ph >= 2 ? '' : 'none';
+      next.style.display = ph === 3 && (T % P) > P / 2 ? '' : 'none';
+      cube.style.display = ghost.style.display = (ph === 0 || ph === 2) ? '' : 'none';
+      if (ph === 1) { const q = Math.floor((T % P) / 170) % 36; tile.setAttribute('x', X((q % 6) * 64)); tile.setAttribute('y', X(Math.floor(q / 6) * 64)); }
+      const base = ph === 0 ? 96 : 0;
+      cube.setAttribute('x', X(base + i * 32)); cube.setAttribute('y', X(base + j * 32));
+      const pk = (k + 24) % 25; ghost.setAttribute('x', X(base + (pk % 5) * 32)); ghost.setAttribute('y', X(base + Math.floor(pk / 5) * 32)); });
+  },
+
+  /* 18b — the whole generation loop as a flow, with a running pulse */
+  genflow() {
+    const svg = document.getElementById('genSvg'), W = 252, G = 43, Y0 = 40, H = 250;
+    const st = [
+      ['1', 'Maps', ['what we ask for:', 'shape and air,', 'ply angle per depth,', 'porosity per tile']],
+      ['2', 'Noise', ['random numbers on', 'the latent canvas,', 'the whole volume', 'at once']],
+      ['3', 'Next chunk', ['in order: depth,', 'then y, then x;', 'finished chunks', 'are its neighbours']],
+      ['4', 'Every window', ['up to 125 windows;', 'each sees its maps', 'and six neighbours;', 'the network gives v']],
+      ['5', 'Blend, step', ['weighted average', 'of the windows,', 'then one DDIM step:', 'a little less noise']],
+      ['6', 'Decode', ['overlapping 64³', 'decoder passes', 'give grey values', 'and labels']]];
+    const B = st.map(([n, t, lines], i) => { const x = i * (W + G), gg = el(svg, 'g');
+      const r = el(gg, 'rect', { x, y: Y0, width: W, height: H, fill: 'rgba(255,255,255,.02)', stroke: 'rgba(232,230,225,.3)', 'stroke-width': 2 });
+      el(gg, 'text', { x: x + 20, y: Y0 + 40, style: 'fill:#7d838c' }, n);
+      el(gg, 'text', { x: x + 20, y: Y0 + 84, class: 'serif', style: 'font-size:34px' }, t);
+      lines.forEach((l, k) => el(gg, 'text', { x: x + 20, y: Y0 + 130 + k * 28, style: 'fill:#c9c7c2;font-family:var(--sans);font-size:21px' }, l));
+      if (i < 5) el(gg, 'path', { d: `M${x + W + 6},${Y0 + H / 2} h${G - 14} m-9,-7 l9,7 l-9,7`, stroke: '#7d838c', 'stroke-width': 2, fill: 'none' });
+      return r; });
+    const cx = i => i * (W + G) + W / 2, yb = Y0 + H;
+    el(svg, 'path', { d: `M${cx(4)},${yb + 6} v40 H${cx(3)} v-40 m-7,9 l7,-9 l7,9`, stroke: '#ffb000', 'stroke-width': 2.5, fill: 'none' });
+    el(svg, 'text', { x: (cx(3) + cx(4)) / 2, y: yb + 80, 'text-anchor': 'middle', style: 'fill:#ffb000' }, '× 50 steps');
+    el(svg, 'path', { d: `M${cx(4) + 60},${yb + 6} v110 H${cx(2)} v-110 m-7,9 l7,-9 l7,9`, stroke: '#e8e6e1', 'stroke-width': 2, fill: 'none', 'stroke-dasharray': '8 6' });
+    el(svg, 'text', { x: (cx(2) + cx(4)) / 2 + 30, y: yb + 150, 'text-anchor': 'middle', style: 'fill:#e8e6e1' }, '× every chunk: the finished chunk is written to the canvas');
+    const ctr = el(svg, 'text', { x: 0, y: yb + 230, style: 'fill:#e8e6e1;font-size:24px' }, '');
+    el(svg, 'text', { x: 1728, y: yb + 230, 'text-anchor': 'end' }, 'one whole coupon: 900 chunks · 4.3 h on one GPU');
+    /* timeline: maps, noise, then 3 chunks of 50 steps, a jump to the last chunk, decode */
+    const seq = [[0, 1200, ''], [1, 1200, '']];
+    [1, 2, 3, 900].forEach(c => { seq.push([2, 700, `chunk ${c} / 900`]); for (let t = 1; t <= 50; t++) seq.push([t % 2 ? 3 : 4, 40, `chunk ${c} / 900 · step ${t} / 50`]); });
+    seq.push([5, 2000, 'all 900 chunks done: decode']); seq.push([-1, 1200, '']);
+    const total = seq.reduce((a, q) => a + q[1], 0); let t0 = null;
+    loop('sGEN', ts => { if (t0 === null) t0 = ts; let T = (ts - t0) % total, k = 0; while (T > seq[k][1]) { T -= seq[k][1]; k++; }
+      const [on, , txt] = seq[k], inner = on === 3 || on === 4;
+      B.forEach((r, i) => { const hot = i === on || (inner && (i === 3 || i === 4));
+        r.setAttribute('stroke', hot ? '#ffb000' : 'rgba(232,230,225,.3)'); r.setAttribute('fill', hot ? 'rgba(255,176,0,.10)' : 'rgba(255,255,255,.02)'); });
+      ctr.textContent = txt; });
+  },
+
+  /* 19b — the overlapped sampler on one axis: standard, shift, keep, redraw, result */
+  a2s() {
+    const svg = document.getElementById('a2sSvg'), K = 2.55, O = 40, X = v => O + v * K;
+    const rowY = [40, 190, 380], RH = 110;
+    el(svg, 'text', { x: O, y: rowY[0] - 12, style: 'fill:#c9c7c2' }, 'chunk k (finished)');
+    el(svg, 'rect', { x: X(0), y: rowY[0], width: 192 * K, height: RH, fill: 'rgba(154,152,147,.18)', stroke: '#9a9893', 'stroke-width': 2 });
+    const rim = el(svg, 'rect', { x: X(168), y: rowY[0], width: 24 * K, height: RH, fill: 'rgba(85,91,101,.6)' });
+    el(svg, 'text', { x: X(180), y: rowY[0] + RH + 26, 'text-anchor': 'middle', style: 'font-size:17px' }, 'rim');
+    const lab2 = el(svg, 'text', { x: O, y: rowY[1] - 12, style: 'fill:#ffb000' }, 'chunk k+1 (being made)');
+    const g2 = el(svg, 'g');
+    el(g2, 'rect', { x: 0, y: rowY[1], width: 192 * K, height: RH, fill: 'rgba(255,176,0,.10)', stroke: '#ffb000', 'stroke-width': 2, 'stroke-dasharray': '9 6' });
+    const kept = el(g2, 'rect', { x: 0, y: rowY[1], width: 32 * K, height: RH, fill: 'rgba(154,152,147,.55)' });
+    const free = el(g2, 'rect', { x: 32 * K, y: rowY[1], width: 32 * K, height: RH, fill: 'rgba(255,176,0,.45)' });
+    const tKept = el(g2, 'text', { x: 16 * K, y: rowY[1] + RH + 26, 'text-anchor': 'middle', style: 'font-size:17px;fill:#e8e6e1' }, 'kept');
+    const tFree = el(g2, 'text', { x: 48 * K, y: rowY[1] + RH + 26, 'text-anchor': 'middle', style: 'font-size:17px;fill:#ffb000' }, 'redrawn');
+    const seen = el(g2, 'path', { d: `M${16 * K},${rowY[1] + 12} c40,-40 120,-40 160,10`, stroke: '#e8e6e1', 'stroke-width': 2, fill: 'none', 'stroke-dasharray': '4 5' });
+    const tSeen = el(g2, 'text', { x: 16 * K + 170, y: rowY[1] + 2, style: 'font-size:17px;fill:#e8e6e1' }, 'seen as context');
+    el(svg, 'text', { x: O, y: rowY[2] - 12, style: 'fill:#c9c7c2' }, 'the volume: pores (schematic)');
+    el(svg, 'rect', { x: X(0), y: rowY[2], width: 384 * K, height: RH, fill: 'none', stroke: 'rgba(232,230,225,.3)' });
+    /* deterministic dots, uniform in y; in the rim zone keep 1 in 4 */
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const dots = []; for (let n = 0; n < 420; n++) { const v = rnd() * 384, y = rowY[2] + 8 + rnd() * (RH - 16), keep = rnd() < .25;
+      dots.push([el(svg, 'circle', { cx: X(v), cy: y, r: 3.2, fill: '#ffb000' }), v, keep]); }
+    const join = el(svg, 'line', { x1: X(192), x2: X(192), y1: rowY[0] - 4, y2: rowY[2] + RH + 8, stroke: '#2f6bff', 'stroke-width': 2, 'stroke-dasharray': '6 5' });
+    const tJoin = el(svg, 'text', { x: X(192) + 8, y: rowY[2] + RH + 30, style: 'fill:#2f6bff;font-size:17px' }, 'band: few pores');
+    const steps = [
+      ['Standard', 'Chunk k+1 starts where chunk k ends. Chunk k’s rim has too few pores: a band at the join.'],
+      ['Start earlier', 'Chunk k+1 starts 64 voxels before chunk k ends. Each chunk moves on by 128 voxels, not 192.'],
+      ['Keep and see', 'At each step, the first 32 shared voxels are reset to chunk k’s result, noised to that step. Chunk k+1 sees them.'],
+      ['Redraw', 'The last 32 shared voxels are chunk k’s rim. Chunk k+1 draws them again, with known material on both sides.'],
+      ['Result', 'No band. Only 32 are kept, so the rim cannot steer the new chunk. Cost: 2.6–2.7× the time.']];
+    const box = document.getElementById('a2sRows');
+    box.innerHTML = steps.map((r, i) => `<div class="ptwc-row"><div class="n">${i + 1}</div><div><div class="sz">${r[0]}</div><div class="tx">${r[1]}</div></div></div>`).join('');
+    const R = [...box.children], P = 4200; let t0 = null;
+    loop('sA2S', ts => { if (t0 === null) t0 = ts;
+      const T = (ts - t0) % (5 * P), ph = Math.floor(T / P), f = Math.min(1, (T % P) / 1200);
+      R.forEach((r, n) => r.classList.toggle('on', n === ph));
+      const start = ph === 0 ? 192 : ph === 1 ? 192 - 64 * f : 128;
+      g2.setAttribute('transform', `translate(${X(start)},0)`);
+      const shared = ph >= 2; kept.style.opacity = free.style.opacity = shared ? 1 : 0;
+      tKept.style.opacity = tFree.style.opacity = shared ? 1 : 0;
+      seen.style.opacity = tSeen.style.opacity = ph === 2 ? (0.4 + 0.6 * Math.abs(Math.sin(ts / 300))) : 0;
+      free.setAttribute('fill', ph >= 3 ? 'rgba(255,176,0,.45)' : 'rgba(255,176,0,.12)');
+      const filled = ph === 3 ? f : ph === 4 ? 1 : 0;
+      dots.forEach(([c, v, keep]) => { const inRim = v >= 168 && v < 192; c.style.opacity = !inRim || keep ? 1 : filled; });
+      join.style.opacity = tJoin.style.opacity = ph <= 1 ? 1 : ph === 2 ? 1 : 1 - filled;
+      tJoin.textContent = 'band: few pores'; });
+  },
+
+  /* 31b — real coupon and its twin: tabs, video, phase captions */
+  twins() {
+    const C = v('twins') || [], tabs = document.getElementById('twinTabs'), vid = document.getElementById('twinVid');
+    const ph = document.getElementById('twinPhase'), pl = document.getElementById('twinPlanes');
+    const pc = x => (100 * x).toFixed(2) + ' %';
+    tabs.innerHTML = C.map((c, i) => `<button class="tab" data-i="${i}">${pc(c.phi_real)}${c.note ? ' <small>' + c.note + '</small>' : ''}</button>`).join('');
+    const pick = i => { const c = C[i]; if (!c) return;
+      [...tabs.children].forEach((b, k) => b.classList.toggle('on', k === i));
+      vid.poster = `media/${c.video}_poster.jpg`;
+      vid.innerHTML = `<source src="media/${c.video}.webm" type="video/webm"><source src="media/${c.video}.mp4" type="video/mp4">`;
+      vid.load(); vid.play().catch(() => {}); vid.dataset.i = i; };
+    tabs.addEventListener('click', e => { const b = e.target.closest('.tab'); if (b) pick(+b.dataset.i); });
+    addEventListener('keydown', e => { if (!document.getElementById('sTWIN').classList.contains('active')) return;
+      const k = '12345'.indexOf(e.key); if (k >= 0) pick(k); });
+    vid.addEventListener('timeupdate', () => { const c = C[+vid.dataset.i]; if (!c) return; const t = vid.currentTime, m = c.phases;
+      const p = t >= m.zoom ? 2 : t >= m.labels ? 1 : 0;
+      ph.innerHTML = `coupon <b>${pc(c.phi_real)}</b> porosity · twin <b>${pc(c.phi_twin)}</b>`;
+      pl.textContent = p === 2 ? 'left: a 512 × 512 window (12.8 mm) at full resolution · right: where the window is'
+        : (p === 1 ? 'labels: pores amber, air blue (a pixel is pore if any voxel under it is) · ' : 'whole coupon, grey 0–255 · ')
+          + 'top: slice at the current depth · right and below: cuts through the depth (line = current depth)'; });
+    pick(0);
+  },
+
   /* 18 — chunk order over a generated slice */
   chunks() {
     const cv = document.getElementById('chunkCv'), g = cv.getContext('2d'), S = 620, T = S / 16, img = new Image();
-    const order = []; for (let cy = 0; cy < 6; cy++) for (let cx = 0; cx < 6; cx++) order.push([cx, cy]);
+    const order = []; for (let cy = 0; cy < 8; cy++) for (let cx = 0; cx < 8; cx++) order.push([cx, cy]);   /* chunk starts every 2 tiles */
     const noise = document.createElement('canvas'); noise.width = noise.height = 155; const nctx = noise.getContext('2d'), nd = nctx.createImageData(155, 155);
     for (let i = 0; i < nd.data.length; i += 4) { const q = 60 + Math.random() * 140; nd.data[i] = nd.data[i + 1] = nd.data[i + 2] = q; nd.data[i + 3] = 255; } nctx.putImageData(nd, 0, 0);
     img.onload = () => { let t0 = null;
       loop('s18', ts => { if (t0 === null) t0 = ts; const per = 700, k = ((ts - t0) / per) % (order.length + 4), cur = Math.floor(k), f = k - cur;
-        g.fillStyle = '#0b0d10'; g.fillRect(0, 0, S, S);
-        order.forEach(([cx, cy], i) => { const x = cx * 3 * T, y = cy * 3 * T, w = Math.min(3 * T, S - x), h = Math.min(3 * T, S - y);
+        g.fillStyle = '#0b0d10'; g.fillRect(0, 0, S, S); g.fillStyle = 'rgba(85,91,101,.35)'; g.fillRect(0, 0, S, S);
+        order.forEach(([cx, cy], i) => { const x = cx * 2 * T, y = cy * 2 * T, w = Math.min(3 * T, S - x), h = Math.min(3 * T, S - y);
           if (i < cur) { g.drawImage(img, x / S * img.width, y / S * img.height, w / S * img.width, h / S * img.height, x, y, w, h); g.fillStyle = 'rgba(11,13,16,.25)'; g.fillRect(x, y, w, h); }
           else if (i === cur) { g.globalAlpha = 1; g.drawImage(noise, 0, 0, 155 * w / (3 * T), 155 * h / (3 * T), x, y, w, h); g.globalAlpha = f;
             g.drawImage(img, x / S * img.width, y / S * img.height, w / S * img.width, h / S * img.height, x, y, w, h); g.globalAlpha = 1;
             g.fillStyle = 'rgba(255,176,0,.12)'; g.fillRect(x, y, w, h); }
-          else { g.fillStyle = 'rgba(85,91,101,.35)'; g.fillRect(x, y, w, h); } });
+        });
         g.strokeStyle = 'rgba(232,230,225,.18)'; g.lineWidth = 1;
         for (let i = 1; i < 16; i++) { g.beginPath(); g.moveTo(i * T, 0); g.lineTo(i * T, S); g.moveTo(0, i * T); g.lineTo(S, i * T); g.stroke(); }
-        g.strokeStyle = 'rgba(232,230,225,.6)'; g.lineWidth = 2;
-        for (let i = 1; i < 6; i++) { g.beginPath(); g.moveTo(i * 3 * T, 0); g.lineTo(i * 3 * T, S); g.moveTo(0, i * 3 * T); g.lineTo(S, i * 3 * T); g.stroke(); }
-        if (cur < order.length) { const [cx, cy] = order[cur]; g.strokeStyle = '#ffb000'; g.lineWidth = 4; g.strokeRect(cx * 3 * T + 2, cy * 3 * T + 2, Math.min(3 * T, S - cx * 3 * T) - 4, Math.min(3 * T, S - cy * 3 * T) - 4); }
+        if (cur < order.length) { const [cx, cy] = order[cur], x = cx * 2 * T, y = cy * 2 * T, w = Math.min(3 * T, S - x), h = Math.min(3 * T, S - y);
+          g.strokeStyle = '#e8e6e1'; g.lineWidth = 2; g.setLineDash([6, 5]);           /* the part shared with finished chunks */
+          if (cx > 0) g.strokeRect(x + 1, y + 1, T, h - 2); if (cy > 0) g.strokeRect(x + 1, y + 1, w - 2, T); g.setLineDash([]);
+          g.strokeStyle = '#ffb000'; g.lineWidth = 4; g.strokeRect(x + 2, y + 2, w - 4, h - 4); }
         g.strokeStyle = '#2f6bff'; g.lineWidth = 6; g.strokeRect(3, 3, S - 6, S - 6); }); };
     img.src = 'media/large_grey.jpg';
   },
@@ -1420,19 +1684,6 @@ function drawStatic() {
   el(db, 'line', { x1: 460, x2: 460, y1: 10, y2: 250, stroke: '#e8e6e1', 'stroke-dasharray': '4 5' });
 
   /* 20 — schemes, profiles, per-axis seam bars */
-  const sc = document.getElementById('schemeSvg');
-  el(sc, 'text', { x: 0, y: 30, style: 'fill:#e8e6e1' }, 'standard');
-  el(sc, 'rect', { x: 0, y: 50, width: 240, height: 160, fill: 'rgba(154,152,147,.25)', stroke: '#9a9893', 'stroke-width': 2 });
-  el(sc, 'rect', { x: 240, y: 50, width: 240, height: 160, fill: 'rgba(255,176,0,.12)', stroke: '#ffb000', 'stroke-width': 2 });
-  el(sc, 'rect', { x: 230, y: 50, width: 20, height: 160, fill: '#0b0d10', 'fill-opacity': .7 });
-  el(sc, 'text', { x: 20, y: 140 }, 'chunk k'); el(sc, 'text', { x: 300, y: 140, style: 'fill:#ffb000' }, 'chunk k+1');
-  el(sc, 'text', { x: 140, y: 240 }, 'band: fewer pores on the plane');
-  el(sc, 'text', { x: 0, y: 320, style: 'fill:#e8e6e1' }, 'overlapped');
-  el(sc, 'rect', { x: 0, y: 340, width: 240, height: 160, fill: 'rgba(154,152,147,.25)', stroke: '#9a9893', 'stroke-width': 2 });
-  el(sc, 'rect', { x: 176, y: 340, width: 300, height: 160, fill: 'rgba(255,176,0,.12)', stroke: '#ffb000', 'stroke-width': 2, 'stroke-dasharray': '7 5' });
-  el(sc, 'rect', { x: 176, y: 340, width: 32, height: 160, fill: '#9a9893', 'fill-opacity': .45 });
-  el(sc, 'rect', { x: 208, y: 340, width: 32, height: 160, fill: '#ffb000', 'fill-opacity': .45 });
-  el(sc, 'text', { x: 150, y: 532 }, '64-voxel overlap:'); el(sc, 'text', { x: 150, y: 560 }, 'first 32 kept from chunk k,'); el(sc, 'text', { x: 150, y: 588 }, 'last 32 rewritten by chunk k+1');
   const prof = document.getElementById('profSvg');
   const PA = axes(prof, { x0: 90, y0: 20, w: 520, h: 460, x: [-96, 96], y: [0.4, 1.2], xt: [-96, -48, 0, 48, 96], yt: [0.4, 0.6, 0.8, 1.0, 1.2], xl: 'distance from the chunk plane (voxels)', yl: 'pore fraction ÷ mean' });
   el(prof, 'line', { x1: PA.X(0), x2: PA.X(0), y1: 20, y2: 480, stroke: 'rgba(232,230,225,.45)', 'stroke-dasharray': '4 6' });
@@ -1452,7 +1703,27 @@ function drawStatic() {
       el(sb, 'line', { x1: x0 + dx + 32, x2: x0 + dx + 32, y1: SY(mn), y2: SY(mx), stroke: '#e8e6e1', 'stroke-width': 2 });
       el(sb, 'text', { x: x0 + dx + 32, y: SY(mx) - 10, 'text-anchor': 'middle', style: 'font-size:16px' }, mn.toFixed(2) + '–' + mx.toFixed(2)); });
     el(sb, 'text', { x: x0 + 72, y: 512, 'text-anchor': 'middle', style: 'fill:#e8e6e1' }, ax + ' planes'); });
-  el(sb, 'text', { x: 50, y: 560 }, 'pore seam ratio · 3 seeds'); el(sb, 'text', { x: 50, y: 590, style: 'fill:#ffb000' }, 'overlapped: 3 of 18 cases');
+  el(sb, 'text', { x: 50, y: 560 }, 'pore seam ratio · 3 seeds'); el(sb, 'text', { x: 50, y: 590, style: 'fill:#ffb000' }, 'overlapped: 3 of 18 cases so far');
+  const cost = v('a2s_time_ratio'); if (cost) document.getElementById('a2sCost').textContent = Math.min(...cost).toFixed(1) + '–' + Math.max(...cost).toFixed(1) + '×';
+
+  /* 20b — pore fraction along a whole coupon: real, standard chunks, overlapped chunks */
+  const ts = document.getElementById('twinSeam'), tsp = v('seam_twin');
+  if (tsp) { const [a0, a1] = tsp.span, L = 1160, RH = 140, Xs = y => 20 + (y - a0) / (a1 - a0) * L;
+    const all = [].concat(tsp.real, tsp.production, tsp.a2s), top = Math.max(...all) * 1.05;
+    for (let j = Math.ceil(a0 / 192) * 192; j <= a1; j += 192) el(ts, 'line', { x1: Xs(j), x2: Xs(j), y1: 10, y2: 3 * (RH + 30) + 6, stroke: 'rgba(232,230,225,.25)', 'stroke-dasharray': '3 5' });
+    [['real scan', tsp.real, '#e8e6e1'], ['standard chunks', tsp.production, '#8e949e'], ['overlapped chunks', tsp.a2s, '#ffb000']].forEach(([n, p, c], r) => {
+      const y0 = 30 + r * (RH + 30), Ys = q => y0 + RH - q / top * RH;
+      el(ts, 'text', { x: 20, y: y0 + 4, style: `fill:${c}` }, n);
+      el(ts, 'line', { x1: 20, x2: 20 + L, y1: y0 + RH, y2: y0 + RH, class: 'ax' });
+      el(ts, 'path', { d: line(p.map((q, i) => [Xs(a0 + i), Ys(q)])), stroke: c, 'stroke-width': 1.6, fill: 'none' }); });
+    [a0, (a0 + a1) / 2, a1].forEach(t => el(ts, 'text', { x: Xs(t), y: 3 * (RH + 30) + 34, 'text-anchor': 'middle' }, Math.round(t)));
+    el(ts, 'text', { x: 20 + L / 2, y: 3 * (RH + 30) + 66, 'text-anchor': 'middle', style: 'fill:#c9c7c2' }, 'position along the coupon (voxels) · pore fraction per cross-section, same scale in all rows');
+    const FA = axes(ts, { x0: 1380, y0: 20, w: 330, h: 420, x: [-24, 24], y: [0.6, 1.2], xt: [-24, 0, 24], yt: [0.6, 0.8, 1.0, 1.2], xl: 'distance from a join', yl: 'pore fraction ÷ local mean' });
+    el(ts, 'line', { x1: FA.X(-24), x2: FA.X(24), y1: FA.Y(1), y2: FA.Y(1), stroke: 'rgba(232,230,225,.4)', 'stroke-dasharray': '4 6' });
+    [['real', '#e8e6e1'], ['production', '#8e949e'], ['a2s', '#ffb000']].forEach(([k, c]) => { const f = tsp.fold[k];
+      el(ts, 'path', { d: line(f.map((q, i) => [FA.X(-24 + i), FA.Y(Math.max(q, 0.6))])), stroke: c, 'stroke-width': 2.5, fill: 'none' }); });
+    el(ts, 'text', { x: 1380, y: 540, style: 'fill:#c9c7c2' }, 'all joins in y and x');
+  }
 
   /* 21 — the floor */
   const fl = document.getElementById('floorSvg');
@@ -1624,6 +1895,7 @@ class Deck {
       if (!s.querySelector('.hud.bl')) { const b = document.createElement('div'); b.className = 'hud bl'; b.textContent = 'Group meeting'; s.appendChild(b); } });
     const fit = () => { const f = Math.min(innerWidth / 1920, innerHeight / 1080);
       this.stage.style.transform = `translate(${(innerWidth - 1920 * f) / 2}px, ${(innerHeight - 1080 * f) / 2}px) scale(${f})`; };
+    document.querySelectorAll('.sref').forEach(r => { r.textContent = this.slides.findIndex(x => x.id === r.dataset.to) + 1; });
     fit(); addEventListener('resize', fit);
     addEventListener('keydown', e => { if (e.target.isContentEditable) return;
       if (['ArrowRight', 'ArrowDown', ' ', 'PageDown'].includes(e.key)) { e.preventDefault(); this.go(this.i + 1); }
