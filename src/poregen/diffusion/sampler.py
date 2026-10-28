@@ -1638,6 +1638,10 @@ class VolumeGenerator:
         # 3-class logits (a per-class logit on its own is not comparable across
         # voxels; the pore-vs-rest log odds is).
         probs = decode_class_probs(logits_t)[0].numpy()
+        # The raw logits are not needed past this point; on a whole coupon
+        # (2e9 voxels) they are 24 GB, and holding them beside the
+        # probabilities took one generation to 101 GB (2026-10-28).
+        del logits_t, class_logits
         p_pore = np.clip(probs[1], 1e-6, 1.0 - 1e-6)
         pore_logit = np.log(p_pore) - np.log1p(-p_pore)
         chunk_period = tuple(P * c for c in self.chunk_tiles)
@@ -1690,7 +1694,7 @@ class VolumeGenerator:
         }
         extra: tuple = ()
         if return_class_probs:
-            extra = extra + (probs.astype(np.float32),)
+            extra = extra + (probs.astype(np.float32, copy=False),)  # no second copy
         if return_latents:
             # .detach().cpu() first. z_clean is a CUDA tensor and np.asarray on
             # one raises TypeError — which is exactly what broke all nine

@@ -46,6 +46,18 @@ def bin_of(phi: float) -> str:
     return "out"
 
 
+def wait_for_memory(gb: float = 45.0) -> None:
+    """Block until the host has ``gb`` GB available. Measurement runs beside a
+    whole-coupon generation; together they took the host to 1 GB free on
+    2026-10-28, and an OOM kill would take the generation with it."""
+    while True:
+        with open("/proc/meminfo") as fh:
+            avail = next(int(l.split()[1]) for l in fh if l.startswith("MemAvailable")) / 2 ** 20
+        if avail >= gb:
+            return
+        time.sleep(60)
+
+
 def write(dest: Path, name: str, df, summary: dict) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     df.to_parquet(dest / f"{name}.parquet", index=False)
@@ -99,6 +111,7 @@ def generated(root: Path, out: Path) -> None:
     for d in sorted(root.glob("volumes/*/")):
         if d.name in have or not (d / "label.tif").exists():
             continue
+        wait_for_memory()
         t0 = time.time()
         m = json.load(open(d / "manifest.json"))
         notes = m.get("notes", {})
