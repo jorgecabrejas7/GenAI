@@ -129,7 +129,16 @@ def main() -> int:
 
     real = load("real_[ab]")
     real = real[real.split.isin(a.real_splits)]
-    gens = {s: load(f"gen_{s}_pore_population") for s in ("production", "a2s")}
+    # The generated side is the twins (author 2026-10-27): five real coupons per
+    # bin, each regenerated whole; a twin belongs to its coupon's bin.
+    gens = {s: load(f"gen_{s}_twins") for s in ("production", "a2s")}
+    # a twin's bin is its real coupon's bin (the first twin of the campaign was
+    # generated before the case carried a "bin" note)
+    bin_of = dict(zip(load("real_[ab]").name, load("real_[ab]").porosity_bin))
+    for g in gens.values():
+        if not g.empty:
+            g["request_bin"] = g.real_volume_id.map(bin_of)
+    twin_rows = []
 
     per_volume, dist_rows, md = [], [], [f"# Campaign 36 - pores with >= {a.min_voxels} voxels, "
                                           f"real splits {a.real_splits}\n"]
@@ -173,6 +182,15 @@ def main() -> int:
                 df = pores(r, a.min_voxels)
                 per_volume.append({"bin": b, "source": s, "split": "", **volume_stats(r, df)})
                 dist_rows.append({"bin": b, "source": s, "name": r["name"], **dist(df)})
+                twin_of = r.get("real_volume_id")
+                if twin_of in rpores:
+                    own = rpores[twin_of]
+                    d_own = {p: wasserstein_distance(sample(df[p].to_numpy(), rng),
+                                                     sample(own[p].to_numpy(), rng)) / iqr[p]
+                             for p in PROPS}
+                    twin_rows.append({"bin": b, "sampler": s, "twin": r["name"],
+                                      "real_porosity": float(rb.set_index("name").loc[twin_of, "porosity"]),
+                                      "twin_porosity": r["porosity"], **d_own})
                 gen_hist.setdefault(s, []).append(df)
 
         # figure: pooled histograms per property
@@ -207,6 +225,11 @@ def main() -> int:
         md.append("## Real floor range (min-max over real coupons)\n")
         rr = dd[dd.source == "real"].groupby("bin")[list(PROPS)].agg(["min", "max"]).round(3)
         md.append(rr.pipe(md_table) + "\n")
+    if twin_rows:
+        tw = pd.DataFrame(twin_rows)
+        tw.to_csv(out / "twins.csv", index=False)
+        md.append("## Each twin against its own real coupon (normalised W1; compare with the real floor range above)\n")
+        md.append(tw.set_index(["bin", "sampler", "twin"]).round(3).pipe(md_table) + "\n")
     md.append(f"## Model error: pores under {MIN_REAL} voxels (all pores counted, median over volumes)\n")
     md.append(pv.groupby(["bin", "source"])[["small_pores", "small_pore_share", "small_pore_volume_share"]]
               .median().round(4).pipe(md_table) + "\n")
