@@ -1089,7 +1089,7 @@ def memorisation(
         if m.requested_global_phi is not None:
             req_phi, phi_source = float(m.requested_global_phi), "global"
         else:
-            field = case.requested_field()
+            field = case.requested_field
             if field is None:
                 m.require(("requested_global_phi",), "memorisation")
             req_phi, phi_source = float(field.mean()), "field mean"
