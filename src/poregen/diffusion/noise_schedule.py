@@ -344,6 +344,57 @@ class DDPMSchedule:
         nonzero = (t > 0).float().view(-1, 1, 1, 1, 1).to(x_t.device)
         return mean + nonzero * (0.5 * log_var).exp() * noise
 
+    def heun_correction(
+        self,
+        x_euler: torch.Tensor,
+        eps_t: torch.Tensor,
+        eps_prev: torch.Tensor,
+        t: torch.Tensor,
+        t_prev: torch.Tensor,
+    ) -> torch.Tensor:
+        """Second-order (Heun) correction of one DDIM step (Karras et al. 2022, Alg. 1).
+
+        :meth:`ddim_step` is Euler on the probability-flow ODE written in the
+        EDM variables ``y = x/sqrt(ᾱ)``, ``σ = sqrt((1−ᾱ)/ᾱ)``, where
+        ``dy/dσ = ε̂``.  Heun evaluates ``ε̂`` again at the Euler point
+        ``(x_euler, t_prev)`` and replaces the slope by the average of the two::
+
+            y'' = y + (σ' − σ) (ε̂_t + ε̂_prev) / 2
+                = y_euler + (σ' − σ) (ε̂_prev − ε̂_t) / 2
+
+        Back in ``x`` the correction is ``c (ε̂_prev − ε̂_t) / 2`` with
+        ``c = sqrt(ᾱ')(σ' − σ) = sqrt(1−ᾱ') − sqrt(ᾱ'/ᾱ) sqrt(1−ᾱ)``.  The
+        caller skips it at the FIRST step (ᾱ = 0 under zero terminal SNR, σ = ∞)
+        and at the LAST step (σ' = 0, no second slope), as the EDM sampler does;
+        both are plain Euler.
+        """
+        a_t = self._gather(self.alphas_cumprod, t).to(x_euler.device)
+        a_p = self._gather(self.alphas_cumprod, t_prev).to(x_euler.device)
+        c = (1.0 - a_p).clamp(min=0.0).sqrt() - (a_p / a_t.clamp(min=1e-12)).sqrt() * (1.0 - a_t).clamp(min=0.0).sqrt()
+        return x_euler + 0.5 * c * (eps_prev - eps_t)
+
+    def sample_ode(self, predict, x_T: torch.Tensor, timesteps: list[int], order: int = 1) -> torch.Tensor:
+        """Run the reverse ODE from ``x_T`` down the ``timesteps`` ladder.
+
+        ``predict(x, t) -> model_out`` in this schedule's objective space.
+        ``order`` 1 = DDIM (Euler); 2 = Heun, Euler at the first and last step.
+        The same arithmetic :class:`VolumeGenerator` applies per chunk, kept
+        here in one place so a known-answer test can exercise it alone.
+        """
+        x = x_T
+        n = len(timesteps) - 1
+        for i in range(n):
+            t = torch.full((x.shape[0],), timesteps[i], dtype=torch.long, device=x.device)
+            tp = torch.full((x.shape[0],), timesteps[i + 1], dtype=torch.long, device=x.device)
+            out = predict(x, t)
+            x_e = self.ddim_step(x, t, tp, out)
+            if order == 2 and 0 < i < n - 1:
+                out2 = predict(x_e, tp)
+                x = self.heun_correction(x_e, self.predict_eps(x, t, out), self.predict_eps(x_e, tp, out2), t, tp)
+            else:
+                x = x_e
+        return x
+
     def ddim_step(
         self,
         x_t: torch.Tensor,

@@ -85,6 +85,9 @@ class CaseSpec:
     chunk_overlap: int | None = None
     chunk_overlap_pinned: int | None = None
     chunk_overlap_write: str | None = None
+    #: Per-step ODE solver: "ddim" (first order) or "heun" (second order, two
+    #: model calls per intermediate step; campaign 38, author 2026-11-06).
+    solver: str = "ddim"
     #: Arm (f): for windows whose neighbour set is MIXED (some faces solved,
     #: the face toward the next chunk not), predict with the neighbour arm
     #: dropped. One model call, so it costs production time.

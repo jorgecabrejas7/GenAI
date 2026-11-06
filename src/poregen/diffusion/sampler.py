@@ -196,6 +196,8 @@ def theta_from_layup(
     return angles[ply_idx].astype(np.float32)
 
 
+
+
 # ── overlapping-window helpers ────────────────────────────────────────────────
 
 def window_origins(
@@ -594,6 +596,10 @@ class DDIMSampler:
     the correction only makes sense once a guidance scale is actually above 1.
     """
 
+    #: ODE solver order of the per-step update: 1 = DDIM (Euler).
+    order: int = 1
+    solver: str = "ddim"
+
     def __init__(
         self,
         model: torch.nn.Module,
@@ -759,6 +765,28 @@ class DDIMSampler:
         if return_intermediates:
             out.append(inter)
         return out[0] if len(out) == 1 else tuple(out)
+
+class HeunSampler(DDIMSampler):
+    """Heun (second-order) sampler on the same timestep ladder as DDIM.
+
+    Naiff et al. 2026 sample their porous-media LDM with the EDM Heun sampler
+    at a few tens of steps (author 2026-11-06: "test heun sampler like in
+    Naiff with few steps").  :meth:`DDIMSampler.predict_out` is unchanged, so
+    the nested CFG and the raw-output space are the same; what changes is the
+    update, done by :class:`VolumeGenerator` through
+    :meth:`DDPMSchedule.heun_correction`: every intermediate step evaluates
+    the fused window prediction a second time at the Euler point and averages
+    the two slopes.  Two model calls per step instead of one, except the first
+    step (pure noise under zero terminal SNR) and the last (σ' = 0), which
+    stay Euler.  ``n_steps`` counts ladder steps, so Heun-N costs about 2N−2
+    model calls per window.  Chunk assembly (a2s overlap, RePaint re-noising)
+    is untouched: it acts between steps, this acts inside one.
+    """
+
+    order = 2
+    solver = "heun"
+
+
 
 
 class VolumeGenerator:
@@ -1201,10 +1229,12 @@ class VolumeGenerator:
             x = init_noise[(slice(None), *chunk_sl)].unsqueeze(0).clone()
             B_max = max(1, min(int(window_batch), n_win))
 
-            for i, t_val in enumerate(timesteps[:-1]):
-                t_prev_val = timesteps[i + 1]
-                # Context canvas at this timestep: finished chunks re-noised to
-                # t with FRESH noise, the current chunk at its live state.
+            def fused_out(x, t_val):
+                """The RePaint paste on ``x`` at ``t_val``, the context canvas at
+                ``t_val``, one fused window prediction over the chunk.  Returns
+                the (pasted) state and the fused raw model output.  Called once
+                per step by DDIM, twice by Heun (the second time at the Euler
+                point and the next timestep)."""
                 t_one = torch.full((1,), t_val, dtype=torch.long, device=self.device)
                 # The re-noising draw runs in the same frame as the initial one:
                 # a canvas-sized field, of which this chunk's context block is a
@@ -1284,10 +1314,14 @@ class VolumeGenerator:
                     for k, j in enumerate(idx):
                         sl = win_sl[j]
                         out_sum[0, :, sl[0], sl[1], sl[2]] += weight * out[k]
+                return x, out_sum / weight_sum
 
+            n_steps = len(timesteps) - 1
+            for i, t_val in enumerate(timesteps[:-1]):
+                t_prev_val = timesteps[i + 1]
+                x, model_out = fused_out(x, t_val)
                 t      = torch.tensor([t_val],      dtype=torch.long, device=self.device)
                 t_prev = torch.tensor([t_prev_val], dtype=torch.long, device=self.device)
-                model_out = out_sum / weight_sum
                 if on_step is not None:
                     # The X0 PREDICTION, not the noisy x_t: x_t is noise the eye
                     # cannot read, while x0 is what the model currently believes
@@ -1301,9 +1335,21 @@ class VolumeGenerator:
                         "x": x.detach().cpu(),
                         "chunk_slice": chunk_sl,
                         "n_chunks": len(chunks),
-                        "n_steps": len(timesteps) - 1,
+                        "n_steps": n_steps,
                     })
-                x = schedule.ddim_step(x, t, t_prev, model_out)
+                x_euler = schedule.ddim_step(x, t, t_prev, model_out)
+                if sampler.order == 2 and 0 < i < n_steps - 1:
+                    # Heun: a second fused prediction at the Euler point and the
+                    # next timestep, then the averaged slope (HeunSampler).
+                    x_e, model_out2 = fused_out(x_euler, t_prev_val)
+                    x = schedule.heun_correction(
+                        x_e,
+                        schedule.predict_eps(x, t, model_out),
+                        schedule.predict_eps(x_e, t_prev, model_out2),
+                        t, t_prev,
+                    )
+                else:
+                    x = x_euler
                 if progress is not None:
                     progress.update(1)
 
@@ -1710,6 +1756,8 @@ class VolumeGenerator:
             "window_stride": self.window_stride,
             "decode_stride": self.decode_stride,
             "ddim_steps": len(self.sampler.timesteps) - 1,
+            "solver": self.sampler.solver,
+            "model_calls_per_step": 2 if self.sampler.order == 2 else 1,
             "s_por": float(self.sampler.s_por),
             "s_nb": float(self.sampler.s_nb),
             "cfg_rescale": float(self.sampler.cfg_rescale),

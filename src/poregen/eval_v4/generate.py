@@ -349,7 +349,7 @@ class VolumeRunner:
 
     def run(self, spec: CaseSpec, case_dir: str | Path, *, progress=None) -> Manifest:
         """Generate one case and write its directory.  Returns the manifest."""
-        from poregen.diffusion.sampler import DDIMSampler, VolumeGenerator  # noqa: PLC0415
+        from poregen.diffusion.sampler import DDIMSampler, HeunSampler, VolumeGenerator  # noqa: PLC0415
 
         shape = tuple(int(s) for s in spec.volume_shape)
         size_mm = tuple(s * VOXEL_SIZE_MM for s in shape)
@@ -361,7 +361,8 @@ class VolumeRunner:
             shape[0], spec.cond_layup or spec.layup,
             spec.ply_thickness_vox, spec.request_offset[0]
         )
-        sampler = DDIMSampler(
+        sampler_cls = {"ddim": DDIMSampler, "heun": HeunSampler}[spec.solver]
+        sampler = sampler_cls(
             self.model, self.schedule, self.device,
             n_steps=spec.ddim_steps, s_por=spec.s_por, s_nb=spec.s_nb,
             cfg_rescale=self.cfg_rescale,
@@ -482,6 +483,8 @@ class VolumeRunner:
                 # A sampler setting that changes the result must be in the
                 # manifest, or a trial volume is indistinguishable from a
                 # production one.
+                "solver": spec.solver,
+                "model_calls_per_step": 2 if spec.solver == "heun" else 1,
                 "chunk_overlap": generator.chunk_overlap,  # as resolved: None in the case means a2s
                 "chunk_overlap_pinned": generator.chunk_overlap_pinned,  # as resolved: None in the case means a2s
                 "chunk_overlap_write": generator.chunk_overlap_write,  # as resolved: None in the case means a2s

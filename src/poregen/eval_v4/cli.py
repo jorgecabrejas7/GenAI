@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     # chunking it would partition the canvas into independent solves and put a
     # seam at every chunk plane for no reason. This is the assembly_modes
     # "joint" arm applied to a whole campaign.
+    g.add_argument("--ddim-steps", type=int, default=None,
+                   help="override every case's ladder step count (campaign 38: Heun at 10/18/25)")
+    g.add_argument("--solver", choices=("ddim", "heun"), default=None,
+                   help="override the per-step ODE solver (heun = second order, two model "
+                        "calls per intermediate step)")
     g.add_argument("--joint", action="store_true",
                    help="denoise each case's WHOLE canvas as one chunk with every "
                         "neighbour UNKNOWN. For the porosity-only baseline, which "
@@ -145,6 +150,8 @@ def _apply_sampler_overrides(specs, args):
         ("chunk_overlap", args.chunk_overlap),
         ("chunk_overlap_pinned", args.chunk_overlap_pinned),
         ("chunk_overlap_write", args.chunk_overlap_write),
+        ("solver", args.solver),
+        ("ddim_steps", args.ddim_steps),
     ) if v is not None}
     if not changes:
         return specs
