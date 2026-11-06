@@ -44,7 +44,8 @@ def test_heun_converges_to_the_exact_solution():
     assert _exact_gaussian(3.0, 80, 2) < 0.01
 
 
-def test_generator_call_pattern_and_equal_result_for_a_constant_model():
+@pytest.mark.parametrize("overlap", [0, None])   # None = the a2s default (64/32/successor)
+def test_generator_call_pattern_and_equal_result_for_a_constant_model(overlap):
     dev = torch.device("cpu")
     sch = DDPMSchedule(T=100, device=dev)
     theta = theta_from_layup(2 * P, [0, 45, 90], 19.6)
@@ -54,7 +55,8 @@ def test_generator_call_pattern_and_equal_result_for_a_constant_model():
         gen = VolumeGenerator(cls(model, sch, dev, n_steps=4), _ConstVAE(), dev, patch_size=P,
                               latent_size=LAT, latent_scale=1.0, voxel_size_mm=VOX_MM,
                               por_log_stats=(-3.0, 1.0), theta_deg=theta, chunk_tiles=(2, 2, 2),
-                              chunk_overlap=0)
+                              chunk_overlap=overlap)
+        assert gen.chunk_overlap == (64 if overlap is None else 0)
         xct, label, stats, *_ = gen.generate(tuple(2 * P * VOX_MM for _ in range(3)),
                                              target_porosity=0.02, seed=1)
         out[cls.solver] = (len(model.calls), xct, stats)
