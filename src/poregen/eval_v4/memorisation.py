@@ -966,6 +966,7 @@ def memorisation(
     n_floor: int = FLOOR_PATCHES,
     seed: int = 0,
     allow_busy_gpu: bool = False,
+    max_patches_per_volume: int | None = None,
 ) -> dict:
     """Full-store memorisation of every generated volume small enough to search.
 
@@ -1094,6 +1095,15 @@ def memorisation(
                 m.require(("requested_global_phi",), "memorisation")
             req_phi, phi_source = float(field.mean()), "field mean"
         origins = patch_origins(case.material_voxels())
+        # A whole-coupon twin holds ~5 600 tiles; five of them in grey space
+        # (float32, 64^3 each) are ~150 GB and killed the host on 2026-10-30.
+        # The cap keeps a seeded random subset of the stride-64 origins; the
+        # count kept and the count available are both recorded per case.
+        n_origins_all = len(origins)
+        if max_patches_per_volume is not None and len(origins) > max_patches_per_volume:
+            keep = np.random.default_rng(seed + len(origins)).choice(
+                len(origins), max_patches_per_volume, replace=False)
+            origins = [origins[i] for i in sorted(keep)]
         win = window_states(m)
         census = win.census()
         mu = encode_patches(vae, case.xct, case.label, origins, device=device)
@@ -1117,6 +1127,7 @@ def memorisation(
         bucket_of += buckets
         per_case[m.case] = {
             "n_patches": len(origins),
+            "n_patches_available": n_origins_all,
             "requested_phi": req_phi,
             "requested_phi_source": phi_source,
             "assessment": m.assessment,
