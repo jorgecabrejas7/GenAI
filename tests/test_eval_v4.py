@@ -999,3 +999,20 @@ class TestPoreDiceAcrossPlanes:
     def test_the_definition_says_the_bare_number_is_not_readable(self):
         out = M.pore_dice_across_planes(self._box(), 64)
         assert "ratio_to_interior" in out["definition"]
+
+
+def test_overlap_override_skips_one_tile_chunks():
+    """`--chunk-overlap 64` on the assembly_modes 'sequential' arm (one-tile chunks)
+    must leave that case unoverlapped instead of stopping the whole assessment."""
+    import argparse
+    from poregen.eval_v4 import cli
+    from poregen.eval_v4.cases import build_cases
+    specs = build_cases("assembly_modes")
+    args = argparse.Namespace(chunk_overlap=64, chunk_overlap_pinned=32, chunk_overlap_write="successor",
+                              solver=None, ddim_steps=None, joint=False)
+    out = cli._apply_sampler_overrides(specs, args)
+    for spec in out:
+        if min(spec.chunk_tiles) == 1:
+            assert spec.chunk_overlap == 0
+        elif spec.neighbour_mode == "canvas":
+            assert spec.chunk_overlap == 64

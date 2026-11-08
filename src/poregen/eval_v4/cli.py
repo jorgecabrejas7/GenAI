@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from poregen.eval_v4.cases import ASSESSMENTS, MEASURE_ONLY, build_cases
+from poregen.eval_v4.io import TILE
 from poregen.eval_v4.io import case_dir, repo_root
 from poregen.paths import default_split
 
@@ -159,6 +160,17 @@ def _apply_sampler_overrides(specs, args):
     for spec in specs:
         if spec.neighbour_mode != "canvas":
             out.append(spec)
+            skipped += 1
+            continue
+        # A chunk overlap must be smaller than the chunk: the assembly_modes
+        # "sequential" arm has one-tile chunks (64 voxels), which a 64-voxel
+        # overlap cannot apply to.  Such a case keeps the unoverlapped
+        # partition, as the sampler's own a2s default does (2026-11-08: the
+        # explicit override stopped the whole campaign-18 regeneration).
+        ov = changes.get("chunk_overlap")
+        if ov and min(spec.chunk_tiles) * TILE <= ov:
+            own = {k: v for k, v in changes.items() if not k.startswith("chunk_overlap")}
+            out.append(dataclasses.replace(spec, chunk_overlap=0, **own))
             skipped += 1
             continue
         out.append(dataclasses.replace(spec, **changes))

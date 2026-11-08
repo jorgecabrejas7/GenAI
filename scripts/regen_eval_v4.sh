@@ -42,8 +42,13 @@ A2S_WRITE=successor
 MEMO_MAX_MIN=60
 MEMO_MAX_GB=20
 
+# Since 7bbfc82 a2s IS the sampler's default for every multi-chunk volume and
+# the unoverlapped partition must be asked for; a case whose chunk is a single
+# tile (assembly_modes "sequential") cannot hold a 64-voxel overlap and stays
+# unoverlapped under either setting (the explicit override used to stop the
+# whole assessment on it, 2026-11-08).
 case "$SAMPLER" in
-    production) OVERRIDE=() ;;
+    production) OVERRIDE=(--chunk-overlap 0) ;;
     a2s)        OVERRIDE=(--chunk-overlap "$A2S_OVERLAP"
                           --chunk-overlap-pinned "$A2S_PINNED"
                           --chunk-overlap-write "$A2S_WRITE") ;;
