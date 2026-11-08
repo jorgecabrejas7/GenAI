@@ -12,10 +12,18 @@ cd "$(dirname "$0")/.."
 export POREGEN_SPLIT=split_v4
 R=runs/campaigns
 say() { printf '%s  C38 %s\n' "$(date -Is)" "$*" | tee -a runs/campaigns/chain.log; }
-until grep -q "C37 precision/recall rc=" runs/campaigns/chain.log; do sleep 60; done
+#: Parameters (vault D91, 2026-11-08): SUFFIX names the new roots; GEN_EXTRA is
+#: appended to every generate call (e.g. "--solver heun --ddim-steps 25");
+#: COPY_ONECHUNK=0 regenerates the one-chunk cases too (a solver change touches
+#: them; a sampler change does not); WAIT_LINE is the chain.log line to wait for.
+SUFFIX="${SUFFIX:--a2s}"; GEN_EXTRA="${GEN_EXTRA:-}"; COPY_ONECHUNK="${COPY_ONECHUNK:-1}"
+WAIT_LINE="${WAIT_LINE:-C37 precision/recall rc=}"
+TAG="${SUFFIX#-}"
+until grep -q "$WAIT_LINE" runs/campaigns/chain.log; do sleep 60; done
 sleep 20
 seed_root() {  # $1 old root, $2 new root: copy one-chunk cases (air rule applied) and link the real floor
     mkdir -p "$2"; [ -e "$2/real_floor" ] || ln -s "$(readlink -f "$1/real_floor")" "$2/real_floor"
+    [ "$COPY_ONECHUNK" = 1 ] || { echo "one-chunk cases regenerated too (COPY_ONECHUNK=0)"; return 0; }
     python - "$1" "$2" <<'PY'
 import json, os, shutil, sys, glob
 import numpy as np, tifffile
@@ -43,23 +51,23 @@ print(f"{n} one-chunk cases copied into {new} with the air rule applied")
 PY
 }
 # c18 via the same script that built the original campaign
-OLD=$R/18-eval-v4-final-v4-run0005; NEW=${OLD}-a2s
-say "c18 a2s start"; seed_root "$OLD" "$NEW" | tee -a runs/campaigns/chain.log
-CKPT_RUN=runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 CKPT=latest SAMPLER=a2s OUT=$NEW SCRATCH=runs/campaigns/chain_logs/v8/c18_a2s bash scripts/regen_eval_v4.sh > runs/campaigns/chain_logs/c18_a2s.log 2>&1
-say "c18 a2s rc=$? (sub-stages: grep rc= $NEW/regen.log)"
+OLD=$R/18-eval-v4-final-v4-run0005; NEW=${OLD}${SUFFIX}
+say "c18 $TAG start"; seed_root "$OLD" "$NEW" | tee -a runs/campaigns/chain.log
+CKPT_RUN=runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 CKPT=latest SAMPLER=a2s EXTRA="$GEN_EXTRA" OUT=$NEW SCRATCH=runs/campaigns/chain_logs/v8/c18_$TAG bash scripts/regen_eval_v4.sh > runs/campaigns/chain_logs/c18_$TAG.log 2>&1
+say "c18 $TAG rc=$? (sub-stages: grep rc= $NEW/regen.log)"
 run_campaign() {  # $1 tag $2 old root $3 model $4 ckpt $5.. assessments
-    tag=$1; old=$2; model=$3; ckpt=$4; shift 4; new=${old}-a2s
-    say "$tag a2s start"; seed_root "$old" "$new" | tee -a runs/campaigns/chain.log
+    tag=$1; old=$2; model=$3; ckpt=$4; shift 4; new=${old}${SUFFIX}
+    say "$tag $TAG start"; seed_root "$old" "$new" | tee -a runs/campaigns/chain.log
     for A in "$@"; do
-        python -m poregen.eval_v4.cli generate "$A" --model "$model" --ckpt "$ckpt" --weights ema --out "$new" > runs/campaigns/chain_logs/${tag}_a2s_gen_$A.log 2>&1
+        python -m poregen.eval_v4.cli generate "$A" --model "$model" --ckpt "$ckpt" --weights ema --out "$new" $GEN_EXTRA > runs/campaigns/chain_logs/${tag}_${TAG}_gen_$A.log 2>&1
         say "$tag generate $A rc=$?"
-        python -m poregen.eval_v4.cli measure "$A" --root "$new" > runs/campaigns/chain_logs/${tag}_a2s_meas_$A.log 2>&1
+        python -m poregen.eval_v4.cli measure "$A" --root "$new" > runs/campaigns/chain_logs/${tag}_${TAG}_meas_$A.log 2>&1
         say "$tag measure $A rc=$?"
     done
-    python -m poregen.eval_v4.cli report --root "$new" > runs/campaigns/chain_logs/${tag}_a2s_report.log 2>&1
+    python -m poregen.eval_v4.cli report --root "$new" > runs/campaigns/chain_logs/${tag}_${TAG}_report.log 2>&1
     say "$tag report rc=$?"
 }
 run_campaign c24 $R/24-ablation-v4-run0005 runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 latest ablation
 run_campaign c25 $R/25-ldm-phi-only-v4-run0002 runs/ldm/ldm25-run-0002-20261025-062027-z4-c128-bs256-lr1e-04-dsv4 40000 sampler porosity_global microstructure cfg
 run_campaign c27 $R/27-budget-matched-40k-v4-run0005 runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 40000 sampler porosity_global microstructure
-say "A2S REGENERATION COMPLETE"
+say "REGENERATION COMPLETE ($TAG)"; [ "$TAG" = a2s ] && say "A2S REGENERATION COMPLETE"

@@ -32,6 +32,11 @@ SRC="$REPO/runs/campaigns/12-eval-v4"
 SCRATCH="${SCRATCH:-/tmp/regen_eval_v4}"
 CKPT="${CKPT:-latest}"
 SAMPLER="${SAMPLER:-production}"
+#: Extra flags for every `generate` call, e.g. "--solver heun --ddim-steps 25"
+#: (vault D91, 2026-11-08: the Heun regenerations use ONE step count for every
+#: case, so the sampler assessment's 50/100/200 rows become three same-setting
+#: rows; the manifest records the truth).
+EXTRA="${EXTRA:-}"
 : "${CKPT_RUN:?set CKPT_RUN to the ldm run directory to generate from}"
 
 #: The a2s sampler, as the trial ran it.
@@ -93,7 +98,7 @@ for a in "${GEN_ORDER[@]}"; do
     say "GEN $a start"
     python -m poregen.eval_v4.cli generate "$a" \
         --model "$CKPT_RUN" --ckpt "$CKPT" --out "$OUT" --save-latents \
-        "${OVERRIDE[@]}" > "$SCRATCH/gen_${a}.log" 2>&1
+        "${OVERRIDE[@]}" $EXTRA > "$SCRATCH/gen_${a}.log" 2>&1
     say "GEN $a done rc=$?"
     if [ "$a" = "cfg" ]; then
         say "INSPECT pack start (before layup, so inspection overlaps it)"
