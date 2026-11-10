@@ -19,6 +19,9 @@ say() { printf '%s  C38 %s\n' "$(date -Is)" "$*" | tee -a runs/campaigns/chain.l
 SUFFIX="${SUFFIX:--a2s}"; GEN_EXTRA="${GEN_EXTRA:-}"; COPY_ONECHUNK="${COPY_ONECHUNK:-1}"
 WAIT_LINE="${WAIT_LINE:-C37 precision/recall rc=}"
 TAG="${SUFFIX#-}"
+#: ONLY: the campaigns to run, e.g. ONLY="c27" (recovery 2026-11-10).
+ONLY="${ONLY:-c18 c24 c25 c27}"
+want() { case " $ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 until grep -q "$WAIT_LINE" runs/campaigns/chain.log; do sleep 60; done
 sleep 20
 seed_root() {  # $1 old root, $2 new root: copy one-chunk cases (air rule applied) and link the real floor
@@ -52,10 +55,12 @@ print(f"{n} one-chunk cases copied into {new} with the air rule applied")
 PY
 }
 # c18 via the same script that built the original campaign
+if want c18; then
 OLD=$R/18-eval-v4-final-v4-run0005; NEW=${OLD}${SUFFIX}
 say "c18 $TAG start"; seed_root "$OLD" "$NEW" | tee -a runs/campaigns/chain.log
 CKPT_RUN=runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 CKPT=latest SAMPLER=a2s EXTRA="$GEN_EXTRA" OUT=$NEW SCRATCH=runs/campaigns/chain_logs/v8/c18_$TAG bash scripts/regen_eval_v4.sh > runs/campaigns/chain_logs/c18_$TAG.log 2>&1
 say "c18 $TAG rc=$? (sub-stages: grep rc= $NEW/regen.log)"
+fi
 run_campaign() {  # $1 tag $2 old root $3 model $4 ckpt $5.. assessments
     tag=$1; old=$2; model=$3; ckpt=$4; shift 4; new=${old}${SUFFIX}
     say "$tag $TAG start"; seed_root "$old" "$new" | tee -a runs/campaigns/chain.log
@@ -68,7 +73,7 @@ run_campaign() {  # $1 tag $2 old root $3 model $4 ckpt $5.. assessments
     python -m poregen.eval_v4.cli report --root "$new" > runs/campaigns/chain_logs/${tag}_${TAG}_report.log 2>&1
     say "$tag report rc=$?"
 }
-run_campaign c24 $R/24-ablation-v4-run0005 runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 latest ablation
-run_campaign c25 $R/25-ldm-phi-only-v4-run0002 runs/ldm/ldm25-run-0002-20261025-062027-z4-c128-bs256-lr1e-04-dsv4 40000 sampler porosity_global microstructure cfg
-run_campaign c27 $R/27-budget-matched-40k-v4-run0005 runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 40000 sampler porosity_global microstructure
+want c24 && run_campaign c24 $R/24-ablation-v4-run0005 runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 latest ablation
+want c25 && run_campaign c25 $R/25-ldm-phi-only-v4-run0002 runs/ldm/ldm25-run-0002-20261025-062027-z4-c128-bs256-lr1e-04-dsv4 40000 sampler porosity_global microstructure cfg
+want c27 && run_campaign c27 $R/27-budget-matched-40k-v4-run0005 runs/ldm/ldm06-run-0005-20261022-081725-z4-c128-bs256-lr1e-04-dsv4 40000 sampler porosity_global microstructure
 say "REGENERATION COMPLETE ($TAG)"; [ "$TAG" = a2s ] && say "A2S REGENERATION COMPLETE"
