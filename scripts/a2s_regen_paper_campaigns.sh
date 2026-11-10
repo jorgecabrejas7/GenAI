@@ -42,8 +42,9 @@ for m in glob.glob(f"{old}/*/volumes/*/manifest.json"):
         g = int(round(float(v[air].mean()))) if air.any() else None
         if g is not None:
             v[air] = g; tifffile.imwrite(f"{dst}/volume.tif", v, imagej=True)
-        d.setdefault("generation_stats", {})["air_grey_value"] = g
-        d["generation_stats"]["air_grey_applied_post_hoc"] = (
+        gs = (d.setdefault("notes", {}) or {}).setdefault("generation_stats", {})  # under notes: a top-level key is rejected by Manifest
+        gs["air_grey_value"] = g
+        gs["air_grey_applied_post_hoc"] = (
             "2026-11-06: one-chunk case copied from the unoverlapped-sampler root; D87 air rule applied to volume.tif")
         json.dump(d, open(f"{dst}/manifest.json", "w"), indent=2)
         n += 1
