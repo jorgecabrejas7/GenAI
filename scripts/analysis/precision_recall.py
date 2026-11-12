@@ -124,9 +124,12 @@ class ArrayCase:
 
 
 def coupon_case(coupon_dir: Path, twin_case) -> ArrayCase:
+    import dataclasses  # noqa: PLC0415
     xct = tifffile.imread(coupon_dir / "real_volume.tif")
     label = tifffile.imread(coupon_dir / "real_label.tif")
-    return ArrayCase(xct, label, twin_case.manifest)
+    # the twin's manifest declares the PADDED canvas; the real coupon has its own shape
+    man = dataclasses.replace(twin_case.manifest, volume_shape=tuple(int(v) for v in xct.shape))
+    return ArrayCase(xct, label, man)
 
 
 def score(fr: dict, fg: dict) -> dict:
