@@ -615,3 +615,4 @@ configs no longer exist.
 Markers: **⚠** stale/broken assumption · **🕰** historical, superseded but kept · **💀** dead or throwaway.
 
 | `docs/REMOTE_RUNG_SWEEP.md` | How to run the five-rung r08 ablation on a second GB10: environment (from `requirements-lock-gb10.txt`, this machine's pip freeze), the rsync of code + split_v4 memmaps only, verification, launch with `scripts/chain_rungs_remote.sh`, and `scripts/pull_remote_results.sh` to read the results from here. |
+| `docs/METRICS_REFERENCE.md` | Every metric the project computes (VAE eval rows, texture suite, pore morphology, eval_v4 porosity/seams/surface/layup/microstructure/memorisation, campaign 37 precision/recall, LDM training probes, campaign 14), each with its file:function, exact formula, reading convention and caveats, plus a list of where the older docs disagree with the code. Written 2026-11-12 from the code. |
