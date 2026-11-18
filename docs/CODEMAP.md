@@ -355,6 +355,7 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/overlay_to_air_label.py` | Campaign 40: author's RGB surface overlay (red upper, green lower line) -> grey.tif, air.tif, per-column surfaces. |
 | `analysis/export_air_crop.py` | Campaign 40: thickness-first grey + reference-air crop of a split_v4 coupon or a TIFF pair. |
 | `analysis/score_air.py` | Campaign 40: air Dice and per-column surface error (longest non-air run) of predicted air masks against a reference. |
+| `analysis/fig_air_compare.py` | Campaign 40: zoomed slice figures with several air-mask outlines and a legend, plus agreement.json (air fraction, per-column surface difference against the first mask). |
 | `analysis/fm_dino_air.py` | Campaign 40 (env `segfm`): frozen DINOv2 patch features + logistic air head fitted on a few slices; applies across volumes. |
 | `analysis/fm_sam2_air.py` | Campaign 40 (env `segfm`): SAM2.1 video propagation of outside air along a chosen axis, prompts from the rule faces = air, mid-plane = specimen. `--ckpt` takes a fine-tuned checkpoint. |
 | `analysis/sam2_export_vos.py` | Campaign 40: labelled volume -> DAVIS-style videos (JPEG frames, palette PNG upper/lower air) along A and B for SAM2 fine-tuning. |
