@@ -349,9 +349,18 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/unet_segment_volume.py` | Campaign 39: segment a grey volume with the U-Net segmenter (texture envelope only for the grey mapping, quantile match to a real coupon, 64^3 windows stride 32 with a Hann blend); label/material/pore/air/pore_prob TIFFs, report, previews. |
 | `analysis/plot_unet_seg_curves.py` | Campaign 39: train loss, val Dice per class, porosity/air error and lr curves of a U-Net segmenter run. |
 | `analysis/paint_material_limits.py` | Campaign 39: RGB TIFF of a grey volume with the specimen's upper (red) and lower (green) surfaces from a 3-class label; longest non-air run per column along the thickness axis; surfaces.json with positions and thickness. |
+| `analysis/teijin_air_views.py` | Campaign 40: orthogonal slices of a grey volume with several air masks outlined in colour, plus a local-std panel. |
+| `analysis/teijin_air_baselines.py` | Campaign 40: non-learned air baselines, the reference `material_mask` (pinned 65c1eea onlypores.py loaded as a lone module) and the campaign-39 texture envelope. |
+| `analysis/unet_air_probe.py` | Campaign 40: the c39 U-Net without the envelope (raw grey or specimen-quantile map), optional rescale (`--zoom`); separates model air from envelope air. |
+| `analysis/overlay_to_air_label.py` | Campaign 40: author's RGB surface overlay (red upper, green lower line) -> grey.tif, air.tif, per-column surfaces. |
+| `analysis/export_air_crop.py` | Campaign 40: thickness-first grey + reference-air crop of a split_v4 coupon or a TIFF pair. |
+| `analysis/score_air.py` | Campaign 40: air Dice and per-column surface error (longest non-air run) of predicted air masks against a reference. |
+| `analysis/fm_dino_air.py` | Campaign 40 (env `segfm`): frozen DINOv2 patch features + logistic air head fitted on a few slices; applies across volumes. |
+| `analysis/fm_sam2_air.py` | Campaign 40 (env `segfm`): SAM2.1 video propagation of outside air along a chosen axis, prompts from the rule faces = air, mid-plane = specimen. |
 | `analysis/unet_seg_eval.py` | Campaign 39: score a U-Net checkpoint on whole split_v4 splits: Dice per class, porosity/air MAE and bias, overall, per porosity bin and per volume. |
 | `c39_paint_limits.sh` | Campaign 39 queue: after c39_after_us01.sh, paints the Teijin material limits (upper red, lower green) on the original grey as an RGB TIFF. |
 | `c39_after_us01.sh` | Campaign 39 queue: waits for us01 to end, then runs unet_seg_eval (test, val) and unet_segment_volume on the Teijin volume. |
+| `c40_gpu_tests.sh` | Campaign 40 queue: after `C39 DONE`, U-Net c39 pipeline on CuartoPulg, SAM2.1-large on three time axes, DINOv2 linear heads across scans, then score_air on every crop. |
 | `experiments/train_grey_encoder.py` | OQ-72: trains `GreyEncoder` (grey patch -> the production VAE's stored mu, MSE on the latent store; decoder frozen, used only to score the decoded 3-class label against the reference label beside the teacher). Run dirs `runs/grey_encoder/<exp>-run-NNNN-<date>/` with metrics.jsonl, tb/, last/best.ckpt. |
 | `experiments/train_unet_seg.py` | Standalone 3-class 3D U-Net segmenter on the split_v4 patches (grey in, reference label out; weighted CE + pore/air soft Dice; flips and ply-plane 90-degree turns). Run dirs `runs/unet_seg/<exp>-run-NNNN-<date>/`, best.ckpt = highest val pore Dice. Not part of the VAE/LDM pipeline. |
 | `analysis/c36_memorisation.py` | Campaign 36: the eval_v4 memorisation search on the whole-coupon a2s twins, 512 random patches per twin (`max_patches_per_volume`; five uncapped twins OOM-killed the host on 2026-10-30). GPU idle only. |
