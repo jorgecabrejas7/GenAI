@@ -81,6 +81,7 @@ def main() -> int:
     ap.add_argument("--thickness-axis", type=int, default=1)
     ap.add_argument("--time-axis", choices=("T", "A", "B"), required=True)
     ap.add_argument("--model", choices=tuple(MODELS), default="large")
+    ap.add_argument("--ckpt", type=Path, default=None, help="fine-tuned checkpoint (same architecture as --model)")
     ap.add_argument("--crop", default=None, help="a0:a1 crop on axis A after the thickness move (to test a part)")
     ap.add_argument("--tile", type=int, default=256)
     ap.add_argument("--points", type=int, default=4)
@@ -93,7 +94,8 @@ def main() -> int:
     device = torch.device(a.device)
     from sam2.build_sam import build_sam2_video_predictor  # noqa: PLC0415
     repo, fn, cfg = MODELS[a.model]
-    pred = build_sam2_video_predictor(cfg, hf_hub_download(repo, fn), device=device)
+    ck = str(a.ckpt) if a.ckpt else hf_hub_download(repo, fn)
+    pred = build_sam2_video_predictor(cfg, ck, device=device)
 
     v = np.moveaxis(tifffile.imread(a.tif), a.thickness_axis, 0)
     full_shape = v.shape
@@ -149,7 +151,7 @@ def main() -> int:
         full[:, c0:c1] = air
         air = full
     tifffile.imwrite(a.out / "air.tif", (np.moveaxis(air, 0, a.thickness_axis) * 255).astype(np.uint8), imagej=True)
-    rep = {"tif": str(a.tif), "model": a.model, "time_axis": a.time_axis, "crop": a.crop, "tile": a.tile,
+    rep = {"tif": str(a.tif), "model": a.model, "ckpt": ck, "time_axis": a.time_axis, "crop": a.crop, "tile": a.tile,
            "points": a.points, "margin": a.margin, "key_every": a.key_every, "seconds": round(time.time() - t0, 1),
            "air_fraction_in_crop": float(air[:, c0:c1].mean() if a.crop else air.mean()),
            "peak_gpu_mem_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2) if device.type == "cuda" else None}
