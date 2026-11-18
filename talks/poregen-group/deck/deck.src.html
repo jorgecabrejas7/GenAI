@@ -187,6 +187,30 @@ aside.notes { display:none; }
   </aside>
 </section>
 <!-- =========================================================
+     02b — WHAT A GOOD GENERATOR MUST DO, AND HOW WE MEASURE IT
+     ========================================================= -->
+<section class="slide" id="sREQ" data-section="Motivation">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Motivation · the tests</div>
+  <h2 class="t r">Six questions, <i>six measurements</i></h2>
+  <p class="msg r d1">A generator is only useful if it does what we ask and the result is like a real scan. We test each point with a number, against real scans where we can.</p>
+  <div class="body">
+    <div class="r d2" style="display:grid;row-gap:16px;column-gap:28px;font:300 28px/1.35 var(--sans);color:var(--ink2);align-items:baseline;grid-template-columns:44px 560px 640px 1fr;row-gap:34px">
+      <div class="lbl"></div><div class="lbl">question</div><div class="lbl">how we measure it</div><div class="lbl">target</div>
+      <div class="amber">1</div><div style="color:var(--ink)">Do we get the porosity we ask for?</div><div>delivered against requested porosity, 42 volumes</div><div>within ±0.5 percentage points</div>
+      <div class="amber">2</div><div style="color:var(--ink)">Do the pores go where we ask?</div><div>porosity per 1.6 mm cube against a painted map</div><div>slope 1</div>
+      <div class="amber">3</div><div style="color:var(--ink)">Are shape and plies where we ask?</div><div>overlap of air with the request; ply angle read back</div><div>overlap 1; angle error at the reader's limit</div>
+      <div class="amber">4</div><div style="color:var(--ink)">Do the pores look real?</div><div>4 statistics, as a ratio to real-against-real</div><div>ratio 1</div>
+      <div class="amber">5</div><div style="color:var(--ink)">Is it new, not copied?</div><div>nearest training cube, among all 222 976</div><div>no copies</div>
+      <div class="amber">6</div><div style="color:var(--ink)">Can it make a whole coupon?</div><div>pores at chunk joins; porosity of a twin against its real coupon</div><div>no band; same porosity</div>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~50 s. This is the frame of the talk. Six questions a materials scientist would ask of any synthetic volume. Each one has a measurement and a target, and most targets come from real scans. The scorecard near the end answers all six.</p>
+    <p class="src">42 volumes: full evaluation of the final model, porosity control (7 levels × 3 seeds × 50 and 200 steps). ±0.005 band: same evaluation. 1.6 mm = 64 voxels at 25 µm. 222 976 training cubes: copy-detection bank of the full evaluation (training patches at stride 64). Reader's limit: ply-angle reader accuracy on 50 real plies, 4.2°.</p>
+  </aside>
+</section>
+
+<!-- =========================================================
      03 — DESTROY WITH NOISE, THEN UNDO
      ========================================================= -->
 <section class="slide" id="s3" data-init="morph" data-section="Diffusion">
@@ -356,14 +380,14 @@ aside.notes { display:none; }
 <section class="slide" id="s14" data-section="Autoencoder">
   <div class="hud tl">PoreGen</div><div class="hud tr">Model · autoencoder</div>
   <h2 class="t r">Our autoencoder: <i>grey in, grey and labels out</i></h2>
-  <p class="msg r d1">The encoder compresses the grey image, the pore map and the air map 48 times. The decoder rebuilds the grey image and a label for every voxel. At this compression, the rebuilt pores still match the real ones with Dice 0.93.</p>
+  <p class="msg r d1">The encoder compresses grey, pore map and air map 48 times. The decoder rebuilds grey and labels: pore Dice 0.93, grey error about 3 of 255 levels.</p>
   <div class="body">
     <svg id="aeSvg" viewBox="0 0 1728 330" width="1728" height="330" class="r d2"></svg>
         <div class="words r d5"><div><b>mask / map</b>a 0/1 image: 1 where there is a pore (or air), 0 elsewhere.</div><div><b>↓4, ↑4</b>each side shrinks 4× (64 → 16) in the encoder and grows back in the decoder.</div><div><b>Dice</b>overlap of rebuilt and real pores: 1 = perfect, 0 = no overlap.</div><div><b>3-class segmentation</b>for each voxel: material, pore or air.</div></div>
   </div>
   <aside class="notes">
     <p>~50 s. Inputs: three 64³ maps — grey, pore mask, air mask. The encoder shrinks each side by 4; the decoder grows it back and gives two outputs: the grey image and a label per voxel. We trained six autoencoders with smaller and smaller latents; 4 numbers per cell is the smallest that keeps pore Dice above 0.93 and air Dice above 0.99 (backup slide <span class="sref" data-to="s15"></span>). Below that, pores are lost.</p>
-    <p class="src">Architecture: autoencoder configuration (3 input channels, z = 4, base 32 channels, two down/up blocks, 3-class head); 0.76 M parameters (generation log). Model in use: step-25 000 checkpoint. Dice 0.93: autoencoder compression study, c = 4, whole validation split, last training step (pore Dice 0.934, air Dice 0.996); one run per size; the model in use is a later checkpoint of the same autoencoder.</p>
+    <p class="src">Architecture: autoencoder configuration (3 input channels, z = 4, base 32 channels, two down/up blocks, 3-class head); 0.76 M parameters (generation log). Model in use: step-25 000 checkpoint. Dice 0.93: autoencoder compression study, c = 4, whole validation split, last training step (pore Dice 0.934, air Dice 0.996, grey L1 0.0255 on the [−1, 1] scale = 0.0255 × 127.5 ≈ 3.3 grey levels of 255); one run per size; the model in use is a later checkpoint of the same autoencoder.</p>
   </aside>
 </section>
 <!-- =========================================================
@@ -397,7 +421,7 @@ aside.notes { display:none; }
   <aside class="notes">
     <p>~70 s. Left to right. (1) We say what we want as maps: where the specimen is and where air is, the ply angle at every depth, and a porosity value for every tile. (2) Random noise fills the latent canvas, the compressed volume. (3) The chunks are taken in order: depth, then y, then x. (4) Inside the chunk, each of the up to 125 windows is given its noisy latent, its maps, and its six neighbours, and the network predicts the next step. (5) The predictions are averaged with the window weights, and one denoising step makes the chunk a little less noisy. Steps 4 and 5 repeat 50 times. (6) The finished chunk is written to the canvas and becomes a neighbour for the next chunks. When every chunk is done, the decoder runs over the canvas in overlapping 64³ passes and gives grey values and labels.</p>
     <p>Scale: one whole coupon, 3 904 × 1 984 × 256 voxels, is 900 chunks with the overlapped sampler, and took 4.3 h on one GPU.</p>
-    <p class="src">Order of chunks (depth, y, x), window count and re-noising of finished chunks: sampler code. Chunk count: chunks of 48 latent cells advancing by 32 (overlap 16 cells = 64 voxels) over 64 × 976 × 496 cells give 2 × 30 × 15 = 900. Time: generation record of the twin of coupon Na_09_5, wall time 15 613 s, volume 256 × 3 904 × 1 984, DDIM-50.</p>
+    <p class="src">Order of chunks (depth, y, x), window count and re-noising of finished chunks: sampler code. Chunk count: chunks of 48 latent cells advancing by 32 (overlap 16 cells = 64 voxels) over 64 × 976 × 496 cells give 2 × 30 × 15 = 900. Time: generation record of the twin of coupon Na_09_5, wall time 15 613 s, volume 256 × 3 904 × 1 984, DDIM-50. Size at 25 µm: 6.4 × 97.6 × 49.6 mm = 31.0 cm³.</p>
   </aside>
 </section>
 <!-- =========================================================
@@ -459,7 +483,7 @@ aside.notes { display:none; }
 <section class="slide" id="s22" data-section="Results">
   <div class="hud tl">PoreGen</div><div class="hud tr">Results · porosity control</div>
   <h2 class="t r">Porosity control: <i>you ask, it delivers</i></h2>
-  <p class="msg r d1">Seven requested levels, three seeds, two step counts: all 42 volumes within ±0.005 of the request.</p>
+  <p class="msg r d1">Seven requested levels from 0.5 % to 10 %, three seeds, two step counts: all 42 volumes within ±0.5 percentage points of the request.</p>
   <div class="body">
     <svg id="doseSvg" viewBox="0 0 760 640" width="600" height="505" class="r d2"></svg>
     <div class="r d3" style="position:absolute;left:700px;top:0;width:1028px">
@@ -486,7 +510,7 @@ aside.notes { display:none; }
 <section class="slide" id="s23" data-section="Results">
   <div class="hud tl">PoreGen</div><div class="hud tr">Results · local control</div>
   <h2 class="t r">Local control: <i>where</i> the pores go</h2>
-  <p class="msg r d1">We paint a porosity value on each 64³ tile and measure what each tile gets. Slope 1 would mean full contrast: large patterns get it, a fine checkerboard gets about half.</p>
+  <p class="msg r d1">We paint a porosity value on each 1.6 mm cube and measure what each cube gets. Halves: slope 0.98, R² 0.87. Checkerboard: slope 0.47 — half the contrast.</p>
   <div class="body">
     <div id="tilesBox" class="r d2" style="position:absolute;left:0;top:0;width:820px"></div>
     <div class="r d3" style="position:absolute;left:880px;top:0;width:848px">
@@ -521,7 +545,7 @@ aside.notes { display:none; }
 <section class="slide" id="s26" data-section="Results">
   <div class="hud tl">PoreGen</div><div class="hud tr">Results · shape and plies</div>
   <h2 class="t r">Shape and plies: <i>drawn where we ask</i></h2>
-  <p class="msg r d1">The material map carves a notch, a hole or a sphere. The ply profile sets the fibre direction of each ply.</p>
+  <p class="msg r d1">The material map carves a notch, a hole or a sphere: air overlap 0.992. The ply profile sets the fibre direction: median error 1.8–2.2°, below the 4.2° of the reader on real scans.</p>
   <div class="body">
     <div class="r d2" style="position:absolute;left:0;top:0;width:820px">
       <video class="vid" poster="media/geometry_poster.jpg" muted loop playsinline preload="auto" style="width:820px"><source src="media/geometry.webm" type="video/webm"><source src="media/geometry.mp4" type="video/mp4"></video>
@@ -545,7 +569,7 @@ aside.notes { display:none; }
 <section class="slide" id="s28" data-section="Results">
   <div class="hud tl">PoreGen</div><div class="hud tr">Results · copy detection</div>
   <h2 class="t r">Is it <i>copying</i> the training set?</h2>
-  <p class="msg r d1">For each generated patch, find its nearest and second-nearest training patch. A copy sits on one of them and far from the rest.</p>
+  <p class="msg r d1">For each generated cube, find its nearest and second-nearest training cube. A copy sits on one and far from the rest. 0 of 4 847 generated cubes are flagged, against all 222 976 training cubes.</p>
   <div class="body">
     <svg id="copyDiag" viewBox="0 0 700 600" width="700" height="600" class="r d2"></svg>
     <svg id="copySvg" viewBox="0 0 960 600" width="960" height="600" class="r d3" style="position:absolute;left:768px;top:0"></svg>
@@ -625,6 +649,27 @@ aside.notes { display:none; }
     <p class="src">Real scans and labels: dataset volumes (reference segmentation). Twins: final model, overlapped sampler, DDIM-50, seed 101, conditioned on the coupon's envelope, ply angles and per-tile porosity. Porosity = pore ÷ (pore + material) voxels, whole coupon, from the label files (render_twins.py). Air in the generated grey: every voxel the twin's label calls air set to one value, the mean grey over air, per volume (values in the build record; labels unchanged).</p>
   </aside>
 </section>
+<section class="slide" id="sSCORE" data-section="Close">
+  <div class="hud tl">PoreGen</div><div class="hud tr">Close · scorecard</div>
+  <h2 class="t r">Scorecard: <i>how well we do it</i></h2>
+  <p class="msg r d1">The six questions from the start, answered with the measured numbers.</p>
+  <div class="body" style="top:290px">
+    <div class="r d2" style="display:grid;row-gap:16px;column-gap:28px;font:300 27px/1.35 var(--sans);color:var(--ink2);align-items:baseline;grid-template-columns:44px 400px 1fr 130px;row-gap:30px">
+      <div class="lbl"></div><div class="lbl">question</div><div class="lbl">result</div><div class="lbl">verdict</div>
+      <div class="amber">1</div><div style="color:var(--ink)">Porosity on request</div><div>42 of 42 volumes within ±0.5 pp · slope 1.03 · R² 0.998 · low end: 0.37 % for 0.5 %</div><div class="amber">met</div>
+      <div class="amber">2</div><div style="color:var(--ink)">Pores where we ask</div><div>large patterns: slope 0.98 · fine checkerboard: 0.47, half the contrast</div><div>partly</div>
+      <div class="amber">3</div><div style="color:var(--ink)">Shape and plies</div><div>air overlap 0.992 · ply angle 1.8–2.2° (reader limit 4.2°) · thin double plies 17.8°</div><div class="amber">met</div>
+      <div class="amber">4</div><div style="color:var(--ink)">Pores look real</div><div>at 3 %: S₂ 0.90, Ripley 0.77 × floor · pore size 2.2–2.3×, FID 2.7–3.4× at every level</div><div>partly</div>
+      <div class="amber">5</div><div style="color:var(--ink)">New, not copied</div><div>0 of 4 847 generated cubes flagged</div><div class="amber">met</div>
+      <div class="amber">6</div><div style="color:var(--ink)">Whole coupons</div><div>pores at joins 0.99 (real 1.01) · twin porosity within 5–14 % from 0.9 %; −34 % at 0.1 % · 31 cm³ in 4.3 h</div><div>partly</div>
+    </div>
+  </div>
+  <aside class="notes">
+    <p>~60 s. Read the verdict column, then one number per row. "Met" means the target of the question slide is reached. "Partly" means: reached for large patterns and amounts, not for the fine detail — the checkerboard, pore sizes and the slice texture, and the lowest porosity.</p>
+    <p class="src">1–5: full evaluation of the final model (porosity control, local porosity, geometry, layup, microstructure, copy detection), as on the result slides. 6: seam profile of the 2.62 % coupon at the joins (±2 voxels), real 1.012, overlapped 0.991 (render_twins.py, seam job). Twin porosity, real → twin, overlapped sampler (render_twins.py, porosity job): 0.100 → 0.066 % (−34 %), 0.876 → 0.786 % (−10 %), 1.012 → 0.872 % (−14 %), 2.618 → 2.492 % (−5 %), 8.695 → 9.109 % (+5 %). 31 cm³: 256 × 3 904 × 1 984 voxels at 25 µm = 6.4 × 97.6 × 49.6 mm = 31.0 cm³; 15 613 s wall time (generation record of the 2.62 % twin).</p>
+  </aside>
+</section>
+
 <!-- =========================================================
      32 — LIMITATIONS AND NEXT STEPS
      ========================================================= -->
@@ -1413,7 +1458,7 @@ const INIT = {
     el(svg, 'path', { d: `M${cx(4) + 60},${yb + 6} v110 H${cx(2)} v-110 m-7,9 l7,-9 l7,9`, stroke: '#e8e6e1', 'stroke-width': 2, fill: 'none', 'stroke-dasharray': '8 6' });
     el(svg, 'text', { x: (cx(2) + cx(4)) / 2 + 30, y: yb + 150, 'text-anchor': 'middle', style: 'fill:#e8e6e1' }, '× every chunk: the finished chunk is written to the canvas');
     const ctr = el(svg, 'text', { x: 0, y: yb + 230, style: 'fill:#e8e6e1;font-size:24px' }, '');
-    el(svg, 'text', { x: 1728, y: yb + 230, 'text-anchor': 'end' }, 'one whole coupon: 900 chunks · 4.3 h on one GPU');
+    el(svg, 'text', { x: 1728, y: yb + 230, 'text-anchor': 'end' }, 'one whole coupon, 6.4 × 97.6 × 49.6 mm (31 cm³): 900 chunks · 4.3 h on one GPU');
     /* timeline: maps, noise, then 3 chunks of 50 steps, a jump to the last chunk, decode */
     const seq = [[0, 1200, ''], [1, 1200, '']];
     [1, 2, 3, 900].forEach(c => { seq.push([2, 700, `chunk ${c} / 900`]); for (let t = 1; t <= 50; t++) seq.push([t % 2 ? 3 : 4, 40, `chunk ${c} / 900 · step ${t} / 50`]); });

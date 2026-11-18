@@ -1,8 +1,8 @@
 # Speaker notes — PoreGen group meeting
 
-*Text in quotes is what you say. Text in italics is for you only: what to point at, cautions, and answers to likely questions. The talk is 23 slides, about 22 min of speaking. After "Questions?" there are 18 backup slides (B1–B18) with the method detail; use them only to answer questions. The source of every number is in the speaker notes of the deck (key N).*
+*Text in quotes is what you say. Text in italics is for you only: what to point at, cautions, and answers to likely questions. The talk is 25 slides, about 24 min of speaking. It is framed as six questions (slide 3) that the results answer with numbers, collected in a scorecard (slide 24). After "Questions?" there are 18 backup slides (B1–B18) with the method detail; use them only to answer questions. The source of every number is in the speaker notes of the deck (key N).*
 
-*The audience is mostly not from ML. Keep the "how" short and spend the time on what the model can do.*
+*The audience are scientists, mostly not from ML. Keep the "how" short; give the numbers, with units, and say what each was measured on.*
 
 ---
 
@@ -40,7 +40,29 @@
 
 ---
 
-## 3 · Destroy with noise, then learn to undo it (~50 s)
+## 3 · Six questions, six measurements (~50 s)
+
+*This slide is the frame of the whole talk. Say it slowly.*
+
+"Before the method: how do we decide if a generator is good? We ask it six questions, and each one has a measurement."
+
+"One: do we get the porosity we ask for? We compare delivered against requested on 42 volumes. The target is half a percentage point."
+
+"Two: do the pores go where we ask? We paint a porosity map, cube by cube, and check what each cube gets."
+
+"Three: are the shape and the plies where we ask? We measure the overlap of the air, and we read the ply angle back from the pores."
+
+"Four: do the pores look real? Four statistics, each compared with the difference between two real scans."
+
+"Five: is it new, or does it copy the training data? We search all 223 000 training cubes."
+
+"Six: can it make a whole coupon? We look at the joins, and we compare a generated twin with its real coupon."
+
+"I come back to these six at the end, with the numbers."
+
+---
+
+## 4 · Destroy with noise, then learn to undo it (~50 s)
 
 *This is the only slide on how diffusion works. Keep it to the picture.*
 
@@ -62,7 +84,7 @@
 
 ---
 
-## 4 · Conditioning: telling the model what to make (~50 s)
+## 5 · Conditioning: telling the model what to make (~50 s)
 
 "A model that makes 'some coupon' is not useful. We want to say what to make: this porosity, these ply angles, this shape. That extra input is called the condition."
 
@@ -76,7 +98,7 @@
 
 ---
 
-## 5 · Diffuse in a compressed latent (~50 s)
+## 6 · Diffuse in a compressed latent (~50 s)
 
 "3-D volumes are big. Running diffusion directly on voxels costs too much."
 
@@ -88,7 +110,7 @@
 
 ---
 
-## 6 · Generating microstructures: what is missing (~50 s)
+## 7 · Generating microstructures: what is missing (~50 s)
 
 "Others have generated microstructures before. GANs did 3-D rock in 2017. SliceGAN learns 3-D from 2-D images. Diffusion models came after, and in 2026 Naiff and colleagues conditioned one on porosity."
 
@@ -102,7 +124,7 @@
 
 ---
 
-## 7 · Our data: 81 coupons at 25 µm (~50 s)
+## 8 · Our data: 81 coupons at 25 µm (~50 s)
 
 "This is a real slice. Every voxel gets one label: material, pore, or air."
 
@@ -114,7 +136,7 @@
 
 ---
 
-## 8 · From volumes to patches, split by panel (~40 s)
+## 9 · From volumes to patches, split by panel (~40 s)
 
 "A panel is one manufactured plate. All coupons from one panel go to the same set: 12 panels for training, 3 for validation, 3 for test. So we test on plates the model never saw."
 
@@ -126,19 +148,19 @@
 
 ---
 
-## 9 · Our autoencoder: grey in, grey and labels out (~50 s)
+## 10 · Our autoencoder: grey in, grey and labels out (~50 s)
 
 "Three maps go in: the grey image, the pore mask, and the air mask."
 
 "The encoder shrinks each side by 4. The decoder grows it back and gives two things: the grey image, and a label for every voxel."
 
-"How much can we compress? We trained six versions, each smaller. This one is the smallest that still keeps the pores: the rebuilt pores match the real ones with a Dice of 0.93. Smaller than this, the pores start to disappear."
+"How much can we compress? We trained six versions, each smaller. This one is the smallest that still keeps the pores: the rebuilt pores match the real ones with a Dice of 0.93, and the grey values are off by about 3 of 255 levels. Smaller than this, the pores start to disappear."
 
 *Dice: overlap of two masks, 1 = perfect. The compression study is on backup B10.*
 
 ---
 
-## 10 · What we can control (~60 s)
+## 11 · What we can control (~60 s)
 
 "This is everything we can tell the network."
 
@@ -156,7 +178,7 @@
 
 ---
 
-## 11 · How a large volume is generated (~70 s)
+## 12 · How a large volume is generated (~70 s)
 
 *Go left to right along the boxes.*
 
@@ -172,11 +194,11 @@
 
 "At the end the decoder turns everything into grey values and labels."
 
-"For scale: one whole coupon is 900 chunks, and takes about 4.3 hours on one GPU."
+"For scale: one whole coupon — 6.4 by 98 by 50 mm, 31 cm³ — is 900 chunks, and takes about 4.3 hours on one GPU."
 
 ---
 
-## 12 · The overlapped sampler: keep, see, redraw (~70 s)
+## 13 · The overlapped sampler: keep, see, redraw (~70 s)
 
 *Follow the five phases of the animation.*
 
@@ -194,7 +216,7 @@
 
 ---
 
-## 13 · The overlapped sampler removes the band (~60 s)
+## 14 · The overlapped sampler removes the band (~60 s)
 
 "This is one real coupon at 2.6 % porosity, generated twice from its maps."
 
@@ -214,7 +236,7 @@
 
 ---
 
-## 14 · First, measure real against real (~50 s)
+## 15 · First, measure real against real (~50 s)
 
 "How do we judge if a generated volume is realistic? A distance alone means nothing: how far is far?"
 
@@ -224,7 +246,7 @@
 
 ---
 
-## 15 · Porosity control: you ask, it delivers (~60 s)
+## 16 · Porosity control: you ask, it delivers (~60 s)
 
 "We asked for seven porosity levels, from 0.5 % to 10 %, with different seeds: 42 volumes."
 
@@ -240,7 +262,7 @@
 
 ---
 
-## 16 · Local control: where the pores go (~60 s)
+## 17 · Local control: where the pores go (~60 s)
 
 "Now we ask for different porosity in different places."
 
@@ -254,7 +276,7 @@
 
 ---
 
-## 17 · Microstructure: 1 to 3× the real floor (~70 s)
+## 18 · Microstructure: 1 to 3× the real floor (~70 s)
 
 "Four ways to compare the structure." *Read the strip at the bottom: one line each.*
 
@@ -270,7 +292,7 @@
 
 ---
 
-## 18 · Shape and plies: drawn where we ask (~60 s)
+## 19 · Shape and plies: drawn where we ask (~60 s)
 
 *Left.*
 
@@ -288,7 +310,7 @@
 
 ---
 
-## 19 · Is it copying the training set? (~45 s)
+## 20 · Is it copying the training set? (~45 s)
 
 "A fair question for any generator: is it just copying?"
 
@@ -298,7 +320,7 @@
 
 ---
 
-## 20 · Against baselines: control is where we win (~70 s)
+## 21 · Against baselines: control is where we win (~70 s)
 
 "We compared with three other methods. Each one removes one of our ideas." *Point at the strip at the bottom.*
 
@@ -314,7 +336,7 @@
 
 ---
 
-## 21 · Real or generated? (~50 s)
+## 22 · Real or generated? (~50 s)
 
 *Optional: ask "which one is real?" and wait 2 s.*
 
@@ -332,7 +354,7 @@
 
 ---
 
-## 22 · A real coupon and its generated twin (~90 s)
+## 23 · A real coupon and its generated twin (~90 s)
 
 "Now a whole coupon. The generator got the coupon's shape and air, its ply angles, and its porosity per 1.6 mm cube. It did not get the pores. It drew every pore itself."
 
@@ -344,13 +366,33 @@
 
 "Look for the same shape and ply directions — those were given — and pores in the same places and amounts, where only the amount per cube was given."
 
-*The 0.10 % twin has only 0.07 %: the same low-porosity under-delivery as slide 15.*
+*The 0.10 % twin has only 0.07 %: the same low-porosity under-delivery as slide 16.*
 
 *If asked why the air looks so flat: in the generated grey, all air is set to one value per volume, the mean grey of its air. Labels unchanged.*
 
 ---
 
-## 23 · Limitations and next steps (~60 s)
+## 24 · Scorecard: how well we do it (~60 s)
+
+"Back to the six questions."
+
+"One, porosity: met. 42 of 42 within half a point; slope 1.03."
+
+"Two, local control: partly. Large patterns, slope 0.98. A fine checkerboard gets half the contrast."
+
+"Three, shape and plies: met. Air overlap 0.992; ply angle within 2°, which is the limit of how well we can read it."
+
+"Four, realism: partly. At 3 % porosity, two statistics are at the real floor. But pore sizes are about 2 times off, and the slices look smoother."
+
+"Five, copying: met. No copies in almost 5 000 cubes."
+
+"Six, whole coupons: partly. No band at the joins. The twin porosity is within 5 to 14 % above 0.9 % porosity, but at 0.1 % it is a third too low. One coupon of 31 cm³ takes 4.3 hours."
+
+*"Partly" always means the same thing: the amounts and large patterns are right; fine detail and the lowest porosity are not yet.*
+
+---
+
+## 25 · Limitations and next steps (~60 s)
 
 "Three limits, all measured."
 

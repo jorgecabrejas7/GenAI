@@ -1,6 +1,6 @@
 # PoreGen — group-meeting deck
 
-A 23-slide, ~22-minute talk (speaker-note estimates) for a mostly non-ML materials audience:
+A 25-slide, ~24-minute talk (speaker-note estimates) for scientists, mostly not from ML, framed as six measurable questions and a closing scorecard:
 the idea of diffusion in one slide, our data and model, large-volume assembly, and the results of
 the final model. After "Questions?" come 18 backup slides (numbered B1–B18) with the method detail.
 `SPEAKER_GUIDE.md` gives what to say on each slide.
