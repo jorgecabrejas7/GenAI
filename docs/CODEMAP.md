@@ -359,6 +359,7 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/fm_sam2_air.py` | Campaign 40 (env `segfm`): SAM2.1 video propagation of outside air along a chosen axis, prompts from the rule faces = air, mid-plane = specimen. `--ckpt` takes a fine-tuned checkpoint. |
 | `analysis/sam2_export_vos.py` | Campaign 40: labelled volume -> DAVIS-style videos (JPEG frames, palette PNG upper/lower air) along A and B for SAM2 fine-tuning. |
 | `analysis/unet_seg_eval.py` | Campaign 39: score a U-Net checkpoint on whole split_v4 splits: Dice per class, porosity/air MAE and bias, overall, per porosity bin and per volume. |
+| `c39_resume_after_c40.sh` | Campaign 39 resumed after campaign 40's GPU queue (author gave c40 the GPU first, 2026-11-18): eval test/val, Teijin segmentation, limits painting. |
 | `c39_paint_limits.sh` | Campaign 39 queue: after c39_after_us01.sh, paints the Teijin material limits (upper red, lower green) on the original grey as an RGB TIFF. |
 | `c39_after_us01.sh` | Campaign 39 queue: waits for us01 to end, then runs unet_seg_eval (test, val) and unet_segment_volume on the Teijin volume. |
 | `c40_gpu_tests.sh` | Campaign 40 queue (Teijin only): after `C39 DONE`, U-Net c39 pipeline on two held-out CuartoPulg crops, SAM2.1-large on three time axes, DINOv2-base/large linear heads fitted on 2 or 8 CuartoPulg slices, then score_air against the author's lines. |
