@@ -1,7 +1,7 @@
 # @package _global_
 # Campaign 40 (author 2026-11-18): SAM2.1 base+ fine-tune on the author's CuartoPulg surface lines.
 # Derived from sam2 2b90b9f sam2.1_hiera_b+_MOSE_finetune.yaml: 4-frame clips, 2 objects (upper/lower air),
-# CuartoPulg A 0:750 + 1150:1450 only (A 800:1100 and 1500:1800 held out for scoring), 17 videos x multiplier 100 x 2 epochs = 3400 steps, affine 5/5 deg, brightness/contrast jitter 0.3, 1 GPU.
+# all of CuartoPulg (author: training help, not a test set), 14 videos x multiplier 100 x 2 epochs = 2800 steps, affine 5/5 deg, brightness/contrast jitter 0.3, 1 GPU.
 
 scratch:
   resolution: 1024
@@ -16,9 +16,9 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  img_folder: /home/jorgecabrejas/Dev/GenAI/data/sam2_vos/cuarto_v0/JPEGImages
-  gt_folder: /home/jorgecabrejas/Dev/GenAI/data/sam2_vos/cuarto_v0/Annotations
-  file_list_txt: /home/jorgecabrejas/Dev/GenAI/data/sam2_vos/cuarto_v0/videos.txt
+  img_folder: /home/jorgecabrejas/Dev/GenAI/data/sam2_vos/cuarto_all/JPEGImages
+  gt_folder: /home/jorgecabrejas/Dev/GenAI/data/sam2_vos/cuarto_all/Annotations
+  file_list_txt: /home/jorgecabrejas/Dev/GenAI/data/sam2_vos/cuarto_all/videos.txt
   multiplier: 100
 
 # Video transforms
@@ -327,7 +327,7 @@ trainer:
 launcher:
   num_nodes: 1
   gpus_per_node: 1
-  experiment_log_dir: /home/jorgecabrejas/Dev/GenAI/runs/sam2_ft/sf01-run-0001-cuarto-v0
+  experiment_log_dir: /home/jorgecabrejas/Dev/GenAI/runs/sam2_ft/sf01-run-0002-cuarto-all
 
 # SLURM args if running on a cluster
 submitit:
