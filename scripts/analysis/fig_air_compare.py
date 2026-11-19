@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Zoomed comparison figure of air masks on one volume (campaign 40).
 
-Thickness-first grey (T, A, B).  For each requested slice (``A:<i>`` = plane
+Grey and masks are moved to (T, A, B) with ``--thickness-axis``.  For each requested slice (``A:<i>`` = plane
 T x B at A=i, ``B:<j>`` = plane T x A at B=j) and window on the in-plane axis,
 draws each mask's outline (1 px, own colour) on the grey, magnified by
 ``--zoom``, with a legend strip.  Also writes agreement.json: air fraction per
@@ -37,15 +37,16 @@ def main() -> int:
     ap.add_argument("--mask", action="append", required=True, help="label=path (thickness-first)")
     ap.add_argument("--slice", action="append", required=True, help="A|B:index:w0:w1")
     ap.add_argument("--zoom", type=int, default=3)
+    ap.add_argument("--thickness-axis", type=int, default=0, help="thickness axis of grey and masks as read")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
-    g = tifffile.imread(a.grey)
+    g = np.moveaxis(tifffile.imread(a.grey), a.thickness_axis, 0)
     names, masks = [], []
     for s in a.mask:
         n, p = s.split("=", 1)
         names.append(n)
-        masks.append(tifffile.imread(p) > 0)
+        masks.append(np.moveaxis(tifffile.imread(p) > 0, a.thickness_axis, 0))
 
     for s in a.slice:
         ax, i, w0, w1 = s.split(":")
@@ -70,8 +71,21 @@ def main() -> int:
 
     t0, b0 = surfaces(masks[0])
     agree = {"reference_for_differences": names[0], "masks": {}}
-    for n, m in zip(names, masks):
-        t, b = surfaces(m)
+    surf = [surfaces(m) for m in masks]
+    import matplotlib  # noqa: PLC0415
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+    fig, ax = plt.subplots(len(names), 2, figsize=(14, 1.6 * len(names) + 0.8), squeeze=False)
+    for k, (n, (t, b)) in enumerate(zip(names, surf)):
+        for j, (h, lab, ref) in enumerate(((t, "upper", t0), (b, "lower", b0))):
+            im = ax[k, j].imshow(h, cmap="viridis", vmin=np.percentile(ref, 1) - 5, vmax=np.percentile(ref, 99) + 5,
+                                 aspect="auto", interpolation="nearest")
+            ax[k, j].set_title(f"{n}: {lab} surface (T index), A down, B across", fontsize=8)
+            ax[k, j].set_xticks([]); ax[k, j].set_yticks([])
+            fig.colorbar(im, ax=ax[k, j], fraction=0.02)
+    fig.tight_layout()
+    fig.savefig(a.out / "surface_maps.png", dpi=90)
+    for n, m, (t, b) in zip(names, masks, surf):
         dt, db = (t - t0).ravel(), (b - b0).ravel()
         agree["masks"][n] = {"air_fraction": float(m.mean()),
                              "top_median_signed": float(np.median(dt)), "bottom_median_signed": float(np.median(db)),
