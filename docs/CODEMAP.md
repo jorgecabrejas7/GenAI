@@ -352,6 +352,7 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/teijin_air_views.py` | Campaign 40: orthogonal slices of a grey volume with several air masks outlined in colour, plus a local-std panel. |
 | `analysis/teijin_air_baselines.py` | Campaign 40: non-learned air baselines, the reference `material_mask` (pinned 65c1eea onlypores.py loaded as a lone module) and the campaign-39 texture envelope. |
 | `analysis/fig_surface_lines.py` | Campaign 40: one PNG per air mask: red upper / green lower surface on full-width T x B slices and T x A slices, plus upper/lower surface height maps. |
+- `scripts/analysis/fig_side_by_side.py` — campaign 40: a few air masks side by side (same slices, surface lines, surface-difference maps against the first mask).
 | `analysis/plot_ft_curves.py` | Campaign 40: training curves of the U-Net air-only fine-tune (metrics.jsonl) or a SAM2 fine-tune (logs/log.txt), one PNG. |
 | `analysis/unet_air_ft_segment.py` | Campaign 40: outside-air mask from an air-only fine-tuned U-Net; raw grey / 255, 96^3 windows, Hann blend of [logsumexp(material, pore), air] logits, air = p > 0.5. |
 | `analysis/unet_air_probe.py` | Campaign 40: the c39 U-Net without the envelope (raw grey or specimen-quantile map), optional rescale (`--zoom`); separates model air from envelope air. |
