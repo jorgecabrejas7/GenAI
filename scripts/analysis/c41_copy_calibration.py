@@ -72,9 +72,11 @@ def main() -> int:
     vae.requires_grad_(False); vae.eval()
 
     vol = zarr.open(str(REPO / "data/split_v4/volumes.zarr"), mode="r")
-    rows = []
+    # Cut every planted patch for every shift first, then search each space
+    # ONCE over all of them: a pass over the grey bank reads ~50 GB, so one
+    # pass per space instead of one per shift and space.
+    xs, ls, meta_q = [], [], []
     for s in a.shifts:
-        xs, ls, src = [], [], []
         for b in pick:
             r = bank.iloc[b]; g = vol[r.volume_id]
             z, y, x = int(r.z0) + s, int(r.y0) + s, int(r.x0) + s
@@ -85,25 +87,26 @@ def main() -> int:
             xs.append(np.asarray(g["xct"][sl]))
             m = np.asarray(g["mask"][sl]); sm = np.asarray(g["sample_mask"][sl])
             ls.append(np.where(sm == 0, 2, np.where(m > 0, 1, 0)).astype(np.uint8))
-            src.append(int(b))
-        xs, ls = np.stack(xs), np.stack(ls)
-        origins = [(0, 0, 0)] * 1
-        mu = np.concatenate([M.encode_patches(vae, xs[i], ls[i], origins, device=dev) for i in range(len(xs))])
-        queries = {
-            "latent": train.normalise_latents(mu),
-            "grey_raw": xs.reshape(len(xs), -1).astype(np.float32) / 255.0,
-            "grey_rt": M.decode_grey(vae, mu, device=dev),
-        }
-        for space, q in queries.items():
-            acc = M.search(q, train, "latent" if space == "latent" else "grey", device=dev)
-            ratio = acc.ratio()
-            for i, b in enumerate(src):
-                rows.append({"shift": s, "space": space, "bank_pos": b, "ratio": float(ratio[i]),
-                             "d1": float(acc.d1[i]), "d2": float(acc.d2[i]),
-                             "nearest_is_source": bool(acc.i1[i] == b)})
-            print(f"shift {s} {space}: detected {np.mean(ratio < M.RATIO_THRESHOLD):.3f} "
-                  f"median ratio {np.median(ratio):.3f}", flush=True)
-            pd.DataFrame(rows).to_csv(a.out / "planted_per_query.csv", index=False)
+            meta_q.append((s, int(b)))
+    xs, ls = np.stack(xs), np.stack(ls)
+    mu = np.concatenate([M.encode_patches(vae, xs[i], ls[i], [(0, 0, 0)], device=dev) for i in range(len(xs))])
+    # encode_patches returns (n, C*d*h*w); decode_grey wants the raw means as (n, C, d, h, w)
+    mu5 = mu.reshape(len(mu), train.latent_channels, *train.latent_spatial)
+    queries = {
+        "latent": train.normalise_latents(mu),
+        "grey_raw": xs.reshape(len(xs), -1).astype(np.float32) / 255.0,
+        "grey_rt": M.decode_grey(vae, mu5, device=dev),
+    }
+    rows = []
+    for space, q in queries.items():
+        acc = M.search(q, train, "latent" if space == "latent" else "grey", device=dev)
+        ratio = acc.ratio()
+        for i, (s, b) in enumerate(meta_q):
+            rows.append({"shift": s, "space": space, "bank_pos": b, "ratio": float(ratio[i]),
+                         "d1": float(acc.d1[i]), "d2": float(acc.d2[i]),
+                         "nearest_is_source": bool(acc.i1[i] == b)})
+        print(f"{space}: detected {np.mean(ratio < M.RATIO_THRESHOLD):.3f} overall", flush=True)
+        pd.DataFrame(rows).to_csv(a.out / "planted_per_query.csv", index=False)
     d = pd.DataFrame(rows)
     th = [0.2, 1 / 3, 0.5, 0.6, 0.7, 0.8]
     summ = d.groupby(["space", "shift"]).agg(
