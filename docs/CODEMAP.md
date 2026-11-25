@@ -364,6 +364,11 @@ Campaign map: `01-conditioning-design` (`t_*`, `viz_orientation_volume`) ·
 | `analysis/fm_dino_air.py` | Campaign 40 (env `segfm`): frozen DINOv2 patch features + logistic air head fitted on a few slices; applies across volumes. |
 | `analysis/fm_sam2_air.py` | Campaign 40 (env `segfm`): SAM2.1 video propagation of outside air along a chosen axis, prompts from the rule faces = air, mid-plane = specimen. `--ckpt` takes a fine-tuned checkpoint. |
 | `analysis/sam2_export_vos.py` | Campaign 40: labelled volume -> DAVIS-style videos (JPEG frames, palette PNG upper/lower air) along A and B for SAM2 fine-tuning. |
+| `analysis/c41_seams.py` | Campaign 41 (paper review): per-axis grey and pore seam ratios at the chunk (192) and window (64) planes, with a real-coupon floor (W1, Q2). |
+| `analysis/c41_label_agreement.py` | Campaign 41 (paper review): decoded label vs Sauvola re-segmentation (split_v4 rule r30 k0.125 min8) of the grey, for real, VAE-reconstructed and generated volumes; `recon` step on GPU (W2). |
+| `analysis/c41_bootstrap.py` | Campaign 41 (paper review): bootstrap 95 % intervals of the microstructure ratios, reference panels and generated seeds resampled, campaign functions reused; optional FID (W5). |
+| `analysis/c41_twins_split.py` | Campaign 41 (paper review): campaign-36 twins table split into training and held-out coupons (W5, I3). |
+| `analysis/c41_copy_calibration.py` | Campaign 41 (paper review): memorisation test on planted training patches shifted 0-32 voxels, latent / raw grey / round-trip grey (A7, Q8). |
 | `analysis/unet_seg_eval.py` | Campaign 39: score a U-Net checkpoint on whole split_v4 splits: Dice per class, porosity/air MAE and bias, overall, per porosity bin and per volume. |
 | `c39_resume_after_c40_ft.sh` | Campaign 39 resumed after both campaign-40 GPU queues (SF01 DONE) (author gave c40 the GPU first, 2026-11-18): eval test/val, Teijin segmentation, limits painting. |
 | `c39_paint_limits.sh` | Campaign 39 queue: after c39_after_us01.sh, paints the Teijin material limits (upper red, lower green) on the original grey as an RGB TIFF. |
