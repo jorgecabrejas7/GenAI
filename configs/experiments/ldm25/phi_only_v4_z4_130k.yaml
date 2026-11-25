@@ -1,0 +1,22 @@
+experiment:
+  name: ldm25
+  variant: phi_only_v4_z4_130k
+  description: >-
+    ldm25/phi_only_v4_z4 trained for 130 000 steps, the step count of the
+    paper's model (ldm06-run-0005), with the same annealed schedule: cosine
+    from lr 1e-4 to lr_min 1e-5 over the whole run, 250 warm-up steps, batch
+    256, EMA 0.9999. One key changes against phi_only_v4_z4:
+    training.total_steps 40000 -> 130000.
+
+    WHY. Paper review W3 (2026-11-24): the phi-only baseline had 40k steps
+    against 130k for PoreGen, so the fidelity comparison is not at matched
+    training length. Author 2026-11-25: retrain to 130k; if the converged
+    baseline is a lot better, it is dropped from the comparisons.
+
+# The VAE comes from POREGEN_VAE_CHECKPOINT, as for every split_v4 LDM:
+# runs/vae/r08-run-0020-*/..._step00025000.ckpt (vault D76).
+extends: ldm25/phi_only_v4_z4
+
+overrides:
+  training:
+    total_steps: 130000
