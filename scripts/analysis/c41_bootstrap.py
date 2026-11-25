@@ -108,6 +108,13 @@ def main() -> int:
                 return out
 
             point = ratios(list(range(len(pg))), list(range(len(panels))))
+            # Leave-one-panel-out: the reference with one panel removed, all
+            # generated volumes kept. With 3 panels the percentile bootstrap is
+            # biased (a draw that repeats a panel shrinks the real-vs-real
+            # spread it divides by); these 3 values show the panel dependence
+            # directly.
+            lopo = [ratios(list(range(len(pg))), [i for i in range(len(panels)) if i != k])
+                    for k in range(len(panels))] if len(panels) > 2 else []
             draws = []
             for _ in range(a.n_boot):
                 gi = rng.integers(0, len(pg), len(pg)); pi = rng.integers(0, len(panels), len(panels))
@@ -117,17 +124,19 @@ def main() -> int:
             d = pd.DataFrame(draws)
             for m in point:
                 lo, hi = np.nanpercentile(d[m], [2.5, 97.5])
+                lv = [x[m] for x in lopo]
                 rows.append({"model": name, "level": level, "metric": m, "ratio": point[m],
-                             "ci_lo": lo, "ci_hi": hi, "n_draws": int(d[m].notna().sum()),
+                             "ci_lo": lo, "ci_hi": hi,
+                             "lopo_min": min(lv) if lv else np.nan, "lopo_max": max(lv) if lv else np.nan, "n_draws": int(d[m].notna().sum()),
                              "n_generated": len(pg), "n_panels": len(panels), "panels": ",".join(panels)})
             print(name, level, {m: round(point[m], 3) for m in point}, flush=True)
             pd.DataFrame(rows).to_csv(a.out / "bootstrap_ratios.csv", index=False)
     t = pd.DataFrame(rows)
-    t["ci95"] = t.apply(lambda r: f"{r.ratio:.2f} [{r.ci_lo:.2f}, {r.ci_hi:.2f}]", axis=1)
+    t["ci95"] = t.apply(lambda r: f"{r.ratio:.2f} [{r.ci_lo:.2f}, {r.ci_hi:.2f}] lopo {r.lopo_min:.2f}-{r.lopo_max:.2f}", axis=1)
     piv = t.pivot_table(index=["model", "level"], columns="metric", values="ci95", aggfunc="first")
     (a.out / "bootstrap_ratios.txt").write_text(
         f"Campaign 41 - microstructure ratios, point [95 % bootstrap interval], {a.n_boot} draws, "
-        "panels and seeds resampled; draws with one distinct panel dropped\n\n" + piv.to_string() + "\n")
+        "panels and seeds resampled; draws with one distinct panel dropped; lopo = range over leave-one-panel-out references\n\n" + piv.to_string() + "\n")
     (a.out / "bootstrap_meta.json").write_text(json.dumps(vars(a), default=str, indent=1))
     print(piv.to_string())
     return 0
